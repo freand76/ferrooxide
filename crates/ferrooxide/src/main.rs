@@ -13,6 +13,7 @@ options:
   --stats           print timing and scheduler statistics to stderr
   --dump-code       print the compiled bytecode to stderr
   --no-jit          interpret the bytecode instead of compiling it to native code
+  --no-fuse         do not fuse combinational processes
   -h, --help        show this help";
 
 fn main() -> ExitCode {
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
     let mut stats = false;
     let mut dump_code = false;
     let mut jit = true;
+    let mut fuse = true;
     let mut max_time = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -59,6 +61,7 @@ fn main() -> ExitCode {
             "--stats" => stats = true,
             "--dump-code" => dump_code = true,
             "--no-jit" => jit = false,
+            "--no-fuse" => fuse = false,
             _ if a.starts_with("-D") => {
                 let v = &a[2..];
                 let (k, v) = v.split_once('=').unwrap_or((v, "1"));
@@ -86,7 +89,7 @@ fn main() -> ExitCode {
         }
     };
     let t1 = Instant::now();
-    let (prog, warnings) = match ferrooxide_compile::compile(&modules, &tops) {
+    let (mut prog, warnings) = match ferrooxide_compile::compile(&modules, &tops) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
@@ -105,6 +108,7 @@ fn main() -> ExitCode {
         }
     }
     let t2 = Instant::now();
+    prog.no_fuse = !fuse;
     let nsig = prog.signals.len();
     if stats {
         eprintln!("ferrooxide: memory {} words", prog.mem.len());

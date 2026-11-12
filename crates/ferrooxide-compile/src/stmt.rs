@@ -188,7 +188,8 @@ impl<'a> Compiler<'a> {
             (Lhs::Expr(_, s), _) | (_, Rhs::Expr(_, s)) => self.scopes[*s].name.clone(),
             _ => String::new(),
         };
-        self.begin_proc(name, ProcClass::Normal);
+        let p = self.begin_proc(name, ProcClass::Normal);
+        self.prog.procs[p as usize].fusible = delay.is_none();
         let top = self.here();
         let lw = self.lhs_width(&lhs)?;
         let mut reads = Vec::new();

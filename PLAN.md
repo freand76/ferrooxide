@@ -81,8 +81,8 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 
 | benchmark | Icarus | ferrooxide JIT | ferrooxide `--no-jit` | speed-up |
 |-----------|--------|----------------|-----------------------|----------|
-| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 3.2 G | 5.0 G | **10.5x** |
-| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.5 G | 0.98 G | 1.4 G | **13.8x** |
+| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 2.96 G | 5.0 G | **11.3x** |
+| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.5 G | 0.66 G | 1.4 G | **20.3x** |
 
 What got us here (in order of impact):
 1. Lowering to single-word fast ops with the 2-state check inline (`rt/fast.rs`).
@@ -100,13 +100,17 @@ What got us here (in order of impact):
    inserts, and scratch temporaries promoted to SSA variables (registers) unless a generic
    callback reads them.
 
+8. Ports connected to constant-index array elements alias the element (no copy process).
+9. Fusion of combinational chains (`rt/fuse.rs`): a pure combinational process whose only
+   combinational consumer is B is merged into B (cpuish 26.0M → 19.6M activations, mixed
+   3.6M → 1.2M).
+
 Scheduling order: wakes are ordered FIFO (sequence numbers) between active processes and the
 combinational settle, matching Icarus in the usual same-time-step testbench races
 (tests/verilog/race.v).
 
-Next performance steps: port connections to array elements / part selects as aliases (no copy
-processes), fused processes per rank (fewer activations), signal values cached in registers within
-an activation, timing wheel,
+Next performance steps: ports connected to part selects as aliases, fusing sibling processes
+with the same inputs, signal values cached in registers within an activation, timing wheel,
 `--threads` (partitioned same-edge/same-rank parallelism, see M8).
 
 ## Known limitations of the current skeleton

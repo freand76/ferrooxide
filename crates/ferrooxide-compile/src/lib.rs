@@ -75,6 +75,8 @@ pub struct Compiler<'a> {
     warned: HashSet<String>,
     scratch_top: u32,
     scratch_saved: Vec<u32>,
+    /// (array, element) -> alias signal created for port connections
+    elem_alias: HashMap<(u32, u32), u32>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -152,6 +154,7 @@ impl<'a> Compiler<'a> {
             warned: HashSet::new(),
             scratch_top: 0,
             scratch_saved: Vec::new(),
+            elem_alias: HashMap::new(),
         }
     }
 
@@ -242,7 +245,18 @@ impl<'a> Compiler<'a> {
             }
         }
         let id = self.prog.signals.len() as u32;
-        self.prog.signals.push(SignalInfo { name: name.clone(), slot, width, signed, depth, msb, lsb, arr_lo, kind });
+        self.prog.signals.push(SignalInfo {
+            name: name.clone(),
+            slot,
+            width,
+            signed,
+            depth,
+            msb,
+            lsb,
+            arr_lo,
+            kind,
+            alias_of: None,
+        });
         self.prog.names.push((name, id));
         id
     }
@@ -266,7 +280,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
-        self.prog.procs.push(ProcDef { name, code: Vec::new(), class });
+        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, fusible: false });
         self.pb.push(PState { proc: id, ..Default::default() });
         self.scratch_saved.push(self.scratch_top);
         self.scratch_top = 0;
@@ -345,6 +359,37 @@ impl<'a> Compiler<'a> {
             cur = *self.scopes[cur].children.get(p)?;
         }
         self.scopes[cur].syms.get(parts.last().unwrap()).cloned()
+    }
+
+    /// A port connected to a constant-index array element of the same width becomes an alias of
+    /// the element (no copy process). Returns the alias signal.
+    fn elem_port_alias(&mut self, conn: &Expr, ps: usize, width: u32, name: &str) -> Option<u32> {
+        let Expr::Index(a, i) = conn else { return None };
+        let arr = self.array_of(a, ps)?;
+        let e = self.const_value(i, ps)? - self.sig(arr).arr_lo;
+        let info = self.sig(arr).clone();
+        if info.width != width || e < 0 || e >= info.depth as i64 {
+            return None;
+        }
+        let e = e as u32;
+        if let Some(&s) = self.elem_alias.get(&(arr, e)) {
+            return Some(s);
+        }
+        let id = self.prog.signals.len() as u32;
+        self.prog.signals.push(SignalInfo {
+            name: name.to_string(),
+            slot: info.slot + e * rt::words(width),
+            width,
+            signed: info.signed,
+            depth: 0,
+            msb: info.msb,
+            lsb: info.lsb,
+            arr_lo: 0,
+            kind: info.kind,
+            alias_of: Some((arr, e)),
+        });
+        self.elem_alias.insert((arr, e), id);
+        Some(id)
     }
 
     pub(crate) fn sig(&self, id: u32) -> &SignalInfo {
@@ -638,6 +683,9 @@ impl<'a> Compiler<'a> {
                                 }
                             }
                         }
+                        if depth == 0 && aliased.is_none() {
+                            aliased = self.elem_port_alias(conn, ps, width, &full);
+                        }
                         if let Some(s) = aliased {
                             if kind != SigKind::Wire && self.sig(s).kind == SigKind::Wire {
                                 // a variable output collapsed onto a net: starts as x, not z
@@ -875,11 +923,17 @@ impl<'a> Compiler<'a> {
                             self.emit(Instr::Halt);
                         }
                         ProcKind::Always | ProcKind::AlwaysFf => {
+                            if let Stmt::Timed { timing: Timing::Event(EventCtl::Star), .. } = body {
+                                let p = self.pb.last().unwrap().proc;
+                                self.prog.procs[p as usize].fusible = true;
+                            }
                             let top = self.here();
                             self.stmt(body, *scope)?;
                             self.emit(Instr::Jmp { to: top });
                         }
                         ProcKind::AlwaysComb | ProcKind::AlwaysLatch => {
+                            let p = self.pb.last().unwrap().proc;
+                            self.prog.procs[p as usize].fusible = *kind == ProcKind::AlwaysComb;
                             let top = self.here();
                             self.stmt(body, *scope)?;
                             let mut reads = Vec::new();

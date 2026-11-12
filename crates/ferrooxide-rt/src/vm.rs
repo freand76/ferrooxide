@@ -171,7 +171,10 @@ fn edge_fires(edge: Edge, old: u8, new: u8) -> bool {
 }
 
 impl Sim {
-    pub fn new(prog: Program) -> Sim {
+    pub fn new(mut prog: Program) -> Sim {
+        if !prog.no_fuse {
+            crate::fuse::fuse(&mut prog);
+        }
         let nsig = prog.signals.len();
         // build fanout table
         let ranks = comb_ranks(&prog);
@@ -186,6 +189,12 @@ impl Sim {
         // virtual signals for array elements that something is sensitive to
         let mut elem_sig: HashMap<(u32, u32), u32> = HashMap::new();
         let mut vsig_of: Vec<(u32, u32)> = Vec::new();
+        // port aliases of array elements are the elements' signals
+        for (i, s) in prog.signals.iter().enumerate() {
+            if let Some(ae) = s.alias_of {
+                elem_sig.insert(ae, i as u32);
+            }
+        }
         for c in &prog.ctls {
             for &(sig, _, e) in &c.triggers {
                 if e != NONE && !elem_sig.contains_key(&(sig, e)) {
@@ -214,7 +223,7 @@ impl Sim {
         for i in 0..ntot {
             let (slot, width, depth, parent) = if i < nsig {
                 let s = &prog.signals[i];
-                (s.slot, s.width, s.depth, NONE)
+                (s.slot, s.width, s.depth, s.alias_of.map(|a| a.0).unwrap_or(NONE))
             } else {
                 let (a, e) = vsig_of[i - nsig];
                 let s = &prog.signals[a as usize];
@@ -1449,15 +1458,27 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
 /// gets a rank above every ranked process that writes a signal it reads. Processes in loops (and
 /// everything else) get NONE and are scheduled through the normal active queue.
 fn comb_ranks(prog: &Program) -> Vec<u32> {
+    comb_graph(prog).0
+}
+
+/// (ranks, combinational successors of each eligible process, eligibility)
+pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>) {
     let n = prog.procs.len();
     let mut eligible = vec![false; n];
-    // reads and writes are (signal, array element or NONE = whole signal)
+    // reads and writes are (signal, array element or NONE = whole signal); an alias of an array
+    // element counts as that element
+    let norm = |s: u32, e: u32| -> (u32, u32) {
+        match prog.signals[s as usize].alias_of {
+            Some(ae) if e == NONE => ae,
+            _ => (s, e),
+        }
+    };
     let mut reads: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
     for c in &prog.ctls {
         if c.proc == NONE {
             continue;
         }
-        reads[c.proc as usize].extend(c.triggers.iter().map(|t| (t.0, t.2)));
+        reads[c.proc as usize].extend(c.triggers.iter().map(|t| norm(t.0, t.2)));
     }
     let mut level = vec![true; n];
     for c in &prog.ctls {
@@ -1491,7 +1512,7 @@ fn comb_ranks(prog: &Program) -> Vec<u32> {
                         | Target::Elem { sig, .. }
                         | Target::ElemPart { sig, .. } => (*sig, NONE),
                     };
-                    writes[i].push(w);
+                    writes[i].push(norm(w.0, w.1));
                 }
                 _ => {}
             }
@@ -1554,7 +1575,7 @@ fn comb_ranks(prog: &Program) -> Vec<u32> {
             rank[i] = NONE;
         }
     }
-    rank
+    (rank, succ, eligible)
 }
 
 // ---------------------------------------------------------------------------------------------

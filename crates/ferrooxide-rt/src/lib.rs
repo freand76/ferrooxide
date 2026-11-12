@@ -6,6 +6,7 @@
 
 pub mod fast;
 pub mod fmt;
+pub mod fuse;
 #[cfg(feature = "jit")]
 pub mod jit;
 pub mod ops;
@@ -66,6 +67,9 @@ pub struct SignalInfo {
     /// declared index of the first array element and direction (for $readmem)
     pub arr_lo: i64,
     pub kind: SigKind,
+    /// this signal is another name for element `e` of array `a` (a port connected to `a[e]`):
+    /// it shares the element's memory and stands for it in sensitivity
+    pub alias_of: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +94,9 @@ pub struct ProcDef {
     pub name: String,
     pub code: Vec<Instr>,
     pub class: ProcClass,
+    /// a pure combinational process (assign, always @*, always_comb) whose sensitivity is its
+    /// full read set: re-evaluating it is harmless, so it may be fused with others
+    pub fusible: bool,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -102,6 +109,8 @@ pub struct Program {
     pub names: Vec<(String, u32)>,
     /// memory words [0, scratch_words) are the shared scratch region for process temporaries
     pub scratch_words: u32,
+    /// disable fusion of combinational processes (debugging)
+    pub no_fuse: bool,
 }
 
 /// Every memory slot an instruction reads or writes (value base slots).

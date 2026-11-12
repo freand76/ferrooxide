@@ -5,6 +5,9 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "BSD-2-Clause"
+repository = "https://github.com/freand76/ferrooxide"
+description = "A fast 4-state, event-driven Verilog simulator with a Cranelift JIT"
 
 [profile.release]
 opt-level = 3

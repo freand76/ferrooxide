@@ -2,6 +2,8 @@
 name = "ferrooxide-rt"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 cranelift-codegen = { version = "0.132", optional = true }
