@@ -65,13 +65,51 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M1 | Core Verilog: modules/ports (ANSI + non-ANSI), params/localparam + overrides, wire/reg/integer/time, vectors + memories, assign, initial/always, blocking/NBA (incl. `<= #d`), if/case/casez/casex/for/while/repeat/forever, `#`, `@`, `wait`, all operators w/ correct width & sign rules, functions/tasks (inlined), generate for/if/case, gate primitives, `$display/$write/$monitor/$strobe/$finish/$time/$random/$signed/$unsigned/$clog2/$readmemh/b/$fopen/$fdisplay` | ✅ initial version |
 | M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff` | ✅ basic (dumps everything; scope/level args ignored) |
 | M2 | `timescale`, reals, plusargs, hierarchical task calls, `$sformat`, `$fopen` modes | ✅ |
-| M2b | fork/join, named events, `disable` across processes, arrays of instances, multi-dim arrays, `$dumpvars` scopes, automatic/recursive functions, `$fgetc`/`$fscanf` | |
+| M2b | Testbench concurrency: fork/join (+ SV join_any/join_none, disable fork), named events, `disable` of blocks/tasks across processes, automatic tasks/functions (per-call storage), Icarus wake order | ✅ (recursion: see notes) |
 | M3 | Nets: multiple drivers with wire resolution, tri-state buses through inout ✅; wand/wor/tri0/tri1, strengths, `assign #d` inertial delays | partly |
 | M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
 | M7 | FST output, VPI-lite, better diagnostics | |
 | M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
+
+## Road to full Verilog-2005 (notes)
+
+Order of work: measure first (ivtest), then the groups below roughly in order of how often real
+code needs them.
+
+0. **Conformance measurement.** Run Icarus's regression suite *ivtest* (a few thousand small
+   tests with expected output) through `tests/difftest.sh`-style comparison; track the pass rate
+   and let the failures order the work below. Also chipsalliance *sv-tests* for parser coverage.
+1. **Testbench concurrency** (M2b, done): fork branches are processes started by `Fork`
+   (Icarus order: last branch first), joins count finished branches, `disable` uses a table of
+   named-block code ranges (+ the branches forked inside them) and process generations to drop
+   stale wake-ups, events are toggled variables, automatic subroutines get storage per call
+   site. Waiters woken by one change run newest first (Icarus's LIFO waiting lists, also for
+   edge groups, which alternate their member order). Remaining: recursion needs real call
+   frames (a VM call stack and frame-relative slots in the JIT) instead of inlining; a fork
+   branch restarted while still running (fork/join_none in a loop) should become a new
+   process instance instead of restarting the old one.
+2. **Structural RTL gaps**: multi-dimensional arrays (`reg [7:0] m [0:3][0:15]`), arrays of
+   instances (`dff u[7:0] (...)`, port slicing rules), hierarchical references into generate
+   blocks (`gen[2].u.sig`), `defparam`, `` `default_nettype none `` enforcement (implicit nets
+   are currently always created for port connections), real-valued function arguments in
+   expressions everywhere.
+3. **Testbench I/O and system functions**: `$fgetc`/`$fgets`/`$fscanf`/`$sscanf`/`$feof`/
+   `$fread`/`$fseek`/`$rewind`/`$ungetc`; IEEE `$random` and `$dist_*` (Icarus-identical
+   sequences); `$timeformat`/`$printtimescale`; `$dumpvars` scope/level arguments and
+   `$dumpall`/`$dumplimit`; `force`/`release` that hold values (also on nets) and procedural
+   `assign`/`deassign`; real math (`$sqrt`, `$ln`, `$pow`, `$floor`, ...); `$countdrivers`,
+   `$q_*` (rare).
+4. **Gate level / netlists**: UDPs (`primitive ... endprimitive`, combinational and sequential
+   tables), net types `wand`/`wor`/`tri0`/`tri1`/`supply0`/`supply1`/`trireg`, drive and charge
+   strengths (`%v`), `bufif0/1`, `notif0/1`, pull gates, switch primitives (`nmos`, `pmos`,
+   `cmos`, `tran`, `rtran`...), gate and net delays (rise/fall/turn-off, min:typ:max),
+   inertial delays on `assign`, `specify` blocks (path delays, `$setup`/`$hold`/`$width`/...
+   timing checks) and SDF back-annotation.
+5. **Tool interfaces and the rest**: VPI/PLI (cocotb and friends), Verilog-2001 configurations
+   and libraries (`config`, `-y`/`-v` library search, `` `uselib ``), `$dumpports`, VCD of
+   reals and events.
 
 ## Testing strategy
 - `tests/verilog/*.v`: self-contained testbenches. `tests/difftest.sh` runs each through `iverilog`+`vvp`

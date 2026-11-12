@@ -692,8 +692,10 @@ impl<'a> Compiler<'a> {
     }
 
     // ------------------------------------------------------------------ functions & tasks
-    pub(crate) fn func_instance(&mut self, f: &'a SubroutineDecl, def_scope: usize) -> R<()> {
-        let key = (def_scope, f.name.clone());
+    /// Storage for a function/task: shared (static), or per call site for `automatic` ones
+    /// (`key` distinguishes the instances).
+    pub(crate) fn func_instance(&mut self, f: &'a SubroutineDecl, def_scope: usize, key: &str) -> R<()> {
+        let key = (def_scope, key.to_string());
         if self.func_inst.contains_key(&key) {
             return Ok(());
         }
@@ -767,8 +769,14 @@ impl<'a> Compiler<'a> {
         if self.call_depth > 32 {
             return self.err(format!("recursive call of '{name}' is not supported"));
         }
-        self.func_instance(f, fs_def)?;
-        let key = (fs_def, f.name.clone());
+        let kname = if f.automatic {
+            self.auto_count += 1;
+            format!("{}#{}", f.name, self.auto_count)
+        } else {
+            f.name.clone()
+        };
+        self.func_instance(f, fs_def, &kname)?;
+        let key = (fs_def, kname);
         let (fscope, ret, ports) = {
             let fi = &self.func_inst[&key];
             (fi.scope, fi.ret, fi.ports.clone())
@@ -789,7 +797,11 @@ impl<'a> Compiler<'a> {
         self.call_depth += 1;
         self.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
         let saved_file = self.file.clone();
+        // the body is a block `disable <task>` can end
+        let bpath = format!("{}.{}", self.scopes[fs_def].name, f.name);
+        let reg = self.open_block(bpath);
         let r = self.stmt(&f.body, fscope);
+        self.close_block(reg);
         self.file = saved_file;
         let (_, patches) = self.pb.last_mut().unwrap().rets.pop().unwrap();
         self.call_depth -= 1;

@@ -1141,10 +1141,14 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
                 b.ins().jump(next, &[]);
             }
             Op::Wait { ctl } => {
-                // inline: record.pc = next, record.wait = ctl
+                // inline: record.pc = next, record.wait = ctl, record.wseq = hot.wseq++
                 let np = c32(b, i as u32 + 1);
                 b.ins().store(fl, np, prec, 0);
                 b.ins().store(fl, ctl_v[ctl as usize], prec, 4);
+                let ws = b.ins().load(i64t, fl, hot, 32);
+                b.ins().store(fl, ws, prec, 8);
+                let ws1 = b.ins().iadd_imm(ws, 1);
+                b.ins().store(fl, ws1, hot, 32);
                 b.ins().jump(exit, &[]);
             }
             Op::Delay { s } => {

@@ -32,6 +32,8 @@ pub enum NetKind {
     Int(u32),
     /// `real` / `realtime`
     Real,
+    /// named `event`
+    Event,
     Bit,
 }
 
@@ -141,6 +143,13 @@ pub enum EventCtl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Join {
+    All,
+    Any,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaseKind {
     Case,
     CaseZ,
@@ -156,7 +165,8 @@ pub enum Timing {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Null,
-    Block { name: Option<String>, decls: Vec<Decl>, stmts: Vec<Stmt>, fork: bool },
+    /// `fork`: Some(join kind) for fork ... join / join_any / join_none
+    Block { name: Option<String>, decls: Vec<Decl>, stmts: Vec<Stmt>, fork: Option<Join> },
     Assign { lhs: Expr, rhs: Expr, nonblocking: bool, timing: Option<Timing>, line: Line },
     If { cond: Expr, then_s: Box<Stmt>, else_s: Option<Box<Stmt>>, line: Line },
     Case { kind: CaseKind, expr: Expr, arms: Vec<(Vec<Expr>, Stmt)>, default: Option<Box<Stmt>>, line: Line },

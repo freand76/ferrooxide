@@ -30,16 +30,27 @@ struct Fan {
     edge: Edge,
 }
 
-/// Process state. `pc` and `wait` are written directly by JIT code (offsets 0 and 4).
+/// Process state. `pc`, `wait` and `wseq` are written directly by JIT code (offsets 0, 4, 8).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct ProcRt {
     pc: u32,
     wait: u32,
+    /// when the process started waiting (Hot::wseq): waiters woken together run newest first,
+    /// like Icarus (whose waiting lists are LIFO)
+    wseq: u64,
     class: ProcClass,
     started: bool,
     /// position in rank order in the combinational settle set, NONE if scheduled normally
     rank: u32,
+    /// incremented when the process is disabled or restarted: older wake-ups are ignored
+    gen: u32,
+    /// fork branches still to finish before this process continues (join)
+    joining: u32,
+    /// the forking process of a branch, NONE otherwise
+    parent: u32,
+    /// a fork branch that has finished (or was disabled)
+    done: bool,
 }
 
 struct Code {
@@ -83,10 +94,13 @@ pub struct Hot {
     pub nba_len: u64,
     pub nba_cap: u64,
     pub procs: *mut u8,
+    /// counter for ProcRt::wseq (offset 32)
+    pub wseq: u64,
 }
 
 enum Fut {
-    Wake(u32),
+    /// (process, generation)
+    Wake(u32, u32),
     Nba { sig: u32, res: Res, sw: u32, val: Box<[u64]> },
 }
 
@@ -108,6 +122,8 @@ pub struct Sim {
     groups: Vec<Vec<u32>>,
     /// number of real processes
     nprocs: u32,
+    /// per group: run the members last to first next time
+    group_rev: Vec<bool>,
     /// (array, element) -> virtual signal of that element
     elem_sig: HashMap<(u32, u32), u32>,
     /// per signal: some element of this array has its own (virtual or alias) signal
@@ -123,18 +139,20 @@ pub struct Sim {
     sigs: Vec<SigRt>,
     fan: Vec<Fan>,
     procs: Vec<ProcRt>,
-    /// active processes with their wake sequence number
-    active: VecDeque<(u32, u64)>,
+    /// active processes with their wake sequence number and process generation
+    active: VecDeque<(u32, u64, u32)>,
     /// wake sequence counter (FIFO order between active wakes and the combinational settle)
     seq: u64,
     /// sequence number of the first pending combinational wake, u64::MAX if none is pending
     comb_seq: u64,
-    inactive: Vec<u32>,
+    inactive: Vec<(u32, u32)>,
     nba: Vec<Nba>,
     nba_vals: Vec<u64>,
     /// the NBA queue (length in `hot.nba_len`); `nba` holds the generic entries it refers to
     nbaq: Vec<NbaE>,
     hot: Hot,
+    /// processes woken by one change, before they are queued (newest waiter first)
+    wake_buf: Vec<(u64, u32)>,
     future: BTreeMap<u64, Vec<Fut>>,
     postponed: Vec<u32>,
     pub time: u64,
@@ -300,11 +318,33 @@ impl Sim {
             .procs
             .iter()
             .enumerate()
-            .map(|(i, p)| ProcRt { pc: 0, wait: NONE, class: p.class, started: false, rank: ranks[i] })
+            .map(|(i, p)| ProcRt {
+                pc: 0,
+                wait: NONE,
+                wseq: 0,
+                class: p.class,
+                started: false,
+                rank: ranks[i],
+                gen: 0,
+                joining: 0,
+                parent: p.parent,
+                done: p.class == ProcClass::Spawned,
+            })
             .collect();
         // one pseudo process per edge group, waiting on its group control from the start
         for g in 0..ngroups {
-            procs.push(ProcRt { pc: 0, wait: NONE - 1 - g, class: ProcClass::Normal, started: true, rank: NONE });
+            procs.push(ProcRt {
+                pc: 0,
+                wait: NONE - 1 - g,
+                wseq: 0,
+                class: ProcClass::Normal,
+                started: true,
+                rank: NONE,
+                gen: 0,
+                joining: 0,
+                parent: NONE,
+                done: false,
+            });
         }
         let groups: Vec<Vec<u32>> = groups.into_iter().map(|g| g.0).collect();
         let code = Rc::new(Code {
@@ -317,6 +357,7 @@ impl Sim {
             comb_order,
             comb_lo: comb_words,
             cfan,
+            group_rev: vec![true; groups.len()],
             groups,
             nprocs,
             cur_comb: NONE,
@@ -340,7 +381,8 @@ impl Sim {
             nba: Vec::new(),
             nba_vals: Vec::new(),
             nbaq: Vec::new(),
-            hot: Hot { nba_ptr: std::ptr::null_mut(), nba_len: 0, nba_cap: 0, procs: std::ptr::null_mut() },
+            hot: Hot { nba_ptr: std::ptr::null_mut(), nba_len: 0, nba_cap: 0, procs: std::ptr::null_mut(), wseq: 0 },
+            wake_buf: Vec::new(),
             future: BTreeMap::new(),
             postponed: Vec::new(),
             time: 0,
@@ -401,7 +443,11 @@ impl Sim {
             self.time = t;
             for ev in evs {
                 match ev {
-                    Fut::Wake(p) => self.push_active(p),
+                    Fut::Wake(p, g) => {
+                        if self.procs[p as usize].gen == g {
+                            self.push_active(p);
+                        }
+                    }
                     Fut::Nba { sig, res, sw, val } => {
                         let off = self.nba_vals.len() as u32;
                         self.nba_vals.extend_from_slice(&val);
@@ -450,7 +496,10 @@ impl Sim {
                 }
                 continue;
             }
-            if let Some((p, _)) = self.active.pop_front() {
+            if let Some((p, _, g)) = self.active.pop_front() {
+                if self.procs[p as usize].gen != g {
+                    continue; // disabled or restarted since it was woken
+                }
                 self.exec(p);
                 if self.finished {
                     return;
@@ -458,8 +507,10 @@ impl Sim {
                 continue;
             }
             if !self.inactive.is_empty() {
-                for p in std::mem::take(&mut self.inactive) {
-                    self.push_active(p);
+                for (p, g) in std::mem::take(&mut self.inactive) {
+                    if self.procs[p as usize].gen == g {
+                        self.push_active(p);
+                    }
                 }
                 continue;
             }
@@ -482,8 +533,119 @@ impl Sim {
 
     #[inline]
     fn push_active(&mut self, p: u32) {
-        self.active.push_back((p, self.seq));
+        let g = self.procs[p as usize].gen;
+        self.active.push_back((p, self.seq, g));
         self.seq += 1;
+    }
+
+    /// Suspend `p` for `d` ticks (0: the inactive region of this time step).
+    #[inline]
+    fn delay(&mut self, p: u32, d: u64) {
+        let g = self.procs[p as usize].gen;
+        if d == 0 {
+            self.inactive.push((p, g));
+        } else {
+            self.future.entry(self.time + d).or_default().push(Fut::Wake(p, g));
+        }
+    }
+
+    /// A process ran to its end: a finished fork branch lets its parent's join count down.
+    fn proc_done(&mut self, p: u32) {
+        let pr = &mut self.procs[p as usize];
+        if pr.class != ProcClass::Spawned || pr.done {
+            return;
+        }
+        pr.done = true;
+        let parent = pr.parent;
+        if parent != NONE && self.procs[parent as usize].joining > 0 {
+            let pp = &mut self.procs[parent as usize];
+            pp.joining -= 1;
+            if pp.joining == 0 {
+                self.push_active(parent);
+            }
+        }
+    }
+
+    /// Start fork branches. Returns true if the parent waits for them.
+    fn fork(&mut self, p: u32, children: &[u32], join: u8) -> bool {
+        // IEEE leaves the order open; Icarus starts the branches last to first
+        for &c in children.iter().rev() {
+            let ch = &mut self.procs[c as usize];
+            if !ch.done {
+                eprintln!("warning: fork branch '{}' restarted while still running", self.prog.procs[c as usize].name);
+            }
+            ch.pc = 0;
+            ch.wait = NONE;
+            ch.gen = ch.gen.wrapping_add(1);
+            ch.done = false;
+            ch.joining = 0;
+            self.push_active(c);
+        }
+        let n = children.len() as u32;
+        let joining = match join {
+            0 => n,
+            1 => n.min(1),
+            _ => 0,
+        };
+        self.procs[p as usize].joining = joining;
+        joining > 0
+    }
+
+    /// End the named blocks of a disable target: their fork branches stop, a process inside a
+    /// block continues after it. Returns (new pc of `p` if it continues, whether `p` stopped).
+    fn disable(&mut self, p: u32, target: u32, pc: usize) -> (Option<usize>, bool) {
+        let mut new_pc = None;
+        let mut stopped = false;
+        if target == NONE {
+            // disable fork: every branch started by `p`, and their branches
+            let mut stack = vec![p];
+            while let Some(q) = stack.pop() {
+                for c in 0..self.nprocs {
+                    let ch = &mut self.procs[c as usize];
+                    if ch.parent == q && ch.class == ProcClass::Spawned && !ch.done {
+                        ch.done = true;
+                        ch.wait = NONE;
+                        ch.gen = ch.gen.wrapping_add(1);
+                        ch.joining = 0;
+                        stack.push(c);
+                    }
+                }
+            }
+            return (None, false);
+        }
+        for &b in &self.prog.disables[target as usize].clone() {
+            let blk = self.prog.blocks[b as usize].clone();
+            for &c in &blk.children {
+                let ch = &mut self.procs[c as usize];
+                if !ch.done {
+                    ch.done = true;
+                    ch.wait = NONE;
+                    ch.gen = ch.gen.wrapping_add(1);
+                    ch.joining = 0;
+                    if c == p {
+                        stopped = true;
+                    }
+                }
+            }
+            let q = blk.proc;
+            if q == p {
+                // the disabling process itself: continue after the block if it is inside it
+                if !stopped && pc > blk.start as usize && pc <= blk.end as usize {
+                    new_pc = Some(blk.end as usize);
+                }
+                continue;
+            }
+            let pr = &mut self.procs[q as usize];
+            let inside = pr.pc > blk.start && pr.pc <= blk.end && !(pr.class == ProcClass::Spawned && pr.done);
+            if inside {
+                pr.pc = blk.end;
+                pr.wait = NONE;
+                pr.joining = 0;
+                pr.gen = pr.gen.wrapping_add(1);
+                self.push_active(q);
+            }
+        }
+        (new_pc, stopped)
     }
 
     /// A combinational process became pending: the settle is ordered by its first wake.
@@ -646,7 +808,25 @@ impl Sim {
             } else if pr.class == ProcClass::Postponed {
                 self.postponed.push(f.proc);
             } else {
-                self.push_active(f.proc);
+                self.wake_buf.push((pr.wseq, f.proc));
+            }
+        }
+        match self.wake_buf.len() {
+            0 => {}
+            1 => {
+                let p = self.wake_buf[0].1;
+                self.wake_buf.clear();
+                self.push_active(p);
+            }
+            _ => {
+                // newest waiter first (Icarus order)
+                let mut buf = std::mem::take(&mut self.wake_buf);
+                buf.sort_unstable_by_key(|w| std::cmp::Reverse(w.0));
+                for &(_, p) in &buf {
+                    self.push_active(p);
+                }
+                buf.clear();
+                self.wake_buf = buf;
             }
         }
     }
@@ -903,15 +1083,23 @@ impl Sim {
     fn exec(&mut self, p: u32) {
         if p >= self.nprocs {
             // an edge group: run every member (each from its wait), then wait again as a group
+            // members run newest waiter first: they re-wait in the order they ran, so the order
+            // alternates from one activation to the next (Icarus's LIFO waiting lists)
             let g = (p - self.nprocs) as usize;
-            for i in 0..self.groups[g].len() {
-                let m = self.groups[g][i];
+            let n = self.groups[g].len();
+            let rev = self.group_rev[g];
+            for i in 0..n {
+                let m = self.groups[g][if rev { n - 1 - i } else { i }];
                 self.exec(m);
                 if self.finished {
                     return;
                 }
             }
-            self.procs[p as usize].wait = NONE - 1 - g as u32;
+            self.group_rev[g] = !rev;
+            let pr = &mut self.procs[p as usize];
+            pr.wait = NONE - 1 - g as u32;
+            pr.wseq = self.hot.wseq;
+            self.hot.wseq += 1;
             return;
         }
         self.stats.activations += 1;
@@ -1240,15 +1428,13 @@ impl Sim {
                     let pr = &mut self.procs[p as usize];
                     pr.wait = ctl;
                     pr.pc = pc as u32;
+                    pr.wseq = self.hot.wseq;
+                    self.hot.wseq += 1;
                     return;
                 }
                 Op::Delay { s } => {
                     let d = if m!(s + 1) == 0 { m!(s) } else { 0 };
-                    if d == 0 {
-                        self.inactive.push(p);
-                    } else {
-                        self.future.entry(self.time + d).or_default().push(Fut::Wake(p));
-                    }
+                    self.delay(p, d);
                     self.procs[p as usize].pc = pc as u32;
                     return;
                 }
@@ -1256,6 +1442,7 @@ impl Sim {
                     let pr = &mut self.procs[p as usize];
                     pr.pc = (pc - 1) as u32;
                     pr.wait = NONE;
+                    self.proc_done(p);
                     return;
                 }
                 Op::Nba1 { sig, s, slot } => {
@@ -1343,11 +1530,7 @@ impl Sim {
                 }
                 Instr::Delay { s } => {
                     let d = ops::read_u64(m, *s as usize, 64).unwrap_or(0);
-                    if d == 0 {
-                        self.inactive.push(p);
-                    } else {
-                        self.future.entry(self.time + d).or_default().push(Fut::Wake(p));
-                    }
+                    self.delay(p, d);
                     self.procs[p as usize].pc = *pc as u32;
                     return true;
                 }
@@ -1355,13 +1538,33 @@ impl Sim {
                     let pr = &mut self.procs[p as usize];
                     pr.wait = *ctl;
                     pr.pc = *pc as u32;
+                    pr.wseq = self.hot.wseq;
+                    self.hot.wseq += 1;
                     return true;
                 }
                 Instr::Halt => {
                     let pr = &mut self.procs[p as usize];
                     pr.pc = (*pc - 1) as u32;
                     pr.wait = NONE;
+                    self.proc_done(p);
                     return true;
+                }
+                Instr::Fork { children, join } => {
+                    if self.fork(p, children, *join) {
+                        let pr = &mut self.procs[p as usize];
+                        pr.pc = *pc as u32;
+                        pr.wait = NONE;
+                        return true;
+                    }
+                }
+                Instr::Disable { target } => {
+                    let (np, stopped) = self.disable(p, *target, *pc);
+                    if stopped {
+                        return true;
+                    }
+                    if let Some(np) = np {
+                        *pc = np;
+                    }
                 }
                 Instr::SysF { f, d } => {
                     let d = *d as usize;
@@ -2000,11 +2203,7 @@ unsafe extern "C" fn cb_delay(sim: *mut Sim, p: u32, s: u32, pc: u32) {
     let sim = &mut *sim;
     let s = s as usize;
     let d = if sim.mem[s + 1] == 0 { sim.mem[s] } else { 0 };
-    if d == 0 {
-        sim.inactive.push(p);
-    } else {
-        sim.future.entry(sim.time + d).or_default().push(Fut::Wake(p));
-    }
+    sim.delay(p, d);
     sim.procs[p as usize].pc = pc;
 }
 
@@ -2014,6 +2213,7 @@ unsafe extern "C" fn cb_halt(sim: *mut Sim, p: u32, pc: u32) {
     let pr = &mut sim.procs[p as usize];
     pr.pc = pc;
     pr.wait = NONE;
+    sim.proc_done(p);
 }
 
 /// Convert a plusarg value for $value$plusargs.

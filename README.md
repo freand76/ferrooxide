@@ -45,6 +45,9 @@ Verilog-2005 plus common SystemVerilog:
 - `real`/`realtime` variables, arrays, parameters, task arguments and function results
 - nets with several drivers (tri-state buses through `inout` ports), hierarchical names
   (reads, writes, parameters, task calls), `force`/`release` (as assignment)
+- `fork`/`join` (and SystemVerilog `join_any`/`join_none`, `disable fork`), named events
+  (`event`, `->`, `@(ev)`), `disable` of named blocks and tasks in any process, `automatic`
+  tasks and functions (per-call storage); processes woken together run in Icarus's order
 - `$display`/`$write`/`$monitor`/`$strobe`/`$finish`/`$random`/`$signed`/`$unsigned`/`$clog2`/
   `$readmemh`/`$readmemb`/`$fopen` (modes)/`$fdisplay`/`$fwrite`/`$fclose`/`$sformat`,
   `$test$plusargs`/`$value$plusargs` (`+name=value` on the command line), `$error`/`$fatal`,
@@ -52,9 +55,9 @@ Verilog-2005 plus common SystemVerilog:
 - VCD output: `$dumpfile`, `$dumpvars`, `$dumpon`, `$dumpoff`
 - preprocessor: `` `define `` (with arguments), `` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``, `` `include ``
 
-Not yet: `fork`/`join` (branches run sequentially, with a warning), drive strengths, `force`
-holding its value, `$fgetc`/`$fscanf`, named events, arrays of instances, multi-dimensional
-arrays. See the milestones in [PLAN.md](PLAN.md).
+Not yet: recursive functions, drive strengths, `force` holding its value, `$fgetc`/`$fscanf`,
+arrays of instances, multi-dimensional arrays. See "Road to full Verilog-2005" in
+[PLAN.md](PLAN.md). See the milestones in [PLAN.md](PLAN.md).
 
 ## Usage
 

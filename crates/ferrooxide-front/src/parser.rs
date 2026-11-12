@@ -116,6 +116,16 @@ impl Parser {
             _ => self.err(format!("expected identifier, found {}", self.describe())),
         }
     }
+    /// a or a.b.c (hierarchical name as a dotted string)
+    fn dotted_name(&mut self) -> Result<String> {
+        let mut n = self.ident()?;
+        while self.eat_p(".") {
+            n.push('.');
+            n.push_str(&self.ident()?);
+        }
+        Ok(n)
+    }
+
     fn opt_block_label(&mut self) -> Result<Option<String>> {
         if self.eat_p(":") {
             Ok(Some(self.ident()?))
@@ -325,6 +335,7 @@ impl Parser {
                 "genvar" => Some(NetKind::Genvar),
                 "int" => Some(NetKind::Int(32)),
                 "real" | "realtime" => Some(NetKind::Real),
+                "event" => Some(NetKind::Event),
                 "byte" => Some(NetKind::Int(8)),
                 "shortint" => Some(NetKind::Int(16)),
                 "longint" => Some(NetKind::Int(64)),
@@ -373,7 +384,7 @@ impl Parser {
 
     fn is_decl_start(&self) -> bool {
         matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
-            "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"
+            "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"|"event"
             |"tri"|"wand"|"wor"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"))
     }
 
@@ -775,7 +786,7 @@ impl Parser {
         let body = if stmts.len() == 1 {
             stmts.pop().unwrap()
         } else {
-            Stmt::Block { name: None, decls: vec![], stmts, fork: false }
+            Stmt::Block { name: None, decls: vec![], stmts, fork: None }
         };
         Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, decls, body, line })
     }
@@ -837,12 +848,17 @@ impl Parser {
         Ok(EventCtl::List(v))
     }
 
-    fn block_body(&mut self, end: &str) -> Result<(Vec<Decl>, Vec<Stmt>)> {
+    /// Statements up to `end` (or join_any / join_none for a fork). Returns the terminator.
+    fn block_body(&mut self, end: &str) -> Result<(Vec<Decl>, Vec<Stmt>, String)> {
         let mut decls = Vec::new();
         let mut stmts = Vec::new();
+        let term;
         loop {
             if self.is_kw(end) || (end == "join" && (self.is_kw("join_any") || self.is_kw("join_none"))) {
-                self.bump();
+                term = match self.bump() {
+                    Tok::Ident(s) => s,
+                    _ => unreachable!(),
+                };
                 break;
             }
             if matches!(self.peek(), Tok::Eof) {
@@ -861,7 +877,7 @@ impl Parser {
                 stmts.push(self.stmt()?);
             }
         }
-        Ok((decls, stmts))
+        Ok((decls, stmts, term))
     }
 
     pub fn stmt(&mut self) -> Result<Stmt> {
@@ -885,7 +901,7 @@ impl Parser {
             }
             Tok::Punct("->") => {
                 self.bump();
-                let name = self.ident()?;
+                let name = self.dotted_name()?;
                 self.expect_p(";")?;
                 Ok(Stmt::Trigger { name, line })
             }
@@ -916,8 +932,14 @@ impl Parser {
                     self.bump();
                     let fork = kw == "fork";
                     let name = self.opt_block_label()?;
-                    let (decls, stmts) = self.block_body(if fork { "join" } else { "end" })?;
+                    let (decls, stmts, term) = self.block_body(if fork { "join" } else { "end" })?;
                     self.opt_block_label()?;
+                    let fork = match term.as_str() {
+                        "join" => Some(Join::All),
+                        "join_any" => Some(Join::Any),
+                        "join_none" => Some(Join::None),
+                        _ => None,
+                    };
                     Ok(Stmt::Block { name, decls, stmts, fork })
                 }
                 "if" => {
@@ -994,7 +1016,7 @@ impl Parser {
                             body: Box::new(body),
                             line,
                         };
-                        return Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![f], fork: false });
+                        return Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![f], fork: None });
                     } else {
                         self.simple_assign_noterm()?
                     };
@@ -1059,7 +1081,7 @@ impl Parser {
                 }
                 "disable" => {
                     self.bump();
-                    let name = self.ident()?;
+                    let name = if self.eat_kw("fork") { "fork".to_string() } else { self.dotted_name()? };
                     self.expect_p(";")?;
                     Ok(Stmt::Disable { name, line })
                 }

@@ -308,9 +308,6 @@ impl<'a> Compiler<'a> {
         match st {
             Stmt::Null => {}
             Stmt::Block { name, decls, stmts, fork } => {
-                if *fork && stmts.len() > 1 {
-                    self.warn("fork/join is executed sequentially (not supported yet)");
-                }
                 let bsid = if name.is_some() || !decls.is_empty() {
                     let path = match name {
                         Some(n) => format!("{}.{}", self.scopes[sid].name, n),
@@ -342,7 +339,7 @@ impl<'a> Compiler<'a> {
                             }
                             _ => SigKind::Reg,
                         };
-                        let is_real = d.kind == NetKind::Real;
+                        let is_real = d.kind == NetKind::Real || d.kind == NetKind::Event;
                         let w = ((m - l).abs() + 1) as u32;
                         for dl in &d.names {
                             let (depth, lo) = if let Some((a, b2)) = dl.dims.first() {
@@ -367,19 +364,46 @@ impl<'a> Compiler<'a> {
                 } else {
                     sid
                 };
-                if let Some(n) = name {
-                    self.pb.last_mut().unwrap().blocks.push((n.clone(), Vec::new()));
-                }
-                for s in stmts {
-                    self.stmt(s, bsid)?;
-                }
-                if name.is_some() {
-                    let (_, patches) = self.pb.last_mut().unwrap().blocks.pop().unwrap();
-                    let end = self.here();
-                    for p in patches {
-                        self.patch(p, end);
+                let reg = match name {
+                    Some(n) => {
+                        let path = format!("{}.{}", self.scopes[sid].name, n);
+                        self.open_block(path)
+                    }
+                    None => None,
+                };
+                match fork {
+                    None => {
+                        for s in stmts {
+                            self.stmt(s, bsid)?;
+                        }
+                    }
+                    Some(join) => {
+                        // each statement runs as its own process; the parent starts them all
+                        let parent = self.pb.last().unwrap().proc;
+                        let mut children = Vec::new();
+                        for s in stmts {
+                            let pname = self.scopes[bsid].name.clone();
+                            let c = self.begin_proc(pname, ProcClass::Spawned);
+                            self.prog.procs[c as usize].parent = parent;
+                            for &ob in &self.open_blocks {
+                                self.block_reg[ob].1.children.push(c);
+                            }
+                            self.stmt(s, bsid)?;
+                            self.emit(Instr::Halt);
+                            self.end_proc();
+                            children.push(c);
+                        }
+                        let join = match join {
+                            Join::All => 0,
+                            Join::Any => 1,
+                            Join::None => 2,
+                        };
+                        if !children.is_empty() {
+                            self.emit(Instr::Fork { children: children.into_boxed_slice(), join });
+                        }
                     }
                 }
+                self.close_block(reg);
             }
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
@@ -600,18 +624,39 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Disable { name, line } => {
                 self.line = *line;
-                let found = self.pb.last().unwrap().blocks.iter().rposition(|b| &b.0 == name);
-                match found {
-                    Some(i) => {
-                        let j = self.emit(Instr::Jmp { to: 0 });
-                        self.pb.last_mut().unwrap().blocks[i].1.push(j);
+                if name == "fork" {
+                    // SystemVerilog `disable fork`: the branches this process started
+                    self.emit(Instr::Disable { target: NONE });
+                } else {
+                    // resolved after code generation: the block may be in another process
+                    let mut cands = Vec::new();
+                    let mut sc = Some(sid);
+                    while let Some(x) = sc {
+                        cands.push(format!("{}.{}", self.scopes[x].name, name));
+                        sc = self.scopes[x].parent;
                     }
-                    None => self.warn(format!("disable of '{name}' outside the block is not supported")),
+                    cands.extend(self.tops.keys().map(|t| format!("{t}.{}", name.split_once('.').map(|x| x.1).unwrap_or(""))));
+                    let target = self.prog.disables.len() as u32;
+                    self.prog.disables.push(Vec::new());
+                    self.pending_disables.push((target, cands, self.file.clone(), *line));
+                    self.emit(Instr::Disable { target });
                 }
             }
-            Stmt::Trigger { line, .. } => {
+            Stmt::Trigger { name, line } => {
                 self.line = *line;
-                return self.err("named events are not supported yet");
+                let e = if name.contains('.') {
+                    Expr::Hier(name.split('.').map(String::from).collect())
+                } else {
+                    Expr::Ident(name.clone())
+                };
+                let Some(expr::Base::Sig(s)) = self.resolve_base(&e, sid)? else {
+                    return self.err(format!("'{name}' is not an event"));
+                };
+                // a trigger toggles the event variable: every waiter sees a change
+                let slot = self.sig(s).slot;
+                let t = self.tmp(1);
+                self.emit(Instr::Un { op: rt::UnOp::Not, d: t, s: slot, w: 1 });
+                self.emit(Instr::Store { t: Target::Whole { sig: s }, s: t, mode: StoreMode::Blocking });
             }
             Stmt::Return { value, line } => {
                 self.line = *line;

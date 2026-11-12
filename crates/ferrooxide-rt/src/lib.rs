@@ -89,6 +89,8 @@ pub enum ProcClass {
     Postponed,
     /// final block: runs at the end of simulation
     Final,
+    /// a fork branch: started by its parent's `Fork`, not at time 0
+    Spawned,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +98,8 @@ pub struct ProcDef {
     pub name: String,
     pub code: Vec<Instr>,
     pub class: ProcClass,
+    /// for a fork branch: the process that forked it (NONE otherwise)
+    pub parent: u32,
     /// a pure combinational process (assign, always @*, always_comb) whose sensitivity is its
     /// full read set: re-evaluating it is harmless, so it may be fused with others
     pub fusible: bool,
@@ -115,6 +119,20 @@ pub struct Program {
     pub no_fuse: bool,
     /// simulation precision as a power of ten of seconds (one tick)
     pub precision: i32,
+    /// named blocks and task bodies that `disable` can end
+    pub blocks: Vec<BlockDef>,
+    /// `Disable { target }`: the blocks each target names
+    pub disables: Vec<Vec<u32>>,
+}
+
+/// A named block (or inlined task body): code range [start, end) of `proc`, and the fork
+/// branches started inside it (ended too when the block is disabled).
+#[derive(Clone, Debug, Default)]
+pub struct BlockDef {
+    pub proc: u32,
+    pub start: u32,
+    pub end: u32,
+    pub children: Vec<u32>,
 }
 
 /// Every memory slot an instruction reads or writes (value base slots).
@@ -153,7 +171,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, .. } => vec![*d],
-        Instr::Jmp { .. } | Instr::Wait { .. } | Instr::Halt => vec![],
+        Instr::Jmp { .. } | Instr::Wait { .. } | Instr::Halt | Instr::Fork { .. } | Instr::Disable { .. } => vec![],
         Instr::Sys(t) => {
             let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
                 args.iter()
@@ -393,6 +411,10 @@ pub enum Instr {
     Halt,
     SysF { f: SysFn, d: u32 },
     Clog2 { d: u32, s: u32, w: u32 },
+    /// start the fork branches; join: 0 = join (all), 1 = join_any, 2 = join_none
+    Fork { children: Box<[u32]>, join: u8 },
+    /// disable the named blocks / tasks of `Program::disables[target]`
+    Disable { target: u32 },
     /// integer (w bits) -> real; x/z bits count as 0
     IToR { d: u32, s: u32, w: u32, signed: bool },
     /// real -> integer of w bits (rounded half away from zero, or truncated toward zero)

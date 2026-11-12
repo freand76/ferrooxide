@@ -54,7 +54,13 @@ fn body(code: &[Instr]) -> Option<(Vec<Instr>, bool)> {
     let mut out = Vec::with_capacity(end - start);
     for ins in &code[start..end] {
         out.push(match ins {
-            Instr::Wait { .. } | Instr::Delay { .. } | Instr::Halt | Instr::Sys(_) | Instr::SysF { .. } => return None,
+            Instr::Wait { .. }
+            | Instr::Delay { .. }
+            | Instr::Halt
+            | Instr::Sys(_)
+            | Instr::SysF { .. }
+            | Instr::Fork { .. }
+            | Instr::Disable { .. } => return None,
             // fused members must see each other's results at once: only blocking writes
             Instr::Store { mode: StoreMode::Nba | StoreMode::NbaDelay(_), .. } => return None,
             Instr::Jmp { to } => Instr::Jmp { to: rel(*to)? },

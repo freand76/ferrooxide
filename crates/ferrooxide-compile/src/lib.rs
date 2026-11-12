@@ -59,8 +59,6 @@ pub(crate) struct PState {
     pub code: Vec<Instr>,
     /// loop stack: (break patches, continue patches)
     pub loops: Vec<(Vec<usize>, Vec<usize>)>,
-    /// named blocks: (name, patches to block end)
-    pub blocks: Vec<(String, Vec<usize>)>,
     /// function/task bodies being inlined: (return variable, patches to the end)
     pub rets: Vec<(Option<u32>, Vec<usize>)>,
 }
@@ -96,6 +94,15 @@ pub struct Compiler<'a> {
     pub(crate) gprec: i32,
     /// (array, element) -> alias signal created for port connections
     elem_alias: HashMap<(u32, u32), u32>,
+    /// named blocks and task bodies for `disable`: (path, definition)
+    pub(crate) block_reg: Vec<(String, rt::BlockDef)>,
+    /// registry entries of the blocks being compiled (fork branches started inside them are
+    /// stopped when they are disabled)
+    pub(crate) open_blocks: Vec<usize>,
+    /// disable targets to resolve after code generation: (target, candidate paths, file, line)
+    pub(crate) pending_disables: Vec<(u32, Vec<String>, String, u32)>,
+    /// counter for per-call storage of automatic functions and tasks
+    pub(crate) auto_count: u32,
     /// nets with several continuous drivers -> their driver signals
     drivers: HashMap<u32, Vec<u32>>,
     /// while compiling a driver of a multi-driven net: net -> this driver's signal
@@ -158,6 +165,7 @@ pub fn compile_lint(modules: &[Module], tops: &[String], lint: bool) -> Result<(
         c.tops.insert(m.name.clone(), sid);
     }
     c.codegen_jobs()?;
+    c.resolve_disables();
     c.prog.scratch_words = SCRATCH_WORDS;
     c.prog.precision = c.gprec;
     Ok((c.prog, c.warnings, c.lint))
@@ -191,6 +199,10 @@ impl<'a> Compiler<'a> {
             gprec: 0,
             elem_alias: HashMap::new(),
             drivers: HashMap::new(),
+            block_reg: Vec::new(),
+            open_blocks: Vec::new(),
+            pending_disables: Vec::new(),
+            auto_count: 0,
             redirect: HashMap::new(),
         }
     }
@@ -318,7 +330,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
-        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, fusible: false });
+        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false });
         self.pb.push(PState { proc: id, ..Default::default() });
         self.scratch_saved.push(self.scratch_top);
         self.scratch_top = 0;
@@ -744,6 +756,7 @@ impl<'a> Compiler<'a> {
                     (msb, lsb) = (63, 0);
                     SigKind::Reg
                 }
+                NetKind::Event => SigKind::Reg,
                 NetKind::Int(n) => {
                     if mg.range.is_none() {
                         (msb, lsb) = (n as i64 - 1, 0);
@@ -753,6 +766,8 @@ impl<'a> Compiler<'a> {
                 _ => SigKind::Reg,
             };
             let is_real = mg.kind == NetKind::Real;
+            // named events start at 0 (a trigger toggles them), like real variables
+            let is_real = is_real || mg.kind == NetKind::Event;
             let width = ((msb - lsb).abs() + 1) as u32;
             let (depth, arr_lo) = match mg.dims.len() {
                 0 => (0, 0),
@@ -1023,6 +1038,50 @@ impl<'a> Compiler<'a> {
     }
 
     // ------------------------------------------------------------------ code generation
+    /// Register a named block / task body; returns its registry index.
+    pub(crate) fn open_block(&mut self, path: String) -> Option<usize> {
+        let proc = self.pb.last().map(|p| p.proc).unwrap_or(NONE);
+        if proc == NONE {
+            return None; // constant evaluation
+        }
+        let start = self.here();
+        self.block_reg.push((path, rt::BlockDef { proc, start, end: start, children: Vec::new() }));
+        let i = self.block_reg.len() - 1;
+        self.open_blocks.push(i);
+        Some(i)
+    }
+
+    pub(crate) fn close_block(&mut self, i: Option<usize>) {
+        if let Some(i) = i {
+            self.block_reg[i].1.end = self.here();
+            let top = self.open_blocks.pop();
+            debug_assert_eq!(top, Some(i));
+        }
+    }
+
+    /// Map the `disable` targets to the registered blocks (first matching scope outwards).
+    fn resolve_disables(&mut self) {
+        let pending = std::mem::take(&mut self.pending_disables);
+        for (target, cands, file, line) in pending {
+            let mut ids = Vec::new();
+            for c in &cands {
+                ids = (0..self.block_reg.len() as u32).filter(|&i| &self.block_reg[i as usize].0 == c).collect();
+                if !ids.is_empty() {
+                    break;
+                }
+            }
+            if ids.is_empty() {
+                let n = cands.first().map(|c| c.rsplit('.').next().unwrap_or(c).to_string()).unwrap_or_default();
+                let m = format!("{file}:{line}: warning: disable: no block or task named '{n}'");
+                if self.warned.insert(m.clone()) {
+                    self.warnings.push(m);
+                }
+            }
+            self.prog.disables[target as usize] = ids;
+        }
+        self.prog.blocks = self.block_reg.iter().map(|b| b.1.clone()).collect();
+    }
+
     /// Assignment targets go to the job's driver signal when the net has several drivers.
     pub(crate) fn redir(&self, s: u32) -> u32 {
         self.redirect.get(&s).copied().unwrap_or(s)
