@@ -36,12 +36,16 @@ pub struct Options {
 pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>> {
     let mut pp = preproc::Preprocessor::new(opts);
     let mut modules = Vec::new();
+    // `timescale stays in effect across files, in command-line order
+    let mut timescale = None;
     for f in files {
         let text = pp.process_file(f)?;
         let name = f.display().to_string();
         let toks = lexer::lex(&text, &name)?;
         let mut p = parser::Parser::new(toks, name);
+        p.timescale = timescale;
         modules.extend(p.parse_source()?);
+        timescale = p.timescale;
     }
     Ok(modules)
 }

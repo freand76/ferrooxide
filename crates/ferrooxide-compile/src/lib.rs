@@ -20,6 +20,15 @@ const SCRATCH_WORDS: u32 = 1 << 16;
 pub(crate) enum Sym {
     Sig(u32),
     Const(Const),
+    /// a real parameter
+    Real(f64),
+}
+
+/// A parameter value given by an override.
+#[derive(Clone, Debug)]
+pub(crate) enum PVal {
+    Int(Const),
+    Real(f64),
 }
 
 pub(crate) struct Scope<'a> {
@@ -29,6 +38,9 @@ pub(crate) struct Scope<'a> {
     pub children: HashMap<String, usize>,
     pub funcs: HashMap<String, &'a SubroutineDecl>,
     pub file: String,
+    /// time unit and precision of the enclosing module (powers of ten of seconds)
+    pub tunit: i32,
+    pub tprec: i32,
 }
 
 enum Job<'a> {
@@ -75,13 +87,20 @@ pub struct Compiler<'a> {
     warned: HashSet<String>,
     scratch_top: u32,
     scratch_saved: Vec<u32>,
+    /// simulation precision (power of ten of seconds): the smallest of all modules
+    pub(crate) gprec: i32,
     /// (array, element) -> alias signal created for port connections
     elem_alias: HashMap<(u32, u32), u32>,
+    /// nets with several continuous drivers -> their driver signals
+    drivers: HashMap<u32, Vec<u32>>,
+    /// while compiling a driver of a multi-driven net: net -> this driver's signal
+    redirect: HashMap<u32, u32>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
 pub fn compile(modules: &[Module], tops: &[String]) -> Result<(Program, Vec<String>), Error> {
     let mut c = Compiler::new(modules);
+    c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
     let top_mods: Vec<&Module> = if tops.is_empty() {
         let mut used = HashSet::new();
         fn scan<'b>(items: &'b [Item], used: &mut HashSet<&'b str>) {
@@ -129,6 +148,7 @@ pub fn compile(modules: &[Module], tops: &[String]) -> Result<(Program, Vec<Stri
     }
     c.codegen_jobs()?;
     c.prog.scratch_words = SCRATCH_WORDS;
+    c.prog.precision = c.gprec;
     Ok((c.prog, c.warnings))
 }
 
@@ -154,7 +174,10 @@ impl<'a> Compiler<'a> {
             warned: HashSet::new(),
             scratch_top: 0,
             scratch_saved: Vec::new(),
+            gprec: 0,
             elem_alias: HashMap::new(),
+            drivers: HashMap::new(),
+            redirect: HashMap::new(),
         }
     }
 
@@ -256,6 +279,7 @@ impl<'a> Compiler<'a> {
             arr_lo,
             kind,
             alias_of: None,
+            real: false,
         });
         self.prog.names.push((name, id));
         id
@@ -313,8 +337,24 @@ impl<'a> Compiler<'a> {
             children: HashMap::new(),
             funcs: HashMap::new(),
             file,
+            tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
+            tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
         });
         self.scopes.len() - 1
+    }
+
+    /// %t / delay scaling of a scope: its time unit in simulation ticks is 10^texp
+    pub(crate) fn texp(&self, sid: usize) -> u8 {
+        (self.scopes[sid].tunit - self.gprec).clamp(0, 18) as u8
+    }
+
+    pub(crate) fn mark_real(&mut self, s: u32) {
+        let info = &mut self.prog.signals[s as usize];
+        info.real = true;
+        let (slot, n) = (info.slot as usize, rt::words(info.width) as usize * info.depth.max(1) as usize);
+        for w in &mut self.prog.mem[slot..slot + n] {
+            *w = 0;
+        }
     }
 
     pub(crate) fn lookup(&self, name: &str, mut sid: usize) -> Option<Sym> {
@@ -327,6 +367,12 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn lookup_func(&self, name: &str, mut sid: usize) -> Option<(&'a SubroutineDecl, usize)> {
+        if name.contains('.') {
+            // hierarchical: inst.inst.task
+            let parts: Vec<String> = name.split('.').map(String::from).collect();
+            let sc = self.hier_scope(&parts[..parts.len() - 1], sid)?;
+            return self.scopes[sc].funcs.get(parts.last().unwrap()).map(|f| (*f, sc));
+        }
         loop {
             if let Some(f) = self.scopes[sid].funcs.get(name) {
                 return Some((f, sid));
@@ -337,6 +383,16 @@ impl<'a> Compiler<'a> {
 
     /// Resolve a hierarchical path a.b.c to a symbol.
     pub(crate) fn lookup_hier(&self, parts: &[String], sid: usize) -> Option<Sym> {
+        let cur = self.hier_scope(&parts[..parts.len() - 1], sid)?;
+        self.scopes[cur].syms.get(parts.last().unwrap()).cloned()
+    }
+
+    /// The scope named by a hierarchical path (instance names), searched from `sid` upwards and
+    /// then from the top-level modules.
+    pub(crate) fn hier_scope(&self, parts: &[String], sid: usize) -> Option<usize> {
+        if parts.is_empty() {
+            return Some(sid);
+        }
         // find the scope for parts[0]
         let mut s = Some(sid);
         let mut start = None;
@@ -355,10 +411,10 @@ impl<'a> Compiler<'a> {
             Some(c) => c,
             None => *self.tops.get(&parts[0])?,
         };
-        for p in &parts[1..parts.len() - 1] {
+        for p in &parts[1..] {
             cur = *self.scopes[cur].children.get(p)?;
         }
-        self.scopes[cur].syms.get(parts.last().unwrap()).cloned()
+        Some(cur)
     }
 
     /// A port connected to a constant-index array element of the same width becomes an alias of
@@ -387,6 +443,7 @@ impl<'a> Compiler<'a> {
             arr_lo: 0,
             kind: info.kind,
             alias_of: Some((arr, e)),
+            real: info.real,
         });
         self.elem_alias.insert((arr, e), id);
         Some(id)
@@ -457,11 +514,13 @@ impl<'a> Compiler<'a> {
         &mut self,
         m: &'a Module,
         path: String,
-        overrides: &[(Option<String>, Const)],
+        overrides: &[(Option<String>, PVal)],
         conns: Option<(&'a [Conn], usize)>,
     ) -> R<usize> {
         let saved_file = std::mem::replace(&mut self.file, m.file.clone());
         let sid = self.new_scope(path.clone(), None, m.file.clone());
+        self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
+        self.scopes[sid].tprec = m.timescale.map(|t| t.1).unwrap_or(0);
         for it in &m.items {
             if let Item::Subroutine(f) = it {
                 self.scopes[sid].funcs.insert(f.name.clone(), f);
@@ -476,7 +535,7 @@ impl<'a> Compiler<'a> {
                 if !p.local {
                     ov = overrides.iter().find(|(n, _)| n.as_deref() == Some(p.name.as_str())).map(|x| x.1.clone());
                     if ov.is_none() {
-                        let positional: Vec<&Const> =
+                        let positional: Vec<&PVal> =
                             overrides.iter().filter(|(n, _)| n.is_none()).map(|(_, c)| c).collect();
                         if pos < positional.len() {
                             ov = Some(positional[pos].clone());
@@ -484,12 +543,8 @@ impl<'a> Compiler<'a> {
                     }
                     pos += 1;
                 }
-                let v = match ov {
-                    Some(v) => v,
-                    None => self.const_eval(&p.value, sid)?,
-                };
-                let v = self.param_type(p, v, sid)?;
-                self.scopes[sid].syms.insert(p.name.clone(), Sym::Const(v));
+                let v = self.param_value(p, ov, sid)?;
+                self.scopes[sid].syms.insert(p.name.clone(), v);
             }
         }
         // port connections by name
@@ -526,6 +581,42 @@ impl<'a> Compiler<'a> {
         Ok(sid)
     }
 
+    /// The value of a parameter (from its override if any): integer or real.
+    fn param_value(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
+        let untyped = !p.integer && p.range.is_none() && !p.signed;
+        let v = match ov {
+            Some(v) => v,
+            None => {
+                if self.is_real(&p.value, sid) {
+                    PVal::Real(self.const_real(&p.value, sid)?)
+                } else {
+                    PVal::Int(self.const_eval(&p.value, sid)?)
+                }
+            }
+        };
+        if p.real || (untyped && matches!(v, PVal::Real(_))) {
+            let r = match v {
+                PVal::Real(r) => r,
+                PVal::Int(c) => c.to_i64().unwrap_or(0) as f64,
+            };
+            return Ok(Sym::Real(r));
+        }
+        let c = match v {
+            PVal::Int(c) => c,
+            PVal::Real(r) => Const::from_i64(r.round() as i64, 32, true),
+        };
+        Ok(Sym::Const(self.param_type(p, c, sid)?))
+    }
+
+    /// evaluate a parameter override in the instantiating scope
+    fn pval(&mut self, e: &Expr, sid: usize) -> R<PVal> {
+        if self.is_real(e, sid) {
+            Ok(PVal::Real(self.const_real(e, sid)?))
+        } else {
+            Ok(PVal::Int(self.const_eval(e, sid)?))
+        }
+    }
+
     fn param_type(&mut self, p: &ParamDecl, v: Const, sid: usize) -> R<Const> {
         if p.integer {
             return Ok(v.resize(32, v.signed).with_sign(true));
@@ -559,9 +650,8 @@ impl<'a> Compiler<'a> {
             for it in items {
                 if let Item::Param(p) = it {
                     self.line = p.line;
-                    let v = self.const_eval(&p.value, sid)?;
-                    let v = self.param_type(p, v, sid)?;
-                    self.scopes[sid].syms.insert(p.name.clone(), Sym::Const(v));
+                    let v = self.param_value(p, None, sid)?;
+                    self.scopes[sid].syms.insert(p.name.clone(), v);
                 }
             }
         }
@@ -636,7 +726,7 @@ impl<'a> Compiler<'a> {
                     signed = true;
                     SigKind::Integer
                 }
-                NetKind::Time => {
+                NetKind::Time | NetKind::Real => {
                     (msb, lsb) = (63, 0);
                     SigKind::Reg
                 }
@@ -648,6 +738,7 @@ impl<'a> Compiler<'a> {
                 }
                 _ => SigKind::Reg,
             };
+            let is_real = mg.kind == NetKind::Real;
             let width = ((msb - lsb).abs() + 1) as u32;
             let (depth, arr_lo) = match mg.dims.len() {
                 0 => (0, 0),
@@ -701,6 +792,9 @@ impl<'a> Compiler<'a> {
                             continue;
                         }
                         let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
+                        if is_real {
+                            self.mark_real(s);
+                        }
                         self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
                         let line = self.line;
                         match dir {
@@ -719,6 +813,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
+            if is_real {
+                self.mark_real(s);
+            }
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
             if let Some(init) = mg.init {
                 if kind == SigKind::Wire {
@@ -729,6 +826,11 @@ impl<'a> Compiler<'a> {
                         scope: sid,
                         line: self.line,
                     });
+                } else if is_real {
+                    let r = self.const_real(init, sid)?;
+                    let slot = self.sig(s).slot as usize;
+                    self.prog.mem[slot] = r.to_bits();
+                    self.prog.mem[slot + 1] = 0;
                 } else {
                     let c = self.const_eval(init, sid)?;
                     let c = c.resize(width, c.signed);
@@ -767,8 +869,8 @@ impl<'a> Compiler<'a> {
                     let mut ovs = Vec::new();
                     for p in params {
                         match p {
-                            Conn::Positional(Some(e)) => ovs.push((None, self.const_eval(e, sid)?)),
-                            Conn::Named(n, Some(e)) => ovs.push((Some(n.clone()), self.const_eval(e, sid)?)),
+                            Conn::Positional(Some(e)) => ovs.push((None, self.pval(e, sid)?)),
+                            Conn::Named(n, Some(e)) => ovs.push((Some(n.clone()), self.pval(e, sid)?)),
                             _ => {}
                         }
                     }
@@ -907,9 +1009,104 @@ impl<'a> Compiler<'a> {
     }
 
     // ------------------------------------------------------------------ code generation
+    /// Assignment targets go to the job's driver signal when the net has several drivers.
+    pub(crate) fn redir(&self, s: u32) -> u32 {
+        self.redirect.get(&s).copied().unwrap_or(s)
+    }
+
+    /// Signals an lvalue writes (whole signals; part selects count as the signal).
+    fn lvalue_bases(&self, e: &Expr, sid: usize, out: &mut Vec<u32>) {
+        match e {
+            Expr::Ident(n) => {
+                if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
+                    out.push(s);
+                }
+            }
+            Expr::Hier(p) => {
+                if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
+                    out.push(s);
+                }
+            }
+            Expr::Index(a, _) | Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) => self.lvalue_bases(a, sid, out),
+            Expr::Concat(v) => {
+                for x in v {
+                    self.lvalue_bases(x, sid, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn job_targets(&self, job: &Job) -> Vec<u32> {
+        let mut v = Vec::new();
+        match job {
+            Job::Assign { lhs, scope, .. } | Job::PortOut { lhs, scope, .. } => self.lvalue_bases(lhs, *scope, &mut v),
+            Job::PortIn { child_sig, .. } => v.push(*child_sig),
+            Job::Proc { .. } => {}
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     fn codegen_jobs(&mut self) -> R<()> {
         let jobs = std::mem::take(&mut self.jobs);
+        // nets with more than one continuous driver are resolved from per-driver signals
+        let mut count: HashMap<u32, u32> = HashMap::new();
         for job in &jobs {
+            for s in self.job_targets(job) {
+                *count.entry(s).or_default() += 1;
+            }
+        }
+        let multi: HashSet<u32> = count
+            .into_iter()
+            .filter(|&(s, n)| {
+                let i = self.sig(s);
+                n > 1 && i.kind == SigKind::Wire && i.depth == 0 && i.alias_of.is_none()
+            })
+            .map(|(s, _)| s)
+            .collect();
+        for job in &jobs {
+            self.redirect.clear();
+            for s in self.job_targets(job) {
+                if multi.contains(&s) {
+                    let i = self.sig(s).clone();
+                    let k = self.drivers.get(&s).map(|v| v.len()).unwrap_or(0);
+                    let d = self.new_signal(format!("{}$drv{k}", i.name), i.width, i.signed, 0, i.msb, i.lsb, 0, SigKind::Wire);
+                    self.prog.names.pop(); // driver signals are not dumped
+                    self.drivers.entry(s).or_default().push(d);
+                    self.redirect.insert(s, d);
+                }
+            }
+            self.codegen_job(job)?;
+        }
+        self.redirect.clear();
+        // resolver processes: net = resolve(driver 0, driver 1, ...)
+        let mut nets: Vec<(u32, Vec<u32>)> = std::mem::take(&mut self.drivers).into_iter().collect();
+        nets.sort();
+        for (net, drv) in nets {
+            let i = self.sig(net).clone();
+            let p = self.begin_proc(i.name.clone(), ProcClass::Normal);
+            self.prog.procs[p as usize].fusible = true;
+            let top = self.here();
+            let mut v = self.sig(drv[0]).slot;
+            for &d in &drv[1..] {
+                let t = self.tmp(i.width);
+                let b = self.sig(d).slot;
+                self.emit(Instr::Bin { op: rt::BinOp::Resolve, d: t, a: v, b, w: i.width });
+                v = t;
+            }
+            self.emit(Instr::Store { t: rt::Target::Whole { sig: net }, s: v, mode: rt::StoreMode::Blocking });
+            let ctl = self.make_ctl(drv.iter().map(|&d| (d, rt::Edge::Any, NONE)).collect());
+            self.emit(Instr::Wait { ctl });
+            self.emit(Instr::Jmp { to: top });
+            self.end_proc();
+        }
+        Ok(())
+    }
+
+    fn codegen_job(&mut self, job: &Job<'a>) -> R<()> {
+        {
             match job {
                 Job::Proc { kind, body, scope, line } => {
                     self.line = *line;

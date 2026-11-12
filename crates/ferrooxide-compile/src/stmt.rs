@@ -33,6 +33,7 @@ impl<'a> Compiler<'a> {
             }
             Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
                 Some(expr::Base::Sig(s)) => {
+                    let s = self.redir(s);
                     let i = self.sig(s);
                     if i.depth > 0 {
                         return self.err(format!("cannot assign to whole array '{}'", i.name));
@@ -136,14 +137,17 @@ impl<'a> Compiler<'a> {
 
     fn lsig(&mut self, e: &Expr, sid: usize) -> R<u32> {
         match self.resolve_base(e, sid)? {
-            Some(expr::Base::Sig(s)) => Ok(s),
+            Some(expr::Base::Sig(s)) => Ok(self.redir(s)),
             _ => self.err("invalid assignment target"),
         }
     }
 
     fn lhs_targets(&mut self, lhs: &Lhs) -> R<Vec<(Option<Target>, u32)>> {
         match lhs {
-            Lhs::Sig(s) => Ok(vec![(Some(Target::Whole { sig: *s }), self.sig(*s).width)]),
+            Lhs::Sig(s) => {
+                let s = self.redir(*s);
+                Ok(vec![(Some(Target::Whole { sig: s }), self.sig(s).width)])
+            }
             Lhs::Expr(e, sid) => {
                 let mut v = Vec::new();
                 self.targets(e, *sid, &mut v)?;
@@ -213,7 +217,7 @@ impl<'a> Compiler<'a> {
                 (Lhs::Expr(_, s), _) | (_, Rhs::Expr(_, s)) => *s,
                 _ => 0,
             };
-            let ds = self.expr(d, sid, 64, false)?;
+            let ds = self.delay_ticks(d, sid)?;
             // copy the value before waiting
             let t = self.ptmp(lw);
             self.emit(Instr::Copy { d: t, s: v, w: lw });
@@ -254,12 +258,10 @@ impl<'a> Compiler<'a> {
                             _ => return self.err("event expression is not a signal"),
                         },
                         _ => {
-                            if re != REdge::Any {
-                                self.warn("edge on a non-signal expression: triggering on any change");
-                            }
-                            let mut reads = Vec::new();
-                            self.reads_expr(e, sid, &mut reads);
-                            trig.extend(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)));
+                            // the value of the expression as a hidden signal, kept up to date by
+                            // a combinational process; edges and changes are detected on it
+                            let h = self.event_signal(e, sid)?;
+                            trig.push((h, re, NONE));
                         }
                     }
                 }
@@ -268,13 +270,30 @@ impl<'a> Compiler<'a> {
         Ok(self.make_ctl(trig))
     }
 
+    /// A hidden signal that follows the value of an event expression (e.g. `posedge a[3]`).
+    fn event_signal(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        let (w, _) = self.ty(e, sid)?;
+        let name = format!("{}.$event{}", self.scopes[sid].name, self.prog.signals.len());
+        let h = self.new_signal(name, w, false, 0, w as i64 - 1, 0, 0, SigKind::Reg);
+        self.prog.names.pop(); // not a user-visible name (no VCD entry)
+        let p = self.begin_proc(self.scopes[sid].name.clone(), ProcClass::Normal);
+        self.prog.procs[p as usize].fusible = true;
+        let top = self.here();
+        let v = self.expr(e, sid, w, false)?;
+        self.emit(Instr::Store { t: Target::Whole { sig: h }, s: v, mode: StoreMode::Blocking });
+        let mut reads = Vec::new();
+        self.reads_expr(e, sid, &mut reads);
+        let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
+        self.emit(Instr::Wait { ctl });
+        self.emit(Instr::Jmp { to: top });
+        self.end_proc();
+        Ok(h)
+    }
+
     fn timing(&mut self, t: &Timing, body: &Stmt, sid: usize) -> R<()> {
         match t {
             Timing::Delay(d) => {
-                let ds = match d {
-                    Expr::Real(r) => self.const_slot(&Const::from_i64(r.round() as i64, 64, false)),
-                    _ => self.expr(d, sid, 64, false)?,
-                };
+                let ds = self.delay_ticks(d, sid)?;
                 self.emit(Instr::Delay { s: ds });
             }
             Timing::Event(ec) => {
@@ -317,12 +336,13 @@ impl<'a> Compiler<'a> {
                                 }
                                 SigKind::Integer
                             }
-                            NetKind::Time => {
+                            NetKind::Time | NetKind::Real => {
                                 (m, l) = (63, 0);
                                 SigKind::Reg
                             }
                             _ => SigKind::Reg,
                         };
+                        let is_real = d.kind == NetKind::Real;
                         let w = ((m - l).abs() + 1) as u32;
                         for dl in &d.names {
                             let (depth, lo) = if let Some((a, b2)) = dl.dims.first() {
@@ -333,9 +353,12 @@ impl<'a> Compiler<'a> {
                             };
                             let s =
                                 self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, kind);
+                            if is_real {
+                                self.mark_real(s);
+                            }
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
                             if let Some(init) = &dl.init {
-                                let v = self.rhs_value(init, b, w)?;
+                                let v = self.value_for(init, b, w, is_real)?;
                                 self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
                             }
                         }
@@ -361,7 +384,8 @@ impl<'a> Compiler<'a> {
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
                 let lw = self.ty(lhs, sid)?.0;
-                let v = self.rhs_value(rhs, sid, lw)?;
+                let real = self.lvalue_is_real(lhs, sid);
+                let v = self.value_for(rhs, sid, lw, real)?;
                 let lv = Lhs::Expr(lhs, sid);
                 match timing {
                     None => {
@@ -369,7 +393,7 @@ impl<'a> Compiler<'a> {
                         self.store_value(&lv, v, lw, mode)?;
                     }
                     Some(Timing::Delay(d)) if *nonblocking => {
-                        let ds = self.expr(d, sid, 64, false)?;
+                        let ds = self.delay_ticks(d, sid)?;
                         self.store_value(&lv, v, lw, StoreMode::NbaDelay(ds))?;
                     }
                     Some(t) => {
@@ -561,6 +585,19 @@ impl<'a> Compiler<'a> {
                 self.line = *line;
                 self.call(name, args, sid, true)?;
             }
+            Stmt::Force { lhs, rhs, line } => {
+                self.line = *line;
+                match rhs {
+                    Some(rhs) => {
+                        self.warn("force is executed as a procedural assignment (the value is not held)");
+                        let lw = self.ty(lhs, sid)?.0;
+                        let real = self.lvalue_is_real(lhs, sid);
+                        let v = self.value_for(rhs, sid, lw, real)?;
+                        self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Blocking)?;
+                    }
+                    None => self.warn("release is ignored"),
+                }
+            }
             Stmt::Disable { name, line } => {
                 self.line = *line;
                 let found = self.pb.last().unwrap().blocks.iter().rposition(|b| &b.0 == name);
@@ -583,7 +620,8 @@ impl<'a> Compiler<'a> {
                 };
                 if let (Some(v), Some(r)) = (value, ret) {
                     let w = self.sig(r).width;
-                    let val = self.rhs_value(v, sid, w)?;
+                    let real = self.sig(r).real;
+                    let val = self.value_for(v, sid, w, real)?;
                     self.emit(Instr::Store { t: Target::Whole { sig: r }, s: val, mode: StoreMode::Blocking });
                 }
                 let j = self.emit(Instr::Jmp { to: 0 });
@@ -631,11 +669,7 @@ impl<'a> Compiler<'a> {
             v.push(match a {
                 None => FmtArg::Empty,
                 Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),
-                Some(Expr::SysCall(n, _)) if n == "$time" || n == "$realtime" => {
-                    let d = self.tmp(64);
-                    self.emit(Instr::SysF { f: rt::SysFn::Time, d });
-                    FmtArg::Time { s: d }
-                }
+                Some(e) if self.is_real(e, sid) => FmtArg::Real { s: self.rexpr(e, sid)? },
                 Some(e) => {
                     let (s, w, signed) = self.self_expr(e, sid)?;
                     FmtArg::Val { s, w, signed }
@@ -652,7 +686,8 @@ impl<'a> Compiler<'a> {
             "$display" | "$write" | "$displayb" | "$displayh" | "$displayo" | "$writeb" | "$writeh" | "$writeo" => {
                 let args = self.fmt_args(args, sid)?;
                 let nl = name.starts_with("$display");
-                self.emit(sys(SysTask::Display { nl, args, scope, fd: None, prefix: "" }));
+                let texp = self.texp(sid);
+                self.emit(sys(SysTask::Display { nl, args, scope, fd: None, prefix: "", texp }));
             }
             "$error" | "$warning" | "$info" | "$fatal" => {
                 let mut a = args;
@@ -666,16 +701,18 @@ impl<'a> Compiler<'a> {
                     "$info" => "INFO: ",
                     _ => "FATAL: ",
                 };
-                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix }));
+                let texp = self.texp(sid);
+                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix, texp }));
                 if name == "$fatal" {
-                    self.emit(sys(SysTask::Finish));
+                    self.emit(sys(SysTask::Finish { loc: String::new(), stop: false }));
                 }
             }
             "$fdisplay" | "$fwrite" => {
                 let Some(Some(fd)) = args.first() else { return self.err(format!("{name} needs a file descriptor")) };
                 let (fs, fw, _) = self.self_expr(fd, sid)?;
                 let args = self.fmt_args(&args[1..], sid)?;
-                self.emit(sys(SysTask::Display { nl: name == "$fdisplay", args, scope, fd: Some((fs, fw)), prefix: "" }));
+                let texp = self.texp(sid);
+                self.emit(sys(SysTask::Display { nl: name == "$fdisplay", args, scope, fd: Some((fs, fw)), prefix: "", texp }));
             }
             "$fclose" => {
                 if let Some(Some(fd)) = args.first() {
@@ -690,7 +727,8 @@ impl<'a> Compiler<'a> {
                 let top = self.here();
                 let fargs = self.fmt_args(args, sid)?;
                 if is_mon {
-                    self.emit(sys(SysTask::MonitorPrint { proc: p, args: fargs, scope: scope.clone() }));
+                    let texp = self.texp(sid);
+                    self.emit(sys(SysTask::MonitorPrint { proc: p, args: fargs, scope: scope.clone(), texp }));
                     let mut reads = Vec::new();
                     for e in args.iter().flatten() {
                         self.reads_expr(e, sid, &mut reads);
@@ -699,7 +737,8 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Wait { ctl });
                     self.emit(Instr::Jmp { to: top });
                 } else {
-                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd: None, prefix: "" }));
+                    let texp = self.texp(sid);
+                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd: None, prefix: "", texp }));
                     self.emit(Instr::Halt);
                 }
                 self.end_proc();
@@ -709,6 +748,17 @@ impl<'a> Compiler<'a> {
                     self.emit(sys(SysTask::Strobe { proc: p }));
                 }
             }
+            "$sformat" | "$swrite" => {
+                let Some(Some(var)) = args.first() else {
+                    return self.err(format!("{name} needs a variable"));
+                };
+                let vw = self.ty(var, sid)?.0;
+                let fargs = self.fmt_args(&args[1..], sid)?;
+                let d = self.tmp(vw);
+                let texp = self.texp(sid);
+                self.emit(sys(SysTask::SFormat { d, w: vw, args: fargs, scope, texp }));
+                self.store_value(&Lhs::Expr(var, sid), d, vw, StoreMode::Blocking)?;
+            }
             "$monitoron" => {
                 self.emit(sys(SysTask::MonitorOn(true)));
             }
@@ -716,7 +766,10 @@ impl<'a> Compiler<'a> {
                 self.emit(sys(SysTask::MonitorOn(false)));
             }
             "$finish" | "$stop" => {
-                self.emit(sys(SysTask::Finish));
+                // $finish(0) prints nothing; otherwise "file:line: $finish called at <time> (<unit>)"
+                let quiet = matches!(args.first(), Some(Some(Expr::Num(n))) if n.digits == "0");
+                let loc = if quiet { String::new() } else { format!("{}:{}", self.file, self.line) };
+                self.emit(sys(SysTask::Finish { loc, stop: name == "$stop" }));
             }
             "$dumpfile" => {
                 if let Some(Some(Expr::Str(f))) = args.first() {
@@ -735,8 +788,8 @@ impl<'a> Compiler<'a> {
             "$dumpall" | "$dumpflush" | "$dumplimit" | "$timeformat" | "$printtimescale" => {}
             "$readmemh" | "$readmemb" => {
                 let file = match args.first() {
-                    Some(Some(Expr::Str(f))) => f.clone(),
-                    _ => return self.err(format!("{name}: file name must be a string literal")),
+                    Some(Some(e)) => self.file_name(e, sid)?,
+                    _ => return self.err(format!("{name}: missing file name")),
                 };
                 let sig = match args.get(1) {
                     Some(Some(e)) => match self.array_of(e, sid) {
@@ -756,7 +809,8 @@ impl<'a> Compiler<'a> {
                 };
                 let start = opt(2, self)?;
                 let end = opt(3, self)?;
-                self.emit(sys(SysTask::ReadMem { hex: name == "$readmemh", file, sig, start, end }));
+                let loc = format!("{}:{}", self.file, self.line);
+                self.emit(sys(SysTask::ReadMem { hex: name == "$readmemh", file, sig, start, end, loc }));
             }
             _ => self.warn(format!("system task '{name}' is not supported, ignored")),
         }
@@ -775,6 +829,12 @@ impl<'a> Compiler<'a> {
     fn reads_stmt_inner(&self, st: &Stmt, sid: usize, out: &mut Vec<(u32, u32)>, locals: &mut Vec<u32>) {
         match st {
             Stmt::Null | Stmt::Disable { .. } | Stmt::Trigger { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Force { lhs, rhs, .. } => {
+                if let Some(r) = rhs {
+                    self.reads_expr(r, sid, out);
+                }
+                self.reads_lvalue(lhs, sid, out);
+            }
             Stmt::Block { stmts, name, .. } => {
                 // block-local variables live in a child scope created at codegen time
                 let bsid = name.as_ref().and_then(|n| self.scopes[sid].children.get(n).copied()).unwrap_or(sid);

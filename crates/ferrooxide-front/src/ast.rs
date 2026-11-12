@@ -5,6 +5,8 @@ pub type Line = u32;
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
+    /// `timescale in effect for this module: (unit, precision) as powers of ten of seconds
+    pub timescale: Option<(i32, i32)>,
     pub file: String,
     pub line: Line,
     /// Port names in header order.
@@ -28,6 +30,8 @@ pub enum NetKind {
     Genvar,
     /// SV `int`, `byte`, `shortint`, `longint`, `bit` (treated as 4-state for now)
     Int(u32),
+    /// `real` / `realtime`
+    Real,
     Bit,
 }
 
@@ -60,6 +64,7 @@ pub struct ParamDecl {
     pub range: Option<Range>,
     /// `integer` type
     pub integer: bool,
+    pub real: bool,
     pub name: String,
     pub value: Expr,
     pub line: Line,
@@ -165,6 +170,8 @@ pub enum Stmt {
     SysTask { name: String, args: Vec<Option<Expr>>, line: Line },
     TaskCall { name: String, args: Vec<Expr>, line: Line },
     Disable { name: String, line: Line },
+    /// `force lhs = rhs` (`rhs` None: `release lhs`)
+    Force { lhs: Expr, rhs: Option<Expr>, line: Line },
     Trigger { name: String, line: Line },
     Return { value: Option<Expr>, line: Line },
     Break { line: Line },

@@ -396,6 +396,19 @@ fn bitwise(op: BinOp, va: u64, xa: u64, vb: u64, xb: u64, mk: u64) -> (u64, u64)
             let rx = xa | xb;
             ((!(va ^ vb) | rx) & mk, rx)
         }
+        BinOp::Resolve => {
+            // z (v=0, x=1) yields to the other driver; equal values stay; conflicts are x
+            let za = !va & xa;
+            let zb = !vb & xb;
+            let take_a = zb & !za;
+            let take_b = za & !zb;
+            let both_z = za & zb;
+            let both = !za & !zb;
+            let eq = !(va ^ vb) & !(xa ^ xb);
+            let rv = (va & take_a) | (vb & take_b) | (both & ((va & eq) | !eq));
+            let rx = (xa & take_a) | (xb & take_b) | both_z | (both & ((xa & eq) | !eq));
+            (rv & mk, rx & mk)
+        }
         _ => unreachable!(),
     }
 }
@@ -404,7 +417,7 @@ pub fn binop(m: &mut [u64], op: BinOp, d: usize, a: usize, b: usize, w: u32) {
     if w <= 64 {
         let (va, xa, vb, xb) = (m[a], m[a + 1], m[b], m[b + 1]);
         let mk = mask(w);
-        if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor) {
+        if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor | BinOp::Resolve) {
             let (r, x) = bitwise(op, va, xa, vb, xb, mk);
             m[d] = r;
             m[d + 1] = x;
@@ -435,7 +448,7 @@ pub fn binop(m: &mut [u64], op: BinOp, d: usize, a: usize, b: usize, w: u32) {
         return;
     }
     let n = nw(w);
-    if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor) {
+    if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor | BinOp::Resolve) {
         for i in 0..n {
             let mk = if i == n - 1 { tmask(w) } else { !0 };
             let (r, x) = bitwise(op, m[a + i], m[a + n + i], m[b + i], m[b + n + i], mk);
@@ -932,4 +945,143 @@ pub fn clog2(m: &mut [u64], d: usize, s: usize, w: u32) {
     };
     m[d] = r;
     m[d + 1] = 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// real numbers: f64 bits in the value word, unknown word 0
+
+#[inline]
+pub fn rd_real(m: &[u64], s: usize) -> f64 {
+    f64::from_bits(m[s])
+}
+
+#[inline]
+pub fn wr_real(m: &mut [u64], d: usize, v: f64) {
+    m[d] = v.to_bits();
+    m[d + 1] = 0;
+}
+
+/// integer (x/z bits as 0) -> f64
+pub fn int_to_real(m: &[u64], s: usize, w: u32, signed: bool) -> f64 {
+    let n = nw(w);
+    let mut words: Vec<u64> = (0..n).map(|i| m[s + i] & !m[s + n + i]).collect();
+    let neg = signed && (words[(w as usize - 1) / 64] >> ((w - 1) % 64)) & 1 == 1;
+    if neg {
+        // two's complement magnitude within w bits
+        for x in words.iter_mut() {
+            *x = !*x;
+        }
+        let top = n - 1;
+        words[top] &= tmask(w);
+        for x in words.iter_mut() {
+            let (v, o) = x.overflowing_add(1);
+            *x = v;
+            if !o {
+                break;
+            }
+        }
+        words[top] &= tmask(w);
+    }
+    let mut f = 0.0f64;
+    for i in (0..n).rev() {
+        f = f * 18446744073709551616.0 + words[i] as f64;
+    }
+    if neg {
+        -f
+    } else {
+        f
+    }
+}
+
+/// f64 -> w-bit integer, rounded half away from zero (two's complement)
+pub fn real_to_int(m: &mut [u64], d: usize, w: u32, v: f64) {
+    let n = nw(w);
+    if !v.is_finite() {
+        set_x(m, d, w);
+        return;
+    }
+    let r = v.round();
+    let neg = r < 0.0;
+    let mut mag = r.abs();
+    let mut words = vec![0u64; n];
+    for x in words.iter_mut() {
+        *x = (mag % 18446744073709551616.0) as u64;
+        mag = (mag / 18446744073709551616.0).floor();
+    }
+    if neg {
+        for x in words.iter_mut() {
+            *x = !*x;
+        }
+        for x in words.iter_mut() {
+            let (v, o) = x.overflowing_add(1);
+            *x = v;
+            if !o {
+                break;
+            }
+        }
+    }
+    for i in 0..n {
+        let mk = if i == n - 1 { tmask(w) } else { !0 };
+        m[d + i] = words[i] & mk;
+        m[d + n + i] = 0;
+    }
+}
+
+const POW10: [f64; 19] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18];
+
+pub fn pow10(e: u8) -> f64 {
+    POW10[e as usize]
+}
+
+/// Execute a real-number instruction. Returns false if `ins` is not one.
+pub fn exec_real(ins: &crate::Instr, m: &mut [u64]) -> bool {
+    use crate::Instr as I;
+    match *ins {
+        I::IToR { d, s, w, signed } => {
+            let v = int_to_real(m, s as usize, w, signed);
+            wr_real(m, d as usize, v);
+        }
+        I::RToI { d, s, w, trunc } => {
+            let v = rd_real(m, s as usize);
+            let v = if trunc { v.trunc() } else { v };
+            real_to_int(m, d as usize, w, v);
+        }
+        I::RNeg { d, s } => {
+            let v = -rd_real(m, s as usize);
+            wr_real(m, d as usize, v);
+        }
+        I::RBin { op, d, a, b } => {
+            let (x, y) = (rd_real(m, a as usize), rd_real(m, b as usize));
+            let v = match op {
+                crate::RealOp::Add => x + y,
+                crate::RealOp::Sub => x - y,
+                crate::RealOp::Mul => x * y,
+                crate::RealOp::Div => x / y,
+                crate::RealOp::Pow => x.powf(y),
+            };
+            wr_real(m, d as usize, v);
+        }
+        I::RCmp { op, d, a, b } => {
+            let (x, y) = (rd_real(m, a as usize), rd_real(m, b as usize));
+            let r = match op {
+                CmpOp::Eq | CmpOp::CaseEq => x == y,
+                CmpOp::Ne | CmpOp::CaseNe => x != y,
+                CmpOp::Lt | CmpOp::LtS => x < y,
+                CmpOp::Le | CmpOp::LeS => x <= y,
+                CmpOp::Gt | CmpOp::GtS => x > y,
+                _ => x >= y,
+            };
+            m[d as usize] = r as u64;
+            m[d as usize + 1] = 0;
+        }
+        I::RToTicks { d, s, exp, post } => {
+            let v = rd_real(m, s as usize) * pow10(exp);
+            let t = if v.is_finite() && v > 0.0 { v.round() as u64 } else { 0 };
+            let t = t * 10u64.pow(post as u32);
+            m[d as usize] = t;
+            m[d as usize + 1] = 0;
+        }
+        _ => return false,
+    }
+    true
 }

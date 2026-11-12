@@ -142,9 +142,11 @@ pub struct Sim {
     dumping: bool,
     dirty: Vec<u32>,
     is_dirty: Vec<bool>,
-    files: HashMap<u32, BufWriter<std::fs::File>>,
+    /// open files: a writer, or None for a file opened for reading
+    files: HashMap<u32, Option<BufWriter<std::fs::File>>>,
     next_fd: u32,
     scratch: Vec<u64>,
+    plusargs: Vec<String>,
     pub stats: Stats,
     #[cfg(feature = "jit")]
     jit: Option<crate::jit::Jit>,
@@ -293,6 +295,7 @@ impl Sim {
             files: HashMap::new(),
             next_fd: 3,
             scratch: Vec::new(),
+            plusargs: Vec::new(),
             stats: Stats::default(),
             #[cfg(feature = "jit")]
             jit: None,
@@ -358,7 +361,7 @@ impl Sim {
         if let Some(v) = &mut self.vcd {
             v.flush();
         }
-        for f in self.files.values_mut() {
+        for f in self.files.values_mut().flatten() {
             let _ = f.flush();
         }
     }
@@ -1105,9 +1108,14 @@ impl Sim {
                 Instr::SysF { f, d } => {
                     let d = *d as usize;
                     match f {
-                        SysFn::Time => {
-                            m[d] = self.time;
+                        SysFn::Time(e) => {
+                            let div = 10u64.pow(*e as u32);
+                            m[d] = (self.time + div / 2) / div;
                             m[d + 1] = 0;
+                        }
+                        SysFn::RealTime(e) => {
+                            let v = self.time as f64 / ops::pow10(*e);
+                            ops::wr_real(m, d, v);
                         }
                         SysFn::Random | SysFn::Urandom => {
                             let v = self.next_random();
@@ -1126,6 +1134,14 @@ impl Sim {
                     }
                 }
                 Instr::Clog2 { d, s, w } => ops::clog2(m, *d as usize, *s as usize, *w),
+                Instr::IToR { .. }
+                | Instr::RToI { .. }
+                | Instr::RBin { .. }
+                | Instr::RNeg { .. }
+                | Instr::RCmp { .. }
+                | Instr::RToTicks { .. } => {
+                    ops::exec_real(ins, m);
+                }
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -1145,9 +1161,9 @@ impl Sim {
     /// Returns true if the process must stop executing.
     fn systask(&mut self, p: u32, task: &SysTask, pc: usize) -> bool {
         match task {
-            SysTask::Display { nl, args, scope, fd, prefix } => {
+            SysTask::Display { nl, args, scope, fd, prefix, texp } => {
                 let mut s = String::from(*prefix);
-                s.push_str(&fmt::format_args(args, &self.mem, scope, 'd'));
+                s.push_str(&fmt::format_args(args, &self.mem, scope, 'd', *texp));
                 if *nl {
                     s.push('\n');
                 }
@@ -1165,7 +1181,7 @@ impl Sim {
                             if v & 2 != 0 {
                                 eprint!("{s}");
                             }
-                        } else if let Some(f) = self.files.get_mut(&v) {
+                        } else if let Some(Some(f)) = self.files.get_mut(&v) {
                             let _ = f.write_all(s.as_bytes());
                         }
                     }
@@ -1179,9 +1195,9 @@ impl Sim {
                     self.postponed.push(*proc);
                 }
             }
-            SysTask::MonitorPrint { proc, args, scope } => {
+            SysTask::MonitorPrint { proc, args, scope, texp } => {
                 if self.monitor == *proc && self.monitor_on {
-                    let mut s = fmt::format_args(args, &self.mem, scope, 'd');
+                    let mut s = fmt::format_args(args, &self.mem, scope, 'd', *texp);
                     s.push('\n');
                     let _ = self.out.write_all(s.as_bytes());
                 }
@@ -1191,7 +1207,24 @@ impl Sim {
                 self.procs[*proc as usize].pc = 0;
                 self.postponed.push(*proc);
             }
-            SysTask::Finish => {
+            SysTask::Finish { loc, stop } => {
+                if !loc.is_empty() {
+                    let unit = match self.prog.precision.rem_euclid(3) {
+                        0 => "1",
+                        1 => "10",
+                        _ => "100",
+                    };
+                    let base = match self.prog.precision.div_euclid(3) {
+                        0 => "s",
+                        -1 => "ms",
+                        -2 => "us",
+                        -3 => "ns",
+                        -4 => "ps",
+                        _ => "fs",
+                    };
+                    let what = if *stop { "$stop" } else { "$finish" };
+                    let _ = writeln!(self.out, "{loc}: {what} called at {} ({unit}{base})", self.time);
+                }
                 self.finished = true;
                 self.procs[p as usize].pc = pc as u32;
                 self.flush();
@@ -1222,20 +1255,52 @@ impl Sim {
                     self.dumping = *on;
                 }
             }
-            SysTask::ReadMem { hex, file, sig, start, end } => {
+            SysTask::ReadMem { hex, file, sig, start, end, loc } => {
                 let start = start.and_then(|(s, w)| ops::read_u64(&self.mem, s as usize, w));
                 let end = end.and_then(|(s, w)| ops::read_u64(&self.mem, s as usize, w));
-                self.readmem(*hex, file, *sig, start, end);
+                let file = self.file_name(file);
+                self.readmem(*hex, &file, *sig, start, end, loc);
             }
-            SysTask::FOpen { d, dw, file } => {
-                let fd = match std::fs::File::create(file) {
-                    Ok(f) => {
+            SysTask::TestPlusargs { d, prefix } => {
+                let found = self.plusargs.iter().any(|a| a.starts_with(prefix.as_str()));
+                self.mem[*d as usize] = found as u64;
+                self.mem[*d as usize + 1] = 0;
+            }
+            SysTask::ValuePlusargs { d, prefix, conv, val, w, real } => {
+                let found = self.plusargs.iter().find(|a| a.starts_with(prefix.as_str())).cloned();
+                let (d, val) = (*d as usize, *val as usize);
+                self.mem[d] = found.is_some() as u64;
+                self.mem[d + 1] = 0;
+                if let Some(a) = found {
+                    plusarg_value(&mut self.mem, val, *w, *real, *conv, &a[prefix.len()..]);
+                }
+            }
+            SysTask::SFormat { d, w, args, scope, texp } => {
+                let s = fmt::format_args(args, &self.mem, scope, 'd', *texp);
+                string_to_bits(&mut self.mem, *d as usize, *w, &s);
+            }
+            SysTask::FOpen { d, dw, file, mode } => {
+                let file = self.file_name(file);
+                let opened: Option<Option<BufWriter<std::fs::File>>> = if mode.starts_with('r') {
+                    // reading: only the descriptor is needed ($fgetc & co. are not supported yet)
+                    std::fs::File::open(&file).ok().map(|_| None)
+                } else {
+                    let mut o = std::fs::OpenOptions::new();
+                    if mode.starts_with('a') {
+                        o.append(true).create(true);
+                    } else {
+                        o.write(true).create(true).truncate(true);
+                    }
+                    o.open(&file).ok().map(|f| Some(BufWriter::new(f)))
+                };
+                let fd = match opened {
+                    Some(h) => {
                         let fd = 0x8000_0000 | self.next_fd;
                         self.next_fd += 1;
-                        self.files.insert(fd, BufWriter::new(f));
+                        self.files.insert(fd, h);
                         fd
                     }
-                    Err(_) => 0,
+                    None => 0,
                 };
                 let tmp = [fd as u64 & ops::mask(*dw), 0];
                 let d = *d as usize;
@@ -1244,7 +1309,7 @@ impl Sim {
             }
             SysTask::FClose { s } => {
                 let v = self.mem[*s as usize] as u32;
-                if let Some(mut f) = self.files.remove(&v) {
+                if let Some(Some(mut f)) = self.files.remove(&v) {
                     let _ = f.flush();
                 }
             }
@@ -1252,7 +1317,19 @@ impl Sim {
         false
     }
 
-    fn readmem(&mut self, hex: bool, file: &str, sig: u32, start: Option<u64>, end: Option<u64>) {
+    fn file_name(&self, f: &FileName) -> String {
+        match f {
+            FileName::Lit(s) => s.clone(),
+            FileName::Val { s, w } => fmt::value_string(&self.mem, *s as usize, *w),
+        }
+    }
+
+    /// Plusargs from the command line (without the leading '+').
+    pub fn set_plusargs(&mut self, args: Vec<String>) {
+        self.plusargs = args;
+    }
+
+    fn readmem(&mut self, hex: bool, file: &str, sig: u32, start: Option<u64>, end: Option<u64>, loc: &str) {
         let text = match std::fs::read_to_string(file) {
             Ok(t) => t,
             Err(e) => {
@@ -1291,9 +1368,12 @@ impl Sim {
             }
         }
         let n = nw(r.width);
+        let first = addr;
+        let mut addressed = false;
         for tok in clean.split_whitespace() {
             if let Some(a) = tok.strip_prefix('@') {
                 addr = i64::from_str_radix(a, 16).unwrap_or(addr);
+                addressed = true;
                 continue;
             }
             if addr > last {
@@ -1327,6 +1407,13 @@ impl Sim {
                 self.apply(sig, Res::Elem(e as u32), &a, r.width);
             }
             addr += 1;
+        }
+        if !addressed && addr <= last {
+            let name = if hex { "$readmemh" } else { "$readmemb" };
+            let _ = writeln!(
+                self.out,
+                "WARNING: {loc}: {name}({file}): Not enough words in the file for the requested range [{first}:{last}]."
+            );
         }
     }
 
@@ -1387,6 +1474,14 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
                 }
             }
             Instr::Clog2 { d, s, w } => ops::clog2(m, *d as usize, *s as usize, *w),
+            Instr::IToR { .. }
+            | Instr::RToI { .. }
+            | Instr::RBin { .. }
+            | Instr::RNeg { .. }
+            | Instr::RCmp { .. }
+            | Instr::RToTicks { .. } => {
+                ops::exec_real(ins, m);
+            }
             Instr::Jmp { to } => pc = *to as usize,
             Instr::Jz { c, w, to } => {
                 if ops::truth(m, *c as usize, *w) != Some(true) {
@@ -1497,7 +1592,7 @@ pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>)
             match ins {
                 Instr::Wait { .. } => waits += 1,
                 Instr::Delay { .. } | Instr::Halt => ok = false,
-                Instr::Sys(t) if matches!(**t, SysTask::Finish | SysTask::Monitor { .. } | SysTask::Strobe { .. }) => {
+                Instr::Sys(t) if matches!(**t, SysTask::Finish { .. } | SysTask::Monitor { .. } | SysTask::Strobe { .. }) => {
                     ok = false
                 }
                 Instr::Store { t, mode, .. } => {
@@ -1641,4 +1736,57 @@ unsafe extern "C" fn cb_halt(sim: *mut Sim, p: u32, pc: u32) {
     let pr = &mut sim.procs[p as usize];
     pr.pc = pc;
     pr.wait = NONE;
+}
+
+/// Convert a plusarg value for $value$plusargs.
+fn plusarg_value(m: &mut [u64], d: usize, w: u32, real: bool, conv: char, text: &str) {
+    let text = text.trim();
+    match conv {
+        'f' | 'e' | 'g' => {
+            let v: f64 = text.parse().unwrap_or(0.0);
+            if real {
+                ops::wr_real(m, d, v);
+            } else {
+                ops::real_to_int(m, d, w, v);
+            }
+        }
+        's' => string_to_bits(m, d, w, text),
+        _ => {
+            let radix = match conv {
+                'h' | 'x' => 16,
+                'o' => 8,
+                'b' => 2,
+                _ => 10,
+            };
+            let (neg, digits) = match text.strip_prefix('-') {
+                Some(r) => (true, r),
+                None => (false, text),
+            };
+            let v = i128::from_str_radix(digits, radix).unwrap_or(0);
+            let v = if neg { -v } else { v };
+            if real {
+                ops::wr_real(m, d, v as f64);
+            } else {
+                ops::real_to_int(m, d, w, v as f64);
+                if w <= 64 {
+                    m[d] = (v as u64) & ops::mask(w);
+                }
+            }
+        }
+    }
+}
+
+/// Store a string as Verilog characters (last character in the low byte) in a w-bit value.
+fn string_to_bits(m: &mut [u64], d: usize, w: u32, s: &str) {
+    let n = nw(w);
+    for i in 0..2 * n {
+        m[d + i] = 0;
+    }
+    for (k, &b) in s.as_bytes().iter().rev().enumerate() {
+        let bit = 8 * k as u32;
+        if bit + 8 > w {
+            break;
+        }
+        m[d + (bit / 64) as usize] |= (b as u64) << (bit % 64);
+    }
 }

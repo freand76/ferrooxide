@@ -8,6 +8,7 @@ use ferrooxide_rt::{BinOp as RB, CmpOp, Index, RedOp, ShOp, SysFn, Target, UnOp 
 pub(crate) enum Base {
     Sig(u32),
     Const(Const),
+    Real(f64),
 }
 
 impl<'a> Compiler<'a> {
@@ -26,6 +27,7 @@ impl<'a> Compiler<'a> {
         Ok(Some(match sym {
             Sym::Sig(s) => Base::Sig(s),
             Sym::Const(c) => Base::Const(c),
+            Sym::Real(r) => Base::Real(r),
         }))
     }
 
@@ -97,6 +99,7 @@ impl<'a> Compiler<'a> {
                 let s = self.const_slot(&c);
                 Ok((s, c.w, c.w as i64 - 1, 0))
             }
+            Some(Base::Real(_)) => self.err("bit select of a real value"),
             None => {
                 let (s, w, _) = self.self_expr(e, sid)?;
                 Ok((s, w, w as i64 - 1, 0))
@@ -111,6 +114,10 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------------ typing
     pub(crate) fn ty(&mut self, e: &Expr, sid: usize) -> R<(u32, bool)> {
+        if self.is_real(e, sid) {
+            // converted to a 64-bit integer where an integer is needed
+            return Ok((64, true));
+        }
         Ok(match e {
             Expr::Num(n) => {
                 if n.fill {
@@ -128,6 +135,7 @@ impl<'a> Compiler<'a> {
                     (i.width, i.signed)
                 }
                 Some(Base::Const(c)) => (c.w, c.signed),
+                Some(Base::Real(_)) => (64, true),
                 None => unreachable!(),
             },
             Expr::Index(a, _) => {
@@ -197,6 +205,9 @@ impl<'a> Compiler<'a> {
                 }
                 "$clog2" | "$bits" => (32, false),
                 "$fopen" => (32, false),
+                "$test$plusargs" | "$value$plusargs" => (32, true),
+                "$rtoi" => (32, true),
+                "$realtobits" => (64, false),
                 "$countones" => (32, false),
                 "$onehot" | "$onehot0" | "$isunknown" => (1, false),
                 _ => return self.err(format!("unsupported system function '{name}'")),
@@ -211,6 +222,9 @@ impl<'a> Compiler<'a> {
     pub(crate) fn func_ret_type(&mut self, f: &SubroutineDecl, fs: usize) -> R<(u32, bool)> {
         if f.ret_kind == NetKind::Integer {
             return Ok((32, true));
+        }
+        if f.ret_kind == NetKind::Real {
+            return Ok((64, true));
         }
         let (m, l) = self.range_vals(&f.range, fs)?;
         Ok((((m - l).abs() + 1) as u32, f.signed))
@@ -235,6 +249,13 @@ impl<'a> Compiler<'a> {
 
     /// Compile `e` to a value of width `w`, with expression signedness `s` (IEEE context propagation).
     pub(crate) fn expr(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
+        // a real expression where an integer is needed: round
+        if self.is_real(e, sid) {
+            let v = self.rexpr(e, sid)?;
+            let d = self.tmp(w);
+            self.emit(Instr::RToI { d, s: v, w, trunc: false });
+            return Ok(d);
+        }
         // constant folding
         if !self.pb.last().map(|p| p.proc == NONE).unwrap_or(true) && self.is_const(e, sid) {
             if !matches!(e, Expr::Num(_) | Expr::Ident(_)) {
@@ -267,6 +288,7 @@ impl<'a> Compiler<'a> {
                     }
                     Ok(self.resize(i.slot, i.width, w, s))
                 }
+                Some(Base::Real(_)) => unreachable!("real handled above"),
                 Some(Base::Const(c)) => {
                     let c = c.resize(w, s);
                     Ok(self.const_slot(&c))
@@ -524,6 +546,20 @@ impl<'a> Compiler<'a> {
             }
             _ => {
                 // comparisons
+                if self.is_real(a, sid) || self.is_real(b, sid) {
+                    let (ra, rb) = (self.rexpr(a, sid)?, self.rexpr(b, sid)?);
+                    let cop = match op {
+                        B::Eq | B::CaseEq | B::WildEq => CmpOp::Eq,
+                        B::Ne | B::CaseNe | B::WildNe => CmpOp::Ne,
+                        B::Lt => CmpOp::Lt,
+                        B::Le => CmpOp::Le,
+                        B::Gt => CmpOp::Gt,
+                        _ => CmpOp::Ge,
+                    };
+                    let d = self.tmp(1);
+                    self.emit(Instr::RCmp { op: cop, d, a: ra, b: rb });
+                    return Ok(self.resize(d, 1, w, false));
+                }
                 let (wa, sa) = self.ty(a, sid)?;
                 let (wb, sb) = self.ty(b, sid)?;
                 let ow = wa.max(wb);
@@ -556,9 +592,10 @@ impl<'a> Compiler<'a> {
 
     fn sys_func(&mut self, name: &str, args: &[Expr], sid: usize, w: u32, s: bool) -> R<u32> {
         match name {
-            "$time" | "$stime" | "$realtime" => {
+            "$time" | "$stime" => {
                 let d = self.tmp(64);
-                self.emit(Instr::SysF { f: SysFn::Time, d });
+                let e = self.texp(sid);
+                self.emit(Instr::SysF { f: SysFn::Time(e), d });
                 let own = if name == "$stime" { 32 } else { 64 };
                 let d = self.resize(d, 64, own, false);
                 Ok(self.resize(d, own, w, false))
@@ -597,12 +634,58 @@ impl<'a> Compiler<'a> {
             }
             "$fopen" => {
                 let file = match args.first() {
-                    Some(Expr::Str(f)) => f.clone(),
-                    _ => return self.err("$fopen needs a string file name"),
+                    Some(e) => self.file_name(e, sid)?,
+                    None => return self.err("$fopen needs a file name"),
+                };
+                let mode = match args.get(1) {
+                    Some(Expr::Str(m)) => m.clone(),
+                    Some(_) => return self.err("$fopen mode must be a string literal"),
+                    None => "w".to_string(),
                 };
                 let d = self.tmp(32);
-                self.emit(Instr::Sys(Box::new(rt::SysTask::FOpen { d, dw: 32, file })));
+                self.emit(Instr::Sys(Box::new(rt::SysTask::FOpen { d, dw: 32, file, mode })));
                 Ok(self.resize(d, 32, w, false))
+            }
+            "$test$plusargs" => {
+                let Some(Expr::Str(prefix)) = args.first() else {
+                    return self.err("$test$plusargs needs a string");
+                };
+                let d = self.tmp(1);
+                self.emit(Instr::Sys(Box::new(rt::SysTask::TestPlusargs { d, prefix: prefix.clone() })));
+                Ok(self.resize(d, 1, w, false))
+            }
+            "$value$plusargs" => {
+                let (Some(Expr::Str(f)), Some(var)) = (args.first(), args.get(1)) else {
+                    return self.err("$value$plusargs needs a format string and a variable");
+                };
+                let Some(pct) = f.find('%') else {
+                    return self.err("$value$plusargs format has no conversion");
+                };
+                let prefix = f[..pct].to_string();
+                let conv = f[pct + 1..].chars().find(|c| c.is_ascii_alphabetic()).unwrap_or('d').to_ascii_lowercase();
+                let real = self.lvalue_is_real(var, sid);
+                let vw = if real { 64 } else { self.ty(var, sid)?.0 };
+                let val = self.tmp(vw);
+                let d = self.tmp(1);
+                self.emit(Instr::Sys(Box::new(rt::SysTask::ValuePlusargs { d, prefix, conv, val, w: vw, real })));
+                // assign the variable only when the plusarg was found
+                let jz = self.emit(Instr::Jz { c: d, w: 1, to: 0 });
+                self.store_value(&stmt::Lhs::Expr(var, sid), val, vw, rt::StoreMode::Blocking)?;
+                let h = self.here();
+                self.patch(jz, h);
+                Ok(self.resize(d, 1, w, false))
+            }
+            "$rtoi" => {
+                let v = self.rexpr(&args[0], sid)?;
+                let d = self.tmp(32);
+                self.emit(Instr::RToI { d, s: v, w: 32, trunc: true });
+                Ok(self.resize(d, 32, w, true))
+            }
+            "$realtobits" => {
+                let v = self.rexpr(&args[0], sid)?;
+                let d = self.tmp(64);
+                self.emit(Instr::Copy { d, s: v, w: 64 });
+                Ok(self.resize(d, 64, w, false))
             }
             _ => self.err(format!("unsupported system function '{name}'")),
         }
@@ -621,8 +704,15 @@ impl<'a> Compiler<'a> {
             None
         } else {
             let (w, s) = self.func_ret_type(f, def_scope)?;
-            let (m, l) = if f.ret_kind == NetKind::Integer { (31, 0) } else { self.range_vals(&f.range, def_scope)? };
+            let (m, l) = match f.ret_kind {
+                NetKind::Integer => (31, 0),
+                NetKind::Real => (63, 0),
+                _ => self.range_vals(&f.range, def_scope)?,
+            };
             let sg = self.new_signal(path.clone(), w, s, 0, m, l, 0, SigKind::Reg);
+            if f.ret_kind == NetKind::Real {
+                self.mark_real(sg);
+            }
             self.scopes[fs].syms.insert(f.name.clone(), Sym::Sig(sg));
             Some(sg)
         };
@@ -638,7 +728,7 @@ impl<'a> Compiler<'a> {
                 NetKind::Int(n) if d.range.is_none() => {
                     (m, l) = (n as i64 - 1, 0);
                 }
-                NetKind::Time => (m, l) = (63, 0),
+                NetKind::Time | NetKind::Real => (m, l) = (63, 0),
                 _ => {}
             }
             let w = ((m - l).abs() + 1) as u32;
@@ -650,6 +740,9 @@ impl<'a> Compiler<'a> {
                     (0, 0)
                 };
                 let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
+                if d.kind == NetKind::Real {
+                    self.mark_real(sg);
+                }
                 self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
                 if let Some(dir) = d.dir {
                     ports.push((dir, sg));
@@ -688,7 +781,8 @@ impl<'a> Compiler<'a> {
             let (dir, ps) = ports[i];
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
-                let v = self.rhs_value(a, sid, pw)?;
+                let real = self.sig(ps).real;
+                let v = self.value_for(a, sid, pw, real)?;
                 self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
             }
         }
@@ -808,5 +902,198 @@ impl<'a> Compiler<'a> {
             }
             _ => {}
         }
+    }
+
+    // ------------------------------------------------------------------ real numbers
+    /// Whether an expression has type real (IEEE: an operand of an arithmetic operator being real
+    /// makes the operation real; comparisons and logical operators give integers).
+    pub(crate) fn is_real(&self, e: &Expr, sid: usize) -> bool {
+        match e {
+            Expr::Real(_) => true,
+            Expr::Ident(_) | Expr::Hier(_) => {
+                let sym = match e {
+                    Expr::Ident(n) => self.lookup(n, sid),
+                    Expr::Hier(p) => self.lookup_hier(p, sid),
+                    _ => None,
+                };
+                match sym {
+                    Some(Sym::Sig(s)) => self.sig(s).real,
+                    Some(Sym::Real(_)) => true,
+                    _ => false,
+                }
+            }
+            Expr::Index(a, _) => self.array_of(a, sid).map(|s| self.sig(s).real).unwrap_or(false),
+            Expr::Unary(UnOp::Plus | UnOp::Neg, a) => self.is_real(a, sid),
+            Expr::Binary(B::Add | B::Sub | B::Mul | B::Div | B::Pow, a, b) => {
+                self.is_real(a, sid) || self.is_real(b, sid)
+            }
+            Expr::Cond(_, t, f) => self.is_real(t, sid) || self.is_real(f, sid),
+            Expr::Call(name, _) => self.lookup_func(name, sid).map(|(f, _)| f.ret_kind == NetKind::Real).unwrap_or(false),
+            Expr::SysCall(name, _) => matches!(name.as_str(), "$realtime" | "$itor" | "$bitstoreal"),
+            _ => false,
+        }
+    }
+
+    /// Whether an assignment target is a real variable.
+    pub(crate) fn lvalue_is_real(&self, e: &Expr, sid: usize) -> bool {
+        match e {
+            Expr::Ident(_) | Expr::Hier(_) | Expr::Index(..) => self.is_real(e, sid),
+            _ => false,
+        }
+    }
+
+    /// Compile an expression as a real value: slot holding f64 bits (unknown word 0).
+    pub(crate) fn rexpr(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        if !self.is_real(e, sid) {
+            let (s, w, signed) = self.self_expr(e, sid)?;
+            let d = self.tmp(64);
+            self.emit(Instr::IToR { d, s, w, signed });
+            return Ok(d);
+        }
+        let rconst = |c: &mut Self, r: f64| c.const_slot(&Const { w: 64, signed: false, a: vec![r.to_bits()], b: vec![0] });
+        match e {
+            Expr::Real(r) => Ok(rconst(self, *r)),
+            Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
+                Some(Base::Sig(s)) => Ok(self.sig(s).slot),
+                Some(Base::Real(r)) => Ok(rconst(self, r)),
+                _ => self.err("not a real value"),
+            },
+            Expr::Index(a, i) => {
+                let arr = self.array_of(a, sid).unwrap();
+                let info = self.sig(arr).clone();
+                if self.is_const(i, sid) {
+                    let e = self.const_int(i, sid)? - info.arr_lo;
+                    if e >= 0 && e < info.depth as i64 {
+                        return Ok(info.slot + e as u32 * rt::words(64));
+                    }
+                    return Ok(rconst(self, 0.0));
+                }
+                let ix = self.index_of(i, sid, false, -info.arr_lo)?;
+                let d = self.tmp(64);
+                self.emit(Instr::ArrRead { d, sig: arr, ix });
+                Ok(d)
+            }
+            Expr::Unary(UnOp::Plus, a) => self.rexpr(a, sid),
+            Expr::Unary(_, a) => {
+                let v = self.rexpr(a, sid)?;
+                let d = self.tmp(64);
+                self.emit(Instr::RNeg { d, s: v });
+                Ok(d)
+            }
+            Expr::Binary(op, a, b) => {
+                let (va, vb) = (self.rexpr(a, sid)?, self.rexpr(b, sid)?);
+                let rop = match op {
+                    B::Add => rt::RealOp::Add,
+                    B::Sub => rt::RealOp::Sub,
+                    B::Mul => rt::RealOp::Mul,
+                    B::Div => rt::RealOp::Div,
+                    _ => rt::RealOp::Pow,
+                };
+                let d = self.tmp(64);
+                self.emit(Instr::RBin { op: rop, d, a: va, b: vb });
+                Ok(d)
+            }
+            Expr::Cond(c, t, f) => {
+                let (cv, cw, _) = self.self_expr(c, sid)?;
+                let (tv, fv) = (self.rexpr(t, sid)?, self.rexpr(f, sid)?);
+                let d = self.tmp(64);
+                self.emit(Instr::Mux { d, c: cv, cw, t: tv, f: fv, w: 64 });
+                Ok(d)
+            }
+            Expr::Call(name, args) => {
+                let (slot, _, _) = self.call(name, args, sid, false)?;
+                let d = self.tmp(64);
+                self.emit(Instr::Copy { d, s: slot.unwrap(), w: 64 });
+                Ok(d)
+            }
+            Expr::SysCall(name, args) => match name.as_str() {
+                "$realtime" => {
+                    let d = self.tmp(64);
+                    let e = self.texp(sid);
+                    self.emit(Instr::SysF { f: SysFn::RealTime(e), d });
+                    Ok(d)
+                }
+                "$itor" => {
+                    let a = args.first().ok_or_else(|| self.mkerr("$itor needs an argument".into()))?;
+                    let (s, w, signed) = self.self_expr(a, sid)?;
+                    let d = self.tmp(64);
+                    self.emit(Instr::IToR { d, s, w, signed });
+                    Ok(d)
+                }
+                _ => {
+                    // $bitstoreal
+                    let a = args.first().ok_or_else(|| self.mkerr(format!("{name} needs an argument")))?;
+                    let v = self.expr(a, sid, 64, false)?;
+                    let d = self.tmp(64);
+                    self.emit(Instr::Copy { d, s: v, w: 64 });
+                    Ok(d)
+                }
+            },
+            _ => self.err("unsupported real expression"),
+        }
+    }
+
+    /// Evaluate a constant real expression at elaboration time.
+    pub(crate) fn const_real(&mut self, e: &Expr, sid: usize) -> R<f64> {
+        if let Expr::Real(r) = e {
+            return Ok(*r);
+        }
+        self.pb.push(PState { proc: NONE, ..Default::default() });
+        let r = self.rexpr(e, sid);
+        let st = self.pb.pop().unwrap();
+        let slot = r?;
+        if !st.code.is_empty() {
+            if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {
+                return self.err(m);
+            }
+        }
+        Ok(f64::from_bits(self.prog.mem[slot as usize]))
+    }
+
+    /// The value for an assignment to a target that is real or `lw` bits wide.
+    pub(crate) fn value_for(&mut self, rhs: &Expr, sid: usize, lw: u32, real: bool) -> R<u32> {
+        if real {
+            self.rexpr(rhs, sid)
+        } else {
+            self.rhs_value(rhs, sid, lw)
+        }
+    }
+
+    /// A delay in the scope's time unit converted to simulation ticks (slot of a 64-bit value).
+    pub(crate) fn delay_ticks(&mut self, d: &Expr, sid: usize) -> R<u32> {
+        let exp = self.texp(sid);
+        // a real delay is rounded to the module's precision, then scaled to simulation ticks
+        let sc = &self.scopes[sid];
+        let to_prec = (sc.tunit - sc.tprec).clamp(0, 18) as u8;
+        let post = (sc.tprec - self.gprec).clamp(0, 18) as u8;
+        if self.is_real(d, sid) {
+            if self.is_const(d, sid) {
+                let r = self.const_real(d, sid)? * 10f64.powi(to_prec as i32);
+                let t = if r > 0.0 { r.round() as i64 } else { 0 };
+                let t = t * 10i64.pow(post as u32);
+                return Ok(self.const_slot(&Const::from_i64(t, 64, false)));
+            }
+            let v = self.rexpr(d, sid)?;
+            let t = self.tmp(64);
+            self.emit(Instr::RToTicks { d: t, s: v, exp: to_prec, post });
+            return Ok(t);
+        }
+        let v = self.expr(d, sid, 64, false)?;
+        if exp == 0 {
+            return Ok(v);
+        }
+        let k = self.const_slot(&Const::from_i64(10i64.pow(exp as u32), 64, false));
+        let t = self.tmp(64);
+        self.emit(Instr::Bin { op: rt::BinOp::Mul, d: t, a: v, b: k, w: 64 });
+        Ok(t)
+    }
+
+    /// A file name argument: a string literal, or a variable holding the characters.
+    pub(crate) fn file_name(&mut self, e: &Expr, sid: usize) -> R<rt::FileName> {
+        if let Expr::Str(s) = e {
+            return Ok(rt::FileName::Lit(s.clone()));
+        }
+        let (s, w, _) = self.self_expr(e, sid)?;
+        Ok(rt::FileName::Val { s, w })
     }
 }

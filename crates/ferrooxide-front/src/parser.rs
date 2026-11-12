@@ -8,6 +8,15 @@ pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
     file: String,
+    /// `timescale in effect (carried from file to file by the caller)
+    pub timescale: Option<(i32, i32)>,
+}
+
+struct PType {
+    signed: bool,
+    integer: bool,
+    real: bool,
+    range: Option<Range>,
 }
 
 const KEYWORDS: &[&str] = &[
@@ -17,7 +26,7 @@ const KEYWORDS: &[&str] = &[
     "endfunction", "task", "endtask", "generate", "endgenerate", "genvar", "signed", "unsigned", "fork", "join",
     "wait", "disable", "tri", "supply0", "supply1", "wand", "wor", "logic", "bit", "int", "byte", "shortint",
     "longint", "always_comb", "always_ff", "always_latch", "automatic", "return", "do", "final", "defparam",
-    "specify", "endspecify", "join_any", "join_none", "break", "continue", "unique", "priority",
+    "specify", "endspecify", "join_any", "force", "release", "realtime", "event", "join_none", "break", "continue", "unique", "priority",
 ];
 
 fn is_keyword(s: &str) -> bool {
@@ -28,7 +37,7 @@ const GATES: &[&str] = &["and", "or", "nand", "nor", "xor", "xnor", "not", "buf"
 
 impl Parser {
     pub fn new(toks: Vec<Token>, file: String) -> Self {
-        Parser { toks, pos: 0, file }
+        Parser { toks, pos: 0, file, timescale: None }
     }
 
     // ---------- token helpers ----------
@@ -122,6 +131,23 @@ impl Parser {
             match self.peek() {
                 Tok::Eof => break,
                 Tok::Ident(s) if s == "module" || s == "macromodule" => mods.push(self.module()?),
+                Tok::Ident(s) if s == "__fx_timescale" => {
+                    self.bump();
+                    let num = |p: &mut Parser| -> Result<i32> {
+                        let neg = p.eat_p("-");
+                        match p.bump() {
+                            Tok::Num(n) => {
+                                let v: i32 = n.digits.parse().unwrap_or(0);
+                                Ok(if neg { -v } else { v })
+                            }
+                            _ => p.err("bad timescale"),
+                        }
+                    };
+                    let u = num(self)?;
+                    let pr = num(self)?;
+                    self.expect_p(";")?;
+                    self.timescale = Some((u, pr));
+                }
                 Tok::Punct(";") => {
                     self.bump();
                 }
@@ -141,20 +167,18 @@ impl Parser {
         if self.eat_p("#") {
             self.expect_p("(")?;
             let mut local = false;
-            let mut signed = false;
-            let mut integer = false;
-            let mut range = None;
+            let mut pt = PType { signed: false, integer: false, real: false, range: None };
             loop {
                 if self.eat_kw("parameter") {
                     local = false;
-                    (signed, integer, range) = self.param_type()?;
+                    pt = self.param_type()?;
                 } else if self.eat_kw("localparam") {
                     local = true;
-                    (signed, integer, range) = self.param_type()?;
-                } else if matches!(self.peek(), Tok::Ident(s) if s == "integer" || s == "signed" || s == "int" || s == "logic" || s == "bit")
+                    pt = self.param_type()?;
+                } else if matches!(self.peek(), Tok::Ident(s) if s == "integer" || s == "signed" || s == "int" || s == "logic" || s == "bit" || s == "real")
                     || self.is_p("[")
                 {
-                    (signed, integer, range) = self.param_type()?;
+                    pt = self.param_type()?;
                 }
                 let pline = self.line();
                 let pname = self.ident()?;
@@ -162,9 +186,10 @@ impl Parser {
                 let value = self.expr()?;
                 items.push(Item::Param(ParamDecl {
                     local,
-                    signed,
-                    range: range.clone(),
-                    integer,
+                    signed: pt.signed,
+                    range: pt.range.clone(),
+                    integer: pt.integer,
+                    real: pt.real,
                     name: pname,
                     value,
                     line: pline,
@@ -234,12 +259,13 @@ impl Parser {
         }
         self.bump();
         self.opt_block_label()?;
-        Ok(Module { name, file: self.file.clone(), line, ports, items })
+        Ok(Module { name, timescale: self.timescale, file: self.file.clone(), line, ports, items })
     }
 
-    fn param_type(&mut self) -> Result<(bool, bool, Option<Range>)> {
+    fn param_type(&mut self) -> Result<PType> {
         let mut signed = false;
         let mut integer = false;
+        let mut real = false;
         loop {
             if self.eat_kw("signed") {
                 signed = true;
@@ -247,13 +273,15 @@ impl Parser {
             } else if self.eat_kw("integer") || self.eat_kw("int") {
                 integer = true;
                 signed = true;
+            } else if self.eat_kw("real") || self.eat_kw("realtime") {
+                real = true;
             } else if self.eat_kw("logic") || self.eat_kw("bit") || self.eat_kw("reg") {
             } else {
                 break;
             }
         }
         let range = if self.is_p("[") { Some(self.range()?) } else { None };
-        Ok((signed, integer, range))
+        Ok(PType { signed, integer, real, range })
     }
 
     fn range(&mut self) -> Result<Range> {
@@ -296,6 +324,7 @@ impl Parser {
                 "time" => Some(NetKind::Time),
                 "genvar" => Some(NetKind::Genvar),
                 "int" => Some(NetKind::Int(32)),
+                "real" | "realtime" => Some(NetKind::Real),
                 "byte" => Some(NetKind::Int(8)),
                 "shortint" => Some(NetKind::Int(16)),
                 "longint" => Some(NetKind::Int(64)),
@@ -344,19 +373,28 @@ impl Parser {
 
     fn is_decl_start(&self) -> bool {
         matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
-            "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"
+            "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"
             |"tri"|"wand"|"wor"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"))
     }
 
     fn param_items(&mut self, local: bool) -> Result<Vec<ParamDecl>> {
-        let (signed, integer, range) = self.param_type()?;
+        let pt = self.param_type()?;
         let mut v = Vec::new();
         loop {
             let line = self.line();
             let name = self.ident()?;
             self.expect_p("=")?;
             let value = self.expr()?;
-            v.push(ParamDecl { local, signed, range: range.clone(), integer, name, value, line });
+            v.push(ParamDecl {
+                local,
+                signed: pt.signed,
+                range: pt.range.clone(),
+                integer: pt.integer,
+                real: pt.real,
+                name,
+                value,
+                line,
+            });
             if !self.eat_p(",") {
                 break;
             }
@@ -443,7 +481,6 @@ impl Parser {
                     self.bump();
                 }
             }
-            "real" | "realtime" => return self.err("real variables are not supported yet"),
             _ if self.is_decl_start() => {
                 let mut d = self.decl_head(true)?;
                 d.names = self.declarators()?;
@@ -674,6 +711,8 @@ impl Parser {
                 } else if self.eat_kw("integer") || self.eat_kw("int") {
                     ret_kind = NetKind::Integer;
                     signed = true;
+                } else if self.eat_kw("real") || self.eat_kw("realtime") {
+                    ret_kind = NetKind::Real;
                 } else {
                     break;
                 }
@@ -1006,6 +1045,18 @@ impl Parser {
                     let body = Box::new(self.stmt()?);
                     Ok(Stmt::Wait { cond, body, line })
                 }
+                "force" | "release" => {
+                    self.bump();
+                    let lhs = self.lvalue()?;
+                    let rhs = if kw == "force" {
+                        self.expect_p("=")?;
+                        Some(self.expr()?)
+                    } else {
+                        None
+                    };
+                    self.expect_p(";")?;
+                    Ok(Stmt::Force { lhs, rhs, line })
+                }
                 "disable" => {
                     self.bump();
                     let name = self.ident()?;
@@ -1056,6 +1107,31 @@ impl Parser {
     }
 
     fn assign_stmt(&mut self) -> Result<Stmt> {
+        // hierarchical task call: inst.task; or inst.task(args);
+        if let Tok::Ident(_) = self.peek() {
+            let save = self.pos;
+            let line = self.line();
+            let first = self.ident()?;
+            if let Expr::Hier(parts) = self.hier_tail(first)? {
+                if self.is_p(";") || self.is_p("(") {
+                    let mut args = Vec::new();
+                    if self.eat_p("(") {
+                        if !self.is_p(")") {
+                            loop {
+                                args.push(self.expr()?);
+                                if !self.eat_p(",") {
+                                    break;
+                                }
+                            }
+                        }
+                        self.expect_p(")")?;
+                    }
+                    self.expect_p(";")?;
+                    return Ok(Stmt::TaskCall { name: parts.join("."), args, line });
+                }
+            }
+            self.pos = save;
+        }
         let s = self.simple_assign_noterm()?;
         self.expect_p(";")?;
         Ok(s)

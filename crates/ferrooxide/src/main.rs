@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage: ferrooxide [options] <files...>
+const USAGE: &str = "usage: ferrooxide [options] <files...> [+plusarg...]
 options:
   -s <top>          top-level module (may be repeated; default: all uninstantiated modules)
   -D <name>[=val]   define a preprocessor macro
@@ -14,10 +14,12 @@ options:
   --dump-code       print the compiled bytecode to stderr
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
+  +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help";
 
 fn main() -> ExitCode {
     let mut files = Vec::new();
+    let mut plusargs = Vec::new();
     let mut tops = Vec::new();
     let mut opts = ferrooxide_front::Options::default();
     let mut stats = false;
@@ -68,6 +70,7 @@ fn main() -> ExitCode {
                 opts.defines.insert(k.to_string(), v.to_string());
             }
             _ if a.starts_with("-I") => opts.incdirs.push(PathBuf::from(&a[2..])),
+            _ if a.starts_with('+') => plusargs.push(a[1..].to_string()),
             _ if a.starts_with('-') => {
                 eprintln!("ferrooxide: unknown option '{a}'\n{USAGE}");
                 return ExitCode::from(2);
@@ -115,6 +118,7 @@ fn main() -> ExitCode {
     }
     let nproc = prog.procs.len();
     let mut sim = ferrooxide_rt::Sim::new(prog);
+    sim.set_plusargs(plusargs);
     if jit {
         if let Err(e) = sim.enable_jit() {
             eprintln!("ferrooxide: JIT compilation failed ({e}), interpreting");

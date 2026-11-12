@@ -216,7 +216,16 @@ impl Preprocessor {
                         // is wrong for `define bodies; just append (line numbers shift after includes)
                         out.push_str(&t);
                     }
-                    "timescale" | "default_nettype" | "celldefine" | "endcelldefine" | "resetall"
+                    "timescale" => {
+                        let st = i;
+                        while i < s.len() && s[i] != '\n' {
+                            i += 1;
+                        }
+                        let spec: String = s[st..i].iter().collect();
+                        let (u, p) = parse_timescale(&spec).ok_or_else(|| err(format!("bad `timescale '{}'", spec.trim()), line))?;
+                        out.push_str(&format!(" __fx_timescale {} {} ; ", u, p));
+                    }
+                    "default_nettype" | "celldefine" | "endcelldefine" | "resetall"
                     | "unconnected_drive" | "nounconnected_drive" | "pragma" | "line" | "begin_keywords"
                     | "end_keywords" => {
                         while i < s.len() && s[i] != '\n' {
@@ -321,4 +330,33 @@ fn substitute_params(body: &str, params: &[String], args: &[String]) -> String {
         }
     }
     out
+}
+
+/// `1ns / 1ps` -> (-9, -12): powers of ten of seconds
+fn parse_timescale(spec: &str) -> Option<(i32, i32)> {
+    let mut parts = spec.split('/');
+    let one = |t: &str| -> Option<i32> {
+        let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+        let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let unit = &t[digits.len()..];
+        let mag = match digits.as_str() {
+            "1" => 0,
+            "10" => 1,
+            "100" => 2,
+            _ => return None,
+        };
+        let e = match unit {
+            "s" => 0,
+            "ms" => -3,
+            "us" => -6,
+            "ns" => -9,
+            "ps" => -12,
+            "fs" => -15,
+            _ => return None,
+        };
+        Some(e + mag)
+    };
+    let u = one(parts.next()?)?;
+    let p = one(parts.next()?)?;
+    Some((u, p.min(u)))
 }

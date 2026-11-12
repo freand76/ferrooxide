@@ -70,6 +70,8 @@ pub struct SignalInfo {
     /// this signal is another name for element `e` of array `a` (a port connected to `a[e]`):
     /// it shares the element's memory and stands for it in sensitivity
     pub alias_of: Option<(u32, u32)>,
+    /// a `real` variable: the value word holds f64 bits, the unknown word is 0
+    pub real: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +113,8 @@ pub struct Program {
     pub scratch_words: u32,
     /// disable fusion of combinational processes (debugging)
     pub no_fuse: bool,
+    /// simulation precision as a power of ten of seconds (one tick)
+    pub precision: i32,
 }
 
 /// Every memory slot an instruction reads or writes (value base slots).
@@ -121,6 +125,10 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             vec![*d, *s]
         }
         Instr::Clog2 { d, s, .. } => vec![*d, *s],
+        Instr::IToR { d, s, .. } | Instr::RToI { d, s, .. } | Instr::RNeg { d, s } | Instr::RToTicks { d, s, .. } => {
+            vec![*d, *s]
+        }
+        Instr::RBin { d, a, b, .. } | Instr::RCmp { d, a, b, .. } => vec![*d, *a, *b],
         Instr::Bin { d, a, b, .. } | Instr::Cmp { d, a, b, .. } => vec![*d, *a, *b],
         Instr::Shift { d, a, b, .. } | Instr::Pow { d, a, b, .. } => vec![*d, *a, *b],
         Instr::Mux { d, c, t, f, .. } => vec![*d, *c, *t, *f],
@@ -150,7 +158,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
                 args.iter()
                     .filter_map(|a| match a {
-                        FmtArg::Val { s, .. } | FmtArg::Time { s } => Some(*s),
+                        FmtArg::Val { s, .. } | FmtArg::Time { s } | FmtArg::Real { s } => Some(*s),
                         _ => None,
                     })
                     .collect()
@@ -164,8 +172,27 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                     v
                 }
                 SysTask::MonitorPrint { args, .. } => fa(args),
-                SysTask::ReadMem { start, end, .. } => start.iter().chain(end.iter()).map(|x| x.0).collect(),
-                SysTask::FOpen { d, .. } => vec![*d],
+                SysTask::ReadMem { start, end, file, .. } => {
+                    let mut v: Vec<u32> = start.iter().chain(end.iter()).map(|x| x.0).collect();
+                    if let FileName::Val { s, .. } = file {
+                        v.push(*s);
+                    }
+                    v
+                }
+                SysTask::FOpen { d, file, .. } => {
+                    let mut v = vec![*d];
+                    if let FileName::Val { s, .. } = file {
+                        v.push(*s);
+                    }
+                    v
+                }
+                SysTask::TestPlusargs { d, .. } => vec![*d],
+                SysTask::ValuePlusargs { d, val, .. } => vec![*d, *val],
+                SysTask::SFormat { d, args, .. } => {
+                    let mut v = fa(args);
+                    v.push(*d);
+                    v
+                }
                 SysTask::FClose { s } => vec![*s],
                 _ => vec![],
             }
@@ -207,6 +234,8 @@ pub enum BinOp {
     Mod,
     DivS,
     ModS,
+    /// wire resolution of two drivers (z yields, conflicts give x)
+    Resolve,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,7 +299,10 @@ pub enum StoreMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SysFn {
-    Time,
+    /// $time in units of the calling module: simulation ticks / 10^exp, rounded
+    Time(u8),
+    /// $realtime: ticks / 10^exp as a real
+    RealTime(u8),
     Random,
     /// $random(seed) where the seed variable is a signal
     RandomSeed(u32),
@@ -284,26 +316,54 @@ pub enum FmtArg {
     Val { s: u32, w: u32, signed: bool },
     /// value produced by $time
     Time { s: u32 },
+    /// a real value (f64 bits)
+    Real { s: u32 },
     Empty,
+}
+
+/// A file name: a string literal, or a variable holding the characters.
+#[derive(Clone, Debug)]
+pub enum FileName {
+    Lit(String),
+    Val { s: u32, w: u32 },
 }
 
 #[derive(Clone, Debug)]
 pub enum SysTask {
     /// $display/$write/$strobe/$monitor body printing; `nl` adds newline. `fd` = None → stdout
-    Display { nl: bool, args: Vec<FmtArg>, scope: String, fd: Option<(u32, u32)>, prefix: &'static str },
+    /// `texp`: %t scales a time in module units by 10^texp to simulation ticks
+    Display { nl: bool, args: Vec<FmtArg>, scope: String, fd: Option<(u32, u32)>, prefix: &'static str, texp: u8 },
     /// mark the given postponed process as the active monitor and wake it
     Monitor { proc: u32 },
     /// only print if this proc is the active monitor
-    MonitorPrint { proc: u32, args: Vec<FmtArg>, scope: String },
+    MonitorPrint { proc: u32, args: Vec<FmtArg>, scope: String, texp: u8 },
     MonitorOn(bool),
     Strobe { proc: u32 },
-    Finish,
+    /// $finish / $stop; `loc` is "file:line" for the message (empty: no message)
+    Finish { loc: String, stop: bool },
     DumpFile(String),
     DumpVars,
     DumpOn(bool),
-    ReadMem { hex: bool, file: String, sig: u32, start: Option<(u32, u32)>, end: Option<(u32, u32)> },
-    FOpen { d: u32, dw: u32, file: String },
+    ReadMem { hex: bool, file: FileName, sig: u32, start: Option<(u32, u32)>, end: Option<(u32, u32)>, loc: String },
+    /// `mode`: "r", "w", "a" (+ "b"/"+"); without a mode the file is opened for writing
+    FOpen { d: u32, dw: u32, file: FileName, mode: String },
     FClose { s: u32 },
+    /// d (1 bit) = some plusarg starts with `prefix`
+    TestPlusargs { d: u32, prefix: String },
+    /// d (1 bit) = a plusarg `<prefix><value>` exists; its value, converted by `conv`
+    /// (d h o b s f e g), goes to `val` (`w` bits, or f64 bits if `real`)
+    ValuePlusargs { d: u32, prefix: String, conv: char, val: u32, w: u32, real: bool },
+    /// format into the `w`-bit value at `d` (characters right-aligned)
+    SFormat { d: u32, w: u32, args: Vec<FmtArg>, scope: String, texp: u8 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
 }
 
 #[derive(Clone, Debug)]
@@ -333,5 +393,16 @@ pub enum Instr {
     Halt,
     SysF { f: SysFn, d: u32 },
     Clog2 { d: u32, s: u32, w: u32 },
+    /// integer (w bits) -> real; x/z bits count as 0
+    IToR { d: u32, s: u32, w: u32, signed: bool },
+    /// real -> integer of w bits (rounded half away from zero, or truncated toward zero)
+    RToI { d: u32, s: u32, w: u32, trunc: bool },
+    RBin { op: RealOp, d: u32, a: u32, b: u32 },
+    RNeg { d: u32, s: u32 },
+    /// real comparison (Eq, Ne, Lt, Le, Gt, Ge), 1-bit result
+    RCmp { op: CmpOp, d: u32, a: u32, b: u32 },
+    /// a delay in module units (real) -> simulation ticks (64-bit integer):
+    /// round(v * 10^exp) (the module's precision) * 10^post
+    RToTicks { d: u32, s: u32, exp: u8, post: u8 },
     Sys(Box<SysTask>),
 }

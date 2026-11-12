@@ -187,7 +187,8 @@ fn fmt_char(v: &Val) -> String {
 
 /// Format the argument list of a $display-family call.
 /// `get(slot, w)` returns the planes of a value.
-pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_radix: char) -> String {
+/// `texp`: %t prints a time in module units multiplied by 10^texp (simulation ticks).
+pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_radix: char, texp: u8) -> String {
     let mut out = String::new();
     let view = |s: u32, w: u32, signed: bool| {
         let n = nw(w);
@@ -223,11 +224,15 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                         width_s.push(chars[k]);
                         k += 1;
                     }
+                    let mut prec: Option<usize> = None;
                     if k < chars.len() && chars[k] == '.' {
                         k += 1;
+                        let mut p = String::new();
                         while k < chars.len() && chars[k].is_ascii_digit() {
+                            p.push(chars[k]);
                             k += 1;
                         }
+                        prec = Some(p.parse().unwrap_or(0));
                     }
                     if k >= chars.len() {
                         break;
@@ -247,6 +252,23 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                     let arg = args.get(i);
                     i += 1;
                     let s = match arg {
+                        Some(FmtArg::Real { s }) => {
+                            let r = f64::from_bits(mem[*s as usize]);
+                            match spec {
+                                'f' | 'e' | 'g' => fmt_real(r, spec, prec.unwrap_or(6)),
+                                't' => {
+                                    let t = (r * 10f64.powi(texp as i32)).round();
+                                    let s = format!("{}", t as i128);
+                                    if pad {
+                                        format!("{:>20}", s)
+                                    } else {
+                                        s
+                                    }
+                                }
+                                's' | 'c' => String::new(),
+                                _ => format!("{}", r.round() as i128),
+                            }
+                        }
                         Some(FmtArg::Val { .. }) | Some(FmtArg::Time { .. }) => {
                             let (s, w, signed) = match arg {
                                 Some(FmtArg::Val { s, w, signed }) => (*s, *w, *signed),
@@ -263,14 +285,18 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 'c' => fmt_char(&v),
                                 's' => fmt_str(&v),
                                 't' => {
-                                    let s = fmt_dec(&v, false);
+                                    let s = scaled_time(&v, texp);
                                     if pad {
                                         format!("{:>20}", s)
                                     } else {
                                         s
                                     }
                                 }
-                                'e' | 'f' | 'g' => fmt_dec(&v, false),
+                                'e' | 'f' | 'g' => {
+                                    let n = nw(w);
+                                    let r = crate::ops::int_to_real(&mem[s as usize..s as usize + 2 * n], 0, w, signed);
+                                    fmt_real(r, spec, prec.unwrap_or(6))
+                                }
                                 'v' => {
                                     let (a, b) = v.bit(0);
                                     match (a, b) {
@@ -316,6 +342,10 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                 out.push_str(&format!("{:>20}", fmt_dec(&v, false)));
                 i += 1;
             }
+            FmtArg::Real { s } => {
+                out.push_str(&fmt_real(f64::from_bits(mem[*s as usize]), 'g', 6));
+                i += 1;
+            }
             FmtArg::Empty => {
                 out.push(' ');
                 i += 1;
@@ -323,4 +353,61 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
         }
     }
     out
+}
+
+/// A time value in module units scaled to simulation ticks (decimal, x/z as for %d).
+fn scaled_time(v: &Val, texp: u8) -> String {
+    if texp == 0 || !v.known() || v.w > 64 {
+        return fmt_dec(v, false);
+    }
+    let t = v.a[0] as u128 * 10u128.pow(texp as u32);
+    t.to_string()
+}
+
+/// C-style %f / %e / %g
+pub fn fmt_real(v: f64, spec: char, prec: usize) -> String {
+    let fmt_e = |v: f64, prec: usize| -> String {
+        let s = format!("{:.*e}", prec, v);
+        let (mant, exp) = s.split_once('e').unwrap();
+        let e: i32 = exp.parse().unwrap();
+        format!("{}e{}{:02}", mant, if e < 0 { '-' } else { '+' }, e.abs())
+    };
+    if !v.is_finite() {
+        return if v.is_nan() { "nan".into() } else if v > 0.0 { "inf".into() } else { "-inf".into() };
+    }
+    match spec {
+        'f' => format!("{:.*}", prec, v),
+        'e' => fmt_e(v, prec),
+        _ => {
+            let p = if prec == 0 { 1 } else { prec };
+            if v == 0.0 {
+                return "0".into();
+            }
+            let e: i32 = {
+                let s = format!("{:.*e}", p - 1, v);
+                s.split_once('e').unwrap().1.parse().unwrap()
+            };
+            let s = if e < -4 || e >= p as i32 {
+                fmt_e(v, p - 1)
+            } else {
+                format!("{:.*}", (p as i32 - 1 - e).max(0) as usize, v)
+            };
+            // strip trailing zeros of the fraction
+            if let Some((m, ex)) = s.split_once('e') {
+                let m = if m.contains('.') { m.trim_end_matches('0').trim_end_matches('.') } else { m };
+                format!("{m}e{ex}")
+            } else if s.contains('.') {
+                s.trim_end_matches('0').trim_end_matches('.').to_string()
+            } else {
+                s
+            }
+        }
+    }
+}
+
+/// The characters of a value (as $display %s, leading zero bytes dropped).
+pub fn value_string(mem: &[u64], s: usize, w: u32) -> String {
+    let n = nw(w);
+    let v = Val { a: &mem[s..s + n], b: &mem[s + n..s + 2 * n], w, signed: false };
+    fmt_str(&v)
 }
