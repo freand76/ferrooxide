@@ -2,6 +2,7 @@
 
 mod expr;
 mod konst;
+mod lint;
 mod stmt;
 
 pub use konst::Const;
@@ -83,6 +84,10 @@ pub struct Compiler<'a> {
     pub(crate) file: String,
     pub(crate) line: u32,
     pub warnings: Vec<String>,
+    /// lint findings (only collected with `lint_enabled`)
+    pub lint: Vec<String>,
+    lint_seen: HashSet<String>,
+    pub lint_enabled: bool,
     pub(crate) call_depth: u32,
     warned: HashSet<String>,
     scratch_top: u32,
@@ -99,7 +104,13 @@ pub struct Compiler<'a> {
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
 pub fn compile(modules: &[Module], tops: &[String]) -> Result<(Program, Vec<String>), Error> {
+    compile_lint(modules, tops, false).map(|(p, w, _)| (p, w))
+}
+
+/// Compile and, with `lint`, also collect lint findings: (program, warnings, lint findings).
+pub fn compile_lint(modules: &[Module], tops: &[String], lint: bool) -> Result<(Program, Vec<String>, Vec<String>), Error> {
     let mut c = Compiler::new(modules);
+    c.lint_enabled = lint;
     c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
     let top_mods: Vec<&Module> = if tops.is_empty() {
         let mut used = HashSet::new();
@@ -149,7 +160,7 @@ pub fn compile(modules: &[Module], tops: &[String]) -> Result<(Program, Vec<Stri
     c.codegen_jobs()?;
     c.prog.scratch_words = SCRATCH_WORDS;
     c.prog.precision = c.gprec;
-    Ok((c.prog, c.warnings))
+    Ok((c.prog, c.warnings, c.lint))
 }
 
 impl<'a> Compiler<'a> {
@@ -170,6 +181,9 @@ impl<'a> Compiler<'a> {
             file: String::new(),
             line: 0,
             warnings: Vec::new(),
+            lint: Vec::new(),
+            lint_seen: HashSet::new(),
+            lint_enabled: false,
             call_depth: 0,
             warned: HashSet::new(),
             scratch_top: 0,
@@ -1015,7 +1029,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Signals an lvalue writes (whole signals; part selects count as the signal).
-    fn lvalue_bases(&self, e: &Expr, sid: usize, out: &mut Vec<u32>) {
+    pub(crate) fn lvalue_bases(&self, e: &Expr, sid: usize, out: &mut Vec<u32>) {
         match e {
             Expr::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
@@ -1127,6 +1141,11 @@ impl<'a> Compiler<'a> {
                             let top = self.here();
                             self.stmt(body, *scope)?;
                             self.emit(Instr::Jmp { to: top });
+                            if self.lint_enabled {
+                                if let Stmt::Timed { timing: Timing::Event(EventCtl::List(items)), body: inner, .. } = body {
+                                    self.lint_sensitivity(items, inner, *scope, *line);
+                                }
+                            }
                         }
                         ProcKind::AlwaysComb | ProcKind::AlwaysLatch => {
                             let p = self.pb.last().unwrap().proc;

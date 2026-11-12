@@ -1,0 +1,6 @@
+tests/lint/sens.v:3: lint: incomplete sensitivity list: 'b' is read but not in the list (synthesis treats the block as combinational logic of all its inputs; use @*)
+tests/lint/sens.v:19: lint: incomplete sensitivity list: 'b' is read but not in the list (synthesis treats the block as combinational logic of all its inputs; use @*)
+tests/lint/sens.v:30: lint: incomplete sensitivity list: 'c' is read but not in the list (synthesis treats the block as combinational logic of all its inputs; use @*)
+tests/lint/sens.v:31: lint: incomplete sensitivity list: 'mem' is read but not in the list (synthesis treats the block as combinational logic of all its inputs; use @*)
+tests/lint/sens.v:35: lint: incomplete sensitivity list: 'u1.x' is read but not in the list (synthesis treats the block as combinational logic of all its inputs; use @*)
+ferrooxide lint: 5 findings

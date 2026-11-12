@@ -78,8 +78,25 @@ ferrooxide [options] <files...>
   --dump-code       print the compiled bytecode to stderr
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
+  --lint            check the design and exit (status 1 on findings), see below
   +<arg>            plusarg for $test$plusargs / $value$plusargs
 ```
+
+### Lint
+
+`ferrooxide --lint <files>` elaborates the design without simulating and reports **incomplete
+sensitivity lists**: a level-sensitive `always @(a or b ...)` block that reads a signal missing
+from its list. Simulation only re-evaluates the block when a listed signal changes, but synthesis
+builds combinational logic that follows every input, so simulation and hardware disagree.
+
+```
+tb.v:19: lint: incomplete sensitivity list: 'b' is read but not in the list (synthesis treats the block as combinational logic of all its inputs; use @*)
+ferrooxide lint: 1 finding
+```
+
+Signals read inside called functions, memories and hierarchical references count; variables the
+block assigns itself (temporaries), loop variables, edge-triggered blocks and `@*`/`always_comb`
+are not reported.
 
 Debugging: `FX_TRACE=<time>` prints every process activation from that time on,
 `FX_GENSTATS=1` counts instructions that take the generic path.
