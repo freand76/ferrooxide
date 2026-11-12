@@ -413,18 +413,23 @@ impl Sim {
 
     /// Run until no events remain, $finish, or `max_time` is passed.
     pub fn run(&mut self, max_time: Option<u64>) {
+        // combinational processes first: they evaluate (assigns) or reach their first wait
+        // (always @*) before any other process can change their inputs at time 0
         for i in 0..self.nprocs as usize {
             let p = &mut self.procs[i];
-            if p.class == ProcClass::Normal {
+            if p.class == ProcClass::Normal && p.rank != NONE {
                 p.started = true;
-                if p.rank != NONE {
-                    let c = p.rank as usize;
-                    self.comb_bits[c >> 6] |= 1 << (c & 63);
-                    self.comb_lo = self.comb_lo.min(c >> 6);
-                    self.comb_wake();
-                } else {
-                    self.push_active(i as u32);
-                }
+                let c = p.rank as usize;
+                self.comb_bits[c >> 6] |= 1 << (c & 63);
+                self.comb_lo = self.comb_lo.min(c >> 6);
+                self.comb_wake();
+            }
+        }
+        for i in 0..self.nprocs as usize {
+            let p = &mut self.procs[i];
+            if p.class == ProcClass::Normal && p.rank == NONE {
+                p.started = true;
+                self.push_active(i as u32);
             }
         }
         loop {

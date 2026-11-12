@@ -259,9 +259,17 @@ impl<'a> Compiler<'a> {
         // constant folding
         if !self.pb.last().map(|p| p.proc == NONE).unwrap_or(true) && self.is_const(e, sid) {
             if !matches!(e, Expr::Num(_) | Expr::Ident(_)) {
-                let c = self.const_eval(e, sid)?;
-                let (_, own_s) = self.ty(e, sid)?;
-                let c = c.resize(w, s && own_s || s && c.signed);
+                // evaluate in the context width and signedness (operands are extended first)
+                self.pb.push(PState { proc: NONE, ..Default::default() });
+                let r = self.expr(e, sid, w, s);
+                let st = self.pb.pop().unwrap();
+                let slot = r?;
+                if !st.code.is_empty() {
+                    if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {
+                        return self.err(m);
+                    }
+                }
+                let c = self.read_const(slot, w, s);
                 return Ok(self.const_slot(&c));
             }
         }
