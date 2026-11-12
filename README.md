@@ -22,16 +22,6 @@ CPU cycles (`perf stat`) on the same machine, Icarus Verilog 14 (`iverilog` + `v
 
 Both produce output identical to Icarus.
 
-A real design: the full-system simulation of a small game console (MIPS-like CPU, instruction
-cache, SDRAM controller and SDRAM model, flash model, video with HDMI encoder, sound, gamepad),
-its three Icarus test targets, wall time on the same machine:
-
-| test | Icarus | ferrooxide | speed-up | result |
-|------|-------:|-----------:|---------:|--------|
-| CPU test program, UART + SDRAM + video frame checks | 237 s | 20.8 s | **11.4x** | log identical |
-| register forwarding test | 290 s | 21.6 s | **13.4x** | log identical |
-| sound test (bit-exact audio log) | 317 s | 26.7 s | **11.9x** | audio log identical |
-
 How: 4-state values as (value, unknown) word pairs with a 2-state fast path; processes lowered to
 specialised ops and JIT-compiled per *shape* (identical processes of different instances share
 native code); temporaries in registers; combinational logic evaluated once per settle in rank

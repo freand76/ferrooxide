@@ -105,6 +105,9 @@ What got us here (in order of impact):
 9. Fusion of combinational chains (`rt/fuse.rs`): a pure combinational process whose only
    combinational consumer is B is merged into B (cpuish 26.0M → 19.6M activations, mixed
    3.6M → 1.2M).
+10. Fast paths for variable-index memory reads/writes, part-select stores, signed compares,
+    logical not and wire resolution; edge groups (clocked processes with identical triggers
+    run as one activation instead of one per process).
 
 Scheduling order: wakes are ordered FIFO (sequence numbers) between active processes and the
 combinational settle, matching Icarus in the usual same-time-step testbench races
@@ -113,15 +116,6 @@ combinational settle, matching Icarus in the usual same-time-step testbench race
 Next performance steps: ports connected to part selects as aliases, fusing sibling processes
 with the same inputs, signal values cached in registers within an activation, timing wheel,
 `--threads` (partitioned same-edge/same-rank parallelism, see M8).
-
-## Real design: TetrIC system simulation
-
-The full-system test bench of a game console (CPU, icache, SDRAM controller + model, flash model,
-video/HDMI, sound, gamepad; the `run`, `fwd` and `sound` targets of its iverilog Makefile) gives
-identical logs (bit-exact audio) at 11.4x / 13.4x / 11.9x Icarus. What it needed on top of the
-benchmarks: element-level sensitivity, fast paths for variable-index memory reads/writes, part
-selects, signed compares, logical not and wire resolution, and edge groups (clocked processes on
-the same clock edge run as one activation: 305 small RAM processes on one clock).
 
 ## Known limitations of the current skeleton
 - Event expressions must be whole signals (`@(posedge clk)`, not `@(posedge v[3])`).
