@@ -1,0 +1,8 @@
+[package]
+name = "ferrooxide-compile"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ferrooxide-front = { path = "../ferrooxide-front" }
+ferrooxide-rt = { path = "../ferrooxide-rt" }
