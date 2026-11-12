@@ -7,6 +7,10 @@
 //! combinational consumer, merging cannot create a cycle in the rank graph. Stores inside the
 //! fused body still notify other (non-combinational) readers.
 //!
+//! Only processes with blocking writes are fused: with non-blocking writes a member's result would
+//! only appear in the NBA region and re-trigger the fused process (`x <= 0; x <= v;` would
+//! even loop forever).
+//!
 //! Continuous assignments are evaluated at time 0 but `always @*` blocks are not, so the fused
 //! code starts with a time-0 section holding only the assign-style members:
 //!
@@ -51,6 +55,8 @@ fn body(code: &[Instr]) -> Option<(Vec<Instr>, bool)> {
     for ins in &code[start..end] {
         out.push(match ins {
             Instr::Wait { .. } | Instr::Delay { .. } | Instr::Halt | Instr::Sys(_) | Instr::SysF { .. } => return None,
+            // fused members must see each other's results at once: only blocking writes
+            Instr::Store { mode: StoreMode::Nba | StoreMode::NbaDelay(_), .. } => return None,
             Instr::Jmp { to } => Instr::Jmp { to: rel(*to)? },
             Instr::Jz { c, w, to } => Instr::Jz { c: *c, w: *w, to: rel(*to)? },
             other => other.clone(),

@@ -64,8 +64,9 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M0 | Workspace, plan, CLI, diff-test harness vs iverilog, benchmark | ✅ |
 | M1 | Core Verilog: modules/ports (ANSI + non-ANSI), params/localparam + overrides, wire/reg/integer/time, vectors + memories, assign, initial/always, blocking/NBA (incl. `<= #d`), if/case/casez/casex/for/while/repeat/forever, `#`, `@`, `wait`, all operators w/ correct width & sign rules, functions/tasks (inlined), generate for/if/case, gate primitives, `$display/$write/$monitor/$strobe/$finish/$time/$random/$signed/$unsigned/$clog2/$readmemh/b/$fopen/$fdisplay` | ✅ initial version |
 | M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff` | ✅ basic (dumps everything; scope/level args ignored) |
-| M2 | fork/join, named events, `disable` across processes, arrays of instances, multi-dim arrays, real numbers, `timescale` + `%t` formatting, `$dumpvars` scopes, automatic/recursive functions | |
-| M3 | Nets done right: multiple drivers, resolution (wire/wand/wor/tri0/tri1), strengths (reduced), `assign #d`, inout | |
+| M2 | `timescale`, reals, plusargs, hierarchical task calls, `$sformat`, `$fopen` modes | ✅ |
+| M2b | fork/join, named events, `disable` across processes, arrays of instances, multi-dim arrays, `$dumpvars` scopes, automatic/recursive functions, `$fgetc`/`$fscanf` | |
+| M3 | Nets: multiple drivers with wire resolution, tri-state buses through inout ✅; wand/wor/tri0/tri1, strengths, `assign #d` inertial delays | partly |
 | M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
@@ -113,8 +114,16 @@ Next performance steps: ports connected to part selects as aliases, fusing sibli
 with the same inputs, signal values cached in registers within an activation, timing wheel,
 `--threads` (partitioned same-edge/same-rank parallelism, see M8).
 
+## Real design: TetrIC system simulation
+
+The full-system test bench of a game console (CPU, icache, SDRAM controller + model, flash model,
+video/HDMI, sound, gamepad; the `run`, `fwd` and `sound` targets of its iverilog Makefile) gives
+identical logs (bit-exact audio) at 11.4x / 13.4x / 11.9x Icarus. What it needed on top of the
+benchmarks: element-level sensitivity, fast paths for variable-index memory reads/writes, part
+selects, signed compares, logical not and wire resolution, and edge groups (clocked processes on
+the same clock edge run as one activation: 305 small RAM processes on one clock).
+
 ## Known limitations of the current skeleton
-- Nets are treated as variables with a single driver (last writer wins).
 - Event expressions must be whole signals (`@(posedge clk)`, not `@(posedge v[3])`).
 - Wide (>64 bit) arithmetic uses a slow generic path.
 - No real numbers, fork/join runs branches sequentially.

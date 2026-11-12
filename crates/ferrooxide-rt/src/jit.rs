@@ -90,6 +90,13 @@ pub struct Callbacks {
     pub nba: unsafe extern "C" fn(*mut Sim, u32, u32, u64, u64),
     /// (sim, signal, value slot, width): non-blocking store of a wide value read from memory
     pub nba_wide: unsafe extern "C" fn(*mut Sim, u32, u32, u32),
+    /// (sim, array, index value, index unknown, value, unknown): blocking element store
+    pub store_elem: unsafe extern "C" fn(*mut Sim, u32, u64, u64, u64, u64),
+    /// (sim, array, index value, index unknown, lsb | w << 8, value, unknown)
+    pub store_elem_part: unsafe extern "C" fn(*mut Sim, u32, u64, u64, u32, u64, u64),
+    pub nba_elem: unsafe extern "C" fn(*mut Sim, u32, u64, u64, u64, u64),
+    /// (sim, signal, slot, w | lsb << 8, words per plane, value, unknown)
+    pub store_part_wide: unsafe extern "C" fn(*mut Sim, u32, u32, u32, u32, u64, u64),
     pub gen: unsafe extern "C" fn(*mut Sim, u32, u32) -> u64,
     pub wait: unsafe extern "C" fn(*mut Sim, u32, u32, u32),
     pub delay: unsafe extern "C" fn(*mut Sim, u32, u32, u32),
@@ -100,6 +107,10 @@ struct Imports {
     notify: FuncId,
     nba: FuncId,
     nba_wide: FuncId,
+    store_elem: FuncId,
+    store_elem_part: FuncId,
+    nba_elem: FuncId,
+    store_part_wide: FuncId,
     gen: FuncId,
     delay: FuncId,
     halt: FuncId,
@@ -109,6 +120,10 @@ struct Refs {
     notify: FuncRef,
     nba: FuncRef,
     nba_wide: FuncRef,
+    store_elem: FuncRef,
+    store_elem_part: FuncRef,
+    nba_elem: FuncRef,
+    store_part_wide: FuncRef,
     gen: FuncRef,
     delay: FuncRef,
     halt: FuncRef,
@@ -136,6 +151,10 @@ pub fn compile(
     jb.symbol("fx_notify", cb.notify as *const u8);
     jb.symbol("fx_nba", cb.nba as *const u8);
     jb.symbol("fx_nba_wide", cb.nba_wide as *const u8);
+    jb.symbol("fx_store_elem", cb.store_elem as *const u8);
+    jb.symbol("fx_store_elem_part", cb.store_elem_part as *const u8);
+    jb.symbol("fx_nba_elem", cb.nba_elem as *const u8);
+    jb.symbol("fx_store_part_wide", cb.store_part_wide as *const u8);
     jb.symbol("fx_gen", cb.gen as *const u8);
     jb.symbol("fx_wait", cb.wait as *const u8);
     jb.symbol("fx_delay", cb.delay as *const u8);
@@ -163,10 +182,17 @@ pub fn compile(
     let s_gen = mk_sig(&module, &[ptr, i32t, i32t], Some(i64t));
     let s_wait = mk_sig(&module, &[ptr, i32t, i32t, i32t], None);
     let s_halt = mk_sig(&module, &[ptr, i32t, i32t], None);
+    let s_store_elem = mk_sig(&module, &[ptr, i32t, i64t, i64t, i64t, i64t], None);
+    let s_store_elem_part = mk_sig(&module, &[ptr, i32t, i64t, i64t, i32t, i64t, i64t], None);
+    let s_store_part_wide = mk_sig(&module, &[ptr, i32t, i32t, i32t, i32t, i64t, i64t], None);
     let imports = Imports {
         notify: decl(&mut module, "fx_notify", &s_notify)?,
         nba: decl(&mut module, "fx_nba", &s_nba)?,
         nba_wide: decl(&mut module, "fx_nba_wide", &s_wait)?,
+        store_elem: decl(&mut module, "fx_store_elem", &s_store_elem)?,
+        store_elem_part: decl(&mut module, "fx_store_elem_part", &s_store_elem_part)?,
+        nba_elem: decl(&mut module, "fx_nba_elem", &s_store_elem)?,
+        store_part_wide: decl(&mut module, "fx_store_part_wide", &s_store_part_wide)?,
         gen: decl(&mut module, "fx_gen", &s_gen)?,
         delay: decl(&mut module, "fx_delay", &s_wait)?,
         halt: decl(&mut module, "fx_halt", &s_halt)?,
@@ -185,7 +211,10 @@ pub fn compile(
         let mut in_mem: Vec<u32> = Vec::new();
         for (pc, op) in ops.iter().enumerate() {
             match *op {
-                Op::Gen | Op::GenJ => in_mem.extend(crate::instr_slots(&orig[p][pc])),
+                // ops that may fall back to the generic path use memory, not registers
+                Op::Gen | Op::GenJ | Op::ArrRead1 { .. } | Op::DynSlice1 { .. } => {
+                    in_mem.extend(crate::instr_slots(&orig[p][pc]))
+                }
                 Op::Delay { s } | Op::WNba { s, .. } => in_mem.push(s),
                 _ => {}
             }
@@ -209,6 +238,10 @@ pub fn compile(
                 notify: module.declare_func_in_func(imports.notify, b.func),
                 nba: module.declare_func_in_func(imports.nba, b.func),
                 nba_wide: module.declare_func_in_func(imports.nba_wide, b.func),
+                store_elem: module.declare_func_in_func(imports.store_elem, b.func),
+                store_elem_part: module.declare_func_in_func(imports.store_elem_part, b.func),
+                nba_elem: module.declare_func_in_func(imports.nba_elem, b.func),
+                store_part_wide: module.declare_func_in_func(imports.store_part_wide, b.func),
                 gen: module.declare_func_in_func(imports.gen, b.func),
                 delay: module.declare_func_in_func(imports.delay, b.func),
                 halt: module.declare_func_in_func(imports.halt, b.func),
@@ -303,6 +336,15 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
     let c32 = |b: &mut FunctionBuilder, v: u32| -> Value { b.ins().iconst(i32t, v as i64) };
     let b2i = |b: &mut FunctionBuilder, c: Value| -> Value { b.ins().uextend(i64t, c) };
 
+    // call the generic path for the instruction at `pc` and continue at `next` (or return if it
+    // suspended)
+    let gen_call = |b: &mut FunctionBuilder, pc: u32, next: Block| {
+        let pcv = b.ins().iconst(i32t, pc as i64);
+        let call = b.ins().call(r.gen, &[sim, p_v, pcv]);
+        let ret = b.inst_results(call)[0];
+        let susp = b.ins().icmp_imm(IntCC::Equal, ret, -1);
+        b.ins().brif(susp, exit, &[], next, &[]);
+    };
     for (i, &op) in ops.iter().enumerate() {
         b.switch_to_block(blocks[i]);
         let next = if i + 1 < n { blocks[i + 1] } else { exit };
@@ -324,6 +366,146 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
                 } else {
                     b.ins().jump(next, &[]);
                 }
+            }
+            Op::ArrRead1 { d, base, ix, depth } => {
+                let (e, xe) = (ld(b, ix), ld(b, ix + 1));
+                let known = b.ins().icmp_imm(IntCC::Equal, xe, 0);
+                let inr = b.ins().icmp_imm(IntCC::UnsignedLessThan, e, depth as i64);
+                let ok = b.ins().band(known, inr);
+                let (fast, slow) = (b.create_block(), b.create_block());
+                b.ins().brif(ok, fast, &[], slow, &[]);
+                b.switch_to_block(fast);
+                let base_addr = acc.borrow().addr[(base >> 1) as usize];
+                let off = b.ins().ishl_imm(e, 4);
+                let ea = b.ins().iadd(base_addr, off);
+                let va = b.ins().load(i64t, fl, ea, 0);
+                let vb = b.ins().load(i64t, fl, ea, 8);
+                st(b, d, va);
+                st(b, d + 1, vb);
+                b.ins().jump(next, &[]);
+                b.switch_to_block(slow);
+                gen_call(b, i as u32, next);
+            }
+            Op::DynSlice1 { d, s, ix, w, sw } => {
+                let (o, xo) = (ld(b, ix), ld(b, ix + 1));
+                let known = b.ins().icmp_imm(IntCC::Equal, xo, 0);
+                let inr = b.ins().icmp_imm(IntCC::UnsignedLessThanOrEqual, o, (sw - w) as i64);
+                let ok = b.ins().band(known, inr);
+                let (fast, slow) = (b.create_block(), b.create_block());
+                b.ins().brif(ok, fast, &[], slow, &[]);
+                b.switch_to_block(fast);
+                let m = c64(b, mk(w));
+                for k in 0..2 {
+                    let v = ld(b, s + k);
+                    let v = b.ins().ushr(v, o);
+                    let v = b.ins().band(v, m);
+                    st(b, d + k, v);
+                }
+                b.ins().jump(next, &[]);
+                b.switch_to_block(slow);
+                gen_call(b, i as u32, next);
+            }
+            Op::LNot1 { d, s } => {
+                let (a, x) = (ld(b, s), ld(b, s + 1));
+                let k1 = b.ins().band_not(a, x);
+                let t = b.ins().icmp_imm(IntCC::NotEqual, k1, 0);
+                let known = b.ins().icmp_imm(IntCC::Equal, x, 0);
+                let (one, zero) = (c64(b, 1), c64(b, 0));
+                // a known 1 bit: 0; all known 0: 1; else x
+                let uv = one;
+                let ux = b.ins().select(known, zero, one);
+                let rv = b.ins().select(t, zero, uv);
+                let rx = b.ins().select(t, zero, ux);
+                st(b, d, rv);
+                st(b, d + 1, rx);
+                goto_next(b);
+            }
+            Op::LtS1 { d, a, b: bb, w } | Op::LeS1 { d, a, b: bb, w } => {
+                let (va, xa, vb, xb) = (ld(b, a), ld(b, a + 1), ld(b, bb), ld(b, bb + 1));
+                let sh = 64 - w as i64;
+                let (sa, sb) = if sh > 0 {
+                    let x = b.ins().ishl_imm(va, sh);
+                    let y = b.ins().ishl_imm(vb, sh);
+                    (b.ins().sshr_imm(x, sh), b.ins().sshr_imm(y, sh))
+                } else {
+                    (va, vb)
+                };
+                let cc = if matches!(op, Op::LtS1 { .. }) { IntCC::SignedLessThan } else { IntCC::SignedLessThanOrEqual };
+                let r = b.ins().icmp(cc, sa, sb);
+                let r = b2i(b, r);
+                let x = b.ins().bor(xa, xb);
+                let known = b.ins().icmp_imm(IntCC::Equal, x, 0);
+                let (one, zero) = (c64(b, 1), c64(b, 0));
+                let rv = b.ins().select(known, r, one);
+                let rx = b.ins().select(known, zero, one);
+                st(b, d, rv);
+                st(b, d + 1, rx);
+                goto_next(b);
+            }
+            Op::Resolve1 { d, a, b: bb, w } => {
+                let (va, xa, vb, xb) = (ld(b, a), ld(b, a + 1), ld(b, bb), ld(b, bb + 1));
+                let (rv, rx) = resolve(b, va, xa, vb, xb, mk(w));
+                st(b, d, rv);
+                st(b, d + 1, rx);
+                goto_next(b);
+            }
+            Op::WResolve { d, a, b: bb, w } => {
+                let n = nw(w as u32) as u32;
+                for i in 0..n {
+                    let (va, xa, vb, xb) = (ldw(b, a, i), ldw(b, a, n + i), ldw(b, bb, i), ldw(b, bb, n + i));
+                    let m = if i == n - 1 { tmask(w as u32) } else { !0 };
+                    let (rv, rx) = resolve(b, va, xa, vb, xb, m);
+                    stw(b, d, i, rv);
+                    stw(b, d, n + i, rx);
+                }
+                goto_next(b);
+            }
+            Op::StorePart1 { sig, s, slot, lsb, w } => {
+                let m = mk(w) << lsb;
+                let (oa, ox) = (ld(b, slot), ld(b, slot + 1));
+                let mut nv = Vec::new();
+                for (k, old) in [(0, oa), (1, ox)] {
+                    let v = ld(b, s + k);
+                    let v = b.ins().ishl_imm(v, lsb as i64);
+                    let v = b.ins().band_imm(v, m as i64);
+                    let o = b.ins().band_imm(old, !m as i64);
+                    nv.push(b.ins().bor(o, v));
+                }
+                let da = b.ins().bxor(nv[0], oa);
+                let dx = b.ins().bxor(nv[1], ox);
+                let dd = b.ins().bor(da, dx);
+                let changed = b.create_block();
+                b.ins().brif(dd, changed, &[], next, &[]);
+                b.switch_to_block(changed);
+                st(b, slot, nv[0]);
+                st(b, slot + 1, nv[1]);
+                let la = b.ins().band_imm(oa, 1);
+                let lx = b.ins().band_imm(ox, 1);
+                let lx = b.ins().ishl_imm(lx, 1);
+                let old = b.ins().bor(la, lx);
+                let old = b.ins().ireduce(i32t, old);
+                b.ins().call(r.notify, &[sim, sig_v[sig as usize], old]);
+                b.ins().jump(next, &[]);
+            }
+            Op::StoreElem1 { sig, s, ix } | Op::NbaElem1 { sig, s, ix } => {
+                let (ea, eb, va, vb) = (ld(b, ix), ld(b, ix + 1), ld(b, s), ld(b, s + 1));
+                let f = if matches!(op, Op::StoreElem1 { .. }) { r.store_elem } else { r.nba_elem };
+                b.ins().call(f, &[sim, sig_v[sig as usize], ea, eb, va, vb]);
+                goto_next(b);
+            }
+            Op::StoreElemPart1 { sig, s, ix, lsb, w } => {
+                let (ea, eb, va, vb) = (ld(b, ix), ld(b, ix + 1), ld(b, s), ld(b, s + 1));
+                let lw = c32(b, lsb as u32 | (w as u32) << 8);
+                b.ins().call(r.store_elem_part, &[sim, sig_v[sig as usize], ea, eb, lw, va, vb]);
+                goto_next(b);
+            }
+            Op::StorePartW { sig, s, slot, lsb, w, n } => {
+                let (va, vb) = (ld(b, s), ld(b, s + 1));
+                let sl = b.ins().ireduce(i32t, slot_no[(slot >> 1) as usize]);
+                let lw = c32(b, w as u32 | lsb << 8);
+                let nv = c32(b, n as u32);
+                b.ins().call(r.store_part_wide, &[sim, sig_v[sig as usize], sl, lw, nv, va, vb]);
+                goto_next(b);
             }
             Op::Ins1 { d, s, off, w } => {
                 let m = mk(w);
@@ -1023,4 +1205,37 @@ impl Acc {
         }
         b.ins().store(MemFlags::trusted(), val, self.addr[k as usize], (j * 8) as i32);
     }
+}
+
+/// wire resolution of one word (see fast::resolve1)
+fn resolve(b: &mut FunctionBuilder, va: Value, xa: Value, vb: Value, xb: Value, mask: u64) -> (Value, Value) {
+    let za = b.ins().band_not(xa, va);
+    let zb = b.ins().band_not(xb, vb);
+    let take_a = b.ins().band_not(zb, za);
+    let take_b = b.ins().band_not(za, zb);
+    let nz = b.ins().bor(za, zb);
+    let both = b.ins().bnot(nz);
+    let dv = b.ins().bxor(va, vb);
+    let dx = b.ins().bxor(xa, xb);
+    let ne = b.ins().bor(dv, dx);
+    let eq = b.ins().bnot(ne);
+    let a_eq = b.ins().band(va, eq);
+    let v_both = b.ins().bor(a_eq, ne);
+    let v_both = b.ins().band(both, v_both);
+    let ta = b.ins().band(va, take_a);
+    let tb = b.ins().band(vb, take_b);
+    let rv = b.ins().bor(ta, tb);
+    let rv = b.ins().bor(rv, v_both);
+    let ax_eq = b.ins().band(xa, eq);
+    let x_both = b.ins().bor(ax_eq, ne);
+    let x_both = b.ins().band(both, x_both);
+    let tax = b.ins().band(xa, take_a);
+    let tbx = b.ins().band(xb, take_b);
+    let zz = b.ins().band(za, zb);
+    let rx = b.ins().bor(tax, tbx);
+    let rx = b.ins().bor(rx, zz);
+    let rx = b.ins().bor(rx, x_both);
+    let rv = b.ins().band_imm(rv, mask as i64);
+    let rx = b.ins().band_imm(rx, mask as i64);
+    (rv, rx)
 }

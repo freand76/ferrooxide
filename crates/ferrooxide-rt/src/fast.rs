@@ -41,6 +41,28 @@ pub enum Op {
     WStore { sig: u32, s: u32, slot: u32, w: u16 },
     /// non-blocking store of a wide value; the value is read from memory by the runtime
     WNba { sig: u32, s: u32, w: u16 },
+    // ---- memories, selects and stores with fast in-range paths (otherwise: generic path)
+    /// d = array element ix (element ≤64 bits, elements 2 words apart from `base`)
+    ArrRead1 { d: u32, base: u32, ix: u32, depth: u32 },
+    /// d = (s >> ix) & mask(w) for a ≤64-bit s when ix + w <= sw
+    DynSlice1 { d: u32, s: u32, ix: u32, w: u8, sw: u8 },
+    /// logical not of a ≤64-bit value
+    LNot1 { d: u32, s: u32 },
+    LtS1 { d: u32, a: u32, b: u32, w: u8 },
+    LeS1 { d: u32, a: u32, b: u32, w: u8 },
+    /// wire resolution of two ≤64-bit drivers
+    Resolve1 { d: u32, a: u32, b: u32, w: u8 },
+    WResolve { d: u32, a: u32, b: u32, w: u16 },
+    /// blocking store of bits [lsb, lsb+w) of a ≤64-bit signal at `slot`
+    StorePart1 { sig: u32, s: u32, slot: u32, lsb: u8, w: u8 },
+    /// blocking store of a ≤64-bit array element (runtime call)
+    StoreElem1 { sig: u32, s: u32, ix: u32 },
+    /// blocking store of bits [lsb, lsb+w) (w ≤ 64) of an array element (runtime call)
+    StoreElemPart1 { sig: u32, s: u32, ix: u32, lsb: u8, w: u8 },
+    /// non-blocking store of a ≤64-bit array element (runtime call)
+    NbaElem1 { sig: u32, s: u32, ix: u32 },
+    /// blocking store of bits [lsb, lsb+w) (w ≤ 64) of a wide signal of `n` words per plane
+    StorePartW { sig: u32, s: u32, slot: u32, lsb: u32, w: u8, n: u8 },
     Copy1 { d: u32, s: u32 },
     /// d = (s >> sh) & mask
     Slice1 { d: u32, s: u32, sh: u8, w: u8 },
@@ -127,6 +149,33 @@ pub fn map_op(op: Op, f: &mut dyn FnMut(Field, u32) -> u32) -> Op {
         Op::WNba { sig, s: x, w } => {
             let x = s(x);
             Op::WNba { sig: f(Sig, sig), s: x, w }
+        }
+        Op::ArrRead1 { d, base, ix, depth } => Op::ArrRead1 { d: s(d), base: s(base), ix: s(ix), depth },
+        Op::DynSlice1 { d, s: x, ix, w, sw } => Op::DynSlice1 { d: s(d), s: s(x), ix: s(ix), w, sw },
+        Op::LNot1 { d, s: x } => Op::LNot1 { d: s(d), s: s(x) },
+        Op::LtS1 { d, a, b, w } => Op::LtS1 { d: s(d), a: s(a), b: s(b), w },
+        Op::LeS1 { d, a, b, w } => Op::LeS1 { d: s(d), a: s(a), b: s(b), w },
+        Op::Resolve1 { d, a, b, w } => Op::Resolve1 { d: s(d), a: s(a), b: s(b), w },
+        Op::WResolve { d, a, b, w } => Op::WResolve { d: s(d), a: s(a), b: s(b), w },
+        Op::StorePart1 { sig, s: x, slot, lsb, w } => {
+            let (x, slot) = (s(x), s(slot));
+            Op::StorePart1 { sig: f(Sig, sig), s: x, slot, lsb, w }
+        }
+        Op::StoreElem1 { sig, s: x, ix } => {
+            let (x, ix) = (s(x), s(ix));
+            Op::StoreElem1 { sig: f(Sig, sig), s: x, ix }
+        }
+        Op::StoreElemPart1 { sig, s: x, ix, lsb, w } => {
+            let (x, ix) = (s(x), s(ix));
+            Op::StoreElemPart1 { sig: f(Sig, sig), s: x, ix, lsb, w }
+        }
+        Op::NbaElem1 { sig, s: x, ix } => {
+            let (x, ix) = (s(x), s(ix));
+            Op::NbaElem1 { sig: f(Sig, sig), s: x, ix }
+        }
+        Op::StorePartW { sig, s: x, slot, lsb, w, n } => {
+            let (x, slot) = (s(x), s(slot));
+            Op::StorePartW { sig: f(Sig, sig), s: x, slot, lsb, w, n }
         }
         Op::Copy1 { d, s: x } => Op::Copy1 { d: s(d), s: s(x) },
         Op::Slice1 { d, s: x, sh, w } => Op::Slice1 { d: s(d), s: s(x), sh, w },
@@ -269,7 +318,47 @@ fn t_sig(t: &Target) -> u32 {
 
 fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::HashMap<(u32, u32), u32>) -> Op {
     use crate::Instr as I;
+    // a plain index: offset = value (no negation, no offset), at most 64 bits
+    let plain = |ix: &Index| !ix.neg && ix.k == 0 && ix.w <= 64;
     match *ins {
+        I::ArrRead { d, sig, ix } if plain(&ix) && sigs[sig as usize].width <= 64 => {
+            let i = &sigs[sig as usize];
+            Op::ArrRead1 { d, base: i.slot, ix: ix.slot, depth: i.depth }
+        }
+        I::DynSlice { d, s, sw, ix, w } if plain(&ix) && sw <= 64 && w <= 64 => {
+            Op::DynSlice1 { d, s, ix: ix.slot, w: w as u8, sw: sw as u8 }
+        }
+        I::Red { op: RedOp::Nor, d, s, w } if w <= 64 => Op::LNot1 { d, s },
+        I::Cmp { op: CmpOp::LtS, d, a, b, w } if w <= 64 => Op::LtS1 { d, a, b, w: w as u8 },
+        I::Cmp { op: CmpOp::LeS, d, a, b, w } if w <= 64 => Op::LeS1 { d, a, b, w: w as u8 },
+        I::Cmp { op: CmpOp::GtS, d, a, b, w } if w <= 64 => Op::LtS1 { d, a: b, b: a, w: w as u8 },
+        I::Cmp { op: CmpOp::GeS, d, a, b, w } if w <= 64 => Op::LeS1 { d, a: b, b: a, w: w as u8 },
+        I::Bin { op: BinOp::Resolve, d, a, b, w } if w <= 64 => Op::Resolve1 { d, a, b, w: w as u8 },
+        I::Bin { op: BinOp::Resolve, d, a, b, w } if w <= MAX_WIDE => Op::WResolve { d, a, b, w: w as u16 },
+        I::Store { t: Target::Part { sig, lsb, w }, s, mode: StoreMode::Blocking }
+            if sigs[sig as usize].width <= 64 && sigs[sig as usize].depth == 0 =>
+        {
+            Op::StorePart1 { sig, s, slot: sigs[sig as usize].slot, lsb: lsb as u8, w: w as u8 }
+        }
+        I::Store { t: Target::Elem { sig, ix }, s, mode: StoreMode::Blocking }
+            if plain(&ix) && sigs[sig as usize].width <= 64 =>
+        {
+            Op::StoreElem1 { sig, s, ix: ix.slot }
+        }
+        I::Store { t: Target::Elem { sig, ix }, s, mode: StoreMode::Nba } if plain(&ix) && sigs[sig as usize].width <= 64 => {
+            Op::NbaElem1 { sig, s, ix: ix.slot }
+        }
+        I::Store { t: Target::ElemPart { sig, ix, lsb, w }, s, mode: StoreMode::Blocking }
+            if plain(&ix) && sigs[sig as usize].width <= 64 =>
+        {
+            Op::StoreElemPart1 { sig, s, ix: ix.slot, lsb: lsb as u8, w: w as u8 }
+        }
+        I::Store { t: Target::Part { sig, lsb, w }, s, mode: StoreMode::Blocking }
+            if w <= 64 && sigs[sig as usize].depth == 0 && nw(sigs[sig as usize].width) <= 255 =>
+        {
+            let i = &sigs[sig as usize];
+            Op::StorePartW { sig, s, slot: i.slot, lsb, w: w as u8, n: nw(i.width) as u8 }
+        }
         I::Copy { d, s, w } if w <= 64 => Op::Copy1 { d, s },
         I::Slice { d, s, sw, lsb, w } if sw <= 64 && lsb + w <= sw => Op::Slice1 { d, s, sh: lsb as u8, w: w as u8 },
         I::Resize { d, s, sw, dw, sign } if sw <= 64 && dw <= 64 => {
@@ -388,4 +477,18 @@ mod tests {
     fn sizes() {
         eprintln!("Op {} Instr {}", std::mem::size_of::<super::Op>(), std::mem::size_of::<crate::Instr>());
     }
+}
+
+/// wire resolution of two drivers (value, unknown): z yields, equal values stay, conflicts are x
+#[inline(always)]
+pub fn resolve1(va: u64, xa: u64, vb: u64, xb: u64, mask: u64) -> (u64, u64) {
+    let za = !va & xa;
+    let zb = !vb & xb;
+    let take_a = zb & !za;
+    let take_b = za & !zb;
+    let both = !za & !zb;
+    let eq = !(va ^ vb) & !(xa ^ xb);
+    let rv = (va & take_a) | (vb & take_b) | (both & ((va & eq) | !eq));
+    let rx = (xa & take_a) | (xb & take_b) | (za & zb) | (both & ((xa & eq) | !eq));
+    (rv & mask, rx & mask)
 }

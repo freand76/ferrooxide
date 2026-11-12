@@ -104,8 +104,14 @@ pub struct Sim {
     comb_bits: Vec<u64>,
     comb_order: Vec<u32>,
     cfan: Vec<u32>,
+    /// edge groups: members (process ids); group g is pseudo process nprocs + g
+    groups: Vec<Vec<u32>>,
+    /// number of real processes
+    nprocs: u32,
     /// (array, element) -> virtual signal of that element
     elem_sig: HashMap<(u32, u32), u32>,
+    /// per signal: some element of this array has its own (virtual or alias) signal
+    has_elem: Vec<bool>,
     /// number of real signals (virtual element signals follow)
     nreal: u32,
     /// comb index of the combinational process being executed, NONE otherwise
@@ -147,6 +153,10 @@ pub struct Sim {
     next_fd: u32,
     scratch: Vec<u64>,
     plusargs: Vec<String>,
+    /// FX_GENSTATS: count generic-path instructions by kind, printed at the end (debugging)
+    genstats: Option<HashMap<String, u64>>,
+    /// FX_TRACE=<time>: print every process activation from that time on to stderr (debugging)
+    trace: u64,
     pub stats: Stats,
     #[cfg(feature = "jit")]
     jit: Option<crate::jit::Jit>,
@@ -205,17 +215,55 @@ impl Sim {
                 }
             }
         }
+        if std::env::var_os("FX_GENSTATS").is_some() {
+            let mut per: HashMap<u32, (Vec<u32>, Vec<u32>, [u32; 3])> = HashMap::new();
+            for (ci, c) in prog.ctls.iter().enumerate() {
+                for &(sig, edge, _) in &c.triggers {
+                    let e = per.entry(sig).or_default();
+                    e.0.push(c.proc);
+                    e.1.push(ci as u32);
+                    e.2[edge as usize] += 1;
+                }
+            }
+            for (sig, (mut ps, cs, edges)) in per {
+                if cs.len() > 50 {
+                    ps.sort_unstable();
+                    ps.dedup();
+                    let mut names: HashMap<&str, u32> = HashMap::new();
+                    for &p in &ps {
+                        *names.entry(prog.procs[p as usize].name.as_str()).or_default() += 1;
+                    }
+                    let mut nv: Vec<_> = names.into_iter().collect();
+                    nv.sort_by_key(|x| std::cmp::Reverse(x.1));
+                    eprintln!("   {:?}", &nv[..nv.len().min(8)]);
+                    eprintln!("fan {} ctls {} procs {} any/pos/neg {:?}", prog.signals[sig as usize].name, cs.len(), ps.len(), edges);
+                }
+            }
+        }
         let ntot = nsig + vsig_of.len();
+        // edge groups: clocked processes with the same triggers run as one activation
+        let (groups, group_of) = edge_groups(&prog, &ranks);
+        let nprocs = prog.procs.len() as u32;
+        let ngroups = groups.len() as u32;
         // fan-out tables: combinational readers by comb index, everything else as events
         let mut per_sig: Vec<Vec<Fan>> = vec![Vec::new(); ntot];
         let mut per_sig_c: Vec<Vec<u32>> = vec![Vec::new(); ntot];
         for (ci, c) in prog.ctls.iter().enumerate() {
+            // a group member's wait is represented by its group's (one entry, at the first member)
+            let (proc, ctl) = match c.proc {
+                NONE => (NONE, ci as u32),
+                p => match group_of[p as usize] {
+                    NONE => (p, ci as u32),
+                    g if groups[g as usize].0[0] == p => (nprocs + g, NONE - 1 - g),
+                    _ => continue,
+                },
+            };
             for &(sig, edge, e) in &c.triggers {
                 let sig = if e != NONE { elem_sig[&(sig, e)] } else { sig };
-                if c.proc != NONE && ranks[c.proc as usize] != NONE {
-                    per_sig_c[sig as usize].push(ranks[c.proc as usize]);
+                if proc != NONE && proc < nprocs && ranks[proc as usize] != NONE {
+                    per_sig_c[sig as usize].push(ranks[proc as usize]);
                 } else {
-                    per_sig[sig as usize].push(Fan { proc: c.proc, ctl: ci as u32, edge });
+                    per_sig[sig as usize].push(Fan { proc, ctl, edge });
                 }
             }
         }
@@ -248,12 +296,17 @@ impl Sim {
                 parent,
             });
         }
-        let procs = prog
+        let mut procs: Vec<ProcRt> = prog
             .procs
             .iter()
             .enumerate()
             .map(|(i, p)| ProcRt { pc: 0, wait: NONE, class: p.class, started: false, rank: ranks[i] })
             .collect();
+        // one pseudo process per edge group, waiting on its group control from the start
+        for g in 0..ngroups {
+            procs.push(ProcRt { pc: 0, wait: NONE - 1 - g, class: ProcClass::Normal, started: true, rank: NONE });
+        }
+        let groups: Vec<Vec<u32>> = groups.into_iter().map(|g| g.0).collect();
         let code = Rc::new(Code {
             ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals, &elem_sig)).collect(),
             orig: prog.procs.iter().map(|p| p.code.clone()).collect(),
@@ -264,7 +317,16 @@ impl Sim {
             comb_order,
             comb_lo: comb_words,
             cfan,
+            groups,
+            nprocs,
             cur_comb: NONE,
+            has_elem: {
+                let mut v = vec![false; nsig];
+                for &(a, _) in elem_sig.keys() {
+                    v[a as usize] = true;
+                }
+                v
+            },
             elem_sig,
             nreal: nsig as u32,
             mem: prog.mem.clone(),
@@ -296,6 +358,8 @@ impl Sim {
             next_fd: 3,
             scratch: Vec::new(),
             plusargs: Vec::new(),
+            genstats: std::env::var_os("FX_GENSTATS").map(|_| HashMap::new()),
+            trace: std::env::var("FX_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX),
             stats: Stats::default(),
             #[cfg(feature = "jit")]
             jit: None,
@@ -307,7 +371,7 @@ impl Sim {
 
     /// Run until no events remain, $finish, or `max_time` is passed.
     pub fn run(&mut self, max_time: Option<u64>) {
-        for i in 0..self.procs.len() {
+        for i in 0..self.nprocs as usize {
             let p = &mut self.procs[i];
             if p.class == ProcClass::Normal {
                 p.started = true;
@@ -357,6 +421,13 @@ impl Sim {
     }
 
     pub fn flush(&mut self) {
+        if let Some(st) = &self.genstats {
+            let mut v: Vec<_> = st.iter().collect();
+            v.sort_by_key(|x| std::cmp::Reverse(*x.1));
+            for (k, n) in v.iter().take(25) {
+                eprintln!("gen {n:>12} {k}");
+            }
+        }
         let _ = self.out.flush();
         if let Some(v) = &mut self.vcd {
             v.flush();
@@ -528,6 +599,10 @@ impl Sim {
     #[inline]
     fn notify(&mut self, sig: u32, old: u8) {
         let r = self.sigs[sig as usize];
+        if let Some(st) = &mut self.genstats {
+            let name = if (sig as usize) < self.prog.signals.len() { self.prog.signals[sig as usize].name.clone() } else { format!("vsig{sig}") };
+            *st.entry(format!("notify {name} fan={} cfan={}", r.fan_hi - r.fan_lo, r.cfan_hi - r.cfan_lo)).or_default() += 1;
+        }
         if r.parent != NONE {
             self.notify(r.parent, 0);
         }
@@ -622,14 +697,92 @@ impl Sim {
                 Res::Elem(e) | Res::ElemBits { e, .. } => e,
                 _ => NONE,
             };
-            match (e != NONE).then(|| self.elem_sig.get(&(sig, e)).copied()).flatten() {
-                Some(v) => {
-                    let old = lsb_code(&self.mem, self.sigs[v as usize].slot, r.width);
-                    let _ = old;
-                    self.notify(v, 0);
-                }
-                None => self.notify(sig, old),
+            if e != NONE {
+                self.notify_elem(sig, e);
+            } else {
+                self.notify(sig, old);
             }
+        }
+    }
+
+    /// An element of an array changed: notify its own signal if it has one, else the array.
+    #[inline]
+    fn notify_elem(&mut self, sig: u32, e: u32) {
+        if self.has_elem[sig as usize] {
+            if let Some(&v) = self.elem_sig.get(&(sig, e)) {
+                self.notify(v, 0);
+                return;
+            }
+        }
+        self.notify(sig, 0);
+    }
+
+    /// Blocking store of bits [lsb, lsb+w) of a ≤64-bit array element.
+    #[inline]
+    fn store_elem_part(&mut self, sig: u32, ea: u64, eb: u64, lsb: u8, w: u8, a: u64, b: u64) {
+        let r = self.sigs[sig as usize];
+        if eb != 0 || ea >= r.depth as u64 {
+            return;
+        }
+        let d = r.slot as usize + 2 * ea as usize;
+        let mask = fast::mk(w) << lsb;
+        let na = (self.mem[d] & !mask) | ((a << lsb) & mask);
+        let nb = (self.mem[d + 1] & !mask) | ((b << lsb) & mask);
+        if self.mem[d] != na || self.mem[d + 1] != nb {
+            self.mem[d] = na;
+            self.mem[d + 1] = nb;
+            self.notify_elem(sig, ea as u32);
+        }
+    }
+
+    /// Non-blocking store of a ≤64-bit array element (the index is taken now).
+    #[inline]
+    fn nba_elem(&mut self, sig: u32, ea: u64, eb: u64, a: u64, b: u64) {
+        let r = self.sigs[sig as usize];
+        if eb != 0 || ea >= r.depth as u64 {
+            return;
+        }
+        let slot = r.slot + 2 * ea as u32;
+        // notify the element's own signal if it has one, else the array
+        let target = if self.has_elem[sig as usize] {
+            self.elem_sig.get(&(sig, ea as u32)).copied().unwrap_or(sig)
+        } else {
+            sig
+        };
+        self.push_small(target, slot, a, b);
+    }
+
+    /// Blocking store of bits [lsb, lsb+w) (w ≤ 64) of a wide signal (`n` words per plane).
+    #[inline]
+    fn store_part_wide(&mut self, sig: u32, slot: u32, lsb: u32, w: u8, n: u8, a: u64, b: u64) {
+        let (base, n) = (slot as usize, n as usize);
+        let old = ((self.mem[base] & 1) | ((self.mem[base + n] & 1) << 1)) as u8;
+        let mut changed = false;
+        for (plane, v) in [(0usize, a), (1usize, b)] {
+            let o = ops::get_bits(&self.mem, base + plane * n, lsb, w as u32);
+            if o != v {
+                ops::set_bits(&mut self.mem, base + plane * n, lsb, w as u32, v);
+                changed = true;
+            }
+        }
+        if changed {
+            self.notify(sig, old);
+        }
+    }
+
+    /// Blocking store of a ≤64-bit array element; the index (value ea, unknown eb) is a plain
+    /// element number. Out-of-range or unknown indices write nothing.
+    #[inline]
+    fn store_elem(&mut self, sig: u32, ea: u64, eb: u64, a: u64, b: u64) {
+        let r = self.sigs[sig as usize];
+        if eb != 0 || ea >= r.depth as u64 {
+            return;
+        }
+        let d = r.slot as usize + 2 * ea as usize;
+        if self.mem[d] != a || self.mem[d + 1] != b {
+            self.mem[d] = a;
+            self.mem[d + 1] = b;
+            self.notify_elem(sig, ea as u32);
         }
     }
 
@@ -724,6 +877,10 @@ impl Sim {
                 notify: cb_notify,
                 nba: cb_nba,
                 nba_wide: cb_nba_wide,
+                store_elem: cb_store_elem,
+                store_elem_part: cb_store_elem_part,
+                nba_elem: cb_nba_elem,
+                store_part_wide: cb_store_part_wide,
                 gen: cb_gen,
                 wait: cb_wait,
                 delay: cb_delay,
@@ -744,7 +901,23 @@ impl Sim {
 
     /// Execute process `p` until it suspends.
     fn exec(&mut self, p: u32) {
+        if p >= self.nprocs {
+            // an edge group: run every member (each from its wait), then wait again as a group
+            let g = (p - self.nprocs) as usize;
+            for i in 0..self.groups[g].len() {
+                let m = self.groups[g][i];
+                self.exec(m);
+                if self.finished {
+                    return;
+                }
+            }
+            self.procs[p as usize].wait = NONE - 1 - g as u32;
+            return;
+        }
         self.stats.activations += 1;
+        if self.time >= self.trace {
+            eprintln!("{} proc {p} {} pc {}", self.time, self.prog.procs[p as usize].name, self.procs[p as usize].pc);
+        }
         #[cfg(feature = "jit")]
         if !self.entries.is_empty() {
             let (f, table) = unsafe { *self.entries.get_unchecked(p as usize) };
@@ -774,10 +947,84 @@ impl Sim {
             pc += 1;
             match op {
                 // the interpreter runs wide ops through the generic path (the JIT compiles them)
-                Op::Gen | Op::GenJ | Op::WCopy { .. } | Op::WAnd { .. } | Op::WOr { .. } | Op::WXor { .. } | Op::WNot { .. } | Op::WAdd { .. } | Op::WSub { .. } | Op::WEq { .. } | Op::WNe { .. } | Op::WCaseEq { .. } | Op::WCaseNe { .. } | Op::WLt { .. } | Op::WLe { .. } | Op::WSlice { .. } | Op::WResize { .. } | Op::WIns { .. } | Op::WMux { .. } | Op::WBool { .. } | Op::WStore { .. } | Op::WNba { .. } => {
+                Op::Gen | Op::GenJ | Op::WResolve { .. } | Op::WCopy { .. } | Op::WAnd { .. } | Op::WOr { .. } | Op::WXor { .. } | Op::WNot { .. } | Op::WAdd { .. } | Op::WSub { .. } | Op::WEq { .. } | Op::WNe { .. } | Op::WCaseEq { .. } | Op::WCaseNe { .. } | Op::WLt { .. } | Op::WLe { .. } | Op::WSlice { .. } | Op::WResize { .. } | Op::WIns { .. } | Op::WMux { .. } | Op::WBool { .. } | Op::WStore { .. } | Op::WNba { .. } => {
                     if self.exec_gen(p, &orig[pc - 1], &mut pc) {
                         return;
                     }
+                }
+                Op::ArrRead1 { d, base, ix, depth } => {
+                    let (e, x) = (m!(ix), m!(ix + 1));
+                    if x == 0 && e < depth as u64 {
+                        let src = base as usize + 2 * e as usize;
+                        m!(d) = m!(src);
+                        m!(d + 1) = m!(src + 1);
+                    } else if self.exec_gen(p, &orig[pc - 1], &mut pc) {
+                        return;
+                    }
+                }
+                Op::DynSlice1 { d, s, ix, w, sw } => {
+                    let (off, x) = (m!(ix), m!(ix + 1));
+                    if x == 0 && off + (w as u64) <= sw as u64 {
+                        let mask = fast::mk(w);
+                        m!(d) = (m!(s) >> off) & mask;
+                        m!(d + 1) = (m!(s + 1) >> off) & mask;
+                    } else if self.exec_gen(p, &orig[pc - 1], &mut pc) {
+                        return;
+                    }
+                }
+                Op::LNot1 { d, s } => {
+                    let (a, b) = (m!(s), m!(s + 1));
+                    let (v, x) = if a & !b != 0 {
+                        (0, 0)
+                    } else if b == 0 {
+                        (1, 0)
+                    } else {
+                        (1, 1)
+                    };
+                    m!(d) = v;
+                    m!(d + 1) = x;
+                }
+                Op::LtS1 { d, a, b, w } | Op::LeS1 { d, a, b, w } => {
+                    if (m!(a + 1) | m!(b + 1)) != 0 {
+                        m!(d) = 1;
+                        m!(d + 1) = 1;
+                    } else {
+                        let (x, y) = (fast::sext(m!(a), w as u32) as i64, fast::sext(m!(b), w as u32) as i64);
+                        m!(d) = if matches!(op, Op::LtS1 { .. }) { x < y } else { x <= y } as u64;
+                        m!(d + 1) = 0;
+                    }
+                }
+                Op::Resolve1 { d, a, b, w } => {
+                    let (v, x) = fast::resolve1(m!(a), m!(a + 1), m!(b), m!(b + 1), fast::mk(w));
+                    m!(d) = v;
+                    m!(d + 1) = x;
+                }
+                Op::StorePart1 { sig, s, slot, lsb, w } => {
+                    let mask = fast::mk(w) << lsb;
+                    let (oa, ob) = (m!(slot), m!(slot + 1));
+                    let na = (oa & !mask) | ((m!(s) << lsb) & mask);
+                    let nb = (ob & !mask) | ((m!(s + 1) << lsb) & mask);
+                    if na != oa || nb != ob {
+                        m!(slot) = na;
+                        m!(slot + 1) = nb;
+                        self.notify(sig, ((oa & 1) | ((ob & 1) << 1)) as u8);
+                    }
+                }
+                Op::StoreElem1 { sig, s, ix } => {
+                    let (ea, eb, a, b) = (m!(ix), m!(ix + 1), m!(s), m!(s + 1));
+                    self.store_elem(sig, ea, eb, a, b);
+                }
+                Op::StoreElemPart1 { sig, s, ix, lsb, w } => {
+                    let (ea, eb, a, b) = (m!(ix), m!(ix + 1), m!(s), m!(s + 1));
+                    self.store_elem_part(sig, ea, eb, lsb, w, a, b);
+                }
+                Op::NbaElem1 { sig, s, ix } => {
+                    let (ea, eb, a, b) = (m!(ix), m!(ix + 1), m!(s), m!(s + 1));
+                    self.nba_elem(sig, ea, eb, a, b);
+                }
+                Op::StorePartW { sig, s, slot, lsb, w, n } => {
+                    let (a, b) = (m!(s), m!(s + 1));
+                    self.store_part_wide(sig, slot, lsb, w, n, a, b);
                 }
                 Op::Copy1 { d, s } => {
                     m!(d) = m!(s);
@@ -1023,6 +1270,17 @@ impl Sim {
     /// Returns true if the process suspended.
     #[inline(never)]
     fn exec_gen(&mut self, p: u32, ins: &Instr, pc: &mut usize) -> bool {
+        if let Some(st) = &mut self.genstats {
+            let k = format!("{ins:?}");
+            let k: String = match ins {
+                Instr::Store { t, mode, .. } => format!("Store {:?} {:?}", std::mem::discriminant(t), mode).chars().take(60).collect(),
+                Instr::Bin { op, w, .. } => format!("Bin {op:?} w{w}"),
+                Instr::Red { op, w, .. } => format!("Red {op:?} w{w}"),
+                Instr::Cmp { op, w, .. } => format!("Cmp {op:?} w{w}"),
+                _ => k.split(|c: char| c == ' ' || c == '{' || c == '(').next().unwrap_or("").to_string(),
+            };
+            *st.entry(k).or_default() += 1;
+        }
         {
             let m = &mut self.mem;
             match ins {
@@ -1687,6 +1945,26 @@ unsafe extern "C" fn cb_nba(sim: *mut Sim, sig: u32, slot: u32, a: u64, b: u64) 
 }
 
 #[cfg(feature = "jit")]
+unsafe extern "C" fn cb_store_elem(sim: *mut Sim, sig: u32, ea: u64, eb: u64, a: u64, b: u64) {
+    (*sim).store_elem(sig, ea, eb, a, b);
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_store_elem_part(sim: *mut Sim, sig: u32, ea: u64, eb: u64, lw: u32, a: u64, b: u64) {
+    (*sim).store_elem_part(sig, ea, eb, lw as u8, (lw >> 8) as u8, a, b);
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_nba_elem(sim: *mut Sim, sig: u32, ea: u64, eb: u64, a: u64, b: u64) {
+    (*sim).nba_elem(sig, ea, eb, a, b);
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_store_part_wide(sim: *mut Sim, sig: u32, slot: u32, lw: u32, n: u32, a: u64, b: u64) {
+    (*sim).store_part_wide(sig, slot, lw >> 8, lw as u8, n as u8, a, b);
+}
+
+#[cfg(feature = "jit")]
 unsafe extern "C" fn cb_nba_wide(sim: *mut Sim, sig: u32, s: u32, w: u32) {
     let sim = &mut *sim;
     let s = s as usize;
@@ -1789,4 +2067,53 @@ fn string_to_bits(m: &mut [u64], d: usize, w: u32, s: &str) {
         }
         m[d + (bit / 64) as usize] |= (b as u64) << (bit % 64);
     }
+}
+
+/// Edge groups: clocked processes of the form `top: Wait ctl; body; Jmp top` (no other
+/// suspension) with identical event-control triggers. When the triggers fire, all members run in
+/// process order as one activation, which is the order they would have been woken in. Returns
+/// (groups as (members, triggers), group of each process or NONE).
+fn edge_groups(prog: &Program, ranks: &[u32]) -> (Vec<(Vec<u32>, Vec<(u32, Edge, u32)>)>, Vec<u32>) {
+    let n = prog.procs.len();
+    let mut by_trig: HashMap<Vec<(u32, u8, u32)>, Vec<u32>> = HashMap::new();
+    let mut order: Vec<Vec<(u32, u8, u32)>> = Vec::new();
+    for p in 0..n {
+        let pd = &prog.procs[p];
+        if pd.class != ProcClass::Normal || ranks[p] != NONE || pd.code.len() < 2 {
+            continue;
+        }
+        let ctl = match (&pd.code[0], &pd.code[pd.code.len() - 1]) {
+            (Instr::Wait { ctl }, Instr::Jmp { to: 0 }) => *ctl,
+            _ => continue,
+        };
+        let simple = pd.code[1..].iter().all(|i| !matches!(i, Instr::Wait { .. } | Instr::Delay { .. } | Instr::Halt));
+        let c = &prog.ctls[ctl as usize];
+        if !simple || c.triggers.is_empty() || c.triggers.iter().all(|t| t.1 == Edge::Any) {
+            continue;
+        }
+        let key: Vec<(u32, u8, u32)> = c.triggers.iter().map(|t| (t.0, t.1 as u8, t.2)).collect();
+        let e = by_trig.entry(key.clone()).or_default();
+        if e.is_empty() {
+            order.push(key);
+        }
+        e.push(p as u32);
+    }
+    let mut groups = Vec::new();
+    let mut group_of = vec![NONE; n];
+    for key in order {
+        let members = by_trig.remove(&key).unwrap();
+        if members.len() < 2 {
+            continue;
+        }
+        let g = groups.len() as u32;
+        for &m in &members {
+            group_of[m as usize] = g;
+        }
+        let first = &prog.ctls[match prog.procs[members[0] as usize].code[0] {
+            Instr::Wait { ctl } => ctl as usize,
+            _ => unreachable!(),
+        }];
+        groups.push((members, first.triggers.clone()));
+    }
+    (groups, group_of)
 }
