@@ -4,7 +4,10 @@
 //! `nw` words of aval followed by `nw` words of bval (VPI encoding: 00=0, 10=1, 01=Z, 11=X).
 //! Bits above `w` in the top word are always zero in both planes.
 
+pub mod fast;
 pub mod fmt;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod ops;
 pub mod vcd;
 pub mod vm;
@@ -180,6 +183,8 @@ pub enum Target {
     Part { sig: u32, lsb: u32, w: u32 },
     DynPart { sig: u32, ix: Index, w: u32 },
     Elem { sig: u32, ix: Index },
+    /// array element with a constant (in-range) element offset
+    ElemK { sig: u32, e: u32 },
     ElemPart { sig: u32, ix: Index, lsb: u32, w: u32 },
 }
 

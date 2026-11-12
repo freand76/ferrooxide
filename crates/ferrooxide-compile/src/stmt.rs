@@ -45,6 +45,16 @@ impl<'a> Compiler<'a> {
             Expr::Index(a, i) => {
                 if let Some(arr) = self.array_of(a, sid) {
                     let info = self.sig(arr).clone();
+                    if self.is_const(i, sid) {
+                        let e = self.const_int(i, sid)? - info.arr_lo;
+                        let t = if e >= 0 && e < info.depth as i64 {
+                            Some(Target::ElemK { sig: arr, e: e as u32 })
+                        } else {
+                            None
+                        };
+                        out.push((t, info.width));
+                        return Ok(());
+                    }
                     let ix = self.index_of(i, sid, false, -info.arr_lo)?;
                     out.push((Some(Target::Elem { sig: arr, ix }), info.width));
                     return Ok(());
@@ -204,7 +214,7 @@ impl<'a> Compiler<'a> {
             };
             let ds = self.expr(d, sid, 64, false)?;
             // copy the value before waiting
-            let t = self.tmp(lw);
+            let t = self.ptmp(lw);
             self.emit(Instr::Copy { d: t, s: v, w: lw });
             self.emit(Instr::Delay { s: ds });
             self.store_value(&lhs, t, lw, StoreMode::Blocking)?;
@@ -363,7 +373,7 @@ impl<'a> Compiler<'a> {
                     }
                     Some(t) => {
                         // intra-assignment timing: evaluate, wait, assign
-                        let tv = self.tmp(lw);
+                        let tv = self.ptmp(lw);
                         self.emit(Instr::Copy { d: tv, s: v, w: lw });
                         self.timing(t, &Stmt::Null, sid)?;
                         let mode = if *nonblocking { StoreMode::Nba } else { StoreMode::Blocking };
@@ -399,7 +409,7 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 let ev = self.expr(expr, sid, w, s)?;
-                let e = self.tmp(w);
+                let e = self.ptmp(w);
                 self.emit(Instr::Copy { d: e, s: ev, w });
                 let op = match kind {
                     CaseKind::Case => CmpOp::CaseEq,
@@ -497,7 +507,7 @@ impl<'a> Compiler<'a> {
             Stmt::Repeat { count, body, line } => {
                 self.line = *line;
                 let (cv, cw, cs) = self.self_expr(count, sid)?;
-                let cnt = self.tmp(cw);
+                let cnt = self.ptmp(cw);
                 self.emit(Instr::Copy { d: cnt, s: cv, w: cw });
                 let zero = self.const_slot(&Const::zero(cw));
                 let one = self.const_slot(&Const::from_i64(1, cw, false));

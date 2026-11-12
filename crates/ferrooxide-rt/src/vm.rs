@@ -1,5 +1,6 @@
 //! The event scheduler (IEEE 1364 stratified regions) and the bytecode interpreter.
 
+use crate::fast::{self, Op};
 use crate::ops;
 use crate::vcd::Vcd;
 use crate::*;
@@ -12,8 +13,12 @@ struct SigRt {
     slot: u32,
     width: u32,
     depth: u32,
+    /// event fan-out (non-combinational waiters) in `fan`
     fan_lo: u32,
     fan_hi: u32,
+    /// combinational readers (comb indices) in `cfan`
+    cfan_lo: u32,
+    cfan_hi: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -23,12 +28,21 @@ struct Fan {
     edge: Edge,
 }
 
+/// Process state. `pc` and `wait` are written directly by JIT code (offsets 0 and 4).
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct ProcRt {
     pc: u32,
     wait: u32,
     class: ProcClass,
     started: bool,
+    /// position in rank order in the combinational settle set, NONE if scheduled normally
+    rank: u32,
+}
+
+struct Code {
+    ops: Vec<Vec<Op>>,
+    orig: Vec<Vec<Instr>>,
 }
 
 /// A resolved store destination inside a signal.
@@ -44,8 +58,29 @@ enum Res {
 struct Nba {
     sig: u32,
     res: Res,
+    /// offset of the value in nba_vals
     off: u32,
     sw: u32,
+}
+
+/// An entry of the NBA queue, in scheduling order: a ≤64-bit whole store (`sig`, destination
+/// `slot`, value `a`/`b`), or, when `sig == NONE`, a marker for generic entry `slot` of `nba`.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct NbaE {
+    sig: u32,
+    slot: u32,
+    a: u64,
+    b: u64,
+}
+
+/// State that JIT-compiled code reads and writes directly (field offsets are part of the ABI).
+#[repr(C)]
+pub struct Hot {
+    pub nba_ptr: *mut NbaE,
+    pub nba_len: u64,
+    pub nba_cap: u64,
+    pub procs: *mut u8,
 }
 
 enum Fut {
@@ -61,7 +96,16 @@ pub struct Stats {
 }
 
 pub struct Sim {
-    code: Rc<Vec<Vec<Instr>>>,
+    code: Rc<Code>,
+    /// combinational settle set: bit c = combinational process `comb_order[c]` is pending.
+    /// Processes are numbered in rank order, so the lowest set bit is the next to evaluate.
+    comb_bits: Vec<u64>,
+    comb_order: Vec<u32>,
+    cfan: Vec<u32>,
+    /// comb index of the combinational process being executed, NONE otherwise
+    cur_comb: u32,
+    /// no bits are set below word `comb_lo`
+    comb_lo: usize,
     prog: Program,
     pub mem: Vec<u64>,
     sigs: Vec<SigRt>,
@@ -71,6 +115,9 @@ pub struct Sim {
     inactive: Vec<u32>,
     nba: Vec<Nba>,
     nba_vals: Vec<u64>,
+    /// the NBA queue (length in `hot.nba_len`); `nba` holds the generic entries it refers to
+    nbaq: Vec<NbaE>,
+    hot: Hot,
     future: BTreeMap<u64, Vec<Fut>>,
     postponed: Vec<u32>,
     pub time: u64,
@@ -88,6 +135,11 @@ pub struct Sim {
     next_fd: u32,
     scratch: Vec<u64>,
     pub stats: Stats,
+    #[cfg(feature = "jit")]
+    jit: Option<crate::jit::Jit>,
+    /// per process: compiled function and its table (empty when not JIT-compiled)
+    #[cfg(feature = "jit")]
+    entries: Vec<(crate::jit::ProcFn, *const u32)>,
 }
 
 #[inline(always)]
@@ -111,27 +163,64 @@ impl Sim {
     pub fn new(prog: Program) -> Sim {
         let nsig = prog.signals.len();
         // build fanout table
+        let ranks = comb_ranks(&prog);
+        // number the ranked processes in rank order
+        let mut comb_order: Vec<u32> = (0..ranks.len() as u32).filter(|&i| ranks[i as usize] != NONE).collect();
+        comb_order.sort_by_key(|&i| (ranks[i as usize], i));
+        let mut ranks = vec![NONE; ranks.len()];
+        for (c, &p) in comb_order.iter().enumerate() {
+            ranks[p as usize] = c as u32;
+        }
+        let comb_words = comb_order.len().div_ceil(64);
+        // fan-out tables: combinational readers by comb index, everything else as events
         let mut per_sig: Vec<Vec<Fan>> = vec![Vec::new(); nsig];
+        let mut per_sig_c: Vec<Vec<u32>> = vec![Vec::new(); nsig];
         for (ci, c) in prog.ctls.iter().enumerate() {
             for &(sig, edge) in &c.triggers {
-                per_sig[sig as usize].push(Fan { proc: c.proc, ctl: ci as u32, edge });
+                if c.proc != NONE && ranks[c.proc as usize] != NONE {
+                    per_sig_c[sig as usize].push(ranks[c.proc as usize]);
+                } else {
+                    per_sig[sig as usize].push(Fan { proc: c.proc, ctl: ci as u32, edge });
+                }
             }
         }
         let mut fan = Vec::new();
+        let mut cfan = Vec::new();
         let mut sigs = Vec::with_capacity(nsig);
         for (i, s) in prog.signals.iter().enumerate() {
             let lo = fan.len() as u32;
             fan.extend_from_slice(&per_sig[i]);
-            sigs.push(SigRt { slot: s.slot, width: s.width, depth: s.depth, fan_lo: lo, fan_hi: fan.len() as u32 });
+            let clo = cfan.len() as u32;
+            per_sig_c[i].sort_unstable();
+            per_sig_c[i].dedup();
+            cfan.extend_from_slice(&per_sig_c[i]);
+            sigs.push(SigRt {
+                slot: s.slot,
+                width: s.width,
+                depth: s.depth,
+                fan_lo: lo,
+                fan_hi: fan.len() as u32,
+                cfan_lo: clo,
+                cfan_hi: cfan.len() as u32,
+            });
         }
         let procs = prog
             .procs
             .iter()
-            .map(|p| ProcRt { pc: 0, wait: NONE, class: p.class, started: false })
+            .enumerate()
+            .map(|(i, p)| ProcRt { pc: 0, wait: NONE, class: p.class, started: false, rank: ranks[i] })
             .collect();
-        let code = Rc::new(prog.procs.iter().map(|p| p.code.clone()).collect());
+        let code = Rc::new(Code {
+            ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals)).collect(),
+            orig: prog.procs.iter().map(|p| p.code.clone()).collect(),
+        });
         Sim {
             code,
+            comb_bits: vec![0; comb_words],
+            comb_order,
+            comb_lo: comb_words,
+            cfan,
+            cur_comb: NONE,
             mem: prog.mem.clone(),
             sigs,
             fan,
@@ -140,6 +229,8 @@ impl Sim {
             inactive: Vec::new(),
             nba: Vec::new(),
             nba_vals: Vec::new(),
+            nbaq: Vec::new(),
+            hot: Hot { nba_ptr: std::ptr::null_mut(), nba_len: 0, nba_cap: 0, procs: std::ptr::null_mut() },
             future: BTreeMap::new(),
             postponed: Vec::new(),
             time: 0,
@@ -157,6 +248,10 @@ impl Sim {
             next_fd: 3,
             scratch: Vec::new(),
             stats: Stats::default(),
+            #[cfg(feature = "jit")]
+            jit: None,
+            #[cfg(feature = "jit")]
+            entries: Vec::new(),
             prog,
         }
     }
@@ -166,7 +261,13 @@ impl Sim {
         for (i, p) in self.procs.iter_mut().enumerate() {
             if p.class == ProcClass::Normal {
                 p.started = true;
-                self.active.push_back(i as u32);
+                if p.rank != NONE {
+                    let c = p.rank as usize;
+                    self.comb_bits[c >> 6] |= 1 << (c & 63);
+                    self.comb_lo = self.comb_lo.min(c >> 6);
+                } else {
+                    self.active.push_back(i as u32);
+                }
             }
         }
         loop {
@@ -189,7 +290,7 @@ impl Sim {
                     Fut::Nba { sig, res, sw, val } => {
                         let off = self.nba_vals.len() as u32;
                         self.nba_vals.extend_from_slice(&val);
-                        self.nba.push(Nba { sig, res, off, sw });
+                        self.push_generic(Nba { sig, res, off, sw });
                     }
                 }
             }
@@ -222,11 +323,28 @@ impl Sim {
                     return;
                 }
             }
+            while self.comb_lo < self.comb_bits.len() && self.comb_bits[self.comb_lo] == 0 {
+                self.comb_lo += 1;
+            }
+            if self.comb_lo < self.comb_bits.len() {
+                let w = self.comb_bits[self.comb_lo];
+                let bit = w.trailing_zeros() as usize;
+                self.comb_bits[self.comb_lo] = w & (w - 1);
+                let c = (self.comb_lo << 6) | bit;
+                let k = self.comb_order[c];
+                self.cur_comb = c as u32;
+                self.exec(k);
+                self.cur_comb = NONE;
+                if self.finished {
+                    return;
+                }
+                continue;
+            }
             if !self.inactive.is_empty() {
                 self.active.extend(self.inactive.drain(..));
                 continue;
             }
-            if !self.nba.is_empty() {
+            if self.hot.nba_len != 0 {
                 self.apply_nba();
                 continue;
             }
@@ -254,14 +372,57 @@ impl Sim {
         self.dirty.clear();
     }
 
+    #[inline]
+    fn push_small(&mut self, sig: u32, slot: u32, a: u64, b: u64) {
+        if self.hot.nba_len == self.hot.nba_cap {
+            unsafe { self.nbaq.set_len(self.hot.nba_len as usize) };
+            self.nbaq.reserve(self.nbaq.len().max(256));
+            self.hot.nba_ptr = self.nbaq.as_mut_ptr();
+            self.hot.nba_cap = self.nbaq.capacity() as u64;
+        }
+        // SAFETY: nba_len < nba_cap, the buffer belongs to `nbaq`
+        unsafe { *self.hot.nba_ptr.add(self.hot.nba_len as usize) = NbaE { sig, slot, a, b } };
+        self.hot.nba_len += 1;
+    }
+
+    fn push_generic(&mut self, e: Nba) {
+        let i = self.nba.len() as u32;
+        self.nba.push(e);
+        self.push_small(NONE, i, 0, 0);
+    }
+
     fn apply_nba(&mut self) {
+        unsafe { self.nbaq.set_len(self.hot.nba_len as usize) };
+        let q = std::mem::take(&mut self.nbaq);
+        self.hot.nba_len = 0;
+        self.hot.nba_ptr = std::ptr::null_mut();
+        self.hot.nba_cap = 0;
         let list = std::mem::take(&mut self.nba);
         let vals = std::mem::take(&mut self.nba_vals);
-        self.stats.nba_updates += list.len() as u64;
-        for e in &list {
-            let n = 2 * nw(e.sw);
-            let o = e.off as usize;
-            self.apply(e.sig, e.res, &vals[o..o + n], e.sw);
+        self.stats.nba_updates += q.len() as u64;
+        for e in &q {
+            if e.sig != NONE {
+                let d = e.slot as usize;
+                if self.mem[d] != e.a || self.mem[d + 1] != e.b {
+                    let old = ((self.mem[d] & 1) | ((self.mem[d + 1] & 1) << 1)) as u8;
+                    self.mem[d] = e.a;
+                    self.mem[d + 1] = e.b;
+                    self.notify(e.sig, old);
+                }
+                continue;
+            }
+            let g = &list[e.slot as usize];
+            let n = 2 * nw(g.sw);
+            let o = g.off as usize;
+            self.apply(g.sig, g.res, &vals[o..o + n], g.sw);
+        }
+        // reuse the queue's buffer (nothing is scheduled while NBAs are applied)
+        let mut q = q;
+        q.clear();
+        if self.hot.nba_len == 0 && self.nbaq.capacity() == 0 {
+            self.hot.nba_ptr = q.as_mut_ptr();
+            self.hot.nba_cap = q.capacity() as u64;
+            self.nbaq = q;
         }
         // reuse allocations
         let mut list = list;
@@ -283,6 +444,17 @@ impl Sim {
             self.is_dirty[sig as usize] = true;
             self.dirty.push(sig);
         }
+        for i in r.cfan_lo..r.cfan_hi {
+            // a combinational process is either waiting on its inputs or running right now
+            let c = unsafe { *self.cfan.get_unchecked(i as usize) };
+            if c != self.cur_comb {
+                let wi = (c >> 6) as usize;
+                self.comb_bits[wi] |= 1 << (c & 63);
+                if wi < self.comb_lo {
+                    self.comb_lo = wi;
+                }
+            }
+        }
         if r.fan_lo == r.fan_hi {
             return;
         }
@@ -297,7 +469,13 @@ impl Sim {
                 continue;
             }
             pr.wait = NONE;
-            if pr.class == ProcClass::Postponed {
+            if pr.rank != NONE {
+                let c = pr.rank as usize;
+                self.comb_bits[c >> 6] |= 1 << (c & 63);
+                if (c >> 6) < self.comb_lo {
+                    self.comb_lo = c >> 6;
+                }
+            } else if pr.class == ProcClass::Postponed {
                 self.postponed.push(f.proc);
             } else {
                 self.active.push_back(f.proc);
@@ -380,6 +558,7 @@ impl Sim {
                 }
                 Some((sig, Res::Elem(e as u32), r.width))
             }
+            Target::ElemK { sig, e } => Some((sig, Res::Elem(e), self.sigs[sig as usize].width)),
             Target::ElemPart { sig, ix, lsb, w } => {
                 let e = self.index(&ix)?;
                 let r = &self.sigs[sig as usize];
@@ -409,9 +588,15 @@ impl Sim {
                 }
             }
             StoreMode::Nba => {
+                if n == 2 && matches!(res, Res::Whole) {
+                    let slot = self.sigs[sig as usize].slot;
+                    let (a, b) = (self.mem[s], self.mem[s + 1]);
+                    self.push_small(sig, slot, a, b);
+                    return;
+                }
                 let off = self.nba_vals.len() as u32;
                 self.nba_vals.extend_from_slice(&self.mem[s..s + n]);
-                self.nba.push(Nba { sig, res, off, sw });
+                self.push_generic(Nba { sig, res, off, sw });
             }
             StoreMode::NbaDelay(ds) => {
                 let d = ops::read_u64(&self.mem, ds as usize, 64).unwrap_or(0);
@@ -419,7 +604,7 @@ impl Sim {
                 if d == 0 {
                     let off = self.nba_vals.len() as u32;
                     self.nba_vals.extend_from_slice(&val);
-                    self.nba.push(Nba { sig, res, off, sw });
+                    self.push_generic(Nba { sig, res, off, sw });
                 } else {
                     self.future.entry(self.time + d).or_default().push(Fut::Nba { sig, res, sw, val });
                 }
@@ -427,15 +612,301 @@ impl Sim {
         }
     }
 
+    /// Compile all processes to native code (no-op without the `jit` feature).
+    pub fn enable_jit(&mut self) -> Result<(), String> {
+        #[cfg(feature = "jit")]
+        {
+            let cb = crate::jit::Callbacks {
+                notify: cb_notify,
+                nba: cb_nba,
+                gen: cb_gen,
+                wait: cb_wait,
+                delay: cb_delay,
+                halt: cb_halt,
+            };
+            let j = crate::jit::compile(&self.code.ops, &cb, std::mem::size_of::<ProcRt>() as u32)?;
+            self.entries = (0..j.fns.len()).map(|p| (j.fns[p], j.tables[j.table_off[p]..].as_ptr())).collect();
+            self.jit = Some(j);
+        }
+        Ok(())
+    }
+
     /// Execute process `p` until it suspends.
     fn exec(&mut self, p: u32) {
         self.stats.activations += 1;
-        let code_rc = self.code.clone();
-        let code = &code_rc[p as usize];
+        #[cfg(feature = "jit")]
+        if !self.entries.is_empty() {
+            let (f, table) = unsafe { *self.entries.get_unchecked(p as usize) };
+            let pc = self.procs[p as usize].pc;
+            let mem = self.mem.as_mut_ptr();
+            self.hot.procs = self.procs.as_mut_ptr() as *mut u8;
+            let hot = &mut self.hot as *mut Hot;
+            // SAFETY: generated code only touches `mem` at compiler-allocated slots, its own
+            // process record, the NBA queue through `hot`, and calls back into cb_* below.
+            unsafe { f(self as *mut Sim, mem, pc, table, hot) };
+            return;
+        }
+        // SAFETY: the code is never modified while the simulation runs, and `self.code` outlives
+        // this call; avoiding the Rc clone keeps a refcount update off every activation.
+        let code: &Code = unsafe { &*Rc::as_ptr(&self.code) };
+        let ops = &code.ops[p as usize][..];
+        let orig = &code.orig[p as usize][..];
         let mut pc = self.procs[p as usize].pc as usize;
+        // SAFETY: slots are allocated by the compiler inside `mem`, which never shrinks.
+        macro_rules! m {
+            ($i:expr) => {
+                *unsafe { self.mem.get_unchecked_mut($i as usize) }
+            };
+        }
         loop {
-            let ins = &code[pc];
+            let op = unsafe { *ops.get_unchecked(pc) };
             pc += 1;
+            match op {
+                Op::Gen => {
+                    if self.exec_gen(p, &orig[pc - 1], &mut pc) {
+                        return;
+                    }
+                }
+                Op::Copy1 { d, s } => {
+                    m!(d) = m!(s);
+                    m!(d + 1) = m!(s + 1);
+                }
+                Op::Slice1 { d, s, sh, w } => {
+                    m!(d) = (m!(s) >> sh) & fast::mk(w);
+                    m!(d + 1) = (m!(s + 1) >> sh) & fast::mk(w);
+                }
+                Op::Trunc1 { d, s, w } => {
+                    let mask = fast::mk(w);
+                    m!(d) = m!(s) & mask;
+                    m!(d + 1) = m!(s + 1) & mask;
+                }
+                Op::Sext1 { d, s, sw, w } => {
+                    let mask = fast::mk(w);
+                    m!(d) = fast::sext(m!(s), sw as u32) & mask;
+                    m!(d + 1) = fast::sext(m!(s + 1), sw as u32) & mask;
+                }
+                Op::Not1 { d, s, w } => {
+                    let mask = fast::mk(w);
+                    let (a, b) = (m!(s), m!(s + 1));
+                    m!(d) = (!a | b) & mask;
+                    m!(d + 1) = b;
+                }
+                Op::And1 { d, a, b } => {
+                    let (r, x) = fast::and1(m!(a), m!(a + 1), m!(b), m!(b + 1));
+                    m!(d) = r;
+                    m!(d + 1) = x;
+                }
+                Op::Or1 { d, a, b } => {
+                    let (r, x) = fast::or1(m!(a), m!(a + 1), m!(b), m!(b + 1));
+                    m!(d) = r;
+                    m!(d + 1) = x;
+                }
+                Op::Xor1 { d, a, b } => {
+                    let x = m!(a + 1) | m!(b + 1);
+                    m!(d) = (m!(a) ^ m!(b)) | x;
+                    m!(d + 1) = x;
+                }
+                Op::Xnor1 { d, a, b, w } => {
+                    let mask = fast::mk(w);
+                    let x = m!(a + 1) | m!(b + 1);
+                    m!(d) = (!(m!(a) ^ m!(b)) | x) & mask;
+                    m!(d + 1) = x;
+                }
+                Op::Add1 { d, a, b, w } => {
+                    let mask = fast::mk(w);
+                    if (m!(a + 1) | m!(b + 1)) == 0 {
+                        m!(d) = m!(a).wrapping_add(m!(b)) & mask;
+                        m!(d + 1) = 0;
+                    } else {
+                        m!(d) = mask;
+                        m!(d + 1) = mask;
+                    }
+                }
+                Op::Sub1 { d, a, b, w } => {
+                    let mask = fast::mk(w);
+                    if (m!(a + 1) | m!(b + 1)) == 0 {
+                        m!(d) = m!(a).wrapping_sub(m!(b)) & mask;
+                        m!(d + 1) = 0;
+                    } else {
+                        m!(d) = mask;
+                        m!(d + 1) = mask;
+                    }
+                }
+                Op::Mul1 { d, a, b, w } => {
+                    let mask = fast::mk(w);
+                    if (m!(a + 1) | m!(b + 1)) == 0 {
+                        m!(d) = m!(a).wrapping_mul(m!(b)) & mask;
+                        m!(d + 1) = 0;
+                    } else {
+                        m!(d) = mask;
+                        m!(d + 1) = mask;
+                    }
+                }
+                Op::Eq1 { d, a, b } | Op::Ne1 { d, a, b } => {
+                    let (va, xa, vb, xb) = (m!(a), m!(a + 1), m!(b), m!(b + 1));
+                    let ne = matches!(op, Op::Ne1 { .. }) as u64;
+                    if (xa | xb) == 0 {
+                        m!(d) = ((va == vb) as u64) ^ ne;
+                        m!(d + 1) = 0;
+                    } else if (va ^ vb) & !xa & !xb != 0 {
+                        m!(d) = ne;
+                        m!(d + 1) = 0;
+                    } else {
+                        m!(d) = 1;
+                        m!(d + 1) = 1;
+                    }
+                }
+                Op::CaseEq1 { d, a, b } => {
+                    m!(d) = (m!(a) == m!(b) && m!(a + 1) == m!(b + 1)) as u64;
+                    m!(d + 1) = 0;
+                }
+                Op::CaseNe1 { d, a, b } => {
+                    m!(d) = !(m!(a) == m!(b) && m!(a + 1) == m!(b + 1)) as u64;
+                    m!(d + 1) = 0;
+                }
+                Op::Lt1 { d, a, b } => {
+                    if (m!(a + 1) | m!(b + 1)) == 0 {
+                        m!(d) = (m!(a) < m!(b)) as u64;
+                        m!(d + 1) = 0;
+                    } else {
+                        m!(d) = 1;
+                        m!(d + 1) = 1;
+                    }
+                }
+                Op::Le1 { d, a, b } => {
+                    if (m!(a + 1) | m!(b + 1)) == 0 {
+                        m!(d) = (m!(a) <= m!(b)) as u64;
+                        m!(d + 1) = 0;
+                    } else {
+                        m!(d) = 1;
+                        m!(d + 1) = 1;
+                    }
+                }
+                Op::Shl1 { d, a, b, w } | Op::Shr1 { d, a, b, w } => {
+                    let mask = fast::mk(w);
+                    if m!(b + 1) != 0 {
+                        m!(d) = mask;
+                        m!(d + 1) = mask;
+                    } else {
+                        let k = m!(b);
+                        if k >= w as u64 {
+                            m!(d) = 0;
+                            m!(d + 1) = 0;
+                        } else if matches!(op, Op::Shl1 { .. }) {
+                            m!(d) = (m!(a) << k) & mask;
+                            m!(d + 1) = (m!(a + 1) << k) & mask;
+                        } else {
+                            m!(d) = m!(a) >> k;
+                            m!(d + 1) = m!(a + 1) >> k;
+                        }
+                    }
+                }
+                Op::Cat2 { d, hi, lo, sh } => {
+                    m!(d) = (m!(hi) << sh) | m!(lo);
+                    m!(d + 1) = (m!(hi + 1) << sh) | m!(lo + 1);
+                }
+                Op::Mux1 { d, c, t, f } => {
+                    let (ca, cb) = (m!(c), m!(c + 1));
+                    if ca & !cb != 0 {
+                        m!(d) = m!(t);
+                        m!(d + 1) = m!(t + 1);
+                    } else if cb == 0 {
+                        m!(d) = m!(f);
+                        m!(d + 1) = m!(f + 1);
+                    } else {
+                        let (ta, tb, fa, fb) = (m!(t), m!(t + 1), m!(f), m!(f + 1));
+                        let x = tb | fb | (ta ^ fa);
+                        m!(d) = ta | x;
+                        m!(d + 1) = x;
+                    }
+                }
+                Op::Bool1 { d, s } => {
+                    let (a, b) = (m!(s), m!(s + 1));
+                    if a & !b != 0 {
+                        m!(d) = 1;
+                        m!(d + 1) = 0;
+                    } else if b == 0 {
+                        m!(d) = 0;
+                        m!(d + 1) = 0;
+                    } else {
+                        m!(d) = 1;
+                        m!(d + 1) = 1;
+                    }
+                }
+                Op::RedAnd1 { d, s, w } => {
+                    let mask = fast::mk(w);
+                    let (a, b) = (m!(s), m!(s + 1));
+                    if (!a & !b & mask) != 0 {
+                        m!(d) = 0;
+                        m!(d + 1) = 0;
+                    } else if b != 0 {
+                        m!(d) = 1;
+                        m!(d + 1) = 1;
+                    } else {
+                        m!(d) = 1;
+                        m!(d + 1) = 0;
+                    }
+                }
+                Op::RedXor1 { d, s } => {
+                    let (a, b) = (m!(s), m!(s + 1));
+                    if b != 0 {
+                        m!(d) = 1;
+                        m!(d + 1) = 1;
+                    } else {
+                        m!(d) = (a.count_ones() & 1) as u64;
+                        m!(d + 1) = 0;
+                    }
+                }
+                Op::Jmp { to } => pc = to as usize,
+                Op::Jz1 { c, to } => {
+                    if m!(c) & !m!(c + 1) == 0 {
+                        pc = to as usize;
+                    }
+                }
+                Op::Store1 { sig, s, slot } => {
+                    let (a, b) = (m!(s), m!(s + 1));
+                    let (oa, ob) = (m!(slot), m!(slot + 1));
+                    if oa != a || ob != b {
+                        m!(slot) = a;
+                        m!(slot + 1) = b;
+                        self.notify(sig, ((oa & 1) | ((ob & 1) << 1)) as u8);
+                    }
+                }
+                Op::Wait { ctl } => {
+                    let pr = &mut self.procs[p as usize];
+                    pr.wait = ctl;
+                    pr.pc = pc as u32;
+                    return;
+                }
+                Op::Delay { s } => {
+                    let d = if m!(s + 1) == 0 { m!(s) } else { 0 };
+                    if d == 0 {
+                        self.inactive.push(p);
+                    } else {
+                        self.future.entry(self.time + d).or_default().push(Fut::Wake(p));
+                    }
+                    self.procs[p as usize].pc = pc as u32;
+                    return;
+                }
+                Op::Halt => {
+                    let pr = &mut self.procs[p as usize];
+                    pr.pc = (pc - 1) as u32;
+                    pr.wait = NONE;
+                    return;
+                }
+                Op::Nba1 { sig, s, slot } => {
+                    let (a, b) = (m!(s), m!(s + 1));
+                    self.push_small(sig, slot, a, b);
+                }
+            }
+        }
+    }
+
+    /// Execute one instruction through the generic path. `pc` already points past it.
+    /// Returns true if the process suspended.
+    #[inline(never)]
+    fn exec_gen(&mut self, p: u32, ins: &Instr, pc: &mut usize) -> bool {
+        {
             let m = &mut self.mem;
             match ins {
                 Instr::Copy { d, s, w } => ops::copy(m, *d as usize, *s as usize, *w),
@@ -483,15 +954,15 @@ impl Sim {
                                 self.mem[d + 1] = b;
                                 self.notify(*sig, old);
                             }
-                            continue;
+                            return false;
                         }
                     }
                     self.store(t, *s, *mode);
                 }
-                Instr::Jmp { to } => pc = *to as usize,
+                Instr::Jmp { to } => *pc = *to as usize,
                 Instr::Jz { c, w, to } => {
                     if ops::truth(m, *c as usize, *w) != Some(true) {
-                        pc = *to as usize;
+                        *pc = *to as usize;
                     }
                 }
                 Instr::Delay { s } => {
@@ -501,20 +972,20 @@ impl Sim {
                     } else {
                         self.future.entry(self.time + d).or_default().push(Fut::Wake(p));
                     }
-                    self.procs[p as usize].pc = pc as u32;
-                    return;
+                    self.procs[p as usize].pc = *pc as u32;
+                    return true;
                 }
                 Instr::Wait { ctl } => {
                     let pr = &mut self.procs[p as usize];
                     pr.wait = *ctl;
-                    pr.pc = pc as u32;
-                    return;
+                    pr.pc = *pc as u32;
+                    return true;
                 }
                 Instr::Halt => {
                     let pr = &mut self.procs[p as usize];
-                    pr.pc = (pc - 1) as u32;
+                    pr.pc = (*pc - 1) as u32;
                     pr.wait = NONE;
-                    return;
+                    return true;
                 }
                 Instr::SysF { f, d } => {
                     let d = *d as usize;
@@ -541,12 +1012,13 @@ impl Sim {
                 }
                 Instr::Clog2 { d, s, w } => ops::clog2(m, *d as usize, *s as usize, *w),
                 Instr::Sys(task) => {
-                    if self.systask(p, task, pc) {
-                        return;
+                    if self.systask(p, task, *pc) {
+                        return true;
                     }
                 }
             }
         }
+        false
     }
 
     fn next_random(&mut self) -> u32 {
@@ -842,6 +1314,11 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
                             }
                         }
                     }
+                    Target::ElemK { sig, e } => {
+                        let r = &sigs[sig as usize];
+                        let n = 2 * nw(r.width);
+                        ops::copy(m, r.slot as usize + e as usize * n, s, r.width);
+                    }
                     Target::Elem { sig, ix } => {
                         let r = &sigs[sig as usize];
                         if let Some(e) = index(m, &ix) {
@@ -858,4 +1335,171 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
         }
     }
     Ok(())
+}
+
+/// Ranks of the processes that can be evaluated in the combinational settle queue: level-sensitive
+/// processes whose only suspension is one `Wait` (assigns, always @*, always_comb, ...). A process
+/// gets a rank above every ranked process that writes a signal it reads. Processes in loops (and
+/// everything else) get NONE and are scheduled through the normal active queue.
+fn comb_ranks(prog: &Program) -> Vec<u32> {
+    let n = prog.procs.len();
+    let mut eligible = vec![false; n];
+    let mut reads: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (ci, c) in prog.ctls.iter().enumerate() {
+        let _ = ci;
+        if c.proc == NONE {
+            continue;
+        }
+        reads[c.proc as usize].extend(c.triggers.iter().map(|t| t.0));
+    }
+    let mut level = vec![true; n];
+    for c in &prog.ctls {
+        if c.proc != NONE && c.triggers.iter().any(|t| t.1 != Edge::Any) {
+            level[c.proc as usize] = false;
+        }
+    }
+    let mut writes: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (i, p) in prog.procs.iter().enumerate() {
+        if p.class != ProcClass::Normal || !level[i] {
+            continue;
+        }
+        let mut waits = 0;
+        let mut ok = true;
+        for ins in &p.code {
+            match ins {
+                Instr::Wait { .. } => waits += 1,
+                Instr::Delay { .. } | Instr::Halt => ok = false,
+                Instr::Sys(t) if matches!(**t, SysTask::Finish | SysTask::Monitor { .. } | SysTask::Strobe { .. }) => {
+                    ok = false
+                }
+                Instr::Store { t, mode, .. } => {
+                    if matches!(mode, StoreMode::NbaDelay(_)) {
+                        ok = false;
+                    }
+                    let sig = match t {
+                        Target::Whole { sig }
+                        | Target::Part { sig, .. }
+                        | Target::DynPart { sig, .. }
+                        | Target::Elem { sig, .. }
+                        | Target::ElemK { sig, .. }
+                        | Target::ElemPart { sig, .. } => *sig,
+                    };
+                    writes[i].push(sig);
+                }
+                _ => {}
+            }
+        }
+        eligible[i] = ok && waits == 1;
+    }
+    // signal -> eligible readers
+    let mut readers: Vec<Vec<u32>> = vec![Vec::new(); prog.signals.len()];
+    for i in 0..n {
+        if eligible[i] {
+            for &s in &reads[i] {
+                readers[s as usize].push(i as u32);
+            }
+        }
+    }
+    // edges between eligible processes (Kahn's algorithm, longest path)
+    let mut succ: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut indeg = vec![0u32; n];
+    for i in 0..n {
+        if !eligible[i] {
+            continue;
+        }
+        let mut targets: Vec<u32> = Vec::new();
+        for &s in &writes[i] {
+            for &r in &readers[s as usize] {
+                if r as usize != i {
+                    targets.push(r);
+                }
+            }
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        for &t in &targets {
+            indeg[t as usize] += 1;
+        }
+        succ[i] = targets;
+    }
+    let mut rank = vec![NONE; n];
+    let mut ready: Vec<u32> = (0..n as u32).filter(|&i| eligible[i as usize] && indeg[i as usize] == 0).collect();
+    for &i in &ready {
+        rank[i as usize] = 0;
+    }
+    while let Some(i) = ready.pop() {
+        let next = rank[i as usize] + 1;
+        for &t in &succ[i as usize] {
+            let t = t as usize;
+            if rank[t] == NONE || rank[t] < next {
+                rank[t] = next;
+            }
+            indeg[t] -= 1;
+            if indeg[t] == 0 {
+                ready.push(t as u32);
+            }
+        }
+    }
+    // processes left with indegree > 0 are in (or behind) a loop: schedule them normally
+    for i in 0..n {
+        if eligible[i] && indeg[i] > 0 {
+            rank[i] = NONE;
+        }
+    }
+    rank
+}
+
+// ---------------------------------------------------------------------------------------------
+// callbacks from JIT-compiled code
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_notify(sim: *mut Sim, sig: u32, old: u32) {
+    (*sim).notify(sig, old as u8);
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_nba(sim: *mut Sim, sig: u32, slot: u32, a: u64, b: u64) {
+    (*sim).push_small(sig, slot, a, b);
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_gen(sim: *mut Sim, p: u32, pc: u32) -> u64 {
+    let sim = &mut *sim;
+    let code: &Code = &*Rc::as_ptr(&sim.code);
+    let ins = &code.orig[p as usize][pc as usize];
+    let mut npc = pc as usize + 1;
+    if sim.exec_gen(p, ins, &mut npc) {
+        u64::MAX
+    } else {
+        npc as u64
+    }
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_wait(sim: *mut Sim, p: u32, ctl: u32, pc: u32) {
+    let sim = &mut *sim;
+    let pr = &mut sim.procs[p as usize];
+    pr.wait = ctl;
+    pr.pc = pc;
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_delay(sim: *mut Sim, p: u32, s: u32, pc: u32) {
+    let sim = &mut *sim;
+    let s = s as usize;
+    let d = if sim.mem[s + 1] == 0 { sim.mem[s] } else { 0 };
+    if d == 0 {
+        sim.inactive.push(p);
+    } else {
+        sim.future.entry(sim.time + d).or_default().push(Fut::Wake(p));
+    }
+    sim.procs[p as usize].pc = pc;
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_halt(sim: *mut Sim, p: u32, pc: u32) {
+    let sim = &mut *sim;
+    let pr = &mut sim.procs[p as usize];
+    pr.pc = pc;
+    pr.wait = NONE;
 }

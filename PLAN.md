@@ -66,19 +66,38 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff` | ✅ basic (dumps everything; scope/level args ignored) |
 | M2 | fork/join, named events, `disable` across processes, arrays of instances, multi-dim arrays, real numbers, `timescale` + `%t` formatting, `$dumpvars` scopes, automatic/recursive functions | |
 | M3 | Nets done right: multiple drivers, resolution (wire/wand/wor/tri0/tri1), strengths (reduced), `assign #d`, inout | |
-| M4 | Performance I: levelized comb evaluation, timing wheel, superinstructions, unchecked VM, profiling | |
-| M5 | Performance II: Cranelift JIT backend | |
+| M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
+| M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
 | M7 | FST output, VPI-lite, better diagnostics | |
+| M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
 
 ## Testing strategy
 - `tests/verilog/*.v`: self-contained testbenches. `tests/difftest.sh` runs each through `iverilog`+`vvp`
   and `ferrooxide` and diffs stdout. `cargo test` runs the same comparison (skipped if iverilog is absent).
 - `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both simulators.
 
-## Baseline (unoptimized bytecode interpreter)
-`bench/cpuish.v` (32 lanes of LFSR + ALU + accumulator, 200k cycles): Icarus 8.7 s, ferrooxide 2.2 s → **4.0x**,
-same checksum. 32M process activations, 12.8M NBA updates. Next: M4 (levelized comb + superinstructions).
+## Performance status (CPU cycles, `perf stat`, same machine)
+
+| benchmark | Icarus | ferrooxide JIT | ferrooxide `--no-jit` | speed-up |
+|-----------|--------|----------------|-----------------------|----------|
+| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 3.34 G | 5.0 G | **10.1x** |
+| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.5 G | 2.23 G | 2.72 G | **6.0x** |
+
+What got us here (in order of impact):
+1. Lowering to single-word fast ops with the 2-state check inline (`rt/fast.rs`).
+2. Cranelift JIT per *process shape*: identical processes of different instances share one native
+   function and get their slots/signals/controls from a per-process table. Without sharing, 32 lane
+   copies thrashed the instruction cache (586M i-cache misses → 2M).
+3. Shared scratch region for temporaries (dead at every suspension point): L1d misses 161M → 42M.
+4. Rank-ordered combinational settle (from digsim-native), as a dirty bitset in rank order, with a
+   separate combinational fan-out list that needs no per-process state.
+5. Constant-index array accesses resolved at compile time; inline `Wait` and inline NBA queue
+   appends in JIT code.
+
+Next performance steps: JIT ops for wide (>64-bit) values (mixed.v), keep values in registers
+across ops within a process, fused processes per rank (fewer activations), timing wheel,
+`--threads` (partitioned same-edge/same-rank parallelism, see M8).
 
 ## Known limitations of the current skeleton
 - Nets are treated as variables with a single driver (last writer wins).

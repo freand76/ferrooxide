@@ -276,6 +276,15 @@ impl<'a> Compiler<'a> {
             Expr::Index(a, i) => {
                 if let Some(arr) = self.array_of(a, sid) {
                     let info = self.sig(arr).clone();
+                    if self.is_const(i, sid) {
+                        let e = self.const_int(i, sid)? - info.arr_lo;
+                        if e < 0 || e >= info.depth as i64 {
+                            let c = self.const_slot(&Const::fill('x', info.width));
+                            return Ok(self.resize(c, info.width, w, s));
+                        }
+                        let es = info.slot + e as u32 * rt::words(info.width);
+                        return Ok(self.resize(es, info.width, w, s));
+                    }
                     let ix = self.index_of(i, sid, false, -info.arr_lo)?;
                     let d = self.tmp(info.width);
                     self.emit(Instr::ArrRead { d, sig: arr, ix });

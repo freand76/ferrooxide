@@ -13,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) type R<T> = Result<T, Error>;
 
+/// Size of the shared scratch region for process temporaries, at the start of memory.
+const SCRATCH_WORDS: u32 = 1 << 16;
+
 #[derive(Clone, Debug)]
 pub(crate) enum Sym {
     Sig(u32),
@@ -70,6 +73,8 @@ pub struct Compiler<'a> {
     pub warnings: Vec<String>,
     pub(crate) call_depth: u32,
     warned: HashSet<String>,
+    scratch_top: u32,
+    scratch_saved: Vec<u32>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -132,7 +137,7 @@ impl<'a> Compiler<'a> {
         }
         Compiler {
             mods,
-            prog: Program::default(),
+            prog: Program { mem: vec![0; SCRATCH_WORDS as usize], ..Program::default() },
             scopes: Vec::new(),
             tops: HashMap::new(),
             jobs: Vec::new(),
@@ -144,6 +149,8 @@ impl<'a> Compiler<'a> {
             warnings: Vec::new(),
             call_depth: 0,
             warned: HashSet::new(),
+            scratch_top: 0,
+            scratch_saved: Vec::new(),
         }
     }
 
@@ -166,7 +173,21 @@ impl<'a> Compiler<'a> {
         s
     }
 
+    /// A temporary that is dead at every suspension point. Process temporaries share one
+    /// scratch region (only one process runs at a time), which keeps them hot in the cache.
     pub(crate) fn tmp(&mut self, w: u32) -> u32 {
+        let in_proc = self.pb.last().map(|p| p.proc != NONE).unwrap_or(false);
+        let n = rt::words(w);
+        if in_proc && self.scratch_top + n <= SCRATCH_WORDS {
+            let s = self.scratch_top;
+            self.scratch_top += n;
+            return s;
+        }
+        self.alloc(w)
+    }
+
+    /// A temporary that stays live across suspension points (private to the process).
+    pub(crate) fn ptmp(&mut self, w: u32) -> u32 {
         self.alloc(w)
     }
 
@@ -246,10 +267,15 @@ impl<'a> Compiler<'a> {
         let id = self.prog.procs.len() as u32;
         self.prog.procs.push(ProcDef { name, code: Vec::new(), class });
         self.pb.push(PState { proc: id, ..Default::default() });
+        self.scratch_saved.push(self.scratch_top);
+        self.scratch_top = 0;
         id
     }
 
     pub(crate) fn end_proc(&mut self) {
+        // nested processes ($monitor/$strobe bodies) restart at 0: the enclosing process's
+        // temporaries are dead whenever the nested one runs (it runs in the postponed region)
+        self.scratch_top = self.scratch_saved.pop().unwrap().max(self.scratch_top);
         let st = self.pb.pop().unwrap();
         self.prog.procs[st.proc as usize].code = st.code;
     }

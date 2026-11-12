@@ -12,6 +12,7 @@ options:
   --max-time <t>    stop simulation after time t
   --stats           print timing and scheduler statistics to stderr
   --dump-code       print the compiled bytecode to stderr
+  --no-jit          interpret the bytecode instead of compiling it to native code
   -h, --help        show this help";
 
 fn main() -> ExitCode {
@@ -20,6 +21,7 @@ fn main() -> ExitCode {
     let mut opts = ferrooxide_front::Options::default();
     let mut stats = false;
     let mut dump_code = false;
+    let mut jit = true;
     let mut max_time = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -56,6 +58,7 @@ fn main() -> ExitCode {
             },
             "--stats" => stats = true,
             "--dump-code" => dump_code = true,
+            "--no-jit" => jit = false,
             _ if a.starts_with("-D") => {
                 let v = &a[2..];
                 let (k, v) = v.split_once('=').unwrap_or((v, "1"));
@@ -103,16 +106,26 @@ fn main() -> ExitCode {
     }
     let t2 = Instant::now();
     let nsig = prog.signals.len();
+    if stats {
+        eprintln!("ferrooxide: memory {} words", prog.mem.len());
+    }
     let nproc = prog.procs.len();
     let mut sim = ferrooxide_rt::Sim::new(prog);
+    if jit {
+        if let Err(e) = sim.enable_jit() {
+            eprintln!("ferrooxide: JIT compilation failed ({e}), interpreting");
+        }
+    }
+    let t2b = Instant::now();
     sim.run(max_time);
     let t3 = Instant::now();
     if stats {
         eprintln!(
-            "ferrooxide: parse {:.3}s, elaborate {:.3}s, simulate {:.3}s; {} signals, {} processes",
+            "ferrooxide: parse {:.3}s, elaborate {:.3}s, jit {:.3}s, simulate {:.3}s; {} signals, {} processes",
             (t1 - t0).as_secs_f64(),
             (t2 - t1).as_secs_f64(),
-            (t3 - t2).as_secs_f64(),
+            (t2b - t2).as_secs_f64(),
+            (t3 - t2b).as_secs_f64(),
             nsig,
             nproc
         );
