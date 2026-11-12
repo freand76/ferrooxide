@@ -81,8 +81,8 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 
 | benchmark | Icarus | ferrooxide JIT | ferrooxide `--no-jit` | speed-up |
 |-----------|--------|----------------|-----------------------|----------|
-| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 3.34 G | 5.0 G | **10.1x** |
-| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.5 G | 2.23 G | 2.72 G | **6.0x** |
+| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 3.2 G | 5.0 G | **10.5x** |
+| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.5 G | 0.98 G | 1.4 G | **13.8x** |
 
 What got us here (in order of impact):
 1. Lowering to single-word fast ops with the 2-state check inline (`rt/fast.rs`).
@@ -94,9 +94,19 @@ What got us here (in order of impact):
    separate combinational fan-out list that needs no per-process state.
 5. Constant-index array accesses resolved at compile time; inline `Wait` and inline NBA queue
    appends in JIT code.
+6. Element-level sensitivity for constant-index array accesses (virtual element signals, element
+   granular rank graph): mixed.v 27.6M → 8.4M activations.
+7. Wide (≤1024-bit) ops compiled natively (unrolled word loops), concatenation as bit-field
+   inserts, and scratch temporaries promoted to SSA variables (registers) unless a generic
+   callback reads them.
 
-Next performance steps: JIT ops for wide (>64-bit) values (mixed.v), keep values in registers
-across ops within a process, fused processes per rank (fewer activations), timing wheel,
+Scheduling order: wakes are ordered FIFO (sequence numbers) between active processes and the
+combinational settle, matching Icarus in the usual same-time-step testbench races
+(tests/verilog/race.v).
+
+Next performance steps: port connections to array elements / part selects as aliases (no copy
+processes), fused processes per rank (fewer activations), signal values cached in registers within
+an activation, timing wheel,
 `--threads` (partitioned same-edge/same-rank parallelism, see M8).
 
 ## Known limitations of the current skeleton

@@ -6,6 +6,10 @@
 //! change notification) and every wide/generic instruction calls back into the runtime.
 
 use crate::fast::{mk, Op};
+use crate::{nw, tmask, Instr};
+use cranelift_frontend::Variable;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use crate::vm::Sim;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, Signature, Value};
@@ -31,6 +35,8 @@ pub struct Jit {
 /// A process normalised so that identical processes of different instances compare equal.
 struct Shape {
     ops: Vec<Op>,
+    /// per slot index: kept in SSA variables (a scratch temporary no callback touches)
+    promoted: Vec<bool>,
     nslots: u32,
     nsigs: u32,
     nctls: u32,
@@ -68,13 +74,22 @@ fn normalise(p: u32, ops: &[Op]) -> (Shape, Vec<u32>) {
     table.extend_from_slice(&slots);
     table.extend_from_slice(&sigs);
     table.extend_from_slice(&ctls);
-    (Shape { ops: out, nslots: slots.len() as u32, nsigs: sigs.len() as u32, nctls: ctls.len() as u32 }, table)
+    let shape = Shape {
+        ops: out,
+        promoted: Vec::new(),
+        nslots: slots.len() as u32,
+        nsigs: sigs.len() as u32,
+        nctls: ctls.len() as u32,
+    };
+    (shape, table)
 }
 
 /// Runtime entry points called from generated code.
 pub struct Callbacks {
     pub notify: unsafe extern "C" fn(*mut Sim, u32, u32),
     pub nba: unsafe extern "C" fn(*mut Sim, u32, u32, u64, u64),
+    /// (sim, signal, value slot, width): non-blocking store of a wide value read from memory
+    pub nba_wide: unsafe extern "C" fn(*mut Sim, u32, u32, u32),
     pub gen: unsafe extern "C" fn(*mut Sim, u32, u32) -> u64,
     pub wait: unsafe extern "C" fn(*mut Sim, u32, u32, u32),
     pub delay: unsafe extern "C" fn(*mut Sim, u32, u32, u32),
@@ -84,6 +99,7 @@ pub struct Callbacks {
 struct Imports {
     notify: FuncId,
     nba: FuncId,
+    nba_wide: FuncId,
     gen: FuncId,
     delay: FuncId,
     halt: FuncId,
@@ -92,13 +108,22 @@ struct Imports {
 struct Refs {
     notify: FuncRef,
     nba: FuncRef,
+    nba_wide: FuncRef,
     gen: FuncRef,
     delay: FuncRef,
     halt: FuncRef,
 }
 
 /// `proc_size`: size of the runtime's process record (pc at offset 0, wait at offset 4).
-pub fn compile(procs: &[Vec<Op>], cb: &Callbacks, proc_size: u32) -> Result<Jit, String> {
+/// `orig`: the original instructions (for the slots generic callbacks use); `scratch`: size of the
+/// scratch region of temporaries at the start of memory.
+pub fn compile(
+    procs: &[Vec<Op>],
+    orig: &[Vec<Instr>],
+    scratch: u32,
+    cb: &Callbacks,
+    proc_size: u32,
+) -> Result<Jit, String> {
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
     flags.set("use_colocated_libcalls", "false").map_err(|e| e.to_string())?;
@@ -110,6 +135,7 @@ pub fn compile(procs: &[Vec<Op>], cb: &Callbacks, proc_size: u32) -> Result<Jit,
     let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
     jb.symbol("fx_notify", cb.notify as *const u8);
     jb.symbol("fx_nba", cb.nba as *const u8);
+    jb.symbol("fx_nba_wide", cb.nba_wide as *const u8);
     jb.symbol("fx_gen", cb.gen as *const u8);
     jb.symbol("fx_wait", cb.wait as *const u8);
     jb.symbol("fx_delay", cb.delay as *const u8);
@@ -140,6 +166,7 @@ pub fn compile(procs: &[Vec<Op>], cb: &Callbacks, proc_size: u32) -> Result<Jit,
     let imports = Imports {
         notify: decl(&mut module, "fx_notify", &s_notify)?,
         nba: decl(&mut module, "fx_nba", &s_nba)?,
+        nba_wide: decl(&mut module, "fx_nba_wide", &s_wait)?,
         gen: decl(&mut module, "fx_gen", &s_gen)?,
         delay: decl(&mut module, "fx_delay", &s_wait)?,
         halt: decl(&mut module, "fx_halt", &s_halt)?,
@@ -148,15 +175,27 @@ pub fn compile(procs: &[Vec<Op>], cb: &Callbacks, proc_size: u32) -> Result<Jit,
 
     let mut ctx = module.make_context();
     let mut fbc = FunctionBuilderContext::new();
-    let mut shape_ids: std::collections::HashMap<Vec<Op>, FuncId> = std::collections::HashMap::new();
+    let mut shape_ids: HashMap<(Vec<Op>, Vec<bool>), FuncId> = HashMap::new();
     let mut ids = Vec::with_capacity(procs.len());
     let mut tables = Vec::new();
     let mut table_off = Vec::with_capacity(procs.len());
     for (p, ops) in procs.iter().enumerate() {
-        let (shape, table) = normalise(p as u32, ops);
+        let (mut shape, table) = normalise(p as u32, ops);
+        // slots the runtime reads or writes in memory on behalf of this process
+        let mut in_mem: Vec<u32> = Vec::new();
+        for (pc, op) in ops.iter().enumerate() {
+            match *op {
+                Op::Gen | Op::GenJ => in_mem.extend(crate::instr_slots(&orig[p][pc])),
+                Op::Delay { s } | Op::WNba { s, .. } => in_mem.push(s),
+                _ => {}
+            }
+        }
+        let slots = &table[1..1 + shape.nslots as usize];
+        shape.promoted = slots.iter().map(|&s| s < scratch && !in_mem.contains(&s)).collect();
         table_off.push(tables.len());
         tables.extend_from_slice(&table);
-        if let Some(&id) = shape_ids.get(&shape.ops) {
+        let key = (shape.ops.clone(), shape.promoted.clone());
+        if let Some(&id) = shape_ids.get(&key) {
             ids.push(id);
             continue;
         }
@@ -169,6 +208,7 @@ pub fn compile(procs: &[Vec<Op>], cb: &Callbacks, proc_size: u32) -> Result<Jit,
             let refs = Refs {
                 notify: module.declare_func_in_func(imports.notify, b.func),
                 nba: module.declare_func_in_func(imports.nba, b.func),
+                nba_wide: module.declare_func_in_func(imports.nba_wide, b.func),
                 gen: module.declare_func_in_func(imports.gen, b.func),
                 delay: module.declare_func_in_func(imports.delay, b.func),
                 halt: module.declare_func_in_func(imports.halt, b.func),
@@ -179,7 +219,7 @@ pub fn compile(procs: &[Vec<Op>], cb: &Callbacks, proc_size: u32) -> Result<Jit,
         }
         module.define_function(id, &mut ctx).map_err(|e| format!("proc {p}: {e:?}"))?;
         module.clear_context(&mut ctx);
-        shape_ids.insert(shape.ops, id);
+        shape_ids.insert(key, id);
         ids.push(id);
     }
     module.finalize_definitions().map_err(|e| e.to_string())?;
@@ -252,11 +292,13 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
     b.ins().return_(&[]);
 
     let _ = mem;
-    // slot fields are table indices; `k + 1` addresses the unknown-bits word of slot k
-    let ld = |b: &mut FunctionBuilder, slot: u32| -> Value { b.ins().load(i64t, fl, addr[(slot >> 1) as usize], ((slot & 1) * 8) as i32) };
-    let st = |b: &mut FunctionBuilder, slot: u32, v: Value| {
-        b.ins().store(fl, v, addr[(slot >> 1) as usize], ((slot & 1) * 8) as i32);
-    };
+    // Slot fields are encoded table indices 2k (+1 for the unknown-bits word of a narrow value).
+    // Word j of slot k lives in memory at addr[k] + 8j, or in an SSA variable if k is promoted.
+    let acc = RefCell::new(Acc { addr, promoted: shape.promoted.clone(), vars: HashMap::new() });
+    let ldw = |b: &mut FunctionBuilder, f: u32, j: u32| -> Value { acc.borrow_mut().ld(b, f >> 1, (f & 1) + j) };
+    let stw = |b: &mut FunctionBuilder, f: u32, j: u32, v: Value| acc.borrow_mut().st(b, f >> 1, (f & 1) + j, v);
+    let ld = |b: &mut FunctionBuilder, slot: u32| -> Value { ldw(b, slot, 0) };
+    let st = |b: &mut FunctionBuilder, slot: u32, v: Value| stw(b, slot, 0, v);
     let c64 = |b: &mut FunctionBuilder, v: u64| -> Value { b.ins().iconst(i64t, v as i64) };
     let c32 = |b: &mut FunctionBuilder, v: u32| -> Value { b.ins().iconst(i32t, v as i64) };
     let b2i = |b: &mut FunctionBuilder, c: Value| -> Value { b.ins().uextend(i64t, c) };
@@ -268,7 +310,7 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
             b.ins().jump(next, &[]);
         };
         match op {
-            Op::Gen => {
+            Op::Gen | Op::GenJ => {
                 let pcv = c32(b, i as u32);
                 let call = b.ins().call(r.gen, &[sim, p_v, pcv]);
                 let ret = b.inst_results(call)[0];
@@ -276,8 +318,331 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
                 let cont = b.create_block();
                 b.ins().brif(susp, exit, &[], cont, &[]);
                 b.switch_to_block(cont);
-                let npc = b.ins().ireduce(i32t, ret);
-                b.ins().jump(dispatch, &[npc.into()]);
+                if matches!(op, Op::GenJ) {
+                    let npc = b.ins().ireduce(i32t, ret);
+                    b.ins().jump(dispatch, &[npc.into()]);
+                } else {
+                    b.ins().jump(next, &[]);
+                }
+            }
+            Op::Ins1 { d, s, off, w } => {
+                let m = mk(w);
+                for k in 0..2 {
+                    let dv = ld(b, d + k);
+                    let sv = ld(b, s + k);
+                    let sv = b.ins().band_imm(sv, m as i64);
+                    let sv = b.ins().ishl_imm(sv, off as i64);
+                    let dv = b.ins().band_imm(dv, !(m << off) as i64);
+                    let v = b.ins().bor(dv, sv);
+                    st(b, d + k, v);
+                }
+                goto_next(b);
+            }
+            Op::WCopy { d, s, w } => {
+                for j in 0..2 * nw(w as u32) as u32 {
+                    let v = ldw(b, s, j);
+                    stw(b, d, j, v);
+                }
+                goto_next(b);
+            }
+            Op::WAnd { d, a, b: bb, w } | Op::WOr { d, a, b: bb, w } | Op::WXor { d, a, b: bb, w } => {
+                let n = nw(w as u32) as u32;
+                for i in 0..n {
+                    let (va, xa, vb, xb) = (ldw(b, a, i), ldw(b, a, n + i), ldw(b, bb, i), ldw(b, bb, n + i));
+                    let (rv, rx) = match op {
+                        Op::WXor { .. } => {
+                            let x = b.ins().bor(xa, xb);
+                            let v = b.ins().bxor(va, vb);
+                            (b.ins().bor(v, x), x)
+                        }
+                        _ => and_or(b, matches!(op, Op::WAnd { .. }), va, xa, vb, xb),
+                    };
+                    stw(b, d, i, rv);
+                    stw(b, d, n + i, rx);
+                }
+                goto_next(b);
+            }
+            Op::WNot { d, s, w } => {
+                let n = nw(w as u32) as u32;
+                for i in 0..n {
+                    let (va, xa) = (ldw(b, s, i), ldw(b, s, n + i));
+                    let m = if i == n - 1 { tmask(w as u32) } else { !0 };
+                    let nv = b.ins().bnot(va);
+                    let v = b.ins().bor(nv, xa);
+                    let v = b.ins().band_imm(v, m as i64);
+                    stw(b, d, i, v);
+                    stw(b, d, n + i, xa);
+                }
+                goto_next(b);
+            }
+            Op::WAdd { d, a, b: bb, w } | Op::WSub { d, a, b: bb, w } => {
+                let n = nw(w as u32) as u32;
+                let add = matches!(op, Op::WAdd { .. });
+                let mut anyx = c64(b, 0);
+                let mut carry = c64(b, 0);
+                let mut res = Vec::new();
+                for i in 0..n {
+                    let (va, xa, vb, xb) = (ldw(b, a, i), ldw(b, a, n + i), ldw(b, bb, i), ldw(b, bb, n + i));
+                    let x = b.ins().bor(xa, xb);
+                    anyx = b.ins().bor(anyx, x);
+                    let (r, c) = if add {
+                        let s1 = b.ins().iadd(va, vb);
+                        let c1 = b.ins().icmp(IntCC::UnsignedLessThan, s1, va);
+                        let s2 = b.ins().iadd(s1, carry);
+                        let c2 = b.ins().icmp(IntCC::UnsignedLessThan, s2, s1);
+                        let c = b.ins().bor(c1, c2);
+                        (s2, c)
+                    } else {
+                        let d1 = b.ins().isub(va, vb);
+                        let b1 = b.ins().icmp(IntCC::UnsignedLessThan, va, vb);
+                        let d2 = b.ins().isub(d1, carry);
+                        let b2 = b.ins().icmp(IntCC::UnsignedLessThan, d1, carry);
+                        let c = b.ins().bor(b1, b2);
+                        (d2, c)
+                    };
+                    carry = b2i(b, c);
+                    res.push(r);
+                }
+                let known = b.ins().icmp_imm(IntCC::Equal, anyx, 0);
+                let zero = c64(b, 0);
+                for i in 0..n {
+                    let m = c64(b, if i == n - 1 { tmask(w as u32) } else { !0 });
+                    let r = b.ins().band(res[i as usize], m);
+                    let rv = b.ins().select(known, r, m);
+                    let rx = b.ins().select(known, zero, m);
+                    stw(b, d, i, rv);
+                    stw(b, d, n + i, rx);
+                }
+                goto_next(b);
+            }
+            Op::WEq { d, a, b: bb, w } | Op::WNe { d, a, b: bb, w } => {
+                let n = nw(w as u32) as u32;
+                let ne = matches!(op, Op::WNe { .. }) as u64;
+                let (mut anyx, mut diff, mut kd) = (c64(b, 0), c64(b, 0), c64(b, 0));
+                for i in 0..n {
+                    let (va, xa, vb, xb) = (ldw(b, a, i), ldw(b, a, n + i), ldw(b, bb, i), ldw(b, bb, n + i));
+                    let x = b.ins().bor(xa, xb);
+                    anyx = b.ins().bor(anyx, x);
+                    let dv = b.ins().bxor(va, vb);
+                    diff = b.ins().bor(diff, dv);
+                    let k = b.ins().band_not(dv, x);
+                    kd = b.ins().bor(kd, k);
+                }
+                let known = b.ins().icmp_imm(IntCC::Equal, anyx, 0);
+                let eq = b.ins().icmp_imm(IntCC::Equal, diff, 0);
+                let eq = b2i(b, eq);
+                let rk = b.ins().bxor_imm(eq, ne as i64);
+                let kd = b.ins().icmp_imm(IntCC::NotEqual, kd, 0);
+                let (one, zero, nev) = (c64(b, 1), c64(b, 0), c64(b, ne));
+                let uv = b.ins().select(kd, nev, one);
+                let ux = b.ins().select(kd, zero, one);
+                let rv = b.ins().select(known, rk, uv);
+                let rx = b.ins().select(known, zero, ux);
+                st(b, d, rv);
+                st(b, d + 1, rx);
+                goto_next(b);
+            }
+            Op::WCaseEq { d, a, b: bb, w } | Op::WCaseNe { d, a, b: bb, w } => {
+                let n = nw(w as u32) as u32;
+                let mut dd = c64(b, 0);
+                for j in 0..2 * n {
+                    let (va, vb) = (ldw(b, a, j), ldw(b, bb, j));
+                    let x = b.ins().bxor(va, vb);
+                    dd = b.ins().bor(dd, x);
+                }
+                let cc = if matches!(op, Op::WCaseEq { .. }) { IntCC::Equal } else { IntCC::NotEqual };
+                let r = b.ins().icmp_imm(cc, dd, 0);
+                let r = b2i(b, r);
+                let zero = c64(b, 0);
+                st(b, d, r);
+                st(b, d + 1, zero);
+                goto_next(b);
+            }
+            Op::WLt { d, a, b: bb, w } | Op::WLe { d, a, b: bb, w } => {
+                let n = nw(w as u32) as u32;
+                let mut anyx = c64(b, 0);
+                // fold from the least significant word: acc = a_i < b_i || (a_i == b_i && acc)
+                let mut acc = c64(b, matches!(op, Op::WLe { .. }) as u64);
+                for i in 0..n {
+                    let (va, xa, vb, xb) = (ldw(b, a, i), ldw(b, a, n + i), ldw(b, bb, i), ldw(b, bb, n + i));
+                    let x = b.ins().bor(xa, xb);
+                    anyx = b.ins().bor(anyx, x);
+                    let lt = b.ins().icmp(IntCC::UnsignedLessThan, va, vb);
+                    let lt = b2i(b, lt);
+                    let eq = b.ins().icmp(IntCC::Equal, va, vb);
+                    let eq = b2i(b, eq);
+                    let e = b.ins().band(eq, acc);
+                    acc = b.ins().bor(lt, e);
+                }
+                let known = b.ins().icmp_imm(IntCC::Equal, anyx, 0);
+                let (one, zero) = (c64(b, 1), c64(b, 0));
+                let rv = b.ins().select(known, acc, one);
+                let rx = b.ins().select(known, zero, one);
+                st(b, d, rv);
+                st(b, d + 1, rx);
+                goto_next(b);
+            }
+            Op::WSlice { d, s, lsb, sw, w } => {
+                let (ns, nd) = (nw(sw as u32) as u32, nw(w as u32) as u32);
+                for p in 0..2 {
+                    for i in 0..nd {
+                        let bit = lsb + 64 * i;
+                        let len = (w as u32 - 64 * i).min(64);
+                        let (idx, off) = (bit / 64, bit % 64);
+                        let mut v = ldw(b, s, p * ns + idx);
+                        if off > 0 {
+                            v = b.ins().ushr_imm(v, off as i64);
+                            if off + len > 64 && idx + 1 < ns {
+                                let hi = ldw(b, s, p * ns + idx + 1);
+                                let hi = b.ins().ishl_imm(hi, (64 - off) as i64);
+                                v = b.ins().bor(v, hi);
+                            }
+                        }
+                        if len < 64 {
+                            v = b.ins().band_imm(v, mk(len as u8) as i64);
+                        }
+                        stw(b, d, p * nd + i, v);
+                    }
+                }
+                goto_next(b);
+            }
+            Op::WResize { d, s, sw, dw, sign } => {
+                let (sw, dw) = (sw as u32, dw as u32);
+                let (ns, nd) = (nw(sw) as u32, nw(dw) as u32);
+                let ext = sign && dw > sw;
+                for p in 0..2 {
+                    let fill = if ext {
+                        let top = ldw(b, s, p * ns + ns - 1);
+                        let msb = (sw - 1) % 64;
+                        let t = b.ins().ishl_imm(top, (63 - msb) as i64);
+                        Some(b.ins().sshr_imm(t, 63))
+                    } else {
+                        None
+                    };
+                    for i in 0..nd {
+                        let mut v = if i < ns {
+                            let v = ldw(b, s, p * ns + i);
+                            match fill {
+                                Some(f) if i == ns - 1 && tmask(sw) != !0 => {
+                                    let hi = b.ins().band_imm(f, !tmask(sw) as i64);
+                                    b.ins().bor(v, hi)
+                                }
+                                _ => v,
+                            }
+                        } else {
+                            match fill {
+                                Some(f) => f,
+                                None => c64(b, 0),
+                            }
+                        };
+                        if i == nd - 1 && tmask(dw) != !0 {
+                            v = b.ins().band_imm(v, tmask(dw) as i64);
+                        }
+                        stw(b, d, p * nd + i, v);
+                    }
+                }
+                goto_next(b);
+            }
+            Op::WIns { d, s, off, dw, sw } => {
+                let (nd, ns) = (nw(dw as u32) as u32, nw(sw as u32) as u32);
+                let len = sw as u32;
+                for p in 0..2 {
+                    let mut i = 0;
+                    while i < len {
+                        let l = (len - i).min(64);
+                        let m = mk(l as u8);
+                        let v = ldw(b, s, p * ns + i / 64);
+                        let pos = off + i;
+                        let (idx, o) = (pos / 64, pos % 64);
+                        let dv = ldw(b, d, p * nd + idx);
+                        let dv = b.ins().band_imm(dv, !(m << o) as i64);
+                        let sv = b.ins().ishl_imm(v, o as i64);
+                        let nv = b.ins().bor(dv, sv);
+                        stw(b, d, p * nd + idx, nv);
+                        if o != 0 && o + l > 64 {
+                            let dv = ldw(b, d, p * nd + idx + 1);
+                            let dv = b.ins().band_imm(dv, !(m >> (64 - o)) as i64);
+                            let sv = b.ins().ushr_imm(v, (64 - o) as i64);
+                            let nv = b.ins().bor(dv, sv);
+                            stw(b, d, p * nd + idx + 1, nv);
+                        }
+                        i += l;
+                    }
+                }
+                goto_next(b);
+            }
+            Op::WMux { d, c, t, f, w } => {
+                let n = nw(w as u32) as u32;
+                let (ca, cb) = (ld(b, c), ld(b, c + 1));
+                let c1 = b.ins().band_not(ca, cb);
+                let c1 = b.ins().icmp_imm(IntCC::NotEqual, c1, 0);
+                let c0 = b.ins().icmp_imm(IntCC::Equal, cb, 0);
+                for i in 0..n {
+                    let (ta, tb, fa, fb) = (ldw(b, t, i), ldw(b, t, n + i), ldw(b, f, i), ldw(b, f, n + i));
+                    let x = b.ins().bor(tb, fb);
+                    let df = b.ins().bxor(ta, fa);
+                    let x = b.ins().bor(x, df);
+                    let mv = b.ins().bor(ta, x);
+                    let v0 = b.ins().select(c0, fa, mv);
+                    let x0 = b.ins().select(c0, fb, x);
+                    let rv = b.ins().select(c1, ta, v0);
+                    let rx = b.ins().select(c1, tb, x0);
+                    stw(b, d, i, rv);
+                    stw(b, d, n + i, rx);
+                }
+                goto_next(b);
+            }
+            Op::WBool { d, s, w } => {
+                let n = nw(w as u32) as u32;
+                let (mut k1, mut anyx) = (c64(b, 0), c64(b, 0));
+                for i in 0..n {
+                    let (a, x) = (ldw(b, s, i), ldw(b, s, n + i));
+                    let k = b.ins().band_not(a, x);
+                    k1 = b.ins().bor(k1, k);
+                    anyx = b.ins().bor(anyx, x);
+                }
+                let t = b.ins().icmp_imm(IntCC::NotEqual, k1, 0);
+                let known0 = b.ins().icmp_imm(IntCC::Equal, anyx, 0);
+                let (one, zero) = (c64(b, 1), c64(b, 0));
+                let uv = b.ins().select(known0, zero, one);
+                let rv = b.ins().select(t, one, uv);
+                let rx = b.ins().select(t, zero, uv);
+                st(b, d, rv);
+                st(b, d + 1, rx);
+                goto_next(b);
+            }
+            Op::WStore { sig, s, slot, w } => {
+                let n = nw(w as u32) as u32;
+                let mut newv = Vec::new();
+                let mut oldv = Vec::new();
+                let mut dd = c64(b, 0);
+                for j in 0..2 * n {
+                    let nv = ldw(b, s, j);
+                    let ov = ldw(b, slot, j);
+                    let x = b.ins().bxor(nv, ov);
+                    dd = b.ins().bor(dd, x);
+                    newv.push(nv);
+                    oldv.push(ov);
+                }
+                let changed = b.create_block();
+                b.ins().brif(dd, changed, &[], next, &[]);
+                b.switch_to_block(changed);
+                for j in 0..2 * n {
+                    stw(b, slot, j, newv[j as usize]);
+                }
+                let la = b.ins().band_imm(oldv[0], 1);
+                let lx = b.ins().band_imm(oldv[n as usize], 1);
+                let lx = b.ins().ishl_imm(lx, 1);
+                let old = b.ins().bor(la, lx);
+                let old = b.ins().ireduce(i32t, old);
+                b.ins().call(r.notify, &[sim, sig_v[sig as usize], old]);
+                b.ins().jump(next, &[]);
+            }
+            Op::WNba { sig, s, w } => {
+                let sv = b.ins().ireduce(i32t, slot_no[(s >> 1) as usize]);
+                let wv = c32(b, w as u32);
+                b.ins().call(r.nba_wide, &[sim, sig_v[sig as usize], sv, wv]);
+                goto_next(b);
             }
             Op::Copy1 { d, s } => {
                 let (a, x) = (ld(b, s), ld(b, s + 1));
@@ -612,5 +977,50 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
                 b.ins().jump(exit, &[]);
             }
         }
+    }
+}
+
+/// 4-state AND / OR of one word: (value, unknown)
+fn and_or(b: &mut FunctionBuilder, is_and: bool, va: Value, xa: Value, vb: Value, xb: Value) -> (Value, Value) {
+    let nxa = b.ins().bnot(xa);
+    let nxb = b.ins().bnot(xb);
+    let a1 = b.ins().band(va, nxa);
+    let b1 = b.ins().band(vb, nxb);
+    let a0 = b.ins().bor(va, xa);
+    let a0 = b.ins().bnot(a0);
+    let b0 = b.ins().bor(vb, xb);
+    let b0 = b.ins().bnot(b0);
+    let (k1, k0) = if is_and { (b.ins().band(a1, b1), b.ins().bor(a0, b0)) } else { (b.ins().bor(a1, b1), b.ins().band(a0, b0)) };
+    let x = b.ins().bor(xa, xb);
+    let k = b.ins().bor(k0, k1);
+    let rx = b.ins().band_not(x, k);
+    (b.ins().bor(k1, rx), rx)
+}
+
+/// Access to the words of slot k: memory, or SSA variables for promoted temporaries.
+struct Acc {
+    addr: Vec<Value>,
+    promoted: Vec<bool>,
+    vars: HashMap<(u32, u32), Variable>,
+}
+
+impl Acc {
+    fn var(&mut self, b: &mut FunctionBuilder, k: u32, j: u32) -> Variable {
+        *self.vars.entry((k, j)).or_insert_with(|| b.declare_var(types::I64))
+    }
+    fn ld(&mut self, b: &mut FunctionBuilder, k: u32, j: u32) -> Value {
+        if self.promoted[k as usize] {
+            let v = self.var(b, k, j);
+            return b.use_var(v);
+        }
+        b.ins().load(types::I64, MemFlags::trusted(), self.addr[k as usize], (j * 8) as i32)
+    }
+    fn st(&mut self, b: &mut FunctionBuilder, k: u32, j: u32, val: Value) {
+        if self.promoted[k as usize] {
+            let v = self.var(b, k, j);
+            b.def_var(v, val);
+            return;
+        }
+        b.ins().store(MemFlags::trusted(), val, self.addr[k as usize], (j * 8) as i32);
     }
 }

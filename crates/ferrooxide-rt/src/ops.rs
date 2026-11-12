@@ -891,6 +891,21 @@ pub fn concat(m: &mut [u64], d: usize, w: u32, parts: &[(u32, u32)]) {
     }
 }
 
+/// Deposit the `sw`-bit value at `s` into bits [off, off+sw) of the `dw`-bit value at `d`.
+pub fn insert(m: &mut [u64], d: usize, dw: u32, s: usize, sw: u32, off: u32) {
+    let (nd, ns) = (nw(dw), nw(sw));
+    let len = sw.min(dw.saturating_sub(off));
+    for plane in 0..2 {
+        let mut i = 0;
+        while i < len {
+            let l = (len - i).min(64);
+            let v = get_bits(m, s + plane * ns, i, l);
+            set_bits(m, d + plane * nd, off + i, l, v);
+            i += l;
+        }
+    }
+}
+
 pub fn clog2(m: &mut [u64], d: usize, s: usize, w: u32) {
     if !is_known(m, s, w) {
         m[d] = 0xffff_ffff;

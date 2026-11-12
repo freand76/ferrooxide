@@ -126,6 +126,7 @@ pub fn compile(modules: &[Module], tops: &[String]) -> Result<(Program, Vec<Stri
         c.tops.insert(m.name.clone(), sid);
     }
     c.codegen_jobs()?;
+    c.prog.scratch_words = SCRATCH_WORDS;
     Ok((c.prog, c.warnings))
 }
 
@@ -280,8 +281,9 @@ impl<'a> Compiler<'a> {
         self.prog.procs[st.proc as usize].code = st.code;
     }
 
-    pub(crate) fn make_ctl(&mut self, mut triggers: Vec<(u32, rt::Edge)>) -> u32 {
-        triggers.sort_by_key(|t| (t.0, t.1 as u8));
+    /// An event control: (signal, edge, array element or NONE) triggers.
+    pub(crate) fn make_ctl(&mut self, mut triggers: Vec<(u32, rt::Edge, u32)>) -> u32 {
+        triggers.sort_by_key(|t| (t.0, t.2, t.1 as u8));
         triggers.dedup();
         let proc = self.pb.last().unwrap().proc;
         let id = self.prog.ctls.len() as u32;
@@ -367,6 +369,27 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(self.read_const(slot, w, s))
+    }
+
+    /// Value of a constant expression without emitting code or errors (None if not evaluable).
+    pub(crate) fn const_value(&self, e: &Expr, sid: usize) -> Option<i64> {
+        match e {
+            Expr::Num(n) => Const::from_number(n).ok()?.to_i64(),
+            Expr::Ident(n) => match self.lookup(n, sid)? {
+                Sym::Const(c) => c.to_i64(),
+                _ => None,
+            },
+            Expr::Binary(op, a, b) => {
+                let (a, b) = (self.const_value(a, sid)?, self.const_value(b, sid)?);
+                match op {
+                    BinOp::Add => Some(a + b),
+                    BinOp::Sub => Some(a - b),
+                    BinOp::Mul => Some(a * b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn const_int(&mut self, e: &Expr, sid: usize) -> R<i64> {
@@ -861,7 +884,7 @@ impl<'a> Compiler<'a> {
                             self.stmt(body, *scope)?;
                             let mut reads = Vec::new();
                             self.reads_stmt(body, *scope, &mut reads);
-                            let ctl = self.make_ctl(reads.into_iter().map(|s| (s, rt::Edge::Any)).collect());
+                            let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect());
                             self.emit(Instr::Wait { ctl });
                             self.emit(Instr::Jmp { to: top });
                         }

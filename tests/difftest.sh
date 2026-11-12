@@ -12,6 +12,7 @@ files=("$@")
 [ ${#files[@]} -eq 0 ] && files=("$root"/tests/verilog/*.v)
 pass=0; fail=0; failed=()
 for f in "${files[@]}"; do
+  f="$(realpath "$f")"
   name="$(basename "$f" .v)"
   ( cd "$(dirname "$f")" && iverilog -g2012 -o "$tmp/$name.vvp" "$f" 2>"$tmp/$name.ierr" ) || { echo "SKIP $name (iverilog failed)"; continue; }
   ( cd "$(dirname "$f")" && vvp -n "$tmp/$name.vvp" 2>&1 | grep -v -e '\$finish called' -e '^VCD info' -e '\$stop called' > "$tmp/$name.exp" )

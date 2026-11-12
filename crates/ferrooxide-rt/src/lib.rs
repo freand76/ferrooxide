@@ -71,7 +71,8 @@ pub struct SignalInfo {
 #[derive(Clone, Debug)]
 pub struct EventCtl {
     pub proc: u32,
-    pub triggers: Vec<(u32, Edge)>,
+    /// (signal, edge, array element or NONE for the whole signal)
+    pub triggers: Vec<(u32, Edge, u32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +100,68 @@ pub struct Program {
     pub ctls: Vec<EventCtl>,
     /// all hierarchical names (including port aliases) for VCD: (name, signal)
     pub names: Vec<(String, u32)>,
+    /// memory words [0, scratch_words) are the shared scratch region for process temporaries
+    pub scratch_words: u32,
+}
+
+/// Every memory slot an instruction reads or writes (value base slots).
+pub fn instr_slots(ins: &Instr) -> Vec<u32> {
+    let ix = |i: &Index| i.slot;
+    match ins {
+        Instr::Copy { d, s, .. } | Instr::Resize { d, s, .. } | Instr::Un { d, s, .. } | Instr::Red { d, s, .. } => {
+            vec![*d, *s]
+        }
+        Instr::Clog2 { d, s, .. } => vec![*d, *s],
+        Instr::Bin { d, a, b, .. } | Instr::Cmp { d, a, b, .. } => vec![*d, *a, *b],
+        Instr::Shift { d, a, b, .. } | Instr::Pow { d, a, b, .. } => vec![*d, *a, *b],
+        Instr::Mux { d, c, t, f, .. } => vec![*d, *c, *t, *f],
+        Instr::Concat { d, parts, .. } => std::iter::once(*d).chain(parts.iter().map(|p| p.0)).collect(),
+        Instr::Insert { d, s, .. } => vec![*d, *s],
+        Instr::Slice { d, s, .. } => vec![*d, *s],
+        Instr::DynSlice { d, s, ix: i, .. } => vec![*d, *s, ix(i)],
+        Instr::ArrRead { d, ix: i, .. } => vec![*d, ix(i)],
+        Instr::Store { t, s, mode } => {
+            let mut v = vec![*s];
+            match t {
+                Target::DynPart { ix: i, .. } | Target::Elem { ix: i, .. } | Target::ElemPart { ix: i, .. } => {
+                    v.push(ix(i))
+                }
+                _ => {}
+            }
+            if let StoreMode::NbaDelay(d) = mode {
+                v.push(*d);
+            }
+            v
+        }
+        Instr::Jz { c, .. } => vec![*c],
+        Instr::Delay { s } => vec![*s],
+        Instr::SysF { d, .. } => vec![*d],
+        Instr::Jmp { .. } | Instr::Wait { .. } | Instr::Halt => vec![],
+        Instr::Sys(t) => {
+            let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
+                args.iter()
+                    .filter_map(|a| match a {
+                        FmtArg::Val { s, .. } | FmtArg::Time { s } => Some(*s),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            match &**t {
+                SysTask::Display { args, fd, .. } => {
+                    let mut v = fa(args);
+                    if let Some((s, _)) = fd {
+                        v.push(*s);
+                    }
+                    v
+                }
+                SysTask::MonitorPrint { args, .. } => fa(args),
+                SysTask::ReadMem { start, end, .. } => start.iter().chain(end.iter()).map(|x| x.0).collect(),
+                SysTask::FOpen { d, .. } => vec![*d],
+                SysTask::FClose { s } => vec![*s],
+                _ => vec![],
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -246,6 +309,8 @@ pub enum Instr {
     Pow { d: u32, a: u32, b: u32, w: u32, bw: u32, signed: bool },
     Mux { d: u32, c: u32, cw: u32, t: u32, f: u32, w: u32 },
     Concat { d: u32, w: u32, parts: Box<[(u32, u32)]> },
+    /// deposit the `sw`-bit value `s` at bit `off` of the `dw`-bit value `d` (other bits kept)
+    Insert { d: u32, dw: u32, s: u32, sw: u32, off: u32 },
     Slice { d: u32, s: u32, sw: u32, lsb: u32, w: u32 },
     DynSlice { d: u32, s: u32, sw: u32, ix: Index, w: u32 },
     ArrRead { d: u32, sig: u32, ix: Index },

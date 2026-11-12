@@ -199,7 +199,7 @@ impl<'a> Compiler<'a> {
                 v
             }
             Rhs::Sig(s) => {
-                reads.push(*s);
+                reads.push((*s, NONE));
                 let i = self.sig(*s).clone();
                 self.resize(i.slot, i.width, lw, i.signed)
             }
@@ -224,7 +224,7 @@ impl<'a> Compiler<'a> {
         if reads.is_empty() {
             self.emit(Instr::Halt);
         } else {
-            let ctl = self.make_ctl(reads.into_iter().map(|s| (s, REdge::Any)).collect());
+            let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
             self.emit(Instr::Wait { ctl });
             self.emit(Instr::Jmp { to: top });
         }
@@ -238,7 +238,7 @@ impl<'a> Compiler<'a> {
             EventCtl::Star => {
                 let mut reads = Vec::new();
                 self.reads_stmt(body, sid, &mut reads);
-                trig.extend(reads.into_iter().map(|s| (s, REdge::Any)));
+                trig.extend(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)));
             }
             EventCtl::List(v) => {
                 for (edge, e) in v {
@@ -249,7 +249,7 @@ impl<'a> Compiler<'a> {
                     };
                     match e {
                         Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
-                            Some(expr::Base::Sig(s)) => trig.push((s, re)),
+                            Some(expr::Base::Sig(s)) => trig.push((s, re, NONE)),
                             _ => return self.err("event expression is not a signal"),
                         },
                         _ => {
@@ -258,7 +258,7 @@ impl<'a> Compiler<'a> {
                             }
                             let mut reads = Vec::new();
                             self.reads_expr(e, sid, &mut reads);
-                            trig.extend(reads.into_iter().map(|s| (s, REdge::Any)));
+                            trig.extend(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)));
                         }
                     }
                 }
@@ -545,7 +545,7 @@ impl<'a> Compiler<'a> {
                 self.patch(jz, h);
                 let mut reads = Vec::new();
                 self.reads_expr(cond, sid, &mut reads);
-                let ctl = self.make_ctl(reads.into_iter().map(|s| (s, REdge::Any)).collect());
+                let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
                 self.emit(Instr::Wait { ctl });
                 self.emit(Instr::Jmp { to: top });
                 let h = self.here();
@@ -694,7 +694,7 @@ impl<'a> Compiler<'a> {
                     for e in args.iter().flatten() {
                         self.reads_expr(e, sid, &mut reads);
                     }
-                    let ctl = self.make_ctl(reads.into_iter().map(|s| (s, REdge::Any)).collect());
+                    let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
                     self.emit(Instr::Wait { ctl });
                     self.emit(Instr::Jmp { to: top });
                 } else {
@@ -763,15 +763,15 @@ impl<'a> Compiler<'a> {
     }
 
     // ------------------------------------------------------------------ read sets
-    pub(crate) fn reads_stmt(&self, st: &Stmt, sid: usize, out: &mut Vec<u32>) {
+    pub(crate) fn reads_stmt(&self, st: &Stmt, sid: usize, out: &mut Vec<(u32, u32)>) {
         let mut locals: Vec<u32> = Vec::new();
         self.reads_stmt_inner(st, sid, out, &mut locals);
-        out.retain(|s| !locals.contains(s));
+        out.retain(|s| !locals.contains(&s.0));
         out.sort_unstable();
         out.dedup();
     }
 
-    fn reads_stmt_inner(&self, st: &Stmt, sid: usize, out: &mut Vec<u32>, locals: &mut Vec<u32>) {
+    fn reads_stmt_inner(&self, st: &Stmt, sid: usize, out: &mut Vec<(u32, u32)>, locals: &mut Vec<u32>) {
         match st {
             Stmt::Null | Stmt::Disable { .. } | Stmt::Trigger { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Block { stmts, name, .. } => {

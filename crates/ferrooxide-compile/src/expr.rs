@@ -30,7 +30,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// If `e` names an array, return its signal.
-    pub(crate) fn array_of(&mut self, e: &Expr, sid: usize) -> Option<u32> {
+    pub(crate) fn array_of(&self, e: &Expr, sid: usize) -> Option<u32> {
         let sym = match e {
             Expr::Ident(n) => self.lookup(n, sid)?,
             Expr::Hier(p) => self.lookup_hier(p, sid)?,
@@ -388,7 +388,7 @@ impl<'a> Compiler<'a> {
                     tw += xw;
                 }
                 let d = self.tmp(tw);
-                self.emit(Instr::Concat { d, w: tw, parts: parts.into_boxed_slice() });
+                self.emit_concat(d, tw, &parts);
                 Ok(self.resize(d, tw, w, false))
             }
             Expr::Repl(n, v) => {
@@ -407,7 +407,7 @@ impl<'a> Compiler<'a> {
                     return Ok(self.const_slot(&Const::zero(w)));
                 }
                 let d = self.tmp(tw);
-                self.emit(Instr::Concat { d, w: tw, parts: parts.into_boxed_slice() });
+                self.emit_concat(d, tw, &parts);
                 Ok(self.resize(d, tw, w, false))
             }
             Expr::Call(name, args) => {
@@ -419,6 +419,22 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(d, rw, w, s && rs))
             }
             Expr::SysCall(name, args) => self.sys_func(name, args, sid, w, s),
+        }
+    }
+
+    /// Concatenation (parts msb-first). Two ≤64-bit parts use one Concat; otherwise the value is
+    /// built from zero with one Insert per part, which the fast paths handle at any width.
+    pub(crate) fn emit_concat(&mut self, d: u32, tw: u32, parts: &[(u32, u32)]) {
+        if tw <= 64 && parts.len() == 2 {
+            self.emit(Instr::Concat { d, w: tw, parts: parts.to_vec().into_boxed_slice() });
+            return;
+        }
+        let zero = self.const_slot(&Const::zero(tw));
+        self.emit(Instr::Copy { d, s: zero, w: tw });
+        let mut off = 0;
+        for &(s, pw) in parts.iter().rev() {
+            self.emit(Instr::Insert { d, dw: tw, s, sw: pw, off });
+            off += pw;
         }
     }
 
@@ -706,19 +722,32 @@ impl<'a> Compiler<'a> {
     }
 
     // ------------------------------------------------------------------ read sets
-    pub(crate) fn reads_expr(&self, e: &Expr, sid: usize, out: &mut Vec<u32>) {
+    pub(crate) fn reads_expr(&self, e: &Expr, sid: usize, out: &mut Vec<(u32, u32)>) {
         match e {
             Expr::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
-                    out.push(s)
+                    out.push((s, NONE))
                 }
             }
             Expr::Hier(p) => {
                 if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
-                    out.push(s)
+                    out.push((s, NONE))
                 }
             }
             Expr::Index(a, b) => {
+                // a constant-index array element is its own node for sensitivity
+                if let Some(arr) = self.array_of(a, sid) {
+                    if self.is_const(b, sid) {
+                        let info = self.sig(arr);
+                        if let Some(e) = self.const_value(b, sid) {
+                            let e = e - info.arr_lo;
+                            if e >= 0 && e < info.depth as i64 {
+                                out.push((arr, e as u32));
+                                return;
+                            }
+                        }
+                    }
+                }
                 self.reads_expr(a, sid, out);
                 self.reads_expr(b, sid, out);
             }
@@ -743,7 +772,7 @@ impl<'a> Compiler<'a> {
                         if let Some(fi) = self.func_inst.get(&(fs, f.name.clone())) {
                             self.reads_stmt(&f.body, fi.scope, &mut inner);
                             let own: Vec<u32> = fi.ports.iter().map(|p| p.1).chain(fi.ret).collect();
-                            out.extend(inner.into_iter().filter(|s| !own.contains(s)));
+                            out.extend(inner.into_iter().filter(|s| !own.contains(&s.0)));
                         }
                     }
                 }
@@ -759,10 +788,12 @@ impl<'a> Compiler<'a> {
     }
 
     /// Signals read by an lvalue's index expressions.
-    pub(crate) fn reads_lvalue(&self, e: &Expr, sid: usize, out: &mut Vec<u32>) {
+    pub(crate) fn reads_lvalue(&self, e: &Expr, sid: usize, out: &mut Vec<(u32, u32)>) {
         match e {
             Expr::Index(a, b) => {
-                self.reads_lvalue(a, sid, out);
+                if !matches!(&**a, Expr::Ident(_) | Expr::Hier(_)) {
+                    self.reads_lvalue(a, sid, out);
+                }
                 self.reads_expr(b, sid, out);
             }
             Expr::Range(a, _, _) => self.reads_lvalue(a, sid, out),

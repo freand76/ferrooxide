@@ -19,6 +19,8 @@ struct SigRt {
     /// combinational readers (comb indices) in `cfan`
     cfan_lo: u32,
     cfan_hi: u32,
+    /// for a virtual array-element signal: the array (whose listeners are notified too)
+    parent: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +104,10 @@ pub struct Sim {
     comb_bits: Vec<u64>,
     comb_order: Vec<u32>,
     cfan: Vec<u32>,
+    /// (array, element) -> virtual signal of that element
+    elem_sig: HashMap<(u32, u32), u32>,
+    /// number of real signals (virtual element signals follow)
+    nreal: u32,
     /// comb index of the combinational process being executed, NONE otherwise
     cur_comb: u32,
     /// no bits are set below word `comb_lo`
@@ -111,7 +117,12 @@ pub struct Sim {
     sigs: Vec<SigRt>,
     fan: Vec<Fan>,
     procs: Vec<ProcRt>,
-    active: VecDeque<u32>,
+    /// active processes with their wake sequence number
+    active: VecDeque<(u32, u64)>,
+    /// wake sequence counter (FIFO order between active wakes and the combinational settle)
+    seq: u64,
+    /// sequence number of the first pending combinational wake, u64::MAX if none is pending
+    comb_seq: u64,
     inactive: Vec<u32>,
     nba: Vec<Nba>,
     nba_vals: Vec<u64>,
@@ -172,11 +183,24 @@ impl Sim {
             ranks[p as usize] = c as u32;
         }
         let comb_words = comb_order.len().div_ceil(64);
+        // virtual signals for array elements that something is sensitive to
+        let mut elem_sig: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut vsig_of: Vec<(u32, u32)> = Vec::new();
+        for c in &prog.ctls {
+            for &(sig, _, e) in &c.triggers {
+                if e != NONE && !elem_sig.contains_key(&(sig, e)) {
+                    elem_sig.insert((sig, e), (nsig + vsig_of.len()) as u32);
+                    vsig_of.push((sig, e));
+                }
+            }
+        }
+        let ntot = nsig + vsig_of.len();
         // fan-out tables: combinational readers by comb index, everything else as events
-        let mut per_sig: Vec<Vec<Fan>> = vec![Vec::new(); nsig];
-        let mut per_sig_c: Vec<Vec<u32>> = vec![Vec::new(); nsig];
+        let mut per_sig: Vec<Vec<Fan>> = vec![Vec::new(); ntot];
+        let mut per_sig_c: Vec<Vec<u32>> = vec![Vec::new(); ntot];
         for (ci, c) in prog.ctls.iter().enumerate() {
-            for &(sig, edge) in &c.triggers {
+            for &(sig, edge, e) in &c.triggers {
+                let sig = if e != NONE { elem_sig[&(sig, e)] } else { sig };
                 if c.proc != NONE && ranks[c.proc as usize] != NONE {
                     per_sig_c[sig as usize].push(ranks[c.proc as usize]);
                 } else {
@@ -186,8 +210,16 @@ impl Sim {
         }
         let mut fan = Vec::new();
         let mut cfan = Vec::new();
-        let mut sigs = Vec::with_capacity(nsig);
-        for (i, s) in prog.signals.iter().enumerate() {
+        let mut sigs = Vec::with_capacity(ntot);
+        for i in 0..ntot {
+            let (slot, width, depth, parent) = if i < nsig {
+                let s = &prog.signals[i];
+                (s.slot, s.width, s.depth, NONE)
+            } else {
+                let (a, e) = vsig_of[i - nsig];
+                let s = &prog.signals[a as usize];
+                (s.slot + e * words(s.width), s.width, 0, a)
+            };
             let lo = fan.len() as u32;
             fan.extend_from_slice(&per_sig[i]);
             let clo = cfan.len() as u32;
@@ -195,13 +227,14 @@ impl Sim {
             per_sig_c[i].dedup();
             cfan.extend_from_slice(&per_sig_c[i]);
             sigs.push(SigRt {
-                slot: s.slot,
-                width: s.width,
-                depth: s.depth,
+                slot,
+                width,
+                depth,
                 fan_lo: lo,
                 fan_hi: fan.len() as u32,
                 cfan_lo: clo,
                 cfan_hi: cfan.len() as u32,
+                parent,
             });
         }
         let procs = prog
@@ -211,7 +244,7 @@ impl Sim {
             .map(|(i, p)| ProcRt { pc: 0, wait: NONE, class: p.class, started: false, rank: ranks[i] })
             .collect();
         let code = Rc::new(Code {
-            ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals)).collect(),
+            ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals, &elem_sig)).collect(),
             orig: prog.procs.iter().map(|p| p.code.clone()).collect(),
         });
         Sim {
@@ -221,11 +254,15 @@ impl Sim {
             comb_lo: comb_words,
             cfan,
             cur_comb: NONE,
+            elem_sig,
+            nreal: nsig as u32,
             mem: prog.mem.clone(),
             sigs,
             fan,
             procs,
             active: VecDeque::new(),
+            seq: 0,
+            comb_seq: u64::MAX,
             inactive: Vec::new(),
             nba: Vec::new(),
             nba_vals: Vec::new(),
@@ -258,15 +295,17 @@ impl Sim {
 
     /// Run until no events remain, $finish, or `max_time` is passed.
     pub fn run(&mut self, max_time: Option<u64>) {
-        for (i, p) in self.procs.iter_mut().enumerate() {
+        for i in 0..self.procs.len() {
+            let p = &mut self.procs[i];
             if p.class == ProcClass::Normal {
                 p.started = true;
                 if p.rank != NONE {
                     let c = p.rank as usize;
                     self.comb_bits[c >> 6] |= 1 << (c & 63);
                     self.comb_lo = self.comb_lo.min(c >> 6);
+                    self.comb_wake();
                 } else {
-                    self.active.push_back(i as u32);
+                    self.push_active(i as u32);
                 }
             }
         }
@@ -286,7 +325,7 @@ impl Sim {
             self.time = t;
             for ev in evs {
                 match ev {
-                    Fut::Wake(p) => self.active.push_back(p),
+                    Fut::Wake(p) => self.push_active(p),
                     Fut::Nba { sig, res, sw, val } => {
                         let off = self.nba_vals.len() as u32;
                         self.nba_vals.extend_from_slice(&val);
@@ -317,31 +356,28 @@ impl Sim {
 
     fn timestep(&mut self) {
         loop {
-            while let Some(p) = self.active.pop_front() {
-                self.exec(p);
-                if self.finished {
+            // Combinational processes settle before the next active process runs: continuous
+            // assignments propagate "immediately", as with Icarus's FIFO order in the common
+            // `data = x; clk = 1;` testbench race, and at time 0 every combinational process
+            // reaches its first wait before initial blocks change its inputs.
+            let front = self.active.front().map(|a| a.1).unwrap_or(u64::MAX);
+            if self.comb_seq < front {
+                if self.settle() {
                     return;
                 }
+                continue;
             }
-            while self.comb_lo < self.comb_bits.len() && self.comb_bits[self.comb_lo] == 0 {
-                self.comb_lo += 1;
-            }
-            if self.comb_lo < self.comb_bits.len() {
-                let w = self.comb_bits[self.comb_lo];
-                let bit = w.trailing_zeros() as usize;
-                self.comb_bits[self.comb_lo] = w & (w - 1);
-                let c = (self.comb_lo << 6) | bit;
-                let k = self.comb_order[c];
-                self.cur_comb = c as u32;
-                self.exec(k);
-                self.cur_comb = NONE;
+            if let Some((p, _)) = self.active.pop_front() {
+                self.exec(p);
                 if self.finished {
                     return;
                 }
                 continue;
             }
             if !self.inactive.is_empty() {
-                self.active.extend(self.inactive.drain(..));
+                for p in std::mem::take(&mut self.inactive) {
+                    self.push_active(p);
+                }
                 continue;
             }
             if self.hot.nba_len != 0 {
@@ -358,6 +394,46 @@ impl Sim {
         }
         if self.dumping && !self.dirty.is_empty() {
             self.dump_dirty();
+        }
+    }
+
+    #[inline]
+    fn push_active(&mut self, p: u32) {
+        self.active.push_back((p, self.seq));
+        self.seq += 1;
+    }
+
+    /// A combinational process became pending: the settle is ordered by its first wake.
+    #[inline]
+    fn comb_wake(&mut self) {
+        if self.comb_seq == u64::MAX {
+            self.comb_seq = self.seq;
+            self.seq += 1;
+        }
+    }
+
+    /// Run pending combinational processes in rank order. Returns true on $finish.
+    #[inline]
+    fn settle(&mut self) -> bool {
+        loop {
+            while self.comb_lo < self.comb_bits.len() && self.comb_bits[self.comb_lo] == 0 {
+                self.comb_lo += 1;
+            }
+            if self.comb_lo >= self.comb_bits.len() {
+                self.comb_seq = u64::MAX;
+                return false;
+            }
+            let w = self.comb_bits[self.comb_lo];
+            let bit = w.trailing_zeros() as usize;
+            self.comb_bits[self.comb_lo] = w & (w - 1);
+            let c = (self.comb_lo << 6) | bit;
+            let k = self.comb_order[c];
+            self.cur_comb = c as u32;
+            self.exec(k);
+            self.cur_comb = NONE;
+            if self.finished {
+                return true;
+            }
         }
     }
 
@@ -440,7 +516,10 @@ impl Sim {
     #[inline]
     fn notify(&mut self, sig: u32, old: u8) {
         let r = self.sigs[sig as usize];
-        if self.dumping && !self.is_dirty[sig as usize] {
+        if r.parent != NONE {
+            self.notify(r.parent, 0);
+        }
+        if self.dumping && sig < self.nreal && !self.is_dirty[sig as usize] {
             self.is_dirty[sig as usize] = true;
             self.dirty.push(sig);
         }
@@ -450,6 +529,7 @@ impl Sim {
             if c != self.cur_comb {
                 let wi = (c >> 6) as usize;
                 self.comb_bits[wi] |= 1 << (c & 63);
+                self.comb_wake();
                 if wi < self.comb_lo {
                     self.comb_lo = wi;
                 }
@@ -472,13 +552,14 @@ impl Sim {
             if pr.rank != NONE {
                 let c = pr.rank as usize;
                 self.comb_bits[c >> 6] |= 1 << (c & 63);
+                self.comb_wake();
                 if (c >> 6) < self.comb_lo {
                     self.comb_lo = c >> 6;
                 }
             } else if pr.class == ProcClass::Postponed {
                 self.postponed.push(f.proc);
             } else {
-                self.active.push_back(f.proc);
+                self.push_active(f.proc);
             }
         }
     }
@@ -525,7 +606,18 @@ impl Sim {
             }
         };
         if changed {
-            self.notify(sig, old);
+            let e = match res {
+                Res::Elem(e) | Res::ElemBits { e, .. } => e,
+                _ => NONE,
+            };
+            match (e != NONE).then(|| self.elem_sig.get(&(sig, e)).copied()).flatten() {
+                Some(v) => {
+                    let old = lsb_code(&self.mem, self.sigs[v as usize].slot, r.width);
+                    let _ = old;
+                    self.notify(v, 0);
+                }
+                None => self.notify(sig, old),
+            }
         }
     }
 
@@ -619,12 +711,19 @@ impl Sim {
             let cb = crate::jit::Callbacks {
                 notify: cb_notify,
                 nba: cb_nba,
+                nba_wide: cb_nba_wide,
                 gen: cb_gen,
                 wait: cb_wait,
                 delay: cb_delay,
                 halt: cb_halt,
             };
-            let j = crate::jit::compile(&self.code.ops, &cb, std::mem::size_of::<ProcRt>() as u32)?;
+            let j = crate::jit::compile(
+                &self.code.ops,
+                &self.code.orig,
+                self.prog.scratch_words,
+                &cb,
+                std::mem::size_of::<ProcRt>() as u32,
+            )?;
             self.entries = (0..j.fns.len()).map(|p| (j.fns[p], j.tables[j.table_off[p]..].as_ptr())).collect();
             self.jit = Some(j);
         }
@@ -662,7 +761,8 @@ impl Sim {
             let op = unsafe { *ops.get_unchecked(pc) };
             pc += 1;
             match op {
-                Op::Gen => {
+                // the interpreter runs wide ops through the generic path (the JIT compiles them)
+                Op::Gen | Op::GenJ | Op::WCopy { .. } | Op::WAnd { .. } | Op::WOr { .. } | Op::WXor { .. } | Op::WNot { .. } | Op::WAdd { .. } | Op::WSub { .. } | Op::WEq { .. } | Op::WNe { .. } | Op::WCaseEq { .. } | Op::WCaseNe { .. } | Op::WLt { .. } | Op::WLe { .. } | Op::WSlice { .. } | Op::WResize { .. } | Op::WIns { .. } | Op::WMux { .. } | Op::WBool { .. } | Op::WStore { .. } | Op::WNba { .. } => {
                     if self.exec_gen(p, &orig[pc - 1], &mut pc) {
                         return;
                     }
@@ -670,6 +770,11 @@ impl Sim {
                 Op::Copy1 { d, s } => {
                     m!(d) = m!(s);
                     m!(d + 1) = m!(s + 1);
+                }
+                Op::Ins1 { d, s, off, w } => {
+                    let mask = fast::mk(w) << off;
+                    m!(d) = (m!(d) & !mask) | ((m!(s) << off) & mask);
+                    m!(d + 1) = (m!(d + 1) & !mask) | ((m!(s + 1) << off) & mask);
                 }
                 Op::Slice1 { d, s, sh, w } => {
                     m!(d) = (m!(s) >> sh) & fast::mk(w);
@@ -925,6 +1030,7 @@ impl Sim {
                     ops::mux(m, *d as usize, *c as usize, *cw, *t as usize, *f as usize, *w)
                 }
                 Instr::Concat { d, w, parts } => ops::concat(m, *d as usize, *w, parts),
+                Instr::Insert { d, dw, s, sw, off } => ops::insert(m, *d as usize, *dw, *s as usize, *sw, *off),
                 Instr::Slice { d, s, sw, lsb, w } => ops::extract(m, *d as usize, *s as usize, *sw, *lsb as i64, *w),
                 Instr::DynSlice { d, s, sw, ix, w } => match self.index(ix) {
                     Some(off) => ops::extract(&mut self.mem, *d as usize, *s as usize, *sw, off, *w),
@@ -1254,6 +1360,7 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
             Instr::Pow { d, a, b, w, bw, signed } => ops::pow(m, *d as usize, *a as usize, *b as usize, *w, *bw, *signed),
             Instr::Mux { d, c, cw, t, f, w } => ops::mux(m, *d as usize, *c as usize, *cw, *t as usize, *f as usize, *w),
             Instr::Concat { d, w, parts } => ops::concat(m, *d as usize, *w, parts),
+            Instr::Insert { d, dw, s, sw, off } => ops::insert(m, *d as usize, *dw, *s as usize, *sw, *off),
             Instr::Slice { d, s, sw, lsb, w } => ops::extract(m, *d as usize, *s as usize, *sw, *lsb as i64, *w),
             Instr::DynSlice { d, s, sw, ix, w } => match index(m, ix) {
                 Some(off) => ops::extract(m, *d as usize, *s as usize, *sw, off, *w),
@@ -1344,13 +1451,13 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
 fn comb_ranks(prog: &Program) -> Vec<u32> {
     let n = prog.procs.len();
     let mut eligible = vec![false; n];
-    let mut reads: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for (ci, c) in prog.ctls.iter().enumerate() {
-        let _ = ci;
+    // reads and writes are (signal, array element or NONE = whole signal)
+    let mut reads: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
+    for c in &prog.ctls {
         if c.proc == NONE {
             continue;
         }
-        reads[c.proc as usize].extend(c.triggers.iter().map(|t| t.0));
+        reads[c.proc as usize].extend(c.triggers.iter().map(|t| (t.0, t.2)));
     }
     let mut level = vec![true; n];
     for c in &prog.ctls {
@@ -1358,7 +1465,7 @@ fn comb_ranks(prog: &Program) -> Vec<u32> {
             level[c.proc as usize] = false;
         }
     }
-    let mut writes: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut writes: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
     for (i, p) in prog.procs.iter().enumerate() {
         if p.class != ProcClass::Normal || !level[i] {
             continue;
@@ -1376,15 +1483,15 @@ fn comb_ranks(prog: &Program) -> Vec<u32> {
                     if matches!(mode, StoreMode::NbaDelay(_)) {
                         ok = false;
                     }
-                    let sig = match t {
+                    let w = match t {
+                        Target::ElemK { sig, e } => (*sig, *e),
                         Target::Whole { sig }
                         | Target::Part { sig, .. }
                         | Target::DynPart { sig, .. }
                         | Target::Elem { sig, .. }
-                        | Target::ElemK { sig, .. }
-                        | Target::ElemPart { sig, .. } => *sig,
+                        | Target::ElemPart { sig, .. } => (*sig, NONE),
                     };
-                    writes[i].push(sig);
+                    writes[i].push(w);
                 }
                 _ => {}
             }
@@ -1392,11 +1499,11 @@ fn comb_ranks(prog: &Program) -> Vec<u32> {
         eligible[i] = ok && waits == 1;
     }
     // signal -> eligible readers
-    let mut readers: Vec<Vec<u32>> = vec![Vec::new(); prog.signals.len()];
+    let mut readers: Vec<Vec<(u32, u32)>> = vec![Vec::new(); prog.signals.len()];
     for i in 0..n {
         if eligible[i] {
-            for &s in &reads[i] {
-                readers[s as usize].push(i as u32);
+            for &(s, e) in &reads[i] {
+                readers[s as usize].push((i as u32, e));
             }
         }
     }
@@ -1408,9 +1515,10 @@ fn comb_ranks(prog: &Program) -> Vec<u32> {
             continue;
         }
         let mut targets: Vec<u32> = Vec::new();
-        for &s in &writes[i] {
-            for &r in &readers[s as usize] {
-                if r as usize != i {
+        for &(s, we) in &writes[i] {
+            for &(r, re) in &readers[s as usize] {
+                let overlap = we == NONE || re == NONE || we == re;
+                if overlap && r as usize != i {
                     targets.push(r);
                 }
             }
@@ -1460,6 +1568,16 @@ unsafe extern "C" fn cb_notify(sim: *mut Sim, sig: u32, old: u32) {
 #[cfg(feature = "jit")]
 unsafe extern "C" fn cb_nba(sim: *mut Sim, sig: u32, slot: u32, a: u64, b: u64) {
     (*sim).push_small(sig, slot, a, b);
+}
+
+#[cfg(feature = "jit")]
+unsafe extern "C" fn cb_nba_wide(sim: *mut Sim, sig: u32, s: u32, w: u32) {
+    let sim = &mut *sim;
+    let s = s as usize;
+    let n = 2 * nw(w);
+    let off = sim.nba_vals.len() as u32;
+    sim.nba_vals.extend_from_slice(&sim.mem[s..s + n]);
+    sim.push_generic(Nba { sig, res: Res::Whole, off, sw: w });
 }
 
 #[cfg(feature = "jit")]

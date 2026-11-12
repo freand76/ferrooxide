@@ -11,6 +11,36 @@ use crate::*;
 pub enum Op {
     /// execute the original instruction at this pc
     Gen,
+    /// a generic jump (wide condition): continues at the pc the generic path returns
+    GenJ,
+    /// narrow insert: bits [off, off+w) of d = s
+    Ins1 { d: u32, s: u32, off: u8, w: u8 },
+    // ---- wide ops (65..=MAX_WIDE bits); `w` widths, operands laid out as nw words per plane
+    WCopy { d: u32, s: u32, w: u16 },
+    WAnd { d: u32, a: u32, b: u32, w: u16 },
+    WOr { d: u32, a: u32, b: u32, w: u16 },
+    WXor { d: u32, a: u32, b: u32, w: u16 },
+    WNot { d: u32, s: u32, w: u16 },
+    WAdd { d: u32, a: u32, b: u32, w: u16 },
+    WSub { d: u32, a: u32, b: u32, w: u16 },
+    WEq { d: u32, a: u32, b: u32, w: u16 },
+    WNe { d: u32, a: u32, b: u32, w: u16 },
+    WCaseEq { d: u32, a: u32, b: u32, w: u16 },
+    WCaseNe { d: u32, a: u32, b: u32, w: u16 },
+    WLt { d: u32, a: u32, b: u32, w: u16 },
+    WLe { d: u32, a: u32, b: u32, w: u16 },
+    /// extract `w` bits at `lsb` of the `sw`-bit value s (in range; either width may be wide)
+    WSlice { d: u32, s: u32, lsb: u32, sw: u16, w: u16 },
+    WResize { d: u32, s: u32, sw: u16, dw: u16, sign: bool },
+    /// insert the `sw`-bit value s at bit `off` of the `dw`-bit value d
+    WIns { d: u32, s: u32, off: u32, dw: u16, sw: u16 },
+    /// mux with a ≤64-bit condition
+    WMux { d: u32, c: u32, t: u32, f: u32, w: u16 },
+    WBool { d: u32, s: u32, w: u16 },
+    /// blocking store of a wide value into a whole signal (or constant-index array element)
+    WStore { sig: u32, s: u32, slot: u32, w: u16 },
+    /// non-blocking store of a wide value; the value is read from memory by the runtime
+    WNba { sig: u32, s: u32, w: u16 },
     Copy1 { d: u32, s: u32 },
     /// d = (s >> sh) & mask
     Slice1 { d: u32, s: u32, sh: u8, w: u8 },
@@ -70,7 +100,34 @@ pub fn map_op(op: Op, f: &mut dyn FnMut(Field, u32) -> u32) -> Op {
     use Field::*;
     let mut s = |x: u32| f(Slot, x);
     match op {
-        Op::Gen | Op::Halt | Op::Jmp { .. } => op,
+        Op::Gen | Op::GenJ | Op::Halt | Op::Jmp { .. } => op,
+        Op::Ins1 { d, s: x, off, w } => Op::Ins1 { d: s(d), s: s(x), off, w },
+        Op::WCopy { d, s: x, w } => Op::WCopy { d: s(d), s: s(x), w },
+        Op::WAnd { d, a, b, w } => Op::WAnd { d: s(d), a: s(a), b: s(b), w },
+        Op::WOr { d, a, b, w } => Op::WOr { d: s(d), a: s(a), b: s(b), w },
+        Op::WXor { d, a, b, w } => Op::WXor { d: s(d), a: s(a), b: s(b), w },
+        Op::WNot { d, s: x, w } => Op::WNot { d: s(d), s: s(x), w },
+        Op::WAdd { d, a, b, w } => Op::WAdd { d: s(d), a: s(a), b: s(b), w },
+        Op::WSub { d, a, b, w } => Op::WSub { d: s(d), a: s(a), b: s(b), w },
+        Op::WEq { d, a, b, w } => Op::WEq { d: s(d), a: s(a), b: s(b), w },
+        Op::WNe { d, a, b, w } => Op::WNe { d: s(d), a: s(a), b: s(b), w },
+        Op::WCaseEq { d, a, b, w } => Op::WCaseEq { d: s(d), a: s(a), b: s(b), w },
+        Op::WCaseNe { d, a, b, w } => Op::WCaseNe { d: s(d), a: s(a), b: s(b), w },
+        Op::WLt { d, a, b, w } => Op::WLt { d: s(d), a: s(a), b: s(b), w },
+        Op::WLe { d, a, b, w } => Op::WLe { d: s(d), a: s(a), b: s(b), w },
+        Op::WSlice { d, s: x, lsb, sw, w } => Op::WSlice { d: s(d), s: s(x), lsb, sw, w },
+        Op::WResize { d, s: x, sw, dw, sign } => Op::WResize { d: s(d), s: s(x), sw, dw, sign },
+        Op::WIns { d, s: x, off, dw, sw } => Op::WIns { d: s(d), s: s(x), off, dw, sw },
+        Op::WMux { d, c, t, f: x, w } => Op::WMux { d: s(d), c: s(c), t: s(t), f: s(x), w },
+        Op::WBool { d, s: x, w } => Op::WBool { d: s(d), s: s(x), w },
+        Op::WStore { sig, s: x, slot, w } => {
+            let (x, slot) = (s(x), s(slot));
+            Op::WStore { sig: f(Sig, sig), s: x, slot, w }
+        }
+        Op::WNba { sig, s: x, w } => {
+            let x = s(x);
+            Op::WNba { sig: f(Sig, sig), s: x, w }
+        }
         Op::Copy1 { d, s: x } => Op::Copy1 { d: s(d), s: s(x) },
         Op::Slice1 { d, s: x, sh, w } => Op::Slice1 { d: s(d), s: s(x), sh, w },
         Op::Trunc1 { d, s: x, w } => Op::Trunc1 { d: s(d), s: s(x), w },
@@ -110,11 +167,107 @@ pub fn map_op(op: Op, f: &mut dyn FnMut(Field, u32) -> u32) -> Op {
     }
 }
 
-pub fn lower(code: &[Instr], sigs: &[SignalInfo]) -> Vec<Op> {
-    code.iter().map(|i| lower1(i, sigs)).collect()
+/// `elem_sig`: (array, element) -> virtual signal notified for writes to that element
+pub fn lower(code: &[Instr], sigs: &[SignalInfo], elem_sig: &std::collections::HashMap<(u32, u32), u32>) -> Vec<Op> {
+    code.iter().map(|i| lower1(i, sigs, elem_sig)).collect()
 }
 
-fn lower1(ins: &Instr, sigs: &[SignalInfo]) -> Op {
+fn lower1(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::HashMap<(u32, u32), u32>) -> Op {
+    let op = lower_narrow(ins, sigs, elem_sig);
+    if !matches!(op, Op::Gen) {
+        return op;
+    }
+    lower_wide(ins, sigs, elem_sig)
+}
+
+/// widest value the wide ops handle (the JIT unrolls word loops)
+pub const MAX_WIDE: u32 = 1024;
+
+fn lower_wide(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::HashMap<(u32, u32), u32>) -> Op {
+    use crate::Instr as I;
+    let ok = |w: u32| w >= 1 && w <= MAX_WIDE;
+    match *ins {
+        I::Jmp { .. } | I::Jz { .. } => Op::GenJ,
+        I::Insert { d, dw, s, sw, off } if dw <= 64 && off + sw <= dw => Op::Ins1 { d, s, off: off as u8, w: sw as u8 },
+        I::Insert { d, dw, s, sw, off } if ok(dw) && ok(sw) && off + sw <= dw => {
+            Op::WIns { d, s, off, dw: dw as u16, sw: sw as u16 }
+        }
+        I::Copy { d, s, w } if ok(w) => Op::WCopy { d, s, w: w as u16 },
+        I::Un { op: UnOp::Not, d, s, w } if ok(w) => Op::WNot { d, s, w: w as u16 },
+        I::Bin { op, d, a, b, w } if ok(w) => {
+            let w = w as u16;
+            match op {
+                BinOp::And => Op::WAnd { d, a, b, w },
+                BinOp::Or => Op::WOr { d, a, b, w },
+                BinOp::Xor => Op::WXor { d, a, b, w },
+                BinOp::Add => Op::WAdd { d, a, b, w },
+                BinOp::Sub => Op::WSub { d, a, b, w },
+                _ => Op::Gen,
+            }
+        }
+        I::Cmp { op, d, a, b, w } if ok(w) => {
+            let w = w as u16;
+            match op {
+                CmpOp::Eq => Op::WEq { d, a, b, w },
+                CmpOp::Ne => Op::WNe { d, a, b, w },
+                CmpOp::CaseEq => Op::WCaseEq { d, a, b, w },
+                CmpOp::CaseNe => Op::WCaseNe { d, a, b, w },
+                CmpOp::Lt => Op::WLt { d, a, b, w },
+                CmpOp::Le => Op::WLe { d, a, b, w },
+                CmpOp::Gt => Op::WLt { d, a: b, b: a, w },
+                CmpOp::Ge => Op::WLe { d, a: b, b: a, w },
+                _ => Op::Gen,
+            }
+        }
+        I::Slice { d, s, sw, lsb, w } if ok(sw) && ok(w) && lsb + w <= sw => {
+            Op::WSlice { d, s, lsb, sw: sw as u16, w: w as u16 }
+        }
+        I::Resize { d, s, sw, dw, sign } if ok(sw) && ok(dw) => Op::WResize { d, s, sw: sw as u16, dw: dw as u16, sign },
+        I::Mux { d, c, cw, t, f, w } if cw <= 64 && ok(w) => Op::WMux { d, c, t, f, w: w as u16 },
+        I::Red { op: RedOp::Bool | RedOp::Or, d, s, w } if ok(w) => Op::WBool { d, s, w: w as u16 },
+        I::Store { t, s, mode } => {
+            let (sig, slot, w) = match t {
+                Target::Whole { sig } => {
+                    let i = &sigs[sig as usize];
+                    if i.depth > 0 {
+                        return Op::Gen;
+                    }
+                    (sig, i.slot, i.width)
+                }
+                Target::ElemK { sig, e } => {
+                    let i = &sigs[sig as usize];
+                    (elem_sig.get(&(sig, e)).copied().unwrap_or(sig), i.slot + e * words(i.width), i.width)
+                }
+                _ => return Op::Gen,
+            };
+            if !ok(w) {
+                return Op::Gen;
+            }
+            match mode {
+                StoreMode::Blocking => Op::WStore { sig, s, slot, w: w as u16 },
+                // generic NBAs of a constant-index element need the element's own signal
+                StoreMode::Nba if matches!(t, Target::Whole { .. }) || sig != t_sig(&t) => {
+                    Op::WNba { sig, s, w: w as u16 }
+                }
+                _ => Op::Gen,
+            }
+        }
+        _ => Op::Gen,
+    }
+}
+
+fn t_sig(t: &Target) -> u32 {
+    match *t {
+        Target::Whole { sig }
+        | Target::Part { sig, .. }
+        | Target::DynPart { sig, .. }
+        | Target::Elem { sig, .. }
+        | Target::ElemK { sig, .. }
+        | Target::ElemPart { sig, .. } => sig,
+    }
+}
+
+fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::HashMap<(u32, u32), u32>) -> Op {
     use crate::Instr as I;
     match *ins {
         I::Copy { d, s, w } if w <= 64 => Op::Copy1 { d, s },
@@ -182,6 +335,7 @@ fn lower1(ins: &Instr, sigs: &[SignalInfo]) -> Op {
                 return Op::Gen;
             }
             let slot = info.slot + 2 * e;
+            let sig = elem_sig.get(&(sig, e)).copied().unwrap_or(sig);
             match mode {
                 StoreMode::Blocking => Op::Store1 { sig, s, slot },
                 StoreMode::Nba => Op::Nba1 { sig, s, slot },
