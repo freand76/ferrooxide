@@ -202,6 +202,7 @@ impl<'a> Compiler<'a> {
                 "$time" => (64, false),
                 "$stime" => (32, false),
                 "$realtime" => (64, false),
+                "$sqrt" | "$ln" | "$log10" | "$exp" | "$floor" | "$ceil" | "$sin" | "$cos" | "$tan" | "$asin" | "$acos" | "$atan" | "$sinh" | "$cosh" | "$tanh" | "$asinh" | "$acosh" | "$atanh" | "$atan2" | "$hypot" | "$pow" => (64, false),
                 "$random" => (32, true),
                 "$urandom" | "$urandom_range" => (32, false),
                 "$signed" | "$unsigned" => {
@@ -1005,8 +1006,10 @@ impl<'a> Compiler<'a> {
                 for x in v {
                     self.reads_expr(x, sid, out);
                 }
-                if let Expr::Call(name, _) = e {
-                    // signals of the enclosing module read inside the function body
+                // signals a function reads besides its arguments: they do not count for
+                // sensitivity (Icarus's continuous assignments and @* follow the arguments
+                // only), but the lint check (synthesis view) includes them
+                if let (Expr::Call(name, _), true) = (e, self.func_reads.get()) {
                     if let Some((f, fs)) = self.lookup_func(name, sid) {
                         let mut inner = Vec::new();
                         if let Some(fi) = self.func_inst.get(&(fs, f.name.clone())) {
@@ -1075,7 +1078,7 @@ impl<'a> Compiler<'a> {
             }
             Expr::Cond(_, t, f) => self.is_real(t, sid) || self.is_real(f, sid),
             Expr::Call(name, _) => self.lookup_func(name, sid).map(|(f, _)| f.ret_kind == NetKind::Real).unwrap_or(false),
-            Expr::SysCall(name, _) => matches!(name.as_str(), "$realtime" | "$itor" | "$bitstoreal"),
+            Expr::SysCall(name, _) => matches!(name.as_str(), "$realtime" | "$itor" | "$bitstoreal" | "$sqrt" | "$ln" | "$log10" | "$exp" | "$floor" | "$ceil" | "$sin" | "$cos" | "$tan" | "$asin" | "$acos" | "$atan" | "$sinh" | "$cosh" | "$tanh" | "$asinh" | "$acosh" | "$atanh" | "$atan2" | "$hypot" | "$pow"),
             _ => false,
         }
     }
@@ -1157,6 +1160,47 @@ impl<'a> Compiler<'a> {
                     let d = self.tmp(64);
                     let e = self.texp(sid);
                     self.emit(Instr::SysF { f: SysFn::RealTime(e), d });
+                    Ok(d)
+                }
+                "$sqrt" | "$ln" | "$log10" | "$exp" | "$floor" | "$ceil" | "$sin" | "$cos" | "$tan" | "$asin" | "$acos" | "$atan" | "$sinh" | "$cosh" | "$tanh" | "$asinh" | "$acosh" | "$atanh" | "$atan2" | "$hypot" | "$pow" => {
+                    let op = match name.as_str() {
+                        "$sqrt" => rt::RealOp::Sqrt,
+                        "$ln" => rt::RealOp::Ln,
+                        "$log10" => rt::RealOp::Log10,
+                        "$exp" => rt::RealOp::Exp,
+                        "$floor" => rt::RealOp::Floor,
+                        "$ceil" => rt::RealOp::Ceil,
+                        "$sin" => rt::RealOp::Sin,
+                        "$cos" => rt::RealOp::Cos,
+                        "$tan" => rt::RealOp::Tan,
+                        "$asin" => rt::RealOp::Asin,
+                        "$acos" => rt::RealOp::Acos,
+                        "$atan" => rt::RealOp::Atan,
+                        "$sinh" => rt::RealOp::Sinh,
+                        "$cosh" => rt::RealOp::Cosh,
+                        "$tanh" => rt::RealOp::Tanh,
+                        "$asinh" => rt::RealOp::Asinh,
+                        "$acosh" => rt::RealOp::Acosh,
+                        "$atanh" => rt::RealOp::Atanh,
+                        "$atan2" => rt::RealOp::Atan2,
+                        "$hypot" => rt::RealOp::Hypot,
+                        "$pow" => rt::RealOp::Pow,
+                        _ => unreachable!(),
+                    };
+                    let two = matches!(op, rt::RealOp::Atan2 | rt::RealOp::Hypot | rt::RealOp::Pow);
+                    if args.len() != 1 + two as usize {
+                        return self.err(format!("{name} needs {} argument(s)", 1 + two as usize));
+                    }
+                    let a = self.rexpr(&args[0], sid)?;
+                    let a = {
+                        // keep it while the second argument is evaluated
+                        let k = self.tmp(64);
+                        self.emit(Instr::Copy { d: k, s: a, w: 64 });
+                        k
+                    };
+                    let b = if two { self.rexpr(&args[1], sid)? } else { a };
+                    let d = self.tmp(64);
+                    self.emit(Instr::RBin { op, d, a, b });
                     Ok(d)
                 }
                 "$itor" => {

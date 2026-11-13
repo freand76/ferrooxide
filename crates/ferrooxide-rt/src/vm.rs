@@ -379,7 +379,8 @@ impl Sim {
                                 | Target::DynPart { sig, .. }
                                 | Target::Elem { sig, .. }
                                 | Target::ElemK { sig, .. }
-                                | Target::ElemPart { sig, .. } => sig,
+                                | Target::ElemPart { sig, .. }
+                    | Target::ElemDynPart { sig, .. } => sig,
                             };
                             let v = m.entry(sig).or_default();
                             if !v.contains(&(p as u32)) {
@@ -1072,6 +1073,20 @@ impl Sim {
                     return None;
                 }
                 Some((sig, Res::ElemBits { e: e as u32, lsb, w, soff: 0 }, w))
+            }
+            Target::ElemDynPart { sig, ix, bix, w } => {
+                let e = self.index(&ix)?;
+                let r = &self.sigs[sig as usize];
+                if e < 0 || e >= r.depth as i64 {
+                    return None;
+                }
+                let off = self.index(&bix)?;
+                let lo = off.max(0);
+                let hi = (off + w as i64).min(r.width as i64);
+                if lo >= hi {
+                    return None;
+                }
+                Some((sig, Res::ElemBits { e: e as u32, lsb: lo as u32, w: (hi - lo) as u32, soff: (lo - off) as u32 }, w))
             }
         }
     }
@@ -2411,7 +2426,8 @@ pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>)
                         | Target::Part { sig, .. }
                         | Target::DynPart { sig, .. }
                         | Target::Elem { sig, .. }
-                        | Target::ElemPart { sig, .. } => (*sig, NONE),
+                        | Target::ElemPart { sig, .. }
+                        | Target::ElemDynPart { sig, .. } => (*sig, NONE),
                     };
                     writes[i].push(norm(w.0, w.1));
                 }

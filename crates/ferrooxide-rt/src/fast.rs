@@ -317,7 +317,8 @@ fn t_sig(t: &Target) -> u32 {
         | Target::DynPart { sig, .. }
         | Target::Elem { sig, .. }
         | Target::ElemK { sig, .. }
-        | Target::ElemPart { sig, .. } => sig,
+        | Target::ElemPart { sig, .. }
+        | Target::ElemDynPart { sig, .. } => sig,
     }
 }
 

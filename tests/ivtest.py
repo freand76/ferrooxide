@@ -10,6 +10,7 @@ output must contain a line with only "PASSED". Only "normal" tests are run; the 
 failures by their first error line.
 """
 import argparse, collections, concurrent.futures as cf, os, re, resource, subprocess, sys
+import shutil, tempfile
 
 # per-test address-space limit: a test with a huge memory must not take the machine down
 MEM_LIMIT = 2 << 30
@@ -116,6 +117,11 @@ def main():
     ap.add_argument("--show", type=int, default=25, help="failure groups to show")
     ap.add_argument("--results", help="write name<TAB>status<TAB>reason lines here")
     a = ap.parse_args()
+    # run a private copy of the binary: rebuilding during a run must not affect it
+    global FX
+    tmpdir = tempfile.mkdtemp(prefix="fx-ivtest-")
+    shutil.copy2(FX, os.path.join(tmpdir, "ferrooxide"))
+    FX = os.path.join(tmpdir, "ferrooxide")
     tests = [t for t in parse_list(os.path.join(a.ivtest, a.list)) if t["kind"] == "normal" and a.filter in t["name"]]
     res = {}
     with cf.ThreadPoolExecutor(a.j) as ex:

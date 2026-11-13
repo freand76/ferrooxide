@@ -26,7 +26,9 @@ impl<'a> Compiler<'a> {
             listed.extend(v);
         }
         let mut reads = Vec::new();
+        self.func_reads.set(true);
         self.reads_stmt(body, sid, &mut reads);
+        self.func_reads.set(false);
         // variables the block computes itself (temporaries) are not inputs
         let mut written = Vec::new();
         self.blocking_writes(body, sid, &mut written);

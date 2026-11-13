@@ -138,7 +138,8 @@ pub fn fuse(prog: &mut Program) -> usize {
                     | Target::DynPart { sig, .. }
                     | Target::Elem { sig, .. }
                     | Target::ElemK { sig, .. }
-                    | Target::ElemPart { sig, .. } => sig,
+                    | Target::ElemPart { sig, .. }
+                    | Target::ElemDynPart { sig, .. } => sig,
                 };
                 let sig = prog.signals[sig as usize].alias_of.map(|a| a.0).unwrap_or(sig);
                 let w = writers.entry(sig).or_default();

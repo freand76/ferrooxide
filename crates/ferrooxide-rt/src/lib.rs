@@ -194,6 +194,10 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                 Target::DynPart { ix: i, .. } | Target::Elem { ix: i, .. } | Target::ElemPart { ix: i, .. } => {
                     v.push(ix(i))
                 }
+                Target::ElemDynPart { ix: i, bix, .. } => {
+                    v.push(ix(i));
+                    v.push(ix(bix));
+                }
                 _ => {}
             }
             if let StoreMode::NbaDelay(d) = mode {
@@ -216,6 +220,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Udp { ins, prev, q, .. } => ins.iter().chain(prev.iter()).copied().chain(std::iter::once(*q)).collect(),
         Instr::Unforce { t } => match t {
             Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
+            Target::ElemDynPart { ix, bix, .. } => vec![ix.slot, bix.slot],
             _ => vec![],
         },
         Instr::Sys(t) => {
@@ -371,6 +376,8 @@ pub enum Target {
     /// array element with a constant (in-range) element offset
     ElemK { sig: u32, e: u32 },
     ElemPart { sig: u32, ix: Index, lsb: u32, w: u32 },
+    /// `mem[i][b +: w]`: bits at a run-time offset `bix` of element `ix`
+    ElemDynPart { sig: u32, ix: Index, bix: Index, w: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -486,6 +493,8 @@ pub enum RealOp {
     Mul,
     Div,
     Pow,
+    // math system functions (one argument: `b` is ignored)
+    Sqrt, Ln, Log10, Exp, Floor, Ceil, Sin, Cos, Tan, Asin, Acos, Atan, Sinh, Cosh, Tanh, Asinh, Acosh, Atanh, Atan2, Hypot,
 }
 
 #[derive(Clone, Debug)]

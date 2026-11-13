@@ -148,6 +148,8 @@ pub struct Compiler<'a> {
     /// drive strength of the continuous assignments being created, and per job index
     cur_strength: Option<(u8, u8)>,
     job_strength: HashMap<usize, (u8, u8)>,
+    /// read sets include signals read inside called functions (lint only)
+    pub(crate) func_reads: std::cell::Cell<bool>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -299,6 +301,7 @@ impl<'a> Compiler<'a> {
             links: Vec::new(),
             cur_strength: None,
             job_strength: HashMap::new(),
+            func_reads: std::cell::Cell::new(false),
             top_names: HashSet::new(),
             redirect: HashMap::new(),
         }

@@ -66,6 +66,12 @@ impl<'a> Compiler<'a> {
                         let info = self.sig(arr).clone();
                         let ix = self.index_of(ai, sid, false, -info.arr_lo)?;
                         let (neg, k) = Self::bit_map(info.msb, info.lsb);
+                        if !self.is_const(i, sid) {
+                            // a bit at a run-time offset
+                            let bix = self.index_of(i, sid, neg, k)?;
+                            out.push((Some(Target::ElemDynPart { sig: arr, ix, bix, w: 1 }), 1));
+                            return Ok(());
+                        }
                         let off = match self.const_index(i, sid)? {
                             Some(b) if neg => k - b,
                             Some(b) => b + k,
@@ -143,6 +149,17 @@ impl<'a> Compiler<'a> {
             }
             Expr::IndexedRange(a, base, width, up) => {
                 let pw = self.const_int(width, sid)? as u32;
+                // of an array element: mem[i][b +: w]
+                if let Expr::Index(arr_e, ai) = &**a {
+                    if let Some(arr) = self.array_of(arr_e, sid) {
+                        let info = self.sig(arr).clone();
+                        let ix = self.index_of(ai, sid, false, -info.arr_lo)?;
+                        let (neg, k) = Self::index_part_map(info.msb, info.lsb, pw, *up);
+                        let bix = self.index_of(base, sid, neg, k)?;
+                        out.push((Some(Target::ElemDynPart { sig: arr, ix, bix, w: pw }), pw));
+                        return Ok(());
+                    }
+                }
                 let s = self.lsig(a, sid)?;
                 let info = self.sig(s).clone();
                 let (neg, k) = Self::index_part_map(info.msb, info.lsb, pw, *up);
