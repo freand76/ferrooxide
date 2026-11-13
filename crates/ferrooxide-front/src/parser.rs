@@ -639,6 +639,7 @@ impl Parser {
                 loop {
                     let line = self.line();
                     let inst_name = if let Tok::Ident(_) = self.peek() { Some(self.ident()?) } else { None };
+                    let dims = if self.is_p("[") { Some(self.range()?) } else { None };
                     self.expect_p("(")?;
                     let mut terms = Vec::new();
                     loop {
@@ -648,7 +649,7 @@ impl Parser {
                         }
                     }
                     self.expect_p(")")?;
-                    items.push(Item::Gate { kind: kind.clone(), inst_name, terms, line });
+                    items.push(Item::Gate { kind: kind.clone(), inst_name, dims, terms, line });
                     if !self.eat_p(",") {
                         break;
                     }
@@ -1383,14 +1384,50 @@ impl Parser {
     }
 
     fn hier_tail(&mut self, name: String) -> Result<Expr> {
-        if self.is_p(".") && matches!(self.peek_at(1), Tok::Ident(_)) {
-            let mut parts = vec![name];
-            while self.eat_p(".") {
-                parts.push(self.ident()?);
+        let mut parts = vec![name];
+        loop {
+            let seg = self.hier_index(parts.last().unwrap());
+            if let Some(s) = seg {
+                *parts.last_mut().unwrap() = s;
             }
-            return Ok(Expr::Hier(parts));
+            if self.is_p(".") && matches!(self.peek_at(1), Tok::Ident(_)) {
+                self.eat_p(".");
+                parts.push(self.ident()?);
+            } else {
+                break;
+            }
         }
-        Ok(Expr::Ident(name))
+        if parts.len() == 1 {
+            return Ok(Expr::Ident(parts.pop().unwrap()));
+        }
+        Ok(Expr::Hier(parts))
+    }
+
+    /// `name[N].` in a hierarchical name (an instance-array element or generate block):
+    /// returns `name[N]` and consumes `[N]` when a literal index is followed by `.ident`.
+    fn hier_index(&mut self, name: &str) -> Option<String> {
+        if !self.is_p("[") {
+            return None;
+        }
+        let save = self.pos;
+        self.eat_p("[");
+        let v = match self.expr() {
+            Ok(Expr::Num(n)) if !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
+                i64::from_str_radix(&n.digits.replace('_', ""), n.base as u32).ok()
+            }
+            Ok(Expr::Unary(UnOp::Neg, b)) => match *b {
+                Expr::Num(n) => i64::from_str_radix(&n.digits.replace('_', ""), n.base as u32).ok().map(|v| -v),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(v) = v {
+            if self.eat_p("]") && self.is_p(".") && matches!(self.peek_at(1), Tok::Ident(_)) {
+                return Some(format!("{name}[{v}]"));
+            }
+        }
+        self.pos = save;
+        None
     }
 
     fn selects(&mut self, mut e: Expr) -> Result<Expr> {

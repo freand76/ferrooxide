@@ -154,7 +154,8 @@ pub enum Item {
     GenCase { expr: Expr, arms: Vec<(Vec<Expr>, Option<String>, Vec<Item>)>, line: Line },
     GenBlock { name: Option<String>, items: Vec<Item>, line: Line },
     /// gate primitive: and/or/nand/nor/xor/xnor/not/buf
-    Gate { kind: String, inst_name: Option<String>, terms: Vec<Expr>, line: Line },
+    /// `dims`: an array of gate instances, e.g. `buf b[7:0] (o, i);`
+    Gate { kind: String, inst_name: Option<String>, dims: Option<Range>, terms: Vec<Expr>, line: Line },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

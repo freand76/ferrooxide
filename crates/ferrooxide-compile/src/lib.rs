@@ -623,31 +623,7 @@ impl<'a> Compiler<'a> {
                 self.scopes[sid].funcs.insert(f.name.clone(), f);
             }
         }
-        // parameters, in order
-        let mut pos = 0usize;
-        for it in &m.items {
-            if let Item::Param(p) = it {
-                self.line = p.line;
-                let mut ov = None;
-                if !p.local {
-                    ov = overrides.iter().find(|(n, _)| n.as_deref() == Some(p.name.as_str())).map(|x| x.1.clone());
-                    if ov.is_none() {
-                        let positional: Vec<&PVal> =
-                            overrides.iter().filter(|(n, _)| n.is_none()).map(|(_, c)| c).collect();
-                        if pos < positional.len() {
-                            ov = Some(positional[pos].clone());
-                        }
-                    }
-                    pos += 1;
-                }
-                let v = self.param_value(p, ov, sid)?;
-                self.scopes[sid].syms.insert(p.name.clone(), v);
-                if p.range.is_some() && !p.real {
-                    let r = self.range_vals(&p.range, sid)?;
-                    self.scopes[sid].param_ranges.insert(p.name.clone(), r);
-                }
-            }
-        }
+        self.eval_params(m, overrides, sid)?;
         // port connections by name
         let mut port_conns: HashMap<String, Option<Expr>> = HashMap::new();
         if let Some((cs, _)) = conns {
@@ -680,6 +656,145 @@ impl<'a> Compiler<'a> {
         self.elab_items(&m.items, sid, true, &port_conns, parent_scope)?;
         self.file = saved_file;
         Ok(sid)
+    }
+
+    /// Evaluate the parameters of module `m` (with overrides) into scope `sid`, in order.
+    fn eval_params(&mut self, m: &'a Module, overrides: &[(Option<String>, PVal)], sid: usize) -> R<()> {
+        let mut pos = 0usize;
+        for it in &m.items {
+            if let Item::Param(p) = it {
+                self.line = p.line;
+                let mut ov = None;
+                if !p.local {
+                    ov = overrides.iter().find(|(n, _)| n.as_deref() == Some(p.name.as_str())).map(|x| x.1.clone());
+                    if ov.is_none() {
+                        let positional: Vec<&PVal> =
+                            overrides.iter().filter(|(n, _)| n.is_none()).map(|(_, c)| c).collect();
+                        if pos < positional.len() {
+                            ov = Some(positional[pos].clone());
+                        }
+                    }
+                    pos += 1;
+                }
+                let v = self.param_value(p, ov, sid)?;
+                self.scopes[sid].syms.insert(p.name.clone(), v);
+                if p.range.is_some() && !p.real {
+                    let r = self.range_vals(&p.range, sid)?;
+                    self.scopes[sid].param_ranges.insert(p.name.clone(), r);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Port widths of module `m` with these parameter overrides (evaluated in a scratch scope).
+    fn port_widths(&mut self, m: &'a Module, overrides: &[(Option<String>, PVal)]) -> R<HashMap<String, u32>> {
+        let saved = std::mem::replace(&mut self.file, m.file.clone());
+        let sid = self.new_scope(format!("$ports.{}", m.name), None, m.file.clone());
+        for it in &m.items {
+            if let Item::Subroutine(f) = it {
+                self.scopes[sid].funcs.insert(f.name.clone(), f);
+            }
+        }
+        self.eval_params(m, overrides, sid)?;
+        let mut w = HashMap::new();
+        for it in &m.items {
+            if let Item::Decl(d) = it {
+                let pw = match d.kind {
+                    NetKind::Integer => Some(32),
+                    NetKind::Int(n) if d.range.is_none() => Some(n),
+                    NetKind::Real | NetKind::Time => Some(64),
+                    _ => match &d.range {
+                        Some(r) => {
+                            let (a, b) = self.range_vals(&Some(r.clone()), sid)?;
+                            Some(((a - b).abs() + 1) as u32)
+                        }
+                        None => None,
+                    },
+                };
+                for dl in &d.names {
+                    if m.ports.contains(&dl.name) {
+                        match pw {
+                            Some(p) => {
+                                w.insert(dl.name.clone(), p);
+                            }
+                            None => {
+                                w.entry(dl.name.clone()).or_insert(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.file = saved;
+        Ok(w)
+    }
+
+    /// The part of terminal `e` that instance `k` (from the left) of an `n`-instance array gets:
+    /// slices of `pw` bits, the leftmost instance taking the most significant one.
+    fn array_slice(&mut self, e: &Expr, k: u32, n: u32, pw: u32, sid: usize) -> R<Expr> {
+        self.slice_bits(e, ((n - 1 - k) * pw) as i64, pw as i64, sid)
+    }
+
+    /// Bits `[off, off+w)` (counted from the LSB) of `e`, as an expression that is still an
+    /// lvalue when `e` is one.
+    fn slice_bits(&mut self, e: &Expr, off: i64, w: i64, sid: usize) -> R<Expr> {
+        let num = |v: i64| -> Expr {
+            let e = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            if v < 0 {
+                Expr::Unary(UnOp::Neg, Box::new(e))
+            } else {
+                e
+            }
+        };
+        // declared index range of a plain signal
+        let decl = |me: &Self, b: &Expr| -> Option<(i64, i64)> {
+            let sym = match b {
+                Expr::Ident(nm) => me.lookup(nm, sid),
+                Expr::Hier(p) => me.lookup_hier(p, sid),
+                _ => None,
+            };
+            match sym {
+                Some(Sym::Sig(s)) if me.sig(s).depth == 0 => Some((me.sig(s).msb, me.sig(s).lsb)),
+                _ => None,
+            }
+        };
+        let off_of = |(msb, lsb): (i64, i64), i: i64| if msb >= lsb { i - lsb } else { lsb - i };
+        match e {
+            Expr::Range(b, m, l) if decl(self, b).is_some() => {
+                if let (Some(m), Some(l)) = (self.const_value(m, sid), self.const_value(l, sid)) {
+                    let d = decl(self, b).unwrap();
+                    let lo = off_of(d, m).min(off_of(d, l));
+                    return self.slice_bits(&b.clone(), lo + off, w, sid);
+                }
+            }
+            Expr::Index(b, i) if decl(self, b).is_some() && off == 0 && w == 1 => return Ok(e.clone()),
+            Expr::Concat(parts) => {
+                // walk from the LSB part; collect the pieces that overlap the slice
+                let mut pieces = Vec::new();
+                let mut base = 0i64;
+                for p in parts.iter().rev() {
+                    let pw = self.ty(p, sid)?.0 as i64;
+                    let (s0, s1) = (off.max(base), (off + w).min(base + pw));
+                    if s0 < s1 {
+                        let piece =
+                            if s0 == base && s1 == base + pw { p.clone() } else { self.slice_bits(p, s0 - base, s1 - s0, sid)? };
+                        pieces.push(piece);
+                    }
+                    base += pw;
+                }
+                pieces.reverse();
+                return Ok(if pieces.len() == 1 { pieces.pop().unwrap() } else { Expr::Concat(pieces) });
+            }
+            _ => {}
+        }
+        let d = decl(self, e).unwrap_or((self.ty(e, sid)?.0 as i64 - 1, 0));
+        let idx = |o: i64| if d.0 >= d.1 { d.1 + o } else { d.1 - o };
+        Ok(if w == 1 {
+            Expr::Index(Box::new(e.clone()), Box::new(num(idx(off))))
+        } else {
+            Expr::Range(Box::new(e.clone()), Box::new(num(idx(off + w - 1))), Box::new(num(idx(off))))
+        })
     }
 
     /// The value of a parameter (from its override if any): integer or real.
@@ -1021,8 +1136,56 @@ impl<'a> Compiler<'a> {
                     }
                     for inst in insts {
                         self.line = inst.line;
-                        if !inst.dims.is_empty() {
-                            return self.err("arrays of instances are not supported yet");
+                        if inst.dims.len() > 1 {
+                            return self.err("multi-dimensional arrays of instances are not supported");
+                        }
+                        if let Some((l, r)) = inst.dims.first() {
+                            // an array of instances: name[i] for i from l to r, terminals sliced
+                            let (l, r) = (self.const_int(l, sid)?, self.const_int(r, sid)?);
+                            let n = ((l - r).abs() + 1) as u32;
+                            let pws = self.port_widths(m, &ovs)?;
+                            for k in 0..n {
+                                let i = if l >= r { l - k as i64 } else { l + k as i64 };
+                                let mut conns = Vec::new();
+                                for (pos, c) in inst.conns.iter().enumerate() {
+                                    let (port, e) = match c {
+                                        Conn::Positional(e) => (m.ports.get(pos).cloned().unwrap_or_default(), e),
+                                        Conn::Named(nm, e) => (nm.clone(), e),
+                                        Conn::Wildcard => {
+                                            conns.push(Conn::Wildcard);
+                                            continue;
+                                        }
+                                    };
+                                    let e = match e {
+                                        Some(e) => {
+                                            let pw = pws.get(&port).copied().unwrap_or(1);
+                                            let tw = self.ty(e, sid)?.0;
+                                            if n > 1 && tw == pw * n {
+                                                Some(self.array_slice(e, k, n, pw, sid)?)
+                                            } else if tw == pw || tw < pw * n {
+                                                Some(e.clone())
+                                            } else {
+                                                return self.err(format!(
+                                                    "port '{port}' of instance array '{}': {tw} bits do not fit {n} x {pw}",
+                                                    inst.name
+                                                ));
+                                            }
+                                        }
+                                        None => None,
+                                    };
+                                    conns.push(match c {
+                                        Conn::Positional(_) => Conn::Positional(e),
+                                        _ => Conn::Named(port, e),
+                                    });
+                                }
+                                // the generated connections live as long as the elaboration
+                                let conns: &'a [Conn] = Box::leak(conns.into_boxed_slice());
+                                let iname = format!("{}[{}]", inst.name, i);
+                                let path = format!("{}.{}", self.scopes[sid].name, iname);
+                                let child = self.instantiate(m, path, &ovs, Some((conns, sid)))?;
+                                self.scopes[sid].children.insert(iname, child);
+                            }
+                            continue;
                         }
                         let path = format!("{}.{}", self.scopes[sid].name, inst.name);
                         let child = self.instantiate(m, path, &ovs, Some((&inst.conns, sid)))?;
@@ -1097,9 +1260,24 @@ impl<'a> Compiler<'a> {
                     genblk += 1;
                     self.gen_scope(its, name, genblk, sid)?;
                 }
-                Item::Gate { kind, terms, line, .. } => {
+                Item::Gate { kind, terms, line, dims, .. } => {
                     self.line = *line;
-                    self.gate(kind, terms, sid, *line)?;
+                    match dims {
+                        None => self.gate(kind, terms, sid, *line)?,
+                        Some((l, r)) => {
+                            // an array of gates: 1-bit terminals per instance
+                            let (l, r) = (self.const_int(l, sid)?, self.const_int(r, sid)?);
+                            let n = ((l - r).abs() + 1) as u32;
+                            for k in 0..n {
+                                let mut ts = Vec::new();
+                                for t in terms {
+                                    let tw = self.ty(t, sid)?.0;
+                                    ts.push(if tw == n && n > 1 { self.array_slice(t, k, n, 1, sid)? } else { t.clone() });
+                                }
+                                self.gate(kind, &ts, sid, *line)?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1139,7 +1317,14 @@ impl<'a> Compiler<'a> {
                 if terms.len() != 3 {
                     return self.err(format!("{kind} needs three terminals"));
                 }
-                let data = if kind.starts_with("notif") { Expr::Unary(UnOp::Not, b(&terms[1])) } else { terms[1].clone() };
+                // bufif/notif turn a z input into x; the switches pass it through
+                let data = if kind.starts_with("notif") {
+                    Expr::Unary(UnOp::Not, b(&terms[1]))
+                } else if kind.starts_with("bufif") {
+                    Expr::Binary(BinOp::And, b(&terms[1]), b(&terms[1]))
+                } else {
+                    terms[1].clone()
+                };
                 let on_high = matches!(kind, "bufif1" | "notif1" | "nmos" | "rnmos");
                 let rhs = if on_high {
                     Expr::Cond(b(&terms[2]), Box::new(data), Box::new(z()))
@@ -1160,7 +1345,12 @@ impl<'a> Compiler<'a> {
             "not" | "buf" => {
                 let input = terms.last().unwrap();
                 for out in &terms[..terms.len() - 1] {
-                    let rhs = if kind == "not" { Expr::Unary(UnOp::Not, b(input)) } else { input.clone() };
+                    // a buffer turns z into x: `in & in`
+                    let rhs = if kind == "not" {
+                        Expr::Unary(UnOp::Not, b(input))
+                    } else {
+                        Expr::Binary(BinOp::And, b(input), b(input))
+                    };
                     self.jobs.push(Job::Assign { lhs: out.clone(), rhs, delay: None, scope: sid, line });
                 }
             }
