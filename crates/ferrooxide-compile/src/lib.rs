@@ -25,6 +25,19 @@ pub(crate) enum Sym {
     Real(f64),
 }
 
+/// A bidirectional connection between bits of two nets (`tran`, an inout port connected to a
+/// part of a net): each side gets the other's drivers as an extra driver. `ctl`: tranif
+/// control (expression, scope, conducts when 1).
+#[derive(Clone, Debug)]
+pub(crate) struct Link {
+    a: u32,
+    a_lsb: u32,
+    b: u32,
+    b_lsb: u32,
+    w: u32,
+    ctl: Option<(Expr, usize, bool)>,
+}
+
 /// A parameter value given by an override.
 #[derive(Clone, Debug)]
 pub(crate) enum PVal {
@@ -129,6 +142,7 @@ pub struct Compiler<'a> {
     /// while compiling a driver of a multi-driven net: net -> this driver's signal
     redirect: HashMap<u32, u32>,
     dialect: Dialect,
+    links: Vec<Link>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -277,6 +291,7 @@ impl<'a> Compiler<'a> {
             init_touch: Vec::new(),
             init_touch_net: Vec::new(),
             dialect: Dialect::default(),
+            links: Vec::new(),
             top_names: HashSet::new(),
             redirect: HashMap::new(),
         }
@@ -1125,6 +1140,7 @@ impl<'a> Compiler<'a> {
                             Dir::Output => {
                                 self.jobs.push(Job::PortOut { lhs: conn.clone(), child_sig: s, scope: ps, line })
                             }
+                            Dir::Inout if self.link_exprs(&Expr::Ident(name.clone()), sid, conn, ps, None) => {}
                             Dir::Inout => self.warn(format!(
                                 "inout port '{name}' connected to an expression: connection ignored"
                             )),
@@ -1427,9 +1443,82 @@ impl<'a> Compiler<'a> {
         self.elab_items(items, child, false, &HashMap::new(), None)
     }
 
+    /// Net bits named by `e` as (signal, lsb, width), most significant first; None if `e` is not
+    /// made of constant selects of scalar nets.
+    fn net_segs(&mut self, e: &Expr, sid: usize) -> Option<Vec<(u32, u32, u32)>> {
+        let base = |me: &mut Self, b: &Expr| -> Option<u32> {
+            match me.resolve_base(b, sid).ok()?? {
+                expr::Base::Sig(s) => {
+                    let i = me.sig(s);
+                    (i.kind == SigKind::Wire && i.depth == 0 && !i.real).then_some(s)
+                }
+                _ => None,
+            }
+        };
+        match e {
+            Expr::Ident(_) | Expr::Hier(_) => {
+                let s = base(self, e)?;
+                Some(vec![(s, 0, self.sig(s).width)])
+            }
+            Expr::Index(b, i) => {
+                let s = base(self, b)?;
+                let i = self.const_value(i, sid)?;
+                let info = self.sig(s);
+                let (neg, k) = Self::bit_map(info.msb, info.lsb);
+                let off = if neg { k - i } else { i + k };
+                (off >= 0 && off < info.width as i64).then(|| vec![(s, off as u32, 1)])
+            }
+            Expr::Range(b, m, l) => {
+                let s = base(self, b)?;
+                let (m, l) = (self.const_value(m, sid)?, self.const_value(l, sid)?);
+                let info = self.sig(s);
+                let (neg, k) = Self::bit_map(info.msb, info.lsb);
+                let (om, ol) = if neg { (k - m, k - l) } else { (m + k, l + k) };
+                let (lo, hi) = (om.min(ol), om.max(ol));
+                (lo >= 0 && hi < info.width as i64).then(|| vec![(s, lo as u32, (hi - lo + 1) as u32)])
+            }
+            Expr::Concat(v) => {
+                let mut out = Vec::new();
+                for x in v {
+                    out.extend(self.net_segs(x, sid)?);
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    /// Link the bits of `x` (in scope `xs`) and `y` (in `ys`) bidirectionally, LSB first, over the
+    /// common width. False if either is not made of nets.
+    fn link_exprs(&mut self, x: &Expr, xs: usize, y: &Expr, ys: usize, ctl: Option<(Expr, usize, bool)>) -> bool {
+        let (Some(xa), Some(ya)) = (self.net_segs(x, xs), self.net_segs(y, ys)) else { return false };
+        // expand into LSB-first runs and pair them up
+        let (mut xi, mut yi) = (xa.into_iter().rev(), ya.into_iter().rev());
+        let (mut xc, mut yc) = (xi.next(), yi.next());
+        while let (Some((xsig, xl, xw)), Some((ysig, yl, yw))) = (xc, yc) {
+            let w = xw.min(yw);
+            self.links.push(Link { a: xsig, a_lsb: xl, b: ysig, b_lsb: yl, w, ctl: ctl.clone() });
+            xc = if xw > w { Some((xsig, xl + w, xw - w)) } else { xi.next() };
+            yc = if yw > w { Some((ysig, yl + w, yw - w)) } else { yi.next() };
+        }
+        true
+    }
+
     fn gate(&mut self, kind: &str, terms: &[Expr], sid: usize, line: u32) -> R<()> {
         if terms.len() < 2 && !matches!(kind, "pullup" | "pulldown") {
             return self.err("gate needs at least two terminals");
+        }
+        if kind.contains("tran") {
+            // bidirectional switches (strengths are ignored: rtran = tran)
+            let ctl = match kind.trim_start_matches('r') {
+                "tran" if terms.len() == 2 => None,
+                "tranif1" | "tranif0" if terms.len() == 3 => Some((terms[2].clone(), sid, kind.ends_with('1'))),
+                _ => return self.err(format!("{kind}: wrong number of terminals")),
+            };
+            if !self.link_exprs(&terms[0], sid, &terms[1], sid, ctl) {
+                return self.err(format!("{kind} terminals must be nets"));
+            }
+            return Ok(());
         }
         let b = |e: &Expr| Box::new(e.clone());
         let z = || Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "z".into(), fill: true });
@@ -1611,6 +1700,15 @@ impl<'a> Compiler<'a> {
             })
             .map(|(s, _)| s)
             .collect();
+        // linked nets (tran, inout ports on parts of nets) are always resolved
+        let mut multi = multi;
+        for l in &self.links {
+            for s in [l.a, l.b] {
+                if self.sig(s).alias_of.is_none() {
+                    multi.insert(s);
+                }
+            }
+        }
         // special nets nothing drives: their resolved value is constant
         let undriven: Vec<u32> = self
             .net_types
@@ -1651,6 +1749,7 @@ impl<'a> Compiler<'a> {
             self.codegen_job(job)?;
         }
         self.redirect.clear();
+        self.link_drivers()?;
         // resolver processes: net = resolve(driver 0, driver 1, ...)
         let mut nets: Vec<(u32, Vec<u32>)> = std::mem::take(&mut self.drivers).into_iter().collect();
         nets.sort();
@@ -1738,6 +1837,74 @@ impl<'a> Compiler<'a> {
         }
         self.emit(Instr::Halt);
         self.end_proc();
+    }
+
+    /// For each side of each link, a driver signal that carries the other side's drivers (those
+    /// not coming back through the same link) into the linked bits, z elsewhere.
+    fn link_drivers(&mut self) -> R<()> {
+        let links = std::mem::take(&mut self.links);
+        let mut from_link: HashMap<u32, usize> = HashMap::new();
+        let mut todo = Vec::new();
+        for (k, l) in links.iter().enumerate() {
+            for (dst, dl, src, sl) in [(l.b, l.b_lsb, l.a, l.a_lsb), (l.a, l.a_lsb, l.b, l.b_lsb)] {
+                let i = self.sig(dst).clone();
+                let d = self.new_signal(format!("{}$tran{k}", i.name), i.width, false, 0, i.msb, i.lsb, 0, SigKind::Wire);
+                self.prog.names.pop();
+                self.drivers.entry(dst).or_default().push(d);
+                from_link.insert(d, k);
+                todo.push((d, dst, dl, src, sl, k));
+            }
+        }
+        for (d, dst, dl, src, sl, k) in todo {
+            let l = &links[k];
+            let (sw, dw) = (self.sig(src).width, self.sig(dst).width);
+            let inputs: Vec<u32> =
+                self.drivers.get(&src).cloned().unwrap_or_default().into_iter().filter(|x| from_link.get(x) != Some(&k)).collect();
+            let name = self.sig(dst).name.clone();
+            let p = self.begin_proc(name, ProcClass::Normal);
+            let _ = p;
+            let top = self.here();
+            let zs = self.const_slot(&Const::fill('z', sw));
+            let mut v = zs;
+            for (j, &x) in inputs.iter().enumerate() {
+                let xs = self.sig(x).slot;
+                if j == 0 {
+                    v = xs;
+                } else {
+                    let t = self.tmp(sw);
+                    self.emit(Instr::Bin { op: rt::BinOp::Resolve, d: t, a: v, b: xs, w: sw });
+                    v = t;
+                }
+            }
+            let mut part = self.tmp(l.w);
+            self.emit(Instr::Slice { d: part, s: v, sw, lsb: sl, w: l.w });
+            let mut trig: Vec<(u32, rt::Edge, u32)> = inputs.iter().map(|&x| (x, rt::Edge::Any, NONE)).collect();
+            if let Some((ce, cs, on1)) = &l.ctl {
+                let (c, cw, _) = self.self_expr(ce, *cs)?;
+                let zw = self.const_slot(&Const::fill('z', l.w));
+                let t = self.tmp(l.w);
+                let (on, off) = if *on1 { (part, zw) } else { (zw, part) };
+                self.emit(Instr::Mux { d: t, c, cw, t: on, f: off, w: l.w });
+                part = t;
+                let mut r = Vec::new();
+                self.reads_expr(ce, *cs, &mut r);
+                trig.extend(r.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)));
+            }
+            let zd = self.const_slot(&Const::fill('z', dw));
+            let o = self.tmp(dw);
+            self.emit(Instr::Copy { d: o, s: zd, w: dw });
+            self.emit(Instr::Insert { d: o, dw, s: part, sw: l.w, off: dl });
+            self.emit(Instr::Store { t: rt::Target::Whole { sig: d }, s: o, mode: rt::StoreMode::Blocking });
+            if !trig.is_empty() {
+                let ctl = self.make_ctl(trig);
+                self.emit(Instr::Wait { ctl });
+                self.emit(Instr::Jmp { to: top });
+            } else {
+                self.emit(Instr::Halt);
+            }
+            self.end_proc();
+        }
+        Ok(())
     }
 
     fn codegen_job(&mut self, job: &Job<'a>) -> R<()> {

@@ -46,7 +46,8 @@ fn is_sv_only(s: &str) -> bool {
 
 const GATES: &[&str] = &[
     "and", "or", "nand", "nor", "xor", "xnor", "not", "buf", "bufif0", "bufif1", "notif0", "notif1", "nmos", "pmos",
-    "rnmos", "rpmos", "cmos", "rcmos", "pullup", "pulldown",
+    "rnmos", "rpmos", "cmos", "rcmos", "pullup", "pulldown", "tran", "rtran", "tranif0", "tranif1", "rtranif0",
+    "rtranif1",
 ];
 
 const STRENGTHS: &[&str] = &[
