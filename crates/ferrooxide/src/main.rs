@@ -12,6 +12,7 @@ options:
   -D <name>[=val]   define a preprocessor macro
   -I <dir>          add an include directory
   --max-time <t>    stop simulation after time t
+  -q, --quiet       no startup summary (parse/elaborate/compile times) on stderr
   --stats           print timing and scheduler statistics to stderr
   --dump-code       print the compiled bytecode to stderr
   --no-jit          interpret the bytecode instead of compiling it to native code
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
     let mut tops = Vec::new();
     let mut opts = ferrooxide_front::Options::default();
     let mut stats = false;
+    let mut quiet = false;
     let mut dump_code = false;
     let mut jit = true;
     let mut fuse = true;
@@ -76,6 +78,7 @@ fn main() -> ExitCode {
                 None => return ExitCode::from(2),
             },
             "--stats" => stats = true,
+            "-q" | "--quiet" => quiet = true,
             "--vcd" => match val("--vcd") {
                 Some(v) => vcd = Some(v),
                 None => return ExitCode::from(2),
@@ -153,6 +156,8 @@ fn main() -> ExitCode {
     }
     let nproc = prog.procs.len();
     let precision = prog.precision;
+    let nmod = modules.len();
+    let mem_mb = prog.mem.len() as f64 * 8.0 / (1024.0 * 1024.0);
     if interactive {
         // any signal may be forced from the command line: stores take the masked path
         for s in prog.signals.iter_mut() {
@@ -186,6 +191,17 @@ fn main() -> ExitCode {
         }
     }
     let t2b = Instant::now();
+    if !quiet {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!(
+            "ferrooxide: {} files, {nmod} modules parsed in {:.0} ms; elaborated in {:.0} ms ({nsig} signals, {nproc} processes, {mem_mb:.1} MB); {} in {:.0} ms",
+            files.len(),
+            ms(t1 - t0),
+            ms(t2 - t1),
+            if jit { "native code compiled" } else { "interpreted, prepared" },
+            ms(t2b - t2),
+        );
+    }
     if interactive {
         repl::run(&mut sim, precision);
     } else {

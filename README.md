@@ -76,6 +76,8 @@ ferrooxide [options] <files...>
   -D <name>[=val]   define a preprocessor macro
   -I <dir>          add an include directory
   --max-time <t>    stop simulation after time t
+  -q, --quiet       no startup summary on stderr (files, modules, signals, processes and the
+                    parse / elaboration / native compile times)
   --stats           print timing and scheduler statistics to stderr
   --dump-code       print the compiled bytecode to stderr
   --no-jit          interpret the bytecode instead of compiling it to native code
