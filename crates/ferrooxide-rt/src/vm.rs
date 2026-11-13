@@ -1581,6 +1581,11 @@ impl Sim {
                             let src = r.slot as usize + e as usize * n;
                             self.mem.copy_within(src..src + n, *d as usize);
                         }
+                        // a real array reads 0.0 out of range (bits: all zero)
+                        _ if self.prog.signals[*sig as usize].real => {
+                            self.mem[*d as usize] = 0;
+                            self.mem[*d as usize + 1] = 0;
+                        }
                         _ => ops::set_x(&mut self.mem, *d as usize, r.width),
                     }
                 }
@@ -1588,7 +1593,8 @@ impl Sim {
                     // fast path: blocking whole-signal store of a ≤64-bit value
                     if let (Target::Whole { sig }, StoreMode::Blocking) = (t, mode) {
                         let r = self.sigs[*sig as usize];
-                        if r.width <= 64 {
+                        // (forced signals go through `store`, which applies the force mask)
+                        if r.width <= 64 && (self.force_mask.is_empty() || !self.force_mask.contains_key(sig)) {
                             let (s, d) = (*s as usize, r.slot as usize);
                             let (a, b) = (self.mem[s], self.mem[s + 1]);
                             if self.mem[d] != a || self.mem[d + 1] != b {
