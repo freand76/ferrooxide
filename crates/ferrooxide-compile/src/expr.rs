@@ -210,6 +210,9 @@ impl<'a> Compiler<'a> {
                 "$clog2" | "$bits" => (32, false),
                 "$fopen" => (32, false),
                 "$test$plusargs" | "$value$plusargs" => (32, true),
+                "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
+                    (32, true)
+                }
                 "$rtoi" => (32, true),
                 "$realtobits" => (64, false),
                 "$countones" => (32, false),
@@ -602,6 +605,86 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// File input functions; returns the slot of the 32-bit result.
+    pub(crate) fn file_read(&mut self, name: &str, args: &[Expr], sid: usize) -> R<u32> {
+        use rt::FileRead as F;
+        let min = match name {
+            "$fgetc" | "$feof" | "$ftell" | "$rewind" => 1,
+            "$fseek" => 3,
+            _ => 2,
+        };
+        if args.len() < min {
+            return self.err(format!("{name} needs {min} arguments"));
+        }
+        let fd_at = |me: &mut Self, i: usize| -> R<(u32, u32)> { Ok((me.expr(&args[i], sid, 32, false)?, 32)) };
+        let scope = self.scopes[sid].name.clone();
+        let d = self.tmp(32);
+        let sys = |kind, src| Instr::Sys(Box::new(rt::SysTask::FileRead { kind, d, src, scope: scope.clone() }));
+        match name {
+            "$fgetc" | "$feof" | "$ftell" | "$rewind" => {
+                let src = fd_at(self, 0)?;
+                let kind = match name {
+                    "$fgetc" => F::Getc,
+                    "$feof" => F::Eof,
+                    "$ftell" => F::Tell,
+                    _ => F::Rewind,
+                };
+                self.emit(sys(kind, src));
+            }
+            "$ungetc" => {
+                let c = self.expr(&args[0], sid, 32, false)?;
+                let src = fd_at(self, 1)?;
+                self.emit(sys(F::Ungetc { c }, src));
+            }
+            "$fseek" => {
+                let src = fd_at(self, 0)?;
+                let off = self.expr(&args[1], sid, 32, true)?;
+                let op = self.expr(&args[2], sid, 32, false)?;
+                self.emit(sys(F::Seek { off, op }, src));
+            }
+            "$fgets" => {
+                let vw = self.ty(&args[0], sid)?.0;
+                let val = self.tmp(vw);
+                let src = fd_at(self, 1)?;
+                self.emit(sys(F::Gets { val, w: vw }, src));
+                let jz = self.emit(Instr::Jz { c: d, w: 32, to: 0 });
+                self.store_value(&stmt::Lhs::Expr(&args[0], sid), val, vw, rt::StoreMode::Blocking)?;
+                let h = self.here();
+                self.patch(jz, h);
+            }
+            _ => {
+                // $fscanf(fd, fmt, vars...) / $sscanf(str, fmt, vars...)
+                let string = name == "$sscanf";
+                let src = if string {
+                    let (s, w, _) = self.self_expr(&args[0], sid)?;
+                    (s, w)
+                } else {
+                    fd_at(self, 0)?
+                };
+                let Expr::Str(fmt) = &args[1] else {
+                    return self.err(format!("{name}: the format must be a string literal"));
+                };
+                let mut outs = Vec::new();
+                for v in &args[2..] {
+                    let real = self.lvalue_is_real(v, sid);
+                    let w = if real { 64 } else { self.ty(v, sid)?.0 };
+                    let val = self.tmp(w);
+                    let ok = self.tmp(1);
+                    outs.push(rt::ScanOut { val, w, real, ok });
+                }
+                self.emit(sys(F::Scan { string, fmt: fmt.clone(), outs: outs.clone() }, src));
+                // assign the variables that got a value
+                for (v, o) in args[2..].iter().zip(&outs) {
+                    let jz = self.emit(Instr::Jz { c: o.ok, w: 1, to: 0 });
+                    self.store_value(&stmt::Lhs::Expr(v, sid), o.val, o.w, rt::StoreMode::Blocking)?;
+                    let h = self.here();
+                    self.patch(jz, h);
+                }
+            }
+        }
+        Ok(d)
+    }
+
     fn sys_func(&mut self, name: &str, args: &[Expr], sid: usize, w: u32, s: bool) -> R<u32> {
         match name {
             "$time" | "$stime" => {
@@ -686,6 +769,10 @@ impl<'a> Compiler<'a> {
                 let h = self.here();
                 self.patch(jz, h);
                 Ok(self.resize(d, 1, w, false))
+            }
+            "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
+                let d = self.file_read(name, args, sid)?;
+                Ok(self.resize(d, 32, w, true))
             }
             "$rtoi" => {
                 let v = self.rexpr(&args[0], sid)?;

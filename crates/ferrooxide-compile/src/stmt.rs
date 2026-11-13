@@ -917,6 +917,11 @@ impl<'a> Compiler<'a> {
                 let loc = format!("{}:{}", self.file, self.line);
                 self.emit(sys(SysTask::ReadMem { hex: name == "$readmemh", file, sig, start, end, loc }));
             }
+            "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
+                // called as a task: the result is dropped
+                let a: Vec<Expr> = args.iter().map(|a| a.clone().unwrap_or(Expr::Str(String::new()))).collect();
+                self.file_read(name, &a, sid)?;
+            }
             _ => self.warn(format!("system task '{name}' is not supported, ignored")),
         }
         Ok(())

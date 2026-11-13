@@ -172,8 +172,8 @@ pub struct Sim {
     dumping: bool,
     dirty: Vec<u32>,
     is_dirty: Vec<bool>,
-    /// open files: a writer, or None for a file opened for reading
-    files: HashMap<u32, Option<BufWriter<std::fs::File>>>,
+    /// open files
+    files: HashMap<u32, FileH>,
     next_fd: u32,
     scratch: Vec<u64>,
     plusargs: Vec<String>,
@@ -513,8 +513,10 @@ impl Sim {
         if let Some(v) = &mut self.vcd {
             v.flush();
         }
-        for f in self.files.values_mut().flatten() {
-            let _ = f.flush();
+        for f in self.files.values_mut() {
+            if let FileH::W(f) = f {
+                let _ = f.flush();
+            }
         }
     }
 
@@ -1780,7 +1782,7 @@ impl Sim {
                             if v & 2 != 0 {
                                 eprint!("{s}");
                             }
-                        } else if let Some(Some(f)) = self.files.get_mut(&v) {
+                        } else if let Some(FileH::W(f)) = self.files.get_mut(&v) {
                             let _ = f.write_all(s.as_bytes());
                         }
                     }
@@ -1881,9 +1883,8 @@ impl Sim {
             }
             SysTask::FOpen { d, dw, file, mode } => {
                 let file = self.file_name(file);
-                let opened: Option<Option<BufWriter<std::fs::File>>> = if mode.starts_with('r') {
-                    // reading: only the descriptor is needed ($fgetc & co. are not supported yet)
-                    std::fs::File::open(&file).ok().map(|_| None)
+                let opened: Option<FileH> = if mode.starts_with('r') {
+                    std::fs::read(&file).ok().map(|data| FileH::R { data, pos: 0, eof: false })
                 } else {
                     let mut o = std::fs::OpenOptions::new();
                     if mode.starts_with('a') {
@@ -1891,7 +1892,7 @@ impl Sim {
                     } else {
                         o.write(true).create(true).truncate(true);
                     }
-                    o.open(&file).ok().map(|f| Some(BufWriter::new(f)))
+                    o.open(&file).ok().map(|f| FileH::W(BufWriter::new(f)))
                 };
                 let fd = match opened {
                     Some(h) => {
@@ -1909,12 +1910,108 @@ impl Sim {
             }
             SysTask::FClose { s } => {
                 let v = self.mem[*s as usize] as u32;
-                if let Some(Some(mut f)) = self.files.remove(&v) {
+                if let Some(FileH::W(mut f)) = self.files.remove(&v) {
                     let _ = f.flush();
                 }
             }
+            SysTask::FileRead { kind, d, src, scope } => {
+                let r = self.file_read(kind, *src, scope);
+                let d = *d as usize;
+                self.mem[d] = r as u32 as u64;
+                self.mem[d + 1] = 0;
+            }
         }
         false
+    }
+
+    /// $fgetc & co.: the 32-bit result (-1 for EOF or errors).
+    fn file_read(&mut self, kind: &FileRead, src: (u32, u32), scope: &str) -> i32 {
+        let rd = |m: &[u64], s: u32| m[s as usize] as u32;
+        if let FileRead::Scan { string: true, fmt, outs } = kind {
+            let s = fmt::value_string(&self.mem, src.0 as usize, src.1);
+            let mut pos = 0;
+            let mut eof = false;
+            return scan(&mut self.mem, s.as_bytes(), &mut pos, &mut eof, fmt, outs, scope);
+        }
+        let fd = rd(&self.mem, src.0);
+        let Some(FileH::R { data, pos, eof }) = self.files.get_mut(&fd) else { return -1 };
+        match kind {
+            FileRead::Getc => match data.get(*pos) {
+                Some(&c) => {
+                    *pos += 1;
+                    c as i32
+                }
+                None => {
+                    *eof = true;
+                    -1
+                }
+            },
+            FileRead::Ungetc { c } => {
+                let c = self.mem[*c as usize];
+                if c > 255 {
+                    return -1;
+                }
+                if *pos > 0 {
+                    *pos -= 1;
+                    data[*pos] = c as u8;
+                } else {
+                    data.insert(0, c as u8);
+                }
+                *eof = false;
+                0
+            }
+            FileRead::Gets { val, w } => {
+                let max = (*w / 8) as usize;
+                let start = *pos;
+                while *pos < data.len() && *pos - start < max {
+                    *pos += 1;
+                    if data[*pos - 1] == b'\n' {
+                        break;
+                    }
+                }
+                if *pos == start {
+                    *eof = true;
+                    return 0;
+                }
+                let line = String::from_utf8_lossy(&data[start..*pos]).into_owned();
+                string_to_bits(&mut self.mem, *val as usize, *w, &line);
+                (*pos - start) as i32
+            }
+            FileRead::Eof => *eof as i32,
+            FileRead::Tell => *pos as i32,
+            FileRead::Seek { off, op } => {
+                let (off, op) = (self.mem[*off as usize] as u32 as i32 as i64, self.mem[*op as usize]);
+                let base = match op {
+                    0 => 0,
+                    1 => *pos as i64,
+                    2 => data.len() as i64,
+                    _ => return -1,
+                };
+                let p = base + off;
+                if p < 0 {
+                    return -1;
+                }
+                *pos = p as usize;
+                *eof = false;
+                0
+            }
+            FileRead::Rewind => {
+                *pos = 0;
+                *eof = false;
+                0
+            }
+            FileRead::Scan { fmt, outs, .. } => {
+                let data = std::mem::take(data);
+                let (mut p, mut e) = (*pos, *eof);
+                let r = scan(&mut self.mem, &data, &mut p, &mut e, fmt, outs, scope);
+                if let Some(FileH::R { data: d, pos, eof }) = self.files.get_mut(&fd) {
+                    *d = data;
+                    *pos = p;
+                    *eof = e;
+                }
+                r
+            }
+        }
     }
 
     fn file_name(&self, f: &FileName) -> String {
@@ -2356,6 +2453,239 @@ unsafe extern "C" fn cb_halt(sim: *mut Sim, p: u32, pc: u32) {
 }
 
 /// Convert a plusarg value for $value$plusargs.
+/// An open file: a writer, or the whole contents of a file opened for reading.
+enum FileH {
+    W(BufWriter<std::fs::File>),
+    R { data: Vec<u8>, pos: usize, eof: bool },
+}
+
+/// $fscanf/$sscanf over `inp` from `*pos`. Returns the number of conversions assigned, or -1
+/// when the input ends before the first one.
+fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, outs: &[ScanOut], scope: &str) -> i32 {
+    for o in outs {
+        m[o.ok as usize] = 0;
+        m[o.ok as usize + 1] = 0;
+    }
+    let f = fmt.as_bytes();
+    let (mut fi, mut n, mut oi) = (0usize, 0i32, 0usize);
+    let ws = |c: u8| c.is_ascii_whitespace();
+    let at_end = |p: usize, eof: &mut bool| {
+        if p >= inp.len() {
+            *eof = true;
+            true
+        } else {
+            false
+        }
+    };
+    let mut ret_eof = false;
+    let pos0 = *pos;
+    while fi < f.len() {
+        let c = f[fi];
+        if ws(c) {
+            while fi < f.len() && ws(f[fi]) {
+                fi += 1;
+            }
+            while *pos < inp.len() && ws(inp[*pos]) {
+                *pos += 1;
+            }
+            continue;
+        }
+        if c != b'%' || f.get(fi + 1) == Some(&b'%') {
+            if c == b'%' {
+                fi += 1;
+            }
+            if at_end(*pos, eof) {
+                ret_eof = n == 0 && *pos == pos0;
+                break;
+            }
+            if inp[*pos] != c {
+                break;
+            }
+            *pos += 1;
+            fi += 1;
+            continue;
+        }
+        // a conversion: %[*][width]conv
+        fi += 1;
+        let skip = f.get(fi) == Some(&b'*');
+        if skip {
+            fi += 1;
+        }
+        let mut width = 0usize;
+        while fi < f.len() && f[fi].is_ascii_digit() {
+            width = width * 10 + (f[fi] - b'0') as usize;
+            fi += 1;
+        }
+        let Some(&conv) = f.get(fi) else { break };
+        fi += 1;
+        let conv = conv.to_ascii_lowercase();
+        let width = if width == 0 { usize::MAX } else { width };
+        if conv == b'm' {
+            if !skip {
+                if let Some(o) = outs.get(oi) {
+                    string_to_bits(m, o.val as usize, o.w, scope);
+                    m[o.ok as usize] = 1;
+                    oi += 1;
+                    n += 1;
+                }
+            }
+            continue;
+        }
+        if conv != b'c' {
+            while *pos < inp.len() && ws(inp[*pos]) {
+                *pos += 1;
+            }
+        }
+        if at_end(*pos, eof) {
+            ret_eof = n == 0 && *pos == pos0;
+            break;
+        }
+        let start = *pos;
+        let take = |pos: &mut usize, ok: &dyn Fn(usize, u8) -> bool| {
+            while *pos < inp.len() && *pos - start < width && ok(*pos - start, inp[*pos]) {
+                *pos += 1;
+            }
+        };
+        match conv {
+            b'c' => *pos += 1,
+            b's' => take(pos, &|_, c| !ws(c)),
+            b'd' | b'u' => {
+                let first = inp[start];
+                if matches!(first, b'x' | b'X' | b'z' | b'Z' | b'?') {
+                    *pos += 1;
+                } else {
+                    take(pos, &|i, c| c.is_ascii_digit() || c == b'_' || (i == 0 && (c == b'-' || c == b'+')));
+                }
+            }
+            b'b' => take(pos, &|_, c| matches!(c, b'0' | b'1' | b'x' | b'X' | b'z' | b'Z' | b'?' | b'_')),
+            b'o' => take(pos, &|_, c| matches!(c, b'0'..=b'7' | b'x' | b'X' | b'z' | b'Z' | b'?' | b'_')),
+            b'h' | b'x' => take(pos, &|_, c| c.is_ascii_hexdigit() || matches!(c, b'x' | b'X' | b'z' | b'Z' | b'?' | b'_')),
+            b'e' | b'f' | b'g' | b't' => {
+                // [+-]digits[.digits][e[+-]digits]
+                take(pos, &|_, c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E'));
+            }
+            _ => break,
+        }
+        let tok = &inp[start..*pos];
+        let digits = tok.iter().any(|c| c.is_ascii_alphanumeric() || *c == b'?') || conv == b'c';
+        if !digits {
+            *pos = start;
+            break;
+        }
+        if skip {
+            continue;
+        }
+        let Some(o) = outs.get(oi) else { break };
+        oi += 1;
+        let text = String::from_utf8_lossy(tok).into_owned();
+        let d = o.val as usize;
+        match conv {
+            b'c' => {
+                if o.real {
+                    ops::wr_real(m, d, tok[0] as f64);
+                } else {
+                    string_to_bits(m, d, o.w, &text);
+                }
+            }
+            b's' => string_to_bits(m, d, o.w, &text),
+            b'e' | b'f' | b'g' | b't' => {
+                // the longest prefix that parses as a number
+                let v = (1..=text.len()).rev().find_map(|k| text[..k].parse::<f64>().ok()).unwrap_or(0.0);
+                if o.real {
+                    ops::wr_real(m, d, v);
+                } else {
+                    ops::real_to_int(m, d, o.w, v);
+                }
+            }
+            _ => {
+                let radix = match conv {
+                    b'b' => 1,
+                    b'o' => 3,
+                    b'h' | b'x' => 4,
+                    _ => 0,
+                };
+                let text = text.replace('_', "");
+                if o.real {
+                    let v = if radix == 0 {
+                        text.parse::<f64>().unwrap_or(0.0)
+                    } else {
+                        u64::from_str_radix(&text, 1 << radix).map(|v| v as f64).unwrap_or(0.0)
+                    };
+                    ops::wr_real(m, d, v);
+                } else {
+                    scan_int(m, d, o.w, radix, &text);
+                }
+            }
+        }
+        m[o.ok as usize] = 1;
+        n += 1;
+    }
+    if ret_eof {
+        -1
+    } else {
+        n
+    }
+}
+
+/// An integer read by $scanf into the `w`-bit value at `d`: `bits` per digit (1, 3, 4), or
+/// decimal (0). x/z digits set the unknown bits.
+fn scan_int(m: &mut [u64], d: usize, w: u32, bits: u32, text: &str) {
+    let n = nw(w);
+    for i in 0..2 * n {
+        m[d + i] = 0;
+    }
+    let set = |m: &mut [u64], bit: u32, a: bool, b: bool| {
+        if bit < w {
+            let (wi, sh) = ((bit / 64) as usize, bit % 64);
+            m[d + wi] |= (a as u64) << sh;
+            m[d + n + wi] |= (b as u64) << sh;
+        }
+    };
+    if bits == 0 {
+        let first = text.bytes().next().unwrap_or(b'0');
+        if matches!(first, b'x' | b'X' | b'z' | b'Z' | b'?') {
+            let z = first != b'x' && first != b'X';
+            for bit in 0..w {
+                set(m, bit, !z, true);
+            }
+            return;
+        }
+        let (neg, digits) = match text.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, text.strip_prefix('+').unwrap_or(text)),
+        };
+        // multiply-add over the value words
+        for c in digits.bytes() {
+            let mut carry = (c - b'0') as u128;
+            for i in 0..n {
+                let v = m[d + i] as u128 * 10 + carry;
+                m[d + i] = v as u64;
+                carry = v >> 64;
+            }
+        }
+        if neg {
+            let mut carry = 1u128;
+            for i in 0..n {
+                let v = (!m[d + i]) as u128 + carry;
+                m[d + i] = v as u64;
+                carry = v >> 64;
+            }
+        }
+        m[d + n - 1] &= ops::mask(if w % 64 == 0 { 64 } else { w % 64 });
+        return;
+    }
+    for (k, c) in text.bytes().rev().enumerate() {
+        let (a, b) = match c {
+            b'x' | b'X' => (u32::MAX, u32::MAX),
+            b'z' | b'Z' | b'?' => (0, u32::MAX),
+            _ => ((c as char).to_digit(16).unwrap_or(0), 0),
+        };
+        for j in 0..bits {
+            set(m, k as u32 * bits + j, a >> j & 1 != 0, b >> j & 1 != 0);
+        }
+    }
+}
+
 fn plusarg_value(m: &mut [u64], d: usize, w: u32, real: bool, conv: char, text: &str) {
     let text = text.trim();
     match conv {

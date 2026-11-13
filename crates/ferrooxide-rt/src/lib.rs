@@ -255,6 +255,21 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                     v
                 }
                 SysTask::FClose { s } => vec![*s],
+                SysTask::FileRead { kind, d, src, .. } => {
+                    let mut v = vec![*d, src.0];
+                    match kind {
+                        FileRead::Ungetc { c } => v.push(*c),
+                        FileRead::Gets { val, .. } => v.push(*val),
+                        FileRead::Seek { off, op } => v.extend([*off, *op]),
+                        FileRead::Scan { outs, .. } => {
+                            for o in outs {
+                                v.extend([o.val, o.ok]);
+                            }
+                        }
+                        _ => {}
+                    }
+                    v
+                }
                 _ => vec![],
             }
         }
@@ -424,6 +439,33 @@ pub enum SysTask {
     ValuePlusargs { d: u32, prefix: String, conv: char, val: u32, w: u32, real: bool },
     /// format into the `w`-bit value at `d` (characters right-aligned)
     SFormat { d: u32, w: u32, args: Vec<FmtArg>, scope: String, texp: u8 },
+    /// file input: the 32-bit result goes to `d`; `src` is the descriptor (or, for $sscanf,
+    /// the string) as (slot, width)
+    FileRead { kind: FileRead, d: u32, src: (u32, u32), scope: String },
+}
+
+#[derive(Clone, Debug)]
+pub enum FileRead {
+    Getc,
+    Ungetc { c: u32 },
+    /// a line into the `w`-bit value at `val`
+    Gets { val: u32, w: u32 },
+    Eof,
+    Tell,
+    Seek { off: u32, op: u32 },
+    Rewind,
+    /// $fscanf / $sscanf (`string`): conversions go to `outs`
+    Scan { string: bool, fmt: String, outs: Vec<ScanOut> },
+}
+
+/// One $scanf output: the converted value (`w` bits, or f64 if `real`) and a 1-bit flag set
+/// when the conversion happened.
+#[derive(Clone, Debug)]
+pub struct ScanOut {
+    pub val: u32,
+    pub w: u32,
+    pub real: bool,
+    pub ok: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
