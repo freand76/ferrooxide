@@ -1809,9 +1809,9 @@ impl Sim {
                     self.postponed.push(*proc);
                 }
             }
-            SysTask::MonitorPrint { proc, args, scope, texp } => {
+            SysTask::MonitorPrint { proc, args, scope, texp, radix } => {
                 if self.monitor == *proc && self.monitor_on {
-                    let mut s = fmt::format_args(args, &self.mem, scope, 'd', *texp);
+                    let mut s = fmt::format_args(args, &self.mem, scope, *radix, *texp);
                     s.push('\n');
                     let _ = self.out.write_all(s.as_bytes());
                 }
@@ -1896,8 +1896,8 @@ impl Sim {
                     plusarg_value(&mut self.mem, val, *w, *real, *conv, &a[prefix.len()..]);
                 }
             }
-            SysTask::SFormat { d, w, args, scope, texp } => {
-                let s = fmt::format_args(args, &self.mem, scope, 'd', *texp);
+            SysTask::SFormat { d, w, args, scope, texp, radix } => {
+                let s = fmt::format_args(args, &self.mem, scope, *radix, *texp);
                 string_to_bits(&mut self.mem, *d as usize, *w, &s);
             }
             SysTask::FOpen { d, dw, file, mode } => {
@@ -1927,8 +1927,11 @@ impl Sim {
                 self.mem[d] = tmp[0];
                 self.mem[d + 1] = 0;
             }
-            SysTask::FClose { s } => {
+            SysTask::FClose { s, loc } => {
                 let v = self.mem[*s as usize] as u32;
+                if v == 1 {
+                    let _ = writeln!(self.out, "WARNING: {loc}: could not close MCD STDOUT (0x1) in $fclose().");
+                }
                 if let Some(FileH::W(mut f)) = self.files.remove(&v) {
                     let _ = f.flush();
                 }

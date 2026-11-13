@@ -808,17 +808,23 @@ impl<'a> Compiler<'a> {
     fn sys_task(&mut self, name: &str, args: &[Option<Expr>], sid: usize) -> R<()> {
         let scope = self.scopes[sid].name.clone();
         let sys = |t: SysTask| Instr::Sys(Box::new(t));
+        // $fdisplayb, $strobeh, $monitoro, ...: the default radix of unformatted arguments
+        let (name, radix) = match name.strip_suffix(['b', 'h', 'o']) {
+            Some(base)
+                if matches!(
+                    base,
+                    "$display" | "$write" | "$fdisplay" | "$fwrite" | "$strobe" | "$fstrobe" | "$monitor" | "$fmonitor" | "$swrite"
+                ) =>
+            {
+                (base, name.chars().last().unwrap())
+            }
+            _ => (name, 'd'),
+        };
         match name {
-            "$display" | "$write" | "$displayb" | "$displayh" | "$displayo" | "$writeb" | "$writeh" | "$writeo" => {
+            "$display" | "$write" => {
                 let args = self.fmt_args(args, sid)?;
                 let nl = name.starts_with("$display");
                 let texp = self.texp(sid);
-                let radix = match name.chars().last() {
-                    Some('h') => 'h',
-                    Some('b') => 'b',
-                    Some('o') => 'o',
-                    _ => 'd',
-                };
                 self.emit(sys(SysTask::Display { nl, args, scope, fd: None, prefix: "", texp, radix }));
             }
             "$error" | "$warning" | "$info" | "$fatal" => {
@@ -844,12 +850,13 @@ impl<'a> Compiler<'a> {
                 let (fs, fw, _) = self.self_expr(fd, sid)?;
                 let args = self.fmt_args(&args[1..], sid)?;
                 let texp = self.texp(sid);
-                self.emit(sys(SysTask::Display { nl: name == "$fdisplay", args, scope, fd: Some((fs, fw)), prefix: "", texp, radix: 'd' }));
+                self.emit(sys(SysTask::Display { nl: name == "$fdisplay", args, scope, fd: Some((fs, fw)), prefix: "", texp, radix }));
             }
             "$fclose" => {
                 if let Some(Some(fd)) = args.first() {
                     let (fs, _, _) = self.self_expr(fd, sid)?;
-                    self.emit(sys(SysTask::FClose { s: fs }));
+                    let loc = format!("{}:{}", self.file, self.line);
+                    self.emit(sys(SysTask::FClose { s: fs, loc }));
                 }
             }
             "$monitor" | "$strobe" => {
@@ -860,7 +867,7 @@ impl<'a> Compiler<'a> {
                 let fargs = self.fmt_args(args, sid)?;
                 if is_mon {
                     let texp = self.texp(sid);
-                    self.emit(sys(SysTask::MonitorPrint { proc: p, args: fargs, scope: scope.clone(), texp }));
+                    self.emit(sys(SysTask::MonitorPrint { proc: p, args: fargs, scope: scope.clone(), texp, radix }));
                     let mut reads = Vec::new();
                     for e in args.iter().flatten() {
                         self.reads_expr(e, sid, &mut reads);
@@ -870,7 +877,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Jmp { to: top });
                 } else {
                     let texp = self.texp(sid);
-                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd: None, prefix: "", texp, radix: 'd' }));
+                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd: None, prefix: "", texp, radix }));
                     self.emit(Instr::Halt);
                 }
                 self.end_proc();
@@ -888,7 +895,8 @@ impl<'a> Compiler<'a> {
                 let fargs = self.fmt_args(&args[1..], sid)?;
                 let d = self.tmp(vw);
                 let texp = self.texp(sid);
-                self.emit(sys(SysTask::SFormat { d, w: vw, args: fargs, scope, texp }));
+                let radix = if name == "$swrite" { radix } else { 'd' };
+                self.emit(sys(SysTask::SFormat { d, w: vw, args: fargs, scope, texp, radix }));
                 self.store_value(&Lhs::Expr(var, sid), d, vw, StoreMode::Blocking)?;
             }
             "$monitoron" => {

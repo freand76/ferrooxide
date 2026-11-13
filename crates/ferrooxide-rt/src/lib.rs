@@ -255,7 +255,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                     v.push(*d);
                     v
                 }
-                SysTask::FClose { s } => vec![*s],
+                SysTask::FClose { s, .. } => vec![*s],
                 SysTask::FileRead { kind, d, src, .. } => {
                     let mut v = vec![*d, src.0];
                     match kind {
@@ -421,7 +421,7 @@ pub enum SysTask {
     /// mark the given postponed process as the active monitor and wake it
     Monitor { proc: u32 },
     /// only print if this proc is the active monitor
-    MonitorPrint { proc: u32, args: Vec<FmtArg>, scope: String, texp: u8 },
+    MonitorPrint { proc: u32, args: Vec<FmtArg>, scope: String, texp: u8, radix: char },
     MonitorOn(bool),
     Strobe { proc: u32 },
     /// $finish / $stop; `loc` is "file:line" for the message (empty: no message)
@@ -434,14 +434,14 @@ pub enum SysTask {
     WriteMem { hex: bool, file: FileName, sig: u32, start: Option<(u32, u32)>, end: Option<(u32, u32)> },
     /// `mode`: "r", "w", "a" (+ "b"/"+"); without a mode the file is opened for writing
     FOpen { d: u32, dw: u32, file: FileName, mode: String },
-    FClose { s: u32 },
+    FClose { s: u32, loc: String },
     /// d (1 bit) = some plusarg starts with `prefix`
     TestPlusargs { d: u32, prefix: String },
     /// d (1 bit) = a plusarg `<prefix><value>` exists; its value, converted by `conv`
     /// (d h o b s f e g), goes to `val` (`w` bits, or f64 bits if `real`)
     ValuePlusargs { d: u32, prefix: String, conv: char, val: u32, w: u32, real: bool },
     /// format into the `w`-bit value at `d` (characters right-aligned)
-    SFormat { d: u32, w: u32, args: Vec<FmtArg>, scope: String, texp: u8 },
+    SFormat { d: u32, w: u32, args: Vec<FmtArg>, scope: String, texp: u8, radix: char },
     /// file input: the 32-bit result goes to `d`; `src` is the descriptor (or, for $sscanf,
     /// the string) as (slot, width)
     FileRead { kind: FileRead, d: u32, src: (u32, u32), scope: String },

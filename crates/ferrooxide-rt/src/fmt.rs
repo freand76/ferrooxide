@@ -264,6 +264,7 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                     if k >= chars.len() {
                         break;
                     }
+                    let upper = matches!(chars[k], 'E' | 'G');
                     let spec = chars[k].to_ascii_lowercase();
                     k += 1;
                     if spec == '%' {
@@ -282,7 +283,16 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                         Some(FmtArg::Real { s }) => {
                             let r = f64::from_bits(mem[*s as usize]);
                             match spec {
-                                'f' | 'e' | 'g' => fmt_real(r, spec, prec.unwrap_or(6)),
+                                'f' | 'e' | 'g' => {
+                                    let t = fmt_real(r, spec, prec.unwrap_or(6));
+                                    if upper {
+                                        t.to_uppercase()
+                                    } else {
+                                        t
+                                    }
+                                }
+                                // an infinite (or NaN) real prints as such also with %d
+                                'd' if !r.is_finite() => fmt_real(r, 'f', 0),
                                 't' => {
                                     let t = (r * 10f64.powi(texp as i32)).round();
                                     let s = format!("{}", t as i128);
@@ -340,7 +350,12 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 'e' | 'f' | 'g' => {
                                     let n = nw(w);
                                     let r = crate::ops::int_to_real(&mem[s as usize..s as usize + 2 * n], 0, w, signed);
-                                    fmt_real(r, spec, prec.unwrap_or(6))
+                                    let t = fmt_real(r, spec, prec.unwrap_or(6));
+                                    if upper {
+                                        t.to_uppercase()
+                                    } else {
+                                        t
+                                    }
                                 }
                                 'v' => {
                                     let (a, b) = v.bit(0);
