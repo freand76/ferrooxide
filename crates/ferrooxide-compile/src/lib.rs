@@ -38,6 +38,8 @@ pub(crate) struct Scope<'a> {
     pub syms: HashMap<String, Sym>,
     pub children: HashMap<String, usize>,
     pub funcs: HashMap<String, &'a SubroutineDecl>,
+    /// declared [msb:lsb] of parameters with a range (for bit and part selects)
+    pub param_ranges: HashMap<String, (i64, i64)>,
     pub file: String,
     /// time unit and precision of the enclosing module (powers of ten of seconds)
     pub tunit: i32,
@@ -103,6 +105,10 @@ pub struct Compiler<'a> {
     pub(crate) pending_disables: Vec<(u32, Vec<String>, String, u32)>,
     /// counter for per-call storage of automatic functions and tasks
     pub(crate) auto_count: u32,
+    /// nets of a special type (tri0, wand, ...): resolved even with one or no driver
+    pub(crate) net_types: HashMap<u32, NetType>,
+    /// nets with a pullup (true) or pulldown (false) gate
+    pub(crate) pulls: HashMap<u32, bool>,
     /// nets with several continuous drivers -> their driver signals
     drivers: HashMap<u32, Vec<u32>>,
     /// while compiling a driver of a multi-driven net: net -> this driver's signal
@@ -199,6 +205,8 @@ impl<'a> Compiler<'a> {
             gprec: 0,
             elem_alias: HashMap::new(),
             drivers: HashMap::new(),
+            net_types: HashMap::new(),
+            pulls: HashMap::new(),
             block_reg: Vec::new(),
             open_blocks: Vec::new(),
             pending_disables: Vec::new(),
@@ -362,6 +370,7 @@ impl<'a> Compiler<'a> {
             syms: HashMap::new(),
             children: HashMap::new(),
             funcs: HashMap::new(),
+            param_ranges: HashMap::new(),
             file,
             tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
             tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
@@ -374,12 +383,31 @@ impl<'a> Compiler<'a> {
         (self.scopes[sid].tunit - self.gprec).clamp(0, 18) as u8
     }
 
+    /// Named events start at 0: a trigger toggles them, so every trigger is a change.
+    pub(crate) fn zero_init(&mut self, s: u32) {
+        let info = &self.prog.signals[s as usize];
+        let (slot, n) = (info.slot as usize, rt::words(info.width) as usize * info.depth.max(1) as usize);
+        for w in &mut self.prog.mem[slot..slot + n] {
+            *w = 0;
+        }
+    }
+
     pub(crate) fn mark_real(&mut self, s: u32) {
         let info = &mut self.prog.signals[s as usize];
         info.real = true;
         let (slot, n) = (info.slot as usize, rt::words(info.width) as usize * info.depth.max(1) as usize);
         for w in &mut self.prog.mem[slot..slot + n] {
             *w = 0;
+        }
+    }
+
+    /// Declared range of a parameter named `name` visible from `sid`.
+    pub(crate) fn param_range(&self, name: &str, mut sid: usize) -> Option<(i64, i64)> {
+        loop {
+            if self.scopes[sid].syms.contains_key(name) {
+                return self.scopes[sid].param_ranges.get(name).copied();
+            }
+            sid = self.scopes[sid].parent?;
         }
     }
 
@@ -571,6 +599,10 @@ impl<'a> Compiler<'a> {
                 }
                 let v = self.param_value(p, ov, sid)?;
                 self.scopes[sid].syms.insert(p.name.clone(), v);
+                if p.range.is_some() && !p.real {
+                    let r = self.range_vals(&p.range, sid)?;
+                    self.scopes[sid].param_ranges.insert(p.name.clone(), r);
+                }
             }
         }
         // port connections by name
@@ -678,6 +710,10 @@ impl<'a> Compiler<'a> {
                     self.line = p.line;
                     let v = self.param_value(p, None, sid)?;
                     self.scopes[sid].syms.insert(p.name.clone(), v);
+                if p.range.is_some() && !p.real {
+                    let r = self.range_vals(&p.range, sid)?;
+                    self.scopes[sid].param_ranges.insert(p.name.clone(), r);
+                }
                 }
             }
         }
@@ -685,6 +721,7 @@ impl<'a> Compiler<'a> {
         struct Merged<'d> {
             dir: Option<Dir>,
             kind: NetKind,
+            net: NetType,
             signed: bool,
             range: Option<&'d Range>,
             dims: &'d [Range],
@@ -707,6 +744,9 @@ impl<'a> Compiler<'a> {
                             if d.explicit_kind && d.kind != NetKind::Wire {
                                 mg.kind = d.kind;
                             }
+                            if d.net != NetType::Wire {
+                                mg.net = d.net;
+                            }
                             mg.signed |= d.signed;
                             if d.range.is_some() {
                                 mg.range = d.range.as_ref();
@@ -725,6 +765,7 @@ impl<'a> Compiler<'a> {
                                 Merged {
                                     dir: d.dir,
                                     kind: d.kind,
+                                    net: d.net,
                                     signed: d.signed,
                                     range: d.range.as_ref(),
                                     dims: &dl.dims,
@@ -766,8 +807,7 @@ impl<'a> Compiler<'a> {
                 _ => SigKind::Reg,
             };
             let is_real = mg.kind == NetKind::Real;
-            // named events start at 0 (a trigger toggles them), like real variables
-            let is_real = is_real || mg.kind == NetKind::Event;
+            let is_event = mg.kind == NetKind::Event;
             let width = ((msb - lsb).abs() + 1) as u32;
             let (depth, arr_lo) = match mg.dims.len() {
                 0 => (0, 0),
@@ -844,6 +884,18 @@ impl<'a> Compiler<'a> {
             let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
             if is_real {
                 self.mark_real(s);
+            }
+            if is_event {
+                self.zero_init(s);
+            }
+            if mg.net != NetType::Wire {
+                self.net_types.insert(s, mg.net);
+                if matches!(mg.net, NetType::Supply0 | NetType::Supply1) {
+                    let d = if mg.net == NetType::Supply1 { "1" } else { "0" };
+                    let rhs = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: d.into(), fill: true });
+                    let line = self.line;
+                    self.jobs.push(Job::Assign { lhs: Expr::Ident(name.clone()), rhs, delay: None, scope: sid, line });
+                }
             }
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
             if let Some(init) = mg.init {
@@ -1003,11 +1055,44 @@ impl<'a> Compiler<'a> {
     }
 
     fn gate(&mut self, kind: &str, terms: &[Expr], sid: usize, line: u32) -> R<()> {
-        if terms.len() < 2 {
+        if terms.len() < 2 && !matches!(kind, "pullup" | "pulldown") {
             return self.err("gate needs at least two terminals");
         }
         let b = |e: &Expr| Box::new(e.clone());
+        let z = || Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "z".into(), fill: true });
         match kind {
+            "pullup" | "pulldown" => {
+                for t in terms {
+                    let mut v = Vec::new();
+                    self.lvalue_bases(t, sid, &mut v);
+                    for s in v {
+                        self.pulls.insert(s, kind == "pullup");
+                    }
+                }
+            }
+            "bufif0" | "bufif1" | "notif0" | "notif1" | "nmos" | "pmos" | "rnmos" | "rpmos" => {
+                // (out, in, control): tri-state buffer; an x control merges the two choices
+                if terms.len() != 3 {
+                    return self.err(format!("{kind} needs three terminals"));
+                }
+                let data = if kind.starts_with("notif") { Expr::Unary(UnOp::Not, b(&terms[1])) } else { terms[1].clone() };
+                let on_high = matches!(kind, "bufif1" | "notif1" | "nmos" | "rnmos");
+                let rhs = if on_high {
+                    Expr::Cond(b(&terms[2]), Box::new(data), Box::new(z()))
+                } else {
+                    Expr::Cond(b(&terms[2]), Box::new(z()), Box::new(data))
+                };
+                self.jobs.push(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
+            }
+            "cmos" | "rcmos" => {
+                // (out, in, ncontrol, pcontrol)
+                if terms.len() != 4 {
+                    return self.err(format!("{kind} needs four terminals"));
+                }
+                let p_side = Expr::Cond(b(&terms[3]), Box::new(z()), b(&terms[1]));
+                let rhs = Expr::Cond(b(&terms[2]), b(&terms[1]), Box::new(p_side));
+                self.jobs.push(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
+            }
             "not" | "buf" => {
                 let input = terms.last().unwrap();
                 for out in &terms[..terms.len() - 1] {
@@ -1135,10 +1220,36 @@ impl<'a> Compiler<'a> {
             .into_iter()
             .filter(|&(s, n)| {
                 let i = self.sig(s);
-                n > 1 && i.kind == SigKind::Wire && i.depth == 0 && i.alias_of.is_none()
+                let special = self.net_types.contains_key(&s) || self.pulls.contains_key(&s);
+                (n > 1 || special) && i.kind == SigKind::Wire && i.depth == 0 && i.alias_of.is_none()
             })
             .map(|(s, _)| s)
             .collect();
+        // special nets nothing drives: their resolved value is constant
+        let undriven: Vec<u32> = self
+            .net_types
+            .keys()
+            .chain(self.pulls.keys())
+            .copied()
+            .filter(|s| !multi.contains(s))
+            .collect();
+        for s in undriven {
+            let pull = match (self.net_types.get(&s), self.pulls.get(&s)) {
+                (_, Some(&p)) => Some(p),
+                (Some(NetType::Tri0), _) => Some(false),
+                (Some(NetType::Tri1), _) => Some(true),
+                _ => None,
+            };
+            if let Some(p) = pull {
+                let i = self.sig(s).clone();
+                let n = rt::nw(i.width);
+                for k in 0..n {
+                    let m = if k == n - 1 { rt::tmask(i.width) } else { !0 };
+                    self.prog.mem[i.slot as usize + k] = if p { m } else { 0 };
+                    self.prog.mem[i.slot as usize + n + k] = 0;
+                }
+            }
+        }
         for job in &jobs {
             self.redirect.clear();
             for s in self.job_targets(job) {
@@ -1162,11 +1273,30 @@ impl<'a> Compiler<'a> {
             let p = self.begin_proc(i.name.clone(), ProcClass::Normal);
             self.prog.procs[p as usize].fusible = true;
             let top = self.here();
+            let nt = self.net_types.get(&net).copied().unwrap_or(NetType::Wire);
+            let rop = match nt {
+                NetType::Wand => rt::BinOp::ResolveAnd,
+                NetType::Wor => rt::BinOp::ResolveOr,
+                _ => rt::BinOp::Resolve,
+            };
             let mut v = self.sig(drv[0]).slot;
             for &d in &drv[1..] {
                 let t = self.tmp(i.width);
                 let b = self.sig(d).slot;
-                self.emit(Instr::Bin { op: rt::BinOp::Resolve, d: t, a: v, b, w: i.width });
+                self.emit(Instr::Bin { op: rop, d: t, a: v, b, w: i.width });
+                v = t;
+            }
+            // pulled nets: undriven (z) bits read as 0 / 1
+            let pull = match (self.pulls.get(&net), nt) {
+                (Some(&p), _) => Some(p),
+                (None, NetType::Tri0) => Some(false),
+                (None, NetType::Tri1) => Some(true),
+                _ => None,
+            };
+            if let Some(p) = pull {
+                let c = self.const_slot(&Const::fill(if p { '1' } else { '0' }, i.width));
+                let t = self.tmp(i.width);
+                self.emit(Instr::Bin { op: rt::BinOp::PullZ, d: t, a: v, b: c, w: i.width });
                 v = t;
             }
             self.emit(Instr::Store { t: rt::Target::Whole { sig: net }, s: v, mode: rt::StoreMode::Blocking });

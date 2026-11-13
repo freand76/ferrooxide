@@ -97,7 +97,11 @@ impl<'a> Compiler<'a> {
             }
             Some(Base::Const(c)) => {
                 let s = self.const_slot(&c);
-                Ok((s, c.w, c.w as i64 - 1, 0))
+                let (m, l) = match e {
+                    Expr::Ident(n) => self.param_range(n, sid).unwrap_or((c.w as i64 - 1, 0)),
+                    _ => (c.w as i64 - 1, 0),
+                };
+                Ok((s, c.w, m, l))
             }
             Some(Base::Real(_)) => self.err("bit select of a real value"),
             None => {
@@ -752,6 +756,9 @@ impl<'a> Compiler<'a> {
                 let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
                 if d.kind == NetKind::Real {
                     self.mark_real(sg);
+                }
+                if d.kind == NetKind::Event {
+                    self.zero_init(sg);
                 }
                 self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
                 if let Some(dir) = d.dir {

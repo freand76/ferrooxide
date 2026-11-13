@@ -266,7 +266,25 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                     }
                                 }
                                 's' | 'c' => String::new(),
-                                _ => format!("{}", r.round() as i128),
+                                'b' | 'o' | 'h' | 'x' => {
+                                    // rounded, as a 64-bit two's complement integer
+                                    let i = [r.round() as i64 as u64];
+                                    let v = Val { a: &i, b: &[0], w: 64, signed: false };
+                                    let bits = match spec {
+                                        'b' => 1,
+                                        'o' => 3,
+                                        _ => 4,
+                                    };
+                                    fmt_radix(&v, bits, pad)
+                                }
+                                _ => {
+                                    let v = r.round();
+                                    if v == 0.0 && r < 0.0 {
+                                        "-0".to_string()
+                                    } else {
+                                        format!("{}", v as i128)
+                                    }
+                                }
                             }
                         }
                         Some(FmtArg::Val { .. }) | Some(FmtArg::Time { .. }) => {

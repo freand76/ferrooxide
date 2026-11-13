@@ -396,6 +396,19 @@ fn bitwise(op: BinOp, va: u64, xa: u64, vb: u64, xb: u64, mk: u64) -> (u64, u64)
             let rx = xa | xb;
             ((!(va ^ vb) | rx) & mk, rx)
         }
+        BinOp::ResolveAnd | BinOp::ResolveOr => {
+            // z yields to the other driver; otherwise 4-state AND / OR
+            let za = !va & xa;
+            let zb = !vb & xb;
+            let (r, x) = bitwise(if op == BinOp::ResolveAnd { BinOp::And } else { BinOp::Or }, va, xa, vb, xb, mk);
+            let rv = (va & zb & !za) | (vb & za & !zb) | (r & !za & !zb);
+            let rx = (xa & zb & !za) | (xb & za & !zb) | (x & !za & !zb) | (za & zb);
+            (rv & mk, rx & mk)
+        }
+        BinOp::PullZ => {
+            let za = !va & xa;
+            ((va & !za) | (vb & za), xa & !za)
+        }
         BinOp::Resolve => {
             // z (v=0, x=1) yields to the other driver; equal values stay; conflicts are x
             let za = !va & xa;
@@ -417,7 +430,10 @@ pub fn binop(m: &mut [u64], op: BinOp, d: usize, a: usize, b: usize, w: u32) {
     if w <= 64 {
         let (va, xa, vb, xb) = (m[a], m[a + 1], m[b], m[b + 1]);
         let mk = mask(w);
-        if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor | BinOp::Resolve) {
+        if matches!(
+            op,
+            BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor | BinOp::Resolve | BinOp::ResolveAnd | BinOp::ResolveOr | BinOp::PullZ
+        ) {
             let (r, x) = bitwise(op, va, xa, vb, xb, mk);
             m[d] = r;
             m[d + 1] = x;
@@ -448,7 +464,10 @@ pub fn binop(m: &mut [u64], op: BinOp, d: usize, a: usize, b: usize, w: u32) {
         return;
     }
     let n = nw(w);
-    if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor | BinOp::Resolve) {
+    if matches!(
+        op,
+        BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Xnor | BinOp::Resolve | BinOp::ResolveAnd | BinOp::ResolveOr | BinOp::PullZ
+    ) {
         for i in 0..n {
             let mk = if i == n - 1 { tmask(w) } else { !0 };
             let (r, x) = bitwise(op, m[a + i], m[a + n + i], m[b + i], m[b + n + i], mk);

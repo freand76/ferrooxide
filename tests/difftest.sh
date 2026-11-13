@@ -17,7 +17,7 @@ for f in "${files[@]}"; do
   # optional plusargs for both simulators: a line "// args: +a=1 +b"
   args="$(sed -n 's|^// args:||p' "$f" | head -1)"
   ( cd "$(dirname "$f")" && iverilog -g2012 -o "$tmp/$name.vvp" "$f" 2>"$tmp/$name.ierr" ) || { echo "SKIP $name (iverilog failed)"; continue; }
-  ( cd "$(dirname "$f")" && vvp -n "$tmp/$name.vvp" $args 2>&1 | grep -v -e '\$finish called' -e '^VCD info' -e '\$stop called' > "$tmp/$name.exp" )
+  ( cd "$(dirname "$f")" && vvp -n "$tmp/$name.vvp" $args 2>&1 | grep -v -e '\$finish called' -e '\$stop called' > "$tmp/$name.exp" )
   ( cd "$(dirname "$f")" && timeout 60 "$bin" ${FX_FLAGS:-} "$f" $args 2>"$tmp/$name.err" | grep -v -e '\$finish called' -e '\$stop called' > "$tmp/$name.out" )
   if diff -u "$tmp/$name.exp" "$tmp/$name.out" > "$tmp/$name.diff"; then
     pass=$((pass+1))

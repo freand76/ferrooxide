@@ -339,7 +339,7 @@ impl<'a> Compiler<'a> {
                             }
                             _ => SigKind::Reg,
                         };
-                        let is_real = d.kind == NetKind::Real || d.kind == NetKind::Event;
+                                        let is_real = d.kind == NetKind::Real;
                         let w = ((m - l).abs() + 1) as u32;
                         for dl in &d.names {
                             let (depth, lo) = if let Some((a, b2)) = dl.dims.first() {
@@ -352,6 +352,9 @@ impl<'a> Compiler<'a> {
                                 self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, kind);
                             if is_real {
                                 self.mark_real(s);
+                            }
+                            if d.kind == NetKind::Event {
+                                self.zero_init(s);
                             }
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
                             if let Some(init) = &dl.init {
@@ -732,7 +735,13 @@ impl<'a> Compiler<'a> {
                 let args = self.fmt_args(args, sid)?;
                 let nl = name.starts_with("$display");
                 let texp = self.texp(sid);
-                self.emit(sys(SysTask::Display { nl, args, scope, fd: None, prefix: "", texp }));
+                let radix = match name.chars().last() {
+                    Some('h') => 'h',
+                    Some('b') => 'b',
+                    Some('o') => 'o',
+                    _ => 'd',
+                };
+                self.emit(sys(SysTask::Display { nl, args, scope, fd: None, prefix: "", texp, radix }));
             }
             "$error" | "$warning" | "$info" | "$fatal" => {
                 let mut a = args;
@@ -747,7 +756,7 @@ impl<'a> Compiler<'a> {
                     _ => "FATAL: ",
                 };
                 let texp = self.texp(sid);
-                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix, texp }));
+                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix, texp, radix: 'd' }));
                 if name == "$fatal" {
                     self.emit(sys(SysTask::Finish { loc: String::new(), stop: false }));
                 }
@@ -757,7 +766,7 @@ impl<'a> Compiler<'a> {
                 let (fs, fw, _) = self.self_expr(fd, sid)?;
                 let args = self.fmt_args(&args[1..], sid)?;
                 let texp = self.texp(sid);
-                self.emit(sys(SysTask::Display { nl: name == "$fdisplay", args, scope, fd: Some((fs, fw)), prefix: "", texp }));
+                self.emit(sys(SysTask::Display { nl: name == "$fdisplay", args, scope, fd: Some((fs, fw)), prefix: "", texp, radix: 'd' }));
             }
             "$fclose" => {
                 if let Some(Some(fd)) = args.first() {
@@ -783,7 +792,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Jmp { to: top });
                 } else {
                     let texp = self.texp(sid);
-                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd: None, prefix: "", texp }));
+                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd: None, prefix: "", texp, radix: 'd' }));
                     self.emit(Instr::Halt);
                 }
                 self.end_proc();

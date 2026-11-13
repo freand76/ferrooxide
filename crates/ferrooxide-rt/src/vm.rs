@@ -1627,9 +1627,9 @@ impl Sim {
     /// Returns true if the process must stop executing.
     fn systask(&mut self, p: u32, task: &SysTask, pc: usize) -> bool {
         match task {
-            SysTask::Display { nl, args, scope, fd, prefix, texp } => {
+            SysTask::Display { nl, args, scope, fd, prefix, texp, radix } => {
                 let mut s = String::from(*prefix);
-                s.push_str(&fmt::format_args(args, &self.mem, scope, 'd', *texp));
+                s.push_str(&fmt::format_args(args, &self.mem, scope, *radix, *texp));
                 if *nl {
                     s.push('\n');
                 }
@@ -1701,6 +1701,7 @@ impl Sim {
                 if self.vcd.is_none() {
                     match Vcd::create(&self.vcd_path, &self.prog) {
                         Ok(mut v) => {
+                            let _ = writeln!(self.out, "VCD info: dumpfile {} opened for output.", self.vcd_path);
                             v.time(self.time);
                             v.begin_dumpvars();
                             for (i, r) in self.sigs.iter().enumerate() {

@@ -33,7 +33,15 @@ fn is_keyword(s: &str) -> bool {
     KEYWORDS.contains(&s)
 }
 
-const GATES: &[&str] = &["and", "or", "nand", "nor", "xor", "xnor", "not", "buf"];
+const GATES: &[&str] = &[
+    "and", "or", "nand", "nor", "xor", "xnor", "not", "buf", "bufif0", "bufif1", "notif0", "notif1", "nmos", "pmos",
+    "rnmos", "rpmos", "cmos", "rcmos", "pullup", "pulldown",
+];
+
+const STRENGTHS: &[&str] = &[
+    "supply0", "supply1", "strong0", "strong1", "pull0", "pull1", "weak0", "weak1", "highz0", "highz1", "small",
+    "medium", "large",
+];
 
 impl Parser {
     pub fn new(toks: Vec<Token>, file: String) -> Self {
@@ -325,9 +333,21 @@ impl Parser {
         let mut kind = NetKind::Wire;
         let mut explicit_kind = false;
         let mut signed = false;
+        let mut net = NetType::Wire;
         if let Tok::Ident(s) = self.peek().clone() {
+            net = match s.as_str() {
+                "tri0" => NetType::Tri0,
+                "tri1" => NetType::Tri1,
+                "supply0" => NetType::Supply0,
+                "supply1" => NetType::Supply1,
+                "wand" | "triand" => NetType::Wand,
+                "wor" | "trior" => NetType::Wor,
+                "trireg" => NetType::Trireg,
+                _ => NetType::Wire,
+            };
             let k = match s.as_str() {
-                "wire" | "tri" | "wand" | "wor" | "supply0" | "supply1" | "tri0" | "tri1" | "uwire" => Some(NetKind::Wire),
+                "wire" | "tri" | "wand" | "wor" | "triand" | "trior" | "trireg" | "supply0" | "supply1" | "tri0"
+                | "tri1" | "uwire" => Some(NetKind::Wire),
                 "reg" | "logic" => Some(NetKind::Reg),
                 "bit" => Some(NetKind::Bit),
                 "integer" => Some(NetKind::Integer),
@@ -352,6 +372,8 @@ impl Parser {
                 if self.is_kw("logic") || self.is_kw("reg") {
                     self.bump();
                 }
+                // drive / charge strength of a net declaration
+                self.skip_strength()?;
             }
         }
         if self.eat_kw("signed") {
@@ -360,7 +382,11 @@ impl Parser {
             signed = false;
         }
         let range = if self.is_p("[") { Some(self.range()?) } else { None };
-        Ok(Decl { dir, kind, explicit_kind, signed, range, names: Vec::new(), line })
+        // optional net delay: wire #5 w;
+        if self.eat_p("#") {
+            self.delay_value()?;
+        }
+        Ok(Decl { dir, kind, net, explicit_kind, signed, range, names: Vec::new(), line })
     }
 
     fn declarators(&mut self) -> Result<Vec<Declarator>> {
@@ -385,7 +411,7 @@ impl Parser {
     fn is_decl_start(&self) -> bool {
         matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
             "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"|"event"
-            |"tri"|"wand"|"wor"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"))
+            |"tri"|"wand"|"wor"|"triand"|"trior"|"trireg"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"))
     }
 
     fn param_items(&mut self, local: bool) -> Result<Vec<ParamDecl>> {
@@ -434,6 +460,7 @@ impl Parser {
             }
             "assign" => {
                 self.bump();
+                self.skip_strength()?;
                 let delay = if self.eat_p("#") { Some(self.delay_value()?) } else { None };
                 loop {
                     let line = self.line();
@@ -500,6 +527,7 @@ impl Parser {
             _ if GATES.contains(&kw) => {
                 self.bump();
                 let kind = kw.to_string();
+                self.skip_strength()?;
                 if self.eat_p("#") {
                     self.delay_value()?;
                 }
@@ -792,18 +820,37 @@ impl Parser {
     }
 
     // ---------- statements ----------
+    /// `( strength0, strength1 )` or a charge strength `(small)`: skipped (no strength model)
+    fn skip_strength(&mut self) -> Result<()> {
+        if self.is_p("(") && matches!(self.peek_at(1), Tok::Ident(s) if STRENGTHS.contains(&s.as_str())) {
+            while !self.eat_p(")") {
+                if matches!(self.peek(), Tok::Eof) {
+                    return self.err("unterminated strength");
+                }
+                self.bump();
+            }
+        }
+        Ok(())
+    }
+
     fn delay_value(&mut self) -> Result<Expr> {
         if self.eat_p("(") {
-            let e = self.expr()?;
-            // min:typ:max -> take typ
-            let e = if self.eat_p(":") {
-                let t = self.expr()?;
-                self.expect_p(":")?;
-                self.expr()?;
-                t
-            } else {
-                e
+            let mtm = |p: &mut Parser| -> Result<Expr> {
+                let e = p.expr()?;
+                // min:typ:max -> take typ
+                if p.eat_p(":") {
+                    let t = p.expr()?;
+                    p.expect_p(":")?;
+                    p.expr()?;
+                    return Ok(t);
+                }
+                Ok(e)
             };
+            let e = mtm(self)?;
+            // (rise, fall[, turn-off]): the rise delay is used
+            while self.eat_p(",") {
+                mtm(self)?;
+            }
             self.expect_p(")")?;
             Ok(e)
         } else {

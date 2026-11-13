@@ -21,6 +21,19 @@ pub enum Dir {
     Inout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetType {
+    #[default]
+    Wire,
+    Tri0,
+    Tri1,
+    Supply0,
+    Supply1,
+    Wand,
+    Wor,
+    Trireg,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetKind {
     Wire,
@@ -51,6 +64,8 @@ pub struct Declarator {
 pub struct Decl {
     pub dir: Option<Dir>,
     pub kind: NetKind,
+    /// the net type of a `NetKind::Wire` declaration
+    pub net: NetType,
     /// true if the kind was given explicitly (e.g. `output reg`) vs. implied
     pub explicit_kind: bool,
     pub signed: bool,

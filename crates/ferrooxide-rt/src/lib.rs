@@ -254,6 +254,11 @@ pub enum BinOp {
     ModS,
     /// wire resolution of two drivers (z yields, conflicts give x)
     Resolve,
+    /// wired-AND / wired-OR resolution (wand, wor): z yields, then 0 (AND) or 1 (OR) dominates
+    ResolveAnd,
+    ResolveOr,
+    /// z bits of a take the value of b (tri0/tri1/pullup/pulldown nets)
+    PullZ,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,7 +355,8 @@ pub enum FileName {
 pub enum SysTask {
     /// $display/$write/$strobe/$monitor body printing; `nl` adds newline. `fd` = None → stdout
     /// `texp`: %t scales a time in module units by 10^texp to simulation ticks
-    Display { nl: bool, args: Vec<FmtArg>, scope: String, fd: Option<(u32, u32)>, prefix: &'static str, texp: u8 },
+    /// `radix`: default for arguments without a format ('d', 'h', 'b', 'o': $displayh ...)
+    Display { nl: bool, args: Vec<FmtArg>, scope: String, fd: Option<(u32, u32)>, prefix: &'static str, texp: u8, radix: char },
     /// mark the given postponed process as the active monitor and wake it
     Monitor { proc: u32 },
     /// only print if this proc is the active monitor
