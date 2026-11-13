@@ -26,7 +26,7 @@ const KEYWORDS: &[&str] = &[
     "endfunction", "task", "endtask", "generate", "endgenerate", "genvar", "signed", "unsigned", "fork", "join",
     "wait", "disable", "tri", "supply0", "supply1", "wand", "wor", "logic", "bit", "int", "byte", "shortint",
     "longint", "always_comb", "always_ff", "always_latch", "automatic", "return", "do", "final", "defparam",
-    "specify", "endspecify", "primitive", "endprimitive", "table", "endtable", "join_any", "force", "release", "deassign", "realtime", "event", "join_none", "break", "continue", "unique", "priority",
+    "specify", "endspecify", "specparam", "primitive", "endprimitive", "table", "endtable", "join_any", "force", "release", "deassign", "realtime", "event", "join_none", "break", "continue", "unique", "priority",
 ];
 
 fn is_keyword(s: &str) -> bool {
@@ -578,9 +578,9 @@ impl Parser {
             _ => return self.err(format!("unexpected {} in module", self.describe())),
         };
         match kw {
-            "parameter" | "localparam" => {
+            "parameter" | "localparam" | "specparam" => {
                 self.bump();
-                for p in self.param_items(kw == "localparam")? {
+                for p in self.param_items(kw != "parameter")? {
                     items.push(Item::Param(p));
                 }
             }
@@ -656,9 +656,16 @@ impl Parser {
                 self.expect_p(";")?;
             }
             "specify" => {
+                // only specparams are kept; paths and timing checks are ignored
                 while !self.eat_kw("endspecify") {
                     if matches!(self.peek(), Tok::Eof) {
                         return self.err("unterminated specify");
+                    }
+                    if self.eat_kw("specparam") {
+                        for p in self.param_items(true)? {
+                            items.push(Item::Param(p));
+                        }
+                        continue;
                     }
                     self.bump();
                 }
@@ -961,6 +968,7 @@ impl Parser {
         } else {
             Stmt::Block { name: None, decls: vec![], stmts, fork: None }
         };
+        let decls = merge_port_types(decls);
         Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, decls, body, line })
     }
 
@@ -1399,6 +1407,12 @@ impl Parser {
             Some(Timing::Delay(self.delay_value()?))
         } else if self.eat_p("@") {
             Some(Timing::Event(self.event_ctl()?))
+        } else if self.eat_kw("repeat") {
+            self.expect_p("(")?;
+            let n = self.expr()?;
+            self.expect_p(")")?;
+            self.expect_p("@")?;
+            Some(Timing::Repeat(n, self.event_ctl()?))
         } else {
             None
         };
@@ -1623,10 +1637,30 @@ impl Parser {
             }
             Tok::SysIdent(name) => {
                 let mut args = Vec::new();
+                let mut type_bits = None;
                 if self.eat_p("(") {
                     if !self.is_p(")") {
                         loop {
-                            args.push(self.expr()?);
+                            // a type as the argument: $bits(integer)
+                            let tw = match self.peek() {
+                                Tok::Ident(t) if matches!(self.peek_at(1), Tok::Punct(")" | ",")) => match t.as_str() {
+                                    "integer" | "int" => Some(32),
+                                    "time" | "real" | "realtime" | "longint" => Some(64),
+                                    "shortint" => Some(16),
+                                    "byte" => Some(8),
+                                    "bit" | "logic" | "reg" => Some(1),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            match tw {
+                                Some(w) if name == "$bits" => {
+                                    self.bump();
+                                    type_bits = Some(w);
+                                    args.push(Expr::Num(dec(w)));
+                                }
+                                _ => args.push(self.expr()?),
+                            }
                             if !self.eat_p(",") {
                                 break;
                             }
@@ -1634,7 +1668,10 @@ impl Parser {
                     }
                     self.expect_p(")")?;
                 }
-                Expr::SysCall(name, args)
+                match type_bits {
+                    Some(w) => Expr::Num(dec(w)),
+                    None => Expr::SysCall(name, args),
+                }
             }
             Tok::Ident(name) if !is_keyword(&name) || (is_sv_only(&name) && !self.is_p("'")) => {
                 if self.is_p("(") {
@@ -1662,6 +1699,44 @@ impl Parser {
         // selects after parenthesised/concat expressions are not legal Verilog, but allow on concat
         Ok(e)
     }
+}
+
+/// Non-ANSI subroutine ports typed by a second declaration (`input x; integer x;`): the
+/// port takes the type, and the type-only declaration is dropped.
+fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
+    let typed: Vec<&Decl> = decls.iter().filter(|d| d.dir.is_none()).collect();
+    let find = |n: &str| typed.iter().find(|d| d.names.iter().any(|x| x.name == n)).copied();
+    let port_names: Vec<String> =
+        decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|x| x.name.clone())).collect();
+    if !port_names.iter().any(|n| find(n).is_some()) {
+        return decls;
+    }
+    let mut out = Vec::new();
+    for d in &decls {
+        if d.dir.is_some() {
+            for x in &d.names {
+                let mut nd = d.clone();
+                nd.names = vec![x.clone()];
+                if let Some(t) = find(&x.name) {
+                    nd.kind = t.kind.clone();
+                    nd.net = t.net;
+                    nd.explicit_kind = true;
+                    nd.signed |= t.signed;
+                    if t.range.is_some() {
+                        nd.range = t.range.clone();
+                    }
+                }
+                out.push(nd);
+            }
+        } else {
+            let mut nd = d.clone();
+            nd.names.retain(|x| !port_names.contains(&x.name));
+            if !nd.names.is_empty() {
+                out.push(nd);
+            }
+        }
+    }
+    out
 }
 
 pub fn dec(v: u64) -> Number {

@@ -1136,6 +1136,38 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        // 3b. implicit nets: undeclared names on the left of continuous assignments and as gate
+        // terminals become 1-bit wires
+        let mut implicit: Vec<&String> = Vec::new();
+        fn lhs_names<'e>(e: &'e Expr, out: &mut Vec<&'e String>) {
+            match e {
+                Expr::Ident(n) => out.push(n),
+                Expr::Concat(v) => v.iter().for_each(|x| lhs_names(x, out)),
+                _ => {}
+            }
+        }
+        for it in items {
+            match it {
+                Item::ContAssign { lhs, .. } => lhs_names(lhs, &mut implicit),
+                Item::Gate { terms, .. } => terms.iter().for_each(|t| lhs_names(t, &mut implicit)),
+                _ => {}
+            }
+        }
+        for n in implicit {
+            if self.lookup(n, sid).is_none() {
+                let full = format!("{}.{}", self.scopes[sid].name, n);
+                let s = self.new_signal(full, 1, false, 0, 0, 0, 0, SigKind::Wire);
+                self.scopes[sid].syms.insert(n.clone(), Sym::Sig(s));
+            }
+        }
+        // 3c. static tasks and functions, so hierarchical names can reach their variables
+        for it in items {
+            if let Item::Subroutine(f) = it {
+                if !f.automatic {
+                    self.func_instance(f, sid, &f.name)?;
+                }
+            }
+        }
         // 4. everything else
         let mut genblk = 0;
         for it in items {

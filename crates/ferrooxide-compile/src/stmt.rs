@@ -308,6 +308,10 @@ impl<'a> Compiler<'a> {
                 let ctl = self.event_ctl(ec, body, sid)?;
                 self.emit(Instr::Wait { ctl });
             }
+            Timing::Repeat(n, ec) => {
+                let wait = Stmt::Timed { timing: Timing::Event(ec.clone()), body: Box::new(Stmt::Null), line: self.line };
+                self.stmt(&Stmt::Repeat { count: n.clone(), body: Box::new(wait), line: self.line }, sid)?;
+            }
         }
         Ok(())
     }

@@ -191,6 +191,8 @@ pub enum CaseKind {
 pub enum Timing {
     Delay(Expr),
     Event(EventCtl),
+    /// intra-assignment `repeat (n) @(ev)`
+    Repeat(Expr, EventCtl),
 }
 
 #[derive(Debug, Clone)]

@@ -853,6 +853,10 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        if key.1 == f.name {
+            // the static instance: reachable by hierarchical names (task.var)
+            self.scopes[def_scope].children.entry(f.name.clone()).or_insert(fs);
+        }
         self.func_inst.insert(key, FuncInst { scope: fs, ret, ports });
         Ok(())
     }

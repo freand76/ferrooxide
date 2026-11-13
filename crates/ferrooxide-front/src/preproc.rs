@@ -203,7 +203,8 @@ impl Preprocessor {
                         let inc: String = s[st..i].iter().collect();
                         i += 1;
                         let mut found = None;
-                        for d in std::iter::once(dir.to_path_buf()).chain(self.incdirs.iter().cloned()) {
+                        let cwd = std::path::PathBuf::from(".");
+                        for d in std::iter::once(dir.to_path_buf()).chain(self.incdirs.iter().cloned()).chain(std::iter::once(cwd)) {
                             let p = d.join(&inc);
                             if p.exists() {
                                 found = Some(p);
@@ -276,6 +277,8 @@ impl Preprocessor {
                                 i += 1;
                             }
                             body = substitute_params(&body, params, &args);
+                        } else {
+                            body = substitute_params(&body, &[], &[]);
                         }
                         let expanded = self.process_text(&body, fname, dir)?;
                         out.push_str(&expanded);
@@ -324,6 +327,12 @@ fn substitute_params(body: &str, params: &[String], args: &[String]) -> String {
             }
         } else if b[i] == '`' && i + 1 < b.len() && b[i + 1] == '`' {
             i += 2; // token pasting
+        } else if b[i] == '`' && i + 1 < b.len() && b[i + 1] == '"' {
+            out.push('"'); // `" : a string with macro arguments substituted
+            i += 2;
+        } else if b[i..].starts_with(&['`', '\\', '`', '"']) {
+            out.push_str("\\\""); // `\`" : an escaped quote inside `"...`"
+            i += 4;
         } else {
             out.push(b[i]);
             i += 1;
