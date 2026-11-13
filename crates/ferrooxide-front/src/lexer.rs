@@ -168,7 +168,9 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
             continue;
         }
         if c.is_ascii_digit() || (c == b'\'' && i + 1 < s.len() && is_base_start(&s[i + 1..])) {
-            let (tok, ni) = lex_number(text, i).map_err(|m| err(m, line))?;
+            // after `#` a number is a delay: `#1 'h5` is the delay 1 and then 'h5
+            let after_hash = matches!(toks.last(), Some(Token { tok: Tok::Punct("#"), .. }));
+            let (tok, ni) = lex_number(text, i, after_hash).map_err(|m| err(m, line))?;
             i = ni;
             toks.push(Token { tok, line });
             continue;
@@ -208,7 +210,7 @@ fn is_base_start(s: &[u8]) -> bool {
     k < s.len() && matches!(s[k], b'b' | b'B' | b'o' | b'O' | b'd' | b'D' | b'h' | b'H')
 }
 
-fn lex_number(text: &str, mut i: usize) -> std::result::Result<(Tok, usize), String> {
+fn lex_number(text: &str, mut i: usize, after_hash: bool) -> std::result::Result<(Tok, usize), String> {
     let s = text.as_bytes();
     let mut size = None;
     if s[i].is_ascii_digit() {
@@ -242,7 +244,7 @@ fn lex_number(text: &str, mut i: usize) -> std::result::Result<(Tok, usize), Str
         }
         // look ahead for a base
         let mut j = i;
-        while j < s.len() && (s[j] == b' ' || s[j] == b'\t') {
+        while j < s.len() && (s[j] == b' ' || s[j] == b'\t') && !after_hash {
             j += 1;
         }
         if j < s.len() && s[j] == b'\'' && is_base_start(&s[j + 1..]) {

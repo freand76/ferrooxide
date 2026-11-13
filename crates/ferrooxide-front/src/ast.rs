@@ -9,6 +9,8 @@ pub struct Module {
     pub timescale: Option<(i32, i32)>,
     /// `default_nettype in effect ("wire", "wand", ..., "none"); None: wire
     pub default_nettype: Option<String>,
+    /// `unconnected_drive pull1 (true) / pull0 (false): unconnected input ports are pulled
+    pub unconnected_drive: Option<bool>,
     pub file: String,
     pub line: Line,
     /// Port names in header order.

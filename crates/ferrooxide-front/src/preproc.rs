@@ -181,7 +181,29 @@ impl Preprocessor {
                                 while i < s.len() && s[i] != '\n' {
                                     i += 1;
                                 }
+                                // a line comment ending in a backslash: the macro continues
+                                if i < s.len() && i > 0 && s[i - 1] == '\\' {
+                                    body.push(' ');
+                                    out.push('\n');
+                                    line += 1;
+                                    i += 1;
+                                    continue;
+                                }
                                 break;
+                            }
+                            if s[i] == '/' && i + 1 < s.len() && s[i + 1] == '*' {
+                                // a block comment (may span continued lines): a space
+                                i += 2;
+                                while i < s.len() && !(s[i] == '*' && i + 1 < s.len() && s[i + 1] == '/') {
+                                    if s[i] == '\n' {
+                                        out.push('\n');
+                                        line += 1;
+                                    }
+                                    i += 1;
+                                }
+                                i += 2;
+                                body.push(' ');
+                                continue;
                             }
                             body.push(s[i]);
                             i += 1;
@@ -234,18 +256,35 @@ impl Preprocessor {
                             out.push_str(" __fx_timescale 0 0 ; ");
                         }
                     }
-                    "default_nettype" => {
+                    "default_nettype" | "unconnected_drive" => {
+                        // the argument may follow comments and line breaks
+                        skip_space_comments(&s, &mut i, &mut line, &mut out);
                         let t = read_ident(&s, &mut i);
-                        if active(&conds) {
+                        if name == "default_nettype" && active(&conds) {
                             out.push_str(&format!(" __fx_nettype {t} ; "));
                         }
-                        while i < s.len() && s[i] != '\n' {
+                        if name == "unconnected_drive" && active(&conds) {
+                            out.push_str(&format!(" __fx_uncdrive {t} ; "));
+                        }
+                    }
+                    "begin_keywords" => {
+                        skip_space_comments(&s, &mut i, &mut line, &mut out);
+                        if i < s.len() && s[i] == '"' {
+                            i += 1;
+                            while i < s.len() && s[i] != '"' && s[i] != '\n' {
+                                i += 1;
+                            }
                             i += 1;
                         }
                     }
-                    "celldefine" | "endcelldefine"
-                    | "unconnected_drive" | "nounconnected_drive" | "pragma" | "line" | "begin_keywords"
-                    | "end_keywords" => {
+                    // no arguments
+                    "nounconnected_drive" => {
+                        if active(&conds) {
+                            out.push_str(" __fx_uncdrive none ; ");
+                        }
+                    }
+                    "celldefine" | "endcelldefine" | "end_keywords" => {}
+                    "pragma" | "line" => {
                         while i < s.len() && s[i] != '\n' {
                             i += 1;
                         }
@@ -312,6 +351,35 @@ impl Preprocessor {
             return Err(err("unterminated `ifdef".into(), line));
         }
         Ok(out)
+    }
+}
+
+/// Skip spaces, line breaks and comments (line breaks are kept in `out` for line numbers).
+fn skip_space_comments(s: &[char], i: &mut usize, line: &mut u32, out: &mut String) {
+    while *i < s.len() {
+        if s[*i] == '\n' {
+            out.push('\n');
+            *line += 1;
+            *i += 1;
+        } else if s[*i].is_whitespace() {
+            *i += 1;
+        } else if s[*i] == '/' && *i + 1 < s.len() && s[*i + 1] == '/' {
+            while *i < s.len() && s[*i] != '\n' {
+                *i += 1;
+            }
+        } else if s[*i] == '/' && *i + 1 < s.len() && s[*i + 1] == '*' {
+            *i += 2;
+            while *i < s.len() && !(s[*i] == '*' && *i + 1 < s.len() && s[*i + 1] == '/') {
+                if s[*i] == '\n' {
+                    out.push('\n');
+                    *line += 1;
+                }
+                *i += 1;
+            }
+            *i += 2;
+        } else {
+            break;
+        }
     }
 }
 

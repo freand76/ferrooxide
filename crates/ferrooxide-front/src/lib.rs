@@ -39,6 +39,7 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
     // `timescale stays in effect across files, in command-line order
     let mut timescale = None;
     let mut nettype = None;
+    let mut uncdrive = None;
     for f in files {
         let text = pp.process_file(f)?;
         let name = f.display().to_string();
@@ -46,9 +47,11 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
         let mut p = parser::Parser::new(toks, name);
         p.timescale = timescale;
         p.default_nettype = nettype.clone();
+        p.unconnected_drive = uncdrive;
         modules.extend(p.parse_source()?);
         timescale = p.timescale;
         nettype = p.default_nettype.clone();
+        uncdrive = p.unconnected_drive;
     }
     Ok(modules)
 }

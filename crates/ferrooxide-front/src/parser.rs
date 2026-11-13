@@ -11,6 +11,7 @@ pub struct Parser {
     /// `timescale in effect (carried from file to file by the caller)
     pub timescale: Option<(i32, i32)>,
     pub default_nettype: Option<String>,
+    pub unconnected_drive: Option<bool>,
 }
 
 struct PType {
@@ -59,7 +60,7 @@ const STRENGTHS: &[&str] = &[
 impl Parser {
     pub fn new(toks: Vec<Token>, file: String) -> Self {
         Parser { toks, pos: 0, file, timescale: None,
-            default_nettype: None }
+            default_nettype: None, unconnected_drive: None }
     }
 
     // ---------- token helpers ----------
@@ -259,6 +260,16 @@ impl Parser {
                 Tok::Eof => break,
                 Tok::Ident(s) if s == "module" || s == "macromodule" => mods.push(self.module()?),
                 Tok::Ident(s) if s == "primitive" => mods.push(self.primitive()?),
+                Tok::Ident(s) if s == "__fx_uncdrive" => {
+                    self.bump();
+                    let t = self.ident_or_kw()?;
+                    self.expect_p(";")?;
+                    self.unconnected_drive = match t.as_str() {
+                        "pull1" => Some(true),
+                        "pull0" => Some(false),
+                        _ => None,
+                    };
+                }
                 Tok::Ident(s) if s == "__fx_nettype" => {
                     self.bump();
                     let t = self.ident_or_kw()?;
@@ -397,6 +408,7 @@ impl Parser {
             name,
             timescale: self.timescale,
             default_nettype: self.default_nettype.clone(),
+            unconnected_drive: self.unconnected_drive,
             file: self.file.clone(),
             line,
             ports,
@@ -502,6 +514,7 @@ impl Parser {
             name,
             timescale: self.timescale,
             default_nettype: None,
+            unconnected_drive: None,
             file: self.file.clone(),
             line,
             ports,
@@ -1205,8 +1218,10 @@ impl Parser {
             return Ok(EventCtl::Star);
         }
         if !self.eat_p("(") {
+            // @name or @a.b.name
             let id = self.ident()?;
-            return Ok(EventCtl::List(vec![(Edge::Any, Expr::Ident(id))]));
+            let e = self.hier_tail(id)?;
+            return Ok(EventCtl::List(vec![(Edge::Any, e)]));
         }
         if self.eat_p("*") {
             self.expect_p(")")?;

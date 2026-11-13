@@ -59,6 +59,8 @@ pub(crate) struct Scope<'a> {
     pub tprec: i32,
     /// `default_nettype of the module (None: wire)
     pub nettype: Option<String>,
+    /// `unconnected_drive of the module
+    pub uncdrive: Option<bool>,
 }
 
 enum Job<'a> {
@@ -514,6 +516,7 @@ impl<'a> Compiler<'a> {
             tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
             tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
             nettype: parent.and_then(|p| self.scopes[p].nettype.clone()),
+            uncdrive: parent.and_then(|p| self.scopes[p].uncdrive),
         });
         self.scopes.len() - 1
     }
@@ -755,6 +758,7 @@ impl<'a> Compiler<'a> {
         self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
         self.scopes[sid].tprec = m.timescale.map(|t| t.1).unwrap_or(0);
         self.scopes[sid].nettype = m.default_nettype.clone();
+        self.scopes[sid].uncdrive = m.unconnected_drive;
         for it in &m.items {
             if let Item::Subroutine(f) = it {
                 self.scopes[sid].funcs.insert(f.name.clone(), f);
@@ -1353,6 +1357,12 @@ impl<'a> Compiler<'a> {
                 }
             }
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
+            // `unconnected_drive: an unconnected input port is pulled
+            if let (Some(Dir::Input), true, Some(up)) = (mg.dir, module_level, self.scopes[sid].uncdrive) {
+                if parent_scope.is_some() && !matches!(port_conns.get(&name), Some(Some(_))) && depth == 0 {
+                    self.pulls.entry(s).or_default().push((0, width, up));
+                }
+            }
             if let Some(init) = mg.init {
                 if kind == SigKind::Wire {
                     self.cur_strength = mg.strength;
