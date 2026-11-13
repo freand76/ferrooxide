@@ -203,6 +203,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         }
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
+        Instr::SysF { d, f: SysFn::UrandomRange(a, b) } => vec![*d, *a, *b],
         Instr::SysF { d, .. } => vec![*d],
         Instr::Jmp { .. }
         | Instr::Wait { .. }
@@ -391,6 +392,10 @@ pub enum SysFn {
     /// $random(seed) where the seed variable is a signal
     RandomSeed(u32),
     Urandom,
+    /// $urandom(seed) where the seed variable is a signal
+    UrandomSeed(u32),
+    /// $urandom_range(max, min): slots of the two 32-bit bounds
+    UrandomRange(u32, u32),
 }
 
 #[derive(Clone, Debug)]

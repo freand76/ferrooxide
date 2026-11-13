@@ -166,7 +166,9 @@ pub struct Sim {
     out: BufWriter<std::io::Stdout>,
     monitor: u32,
     monitor_on: bool,
-    seed: u32,
+    seed: i32,
+    /// shared seed of $urandom / $urandom_range
+    useed: i32,
     vcd_path: String,
     vcd: Option<Vcd>,
     dumping: bool,
@@ -421,6 +423,7 @@ impl Sim {
             monitor: NONE,
             monitor_on: true,
             seed: 0,
+            useed: 0,
             vcd_path: "dump.vcd".into(),
             vcd: None,
             dumping: false,
@@ -1733,18 +1736,36 @@ impl Sim {
                             let v = self.time as f64 / ops::pow10(*e);
                             ops::wr_real(m, d, v);
                         }
-                        SysFn::Random | SysFn::Urandom => {
-                            let v = self.next_random();
+                        SysFn::Random => {
+                            let v = rtl_dist_uniform(&mut self.seed, i32::MIN, i32::MAX);
+                            self.mem[d] = v as u32 as u64;
+                            self.mem[d + 1] = 0;
+                        }
+                        SysFn::Urandom => {
+                            let v = urandom(&mut self.useed, 0, u32::MAX);
                             self.mem[d] = v as u64;
                             self.mem[d + 1] = 0;
                         }
-                        SysFn::RandomSeed(sig) => {
-                            let r = self.sigs[*sig as usize];
-                            let seed = self.mem[r.slot as usize] as u32;
-                            let (v, ns) = random_step(seed);
+                        SysFn::UrandomRange(a, b) => {
+                            let (a, b) = (self.mem[*a as usize] as u32, self.mem[*b as usize] as u32);
+                            let v = urandom(&mut self.useed, a.min(b), a.max(b));
                             self.mem[d] = v as u64;
                             self.mem[d + 1] = 0;
-                            let tmp = [ns as u64 & ops::mask(r.width), 0];
+                        }
+                        SysFn::RandomSeed(sig) | SysFn::UrandomSeed(sig) => {
+                            let r = self.sigs[*sig as usize];
+                            let mut seed = self.mem[r.slot as usize] as u32 as i32;
+                            let v = if matches!(f, SysFn::RandomSeed(_)) {
+                                rtl_dist_uniform(&mut seed, i32::MIN, i32::MAX) as u32
+                            } else {
+                                // (Icarus: the shared $urandom state continues from this seed)
+                                let v = urandom(&mut seed, 0, u32::MAX);
+                                self.useed = seed;
+                                v
+                            };
+                            self.mem[d] = v as u64;
+                            self.mem[d + 1] = 0;
+                            let tmp = [seed as u32 as u64 & ops::mask(r.width.min(64)), 0];
                             self.apply(*sig, Res::Whole, &tmp[..2.min(2 * nw(r.width))], r.width.min(64));
                         }
                     }
@@ -1766,12 +1787,6 @@ impl Sim {
             }
         }
         false
-    }
-
-    fn next_random(&mut self) -> u32 {
-        let (v, ns) = random_step(self.seed);
-        self.seed = ns;
-        v
     }
 
     /// Returns true if the process must stop executing.
@@ -2174,10 +2189,48 @@ impl Sim {
     }
 }
 
-/// $random: the algorithm of IEEE 1364-2005 (rtl_dist_uniform-free variant used by $random).
-fn random_step(seed: u32) -> (u32, u32) {
-    let ns = seed.wrapping_mul(69069).wrapping_add(1);
-    (ns, ns)
+/// IEEE 1364-2005 (17.9.3 / annex) `uniform`: the seed is a 32-bit long, as in Icarus.
+fn uniform(seed: &mut i32, start: f64, end: f64) -> f64 {
+    let d = 0.00000011920928955078125f64;
+    if *seed == 0 {
+        *seed = 259341593;
+    }
+    let (a, b) = if start >= end { (0.0, 2147483647.0) } else { (start, end) };
+    *seed = seed.wrapping_mul(69069).wrapping_add(1);
+    let st = ((*seed as u32) >> 9) | 0x3f800000;
+    let c = f32::from_bits(st) as f64;
+    let c = c + c * d;
+    (b - a) * (c - 1.0) + a
+}
+
+/// `rtl_dist_uniform` of the standard ($random).
+fn rtl_dist_uniform(seed: &mut i32, start: i32, end: i32) -> i32 {
+    if start >= end {
+        return start;
+    }
+    let floor = |r: f64| if r >= 0.0 { r as i64 } else { (r - 1.0) as i64 };
+    if end != i32::MAX {
+        let end = end as i64 + 1;
+        let r = uniform(seed, start as f64, end as f64);
+        floor(r).clamp(start as i64, end - 1) as i32
+    } else if start != i32::MIN {
+        let start = start as i64 - 1;
+        let r = uniform(seed, start as f64, end as f64) + 1.0;
+        floor(r).clamp(start + 1, end as i64) as i32
+    } else {
+        let r = (uniform(seed, start as f64, end as f64) + 2147483648.0) / 4294967295.0;
+        let r = r * 4294967296.0 - 2147483648.0;
+        floor(r) as i32
+    }
+}
+
+/// $urandom / $urandom_range as Icarus computes them: uniform over [start, end + 1).
+fn urandom(seed: &mut i32, start: u32, end: u32) -> u32 {
+    if start >= end {
+        return start;
+    }
+    let r = uniform(seed, start as f64, end as f64 + 1.0);
+    (r as u64).min(end as u64) as u32
 }
 
 /// Evaluate straight-line/branching code without a scheduler (constant expressions and

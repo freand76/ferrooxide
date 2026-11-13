@@ -708,9 +708,10 @@ impl<'a> Compiler<'a> {
             "$random" | "$urandom" => {
                 let d = self.tmp(32);
                 let f = match args.first() {
-                    Some(Expr::Ident(n)) if name == "$random" => match self.lookup(n, sid) {
-                        Some(Sym::Sig(sg)) => SysFn::RandomSeed(sg),
-                        _ => return self.err("$random seed must be a variable"),
+                    Some(Expr::Ident(n)) => match self.lookup(n, sid) {
+                        Some(Sym::Sig(sg)) if name == "$random" => SysFn::RandomSeed(sg),
+                        Some(Sym::Sig(sg)) => SysFn::UrandomSeed(sg),
+                        _ => return self.err(format!("{name} seed must be a variable")),
                     },
                     _ => {
                         if name == "$random" {
@@ -721,6 +722,23 @@ impl<'a> Compiler<'a> {
                     }
                 };
                 self.emit(Instr::SysF { f, d });
+                Ok(self.resize(d, 32, w, s))
+            }
+            "$urandom_range" => {
+                let Some(max) = args.first() else { return self.err("$urandom_range needs a maximum") };
+                let a = self.expr(max, sid, 32, false)?;
+                let a = {
+                    // keep it: the minimum's evaluation may reuse scratch slots
+                    let k = self.tmp(32);
+                    self.emit(Instr::Copy { d: k, s: a, w: 32 });
+                    k
+                };
+                let b = match args.get(1) {
+                    Some(e) => self.expr(e, sid, 32, false)?,
+                    None => self.const_slot(&Const::from_i64(0, 32, false)),
+                };
+                let d = self.tmp(32);
+                self.emit(Instr::SysF { f: SysFn::UrandomRange(a, b), d });
                 Ok(self.resize(d, 32, w, s))
             }
             "$signed" | "$unsigned" => {

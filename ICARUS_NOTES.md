@@ -16,3 +16,6 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    matched by ferrooxide yet.
 4. **`logic` is reserved with `-g2005`.** `reg logic;` is a syntax error, but `logic` is not a
    1364-2005 keyword (`bit`, `int`, `byte`, `do`, `priority`, ... are accepted as names).
+5. **`$urandom(seed)` leaks its seed into the unseeded generator.** After `$urandom(s)` the
+   next `$urandom` / `$urandom_range` without a seed continues from the updated `s` (they
+   share one internal seed); `$random(s)` does not do this. Test: `tests/verilog/random.v`.
