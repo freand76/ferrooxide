@@ -483,7 +483,19 @@ impl Parser {
         let sv_name = dir.is_some() && self.sv_ident_here();
         if let Tok::Ident(s) = self.peek().clone() {
             if sv_name {
-                return Ok(Decl { dir, kind, net, explicit_kind, real_net: false, strength: None, signed, range: None, names: vec![], line });
+                return Ok(Decl {
+                    dir,
+                    kind,
+                    net,
+                    explicit_kind,
+                    real_net: false,
+                    strength: None,
+                    delay: None,
+                    signed,
+                    range: None,
+                    names: vec![],
+                    line,
+                });
             }
             net = match s.as_str() {
                 "tri0" => NetType::Tri0,
@@ -538,10 +550,8 @@ impl Parser {
         }
         let range = if self.is_p("[") { Some(self.range()?) } else { None };
         // optional net delay: wire #5 w;
-        if self.eat_p("#") {
-            self.delay_value()?;
-        }
-        Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, signed, range, names: Vec::new(), line })
+        let delay = if self.eat_p("#") { Some(self.delay_value()?) } else { None };
+        Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, names: Vec::new(), line })
     }
 
     fn declarators(&mut self) -> Result<Vec<Declarator>> {
@@ -718,9 +728,7 @@ impl Parser {
                 self.bump();
                 let kind = kw.to_string();
                 let strength = self.strength()?;
-                if self.eat_p("#") {
-                    self.delay_value()?;
-                }
+                let delay = if self.eat_p("#") { Some(self.delay_value()?) } else { None };
                 loop {
                     let line = self.line();
                     let inst_name = if let Tok::Ident(_) = self.peek() { Some(self.ident()?) } else { None };
@@ -734,7 +742,7 @@ impl Parser {
                         }
                     }
                     self.expect_p(")")?;
-                    items.push(Item::Gate { kind: kind.clone(), inst_name, dims, terms, strength, line });
+                    items.push(Item::Gate { kind: kind.clone(), inst_name, dims, terms, strength, delay: delay.clone(), line });
                     if !self.eat_p(",") {
                         break;
                     }
@@ -1063,12 +1071,13 @@ impl Parser {
                 Ok(e)
             };
             let e = mtm(self)?;
-            // (rise, fall[, turn-off]): the rise delay is used
+            // (rise, fall[, turn-off]): kept as a pseudo call; procedural delays use the first
+            let mut v = vec![e];
             while self.eat_p(",") {
-                mtm(self)?;
+                v.push(mtm(self)?);
             }
             self.expect_p(")")?;
-            Ok(e)
+            Ok(if v.len() == 1 { v.pop().unwrap() } else { Expr::SysCall("$__delays".into(), v) })
         } else {
             match self.bump() {
                 Tok::Num(n) => Ok(Expr::Num(n)),

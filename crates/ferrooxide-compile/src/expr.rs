@@ -1251,6 +1251,12 @@ impl<'a> Compiler<'a> {
 
     /// A delay in the scope's time unit converted to simulation ticks (slot of a 64-bit value).
     pub(crate) fn delay_ticks(&mut self, d: &Expr, sid: usize) -> R<u32> {
+        if let Expr::SysCall(n, v) = d {
+            if n == "$__delays" {
+                // (rise, fall, ...) where one delay is needed: the first
+                return self.delay_ticks(&v[0], sid);
+            }
+        }
         let exp = self.texp(sid);
         // a real delay is rounded to the module's precision, then scaled to simulation ticks
         let sc = &self.scopes[sid];
@@ -1276,6 +1282,26 @@ impl<'a> Compiler<'a> {
         let t = self.tmp(64);
         self.emit(Instr::Bin { op: rt::BinOp::Mul, d: t, a: v, b: k, w: 64 });
         Ok(t)
+    }
+
+    /// Rise, fall and turn-off delays (ticks) as one 192-bit value for `StoreMode::Inertial`;
+    /// a missing turn-off delay is all ones (the runtime takes the smaller of rise and fall).
+    pub(crate) fn delays3(&mut self, d: &Expr, sid: usize) -> R<u32> {
+        let ds: Vec<Expr> = match d {
+            Expr::SysCall(n, v) if n == "$__delays" => v.clone(),
+            _ => vec![d.clone()],
+        };
+        let out = self.tmp(192);
+        let z = self.const_slot(&Const::zero(192));
+        self.emit(Instr::Copy { d: out, s: z, w: 192 });
+        for k in 0..3 {
+            let t = match ds.get(k).or(if ds.len() == 1 { ds.first() } else { None }) {
+                Some(e) => self.delay_ticks(e, sid)?,
+                None => self.const_slot(&Const::from_i64(-1, 64, true)),
+            };
+            self.emit(Instr::Insert { d: out, dw: 192, s: t, sw: 64, off: 64 * k as u32 });
+        }
+        Ok(out)
     }
 
     /// A file name argument: a string literal, or a variable holding the characters.

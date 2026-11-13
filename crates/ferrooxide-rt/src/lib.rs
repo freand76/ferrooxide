@@ -200,7 +200,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                 }
                 _ => {}
             }
-            if let StoreMode::NbaDelay(d) = mode {
+            if let StoreMode::NbaDelay(d) | StoreMode::Inertial(d) = mode {
                 v.push(*d);
             }
             v
@@ -388,6 +388,10 @@ pub enum StoreMode {
     NbaDelay(u32),
     /// force / procedural assign: writes the bits and marks them forced (other stores keep them)
     Force,
+    /// continuous assignment / gate output with an (inertial) delay: the store happens after the
+    /// delay unless a newer value for the same target replaces it first. The slot holds a
+    /// 192-bit value whose words are the rise, fall and turn-off delays in ticks.
+    Inertial(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

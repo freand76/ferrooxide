@@ -257,12 +257,24 @@ impl<'a> Compiler<'a> {
                 (Lhs::Expr(_, s), _) | (_, Rhs::Expr(_, s)) => *s,
                 _ => 0,
             };
-            let ds = self.delay_ticks(d, sid)?;
-            // copy the value before waiting
-            let t = self.ptmp(lw);
-            self.emit(Instr::Copy { d: t, s: v, w: lw });
-            self.emit(Instr::Delay { s: ds });
-            self.store_value(&lhs, t, lw, StoreMode::Blocking)?;
+            // an inertial delay: the update is scheduled (replacing a pending one), the process
+            // goes on waiting for its inputs
+            let ds = self.delays3(d, sid)?;
+            self.store_value(&lhs, v, lw, StoreMode::Inertial(ds))?;
+            // the driven net reads x until the first delayed update (as in Icarus)
+            for (t, _) in self.lhs_targets(&lhs)? {
+                if let Some(Target::Whole { sig }) = t {
+                    let i = self.sig(sig).clone();
+                    if i.kind == SigKind::Wire && i.depth == 0 {
+                        let n = rt::nw(i.width);
+                        for k in 0..n {
+                            let m = if k == n - 1 { rt::tmask(i.width) } else { !0 };
+                            self.prog.mem[i.slot as usize + k] = m;
+                            self.prog.mem[i.slot as usize + n + k] = m;
+                        }
+                    }
+                }
+            }
         } else {
             self.store_value(&lhs, v, lw, StoreMode::Blocking)?;
         }

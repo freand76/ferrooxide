@@ -102,6 +102,8 @@ enum Fut {
     /// (process, generation)
     Wake(u32, u32),
     Nba { sig: u32, res: Res, sw: u32, val: Box<[u64]> },
+    /// a delayed continuous-assignment update, valid while its generation is current
+    Inertial { key: (u32, u32), gen: u32, sig: u32, res: Res, sw: u32, val: Box<[u64]> },
 }
 
 #[derive(Default, Debug, Clone)]
@@ -126,6 +128,8 @@ pub struct Sim {
     writers: HashMap<u32, Vec<u32>>,
     /// forced bits per signal (value-plane words); stores keep these bits
     force_mask: HashMap<u32, Vec<u64>>,
+    /// pending inertial (continuous-assignment delay) updates: target -> current generation
+    inertial: HashMap<(u32, u32), u32>,
     /// a force store is writing (the mask does not apply)
     force_bypass: bool,
     /// per group: run the members last to first next time
@@ -367,6 +371,7 @@ impl Sim {
             cfan,
             group_rev: vec![true; groups.len()],
             force_mask: HashMap::new(),
+            inertial: HashMap::new(),
             force_bypass: false,
             writers: {
                 let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -493,6 +498,12 @@ impl Sim {
                         let off = self.nba_vals.len() as u32;
                         self.nba_vals.extend_from_slice(&val);
                         self.push_generic(Nba { sig, res, off, sw });
+                    }
+                    Fut::Inertial { key, gen, sig, res, sw, val } => {
+                        if self.inertial.get(&key) == Some(&gen) {
+                            self.inertial.remove(&key);
+                            self.apply(sig, res, &val, sw);
+                        }
                     }
                 }
             }
@@ -1132,6 +1143,43 @@ impl Sim {
                 let off = self.nba_vals.len() as u32;
                 self.nba_vals.extend_from_slice(&self.mem[s..s + n]);
                 self.push_generic(Nba { sig, res, off, sw });
+            }
+            StoreMode::Inertial(ds) => {
+                // the delay for this value: rise (to 1), fall (to 0), turn-off (to z),
+                // the smallest for x; a vector counts as falling when it becomes 0
+                let ds = ds as usize;
+                let (r, f, t) = (self.mem[ds], self.mem[ds + 1], self.mem[ds + 2]);
+                let t = if t == u64::MAX { r.min(f) } else { t };
+                let hn = n / 2;
+                let (a, b) = (&self.mem[s..s + hn], &self.mem[s + hn..s + n]);
+                let mask_last = if sw % 64 == 0 { !0 } else { (1u64 << (sw % 64)) - 1 };
+                let all_z = a.iter().all(|&x| x == 0)
+                    && b.iter().enumerate().all(|(i, &x)| x == if i == hn - 1 { mask_last } else { !0 });
+                let any_x = a.iter().zip(b).any(|(&x, &y)| x & y != 0);
+                let d = if all_z {
+                    t
+                } else if any_x {
+                    r.min(f).min(t)
+                } else if a.iter().all(|&x| x == 0) && b.iter().all(|&x| x == 0) {
+                    f
+                } else {
+                    r
+                };
+                let lsb = match res {
+                    Res::Bits { lsb, .. } | Res::ElemBits { lsb, .. } => lsb,
+                    Res::Elem(e) => e,
+                    Res::Whole => 0,
+                };
+                let key = (sig, lsb);
+                let gen = self.inertial.get(&key).map_or(1, |g| g.wrapping_add(1));
+                let val: Box<[u64]> = self.mem[s..s + n].into();
+                if d == 0 {
+                    self.inertial.remove(&key);
+                    self.apply(sig, res, &val, sw);
+                } else {
+                    self.inertial.insert(key, gen);
+                    self.future.entry(self.time + d).or_default().push(Fut::Inertial { key, gen, sig, res, sw, val });
+                }
             }
             StoreMode::NbaDelay(ds) => {
                 let d = ops::read_u64(&self.mem, ds as usize, 64).unwrap_or(0);

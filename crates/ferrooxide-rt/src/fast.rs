@@ -421,7 +421,7 @@ fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::H
             match mode {
                 StoreMode::Blocking => Op::Store1 { sig, s, slot: info.slot },
                 StoreMode::Nba => Op::Nba1 { sig, s, slot: info.slot },
-                StoreMode::NbaDelay(_) | StoreMode::Force => Op::Gen,
+                StoreMode::NbaDelay(_) | StoreMode::Force | StoreMode::Inertial(_) => Op::Gen,
             }
         }
         I::Store { t: Target::ElemK { sig, e }, s, mode } => {
@@ -434,7 +434,7 @@ fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::H
             match mode {
                 StoreMode::Blocking => Op::Store1 { sig, s, slot },
                 StoreMode::Nba => Op::Nba1 { sig, s, slot },
-                StoreMode::NbaDelay(_) | StoreMode::Force => Op::Gen,
+                StoreMode::NbaDelay(_) | StoreMode::Force | StoreMode::Inertial(_) => Op::Gen,
             }
         }
         _ => Op::Gen,

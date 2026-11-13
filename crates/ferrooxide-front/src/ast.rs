@@ -87,6 +87,8 @@ pub struct Decl {
     pub real_net: bool,
     /// drive strength of a net declaration assignment (`wire (weak1, weak0) w = e;`)
     pub strength: Option<(u8, u8)>,
+    /// net delay (`wire #5 w = e;`)
+    pub delay: Option<Expr>,
     pub signed: bool,
     pub range: Option<Range>,
     pub names: Vec<Declarator>,
@@ -164,7 +166,15 @@ pub enum Item {
     GenBlock { name: Option<String>, items: Vec<Item>, line: Line },
     /// gate primitive: and/or/nand/nor/xor/xnor/not/buf
     /// `dims`: an array of gate instances, e.g. `buf b[7:0] (o, i);`
-    Gate { kind: String, inst_name: Option<String>, dims: Option<Range>, terms: Vec<Expr>, strength: Option<(u8, u8)>, line: Line },
+    Gate {
+        kind: String,
+        inst_name: Option<String>,
+        dims: Option<Range>,
+        terms: Vec<Expr>,
+        strength: Option<(u8, u8)>,
+        delay: Option<Expr>,
+        line: Line,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

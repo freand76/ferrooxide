@@ -147,6 +147,8 @@ pub struct Compiler<'a> {
     links: Vec<Link>,
     /// drive strength of the continuous assignments being created, and per job index
     cur_strength: Option<(u8, u8)>,
+    /// delay of the gate being instantiated
+    cur_delay: Option<Expr>,
     job_strength: HashMap<usize, (u8, u8)>,
     /// read sets include signals read inside called functions (lint only)
     pub(crate) func_reads: std::cell::Cell<bool>,
@@ -300,6 +302,7 @@ impl<'a> Compiler<'a> {
             dialect: Dialect::default(),
             links: Vec::new(),
             cur_strength: None,
+            cur_delay: None,
             job_strength: HashMap::new(),
             func_reads: std::cell::Cell::new(false),
             top_names: HashSet::new(),
@@ -1061,6 +1064,7 @@ impl<'a> Compiler<'a> {
             net: NetType,
             real_net: bool,
             strength: Option<(u8, u8)>,
+            delay: Option<&'d Expr>,
             signed: bool,
             range: Option<&'d Range>,
             dims: &'d [Range],
@@ -1090,6 +1094,9 @@ impl<'a> Compiler<'a> {
                             if d.strength.is_some() {
                                 mg.strength = d.strength;
                             }
+                            if d.delay.is_some() {
+                                mg.delay = d.delay.as_ref();
+                            }
                             mg.signed |= d.signed;
                             if d.range.is_some() {
                                 mg.range = d.range.as_ref();
@@ -1111,6 +1118,7 @@ impl<'a> Compiler<'a> {
                                     net: d.net,
                                     real_net: d.real_net,
                                     strength: d.strength,
+                                    delay: d.delay.as_ref(),
                                     signed: d.signed,
                                     range: d.range.as_ref(),
                                     dims: &dl.dims,
@@ -1255,7 +1263,7 @@ impl<'a> Compiler<'a> {
                     self.push_job(Job::Assign {
                         lhs: Expr::Ident(name.clone()),
                         rhs: init.clone(),
-                        delay: None,
+                        delay: mg.delay.cloned(),
                         scope: sid,
                         line: self.line,
                     });
@@ -1492,11 +1500,13 @@ impl<'a> Compiler<'a> {
                     genblk += 1;
                     self.gen_scope(its, name, genblk, sid)?;
                 }
-                Item::Gate { kind, terms, line, dims, strength, .. } => {
+                Item::Gate { kind, terms, line, dims, strength, delay, .. } => {
                     self.line = *line;
                     self.cur_strength = *strength;
+                    self.cur_delay = delay.clone();
                     let r = self.gate_items(kind, terms, dims, sid, *line);
                     self.cur_strength = None;
+                    self.cur_delay = None;
                     r?;
                 }
             }
@@ -1656,7 +1666,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     Expr::Cond(b(&terms[2]), Box::new(z()), Box::new(data))
                 };
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.cur_delay.clone(), scope: sid, line });
             }
             "cmos" | "rcmos" => {
                 // (out, in, ncontrol, pcontrol)
@@ -1665,7 +1675,7 @@ impl<'a> Compiler<'a> {
                 }
                 let p_side = Expr::Cond(b(&terms[3]), Box::new(z()), b(&terms[1]));
                 let rhs = Expr::Cond(b(&terms[2]), b(&terms[1]), Box::new(p_side));
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.cur_delay.clone(), scope: sid, line });
             }
             "not" | "buf" => {
                 let input = terms.last().unwrap();
@@ -1676,7 +1686,7 @@ impl<'a> Compiler<'a> {
                     } else {
                         Expr::Binary(BinOp::And, b(input), b(input))
                     };
-                    self.push_job(Job::Assign { lhs: out.clone(), rhs, delay: None, scope: sid, line });
+                    self.push_job(Job::Assign { lhs: out.clone(), rhs, delay: self.cur_delay.clone(), scope: sid, line });
                 }
             }
             _ => {
@@ -1695,7 +1705,7 @@ impl<'a> Compiler<'a> {
                 if inv {
                     e = Expr::Unary(UnOp::Not, Box::new(e));
                 }
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: e, delay: None, scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: e, delay: self.cur_delay.clone(), scope: sid, line });
             }
         }
         Ok(())
