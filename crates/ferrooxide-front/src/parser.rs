@@ -33,6 +33,17 @@ fn is_keyword(s: &str) -> bool {
     KEYWORDS.contains(&s)
 }
 
+/// SystemVerilog keywords that are ordinary identifiers in Verilog-2005 code: accepted as names
+/// wherever an identifier is required.
+const SV_ONLY: &[&str] = &[
+    "logic", "bit", "int", "byte", "shortint", "longint", "always_comb", "always_ff", "always_latch", "return", "do",
+    "final", "join_any", "join_none", "break", "continue", "unique", "priority",
+];
+
+fn is_sv_only(s: &str) -> bool {
+    SV_ONLY.contains(&s)
+}
+
 const GATES: &[&str] = &[
     "and", "or", "nand", "nor", "xor", "xnor", "not", "buf", "bufif0", "bufif1", "notif0", "notif1", "nmos", "pmos",
     "rnmos", "rpmos", "cmos", "rcmos", "pullup", "pulldown",
@@ -117,7 +128,7 @@ impl Parser {
     }
     fn ident(&mut self) -> Result<String> {
         match self.peek().clone() {
-            Tok::Ident(s) if !is_keyword(&s) => {
+            Tok::Ident(s) if !is_keyword(&s) || is_sv_only(&s) => {
                 self.bump();
                 Ok(s)
             }
@@ -513,7 +524,17 @@ impl Parser {
         Ok(v)
     }
 
+    /// The current token is a SystemVerilog keyword used as a Verilog-2005 identifier
+    /// (`bit = 1;`, `x = int + 1`).
+    fn sv_ident_here(&self) -> bool {
+        matches!(self.peek(), Tok::Ident(s) if is_sv_only(s))
+            && matches!(self.peek_at(1), Tok::Punct("=" | "<=" | ")" | "," | ";" | "." | "+" | "-" | "*" | "/" | "&" | "|" | "^" | "==" | "!=" | "?" | ":" | "}" | "]"))
+    }
+
     fn is_decl_start(&self) -> bool {
+        if self.sv_ident_here() {
+            return false;
+        }
         matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
             "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"|"event"
             |"tri"|"wand"|"wor"|"triand"|"trior"|"trireg"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"))
@@ -1098,6 +1119,7 @@ impl Parser {
                 Ok(Stmt::SysTask { name, args, line })
             }
             Tok::Punct("{") => self.assign_stmt(),
+            Tok::Ident(_) if self.sv_ident_here() => self.assign_stmt(),
             Tok::Ident(kw) => match kw.as_str() {
                 "begin" | "fork" => {
                     self.bump();
@@ -1614,7 +1636,7 @@ impl Parser {
                 }
                 Expr::SysCall(name, args)
             }
-            Tok::Ident(name) if !is_keyword(&name) => {
+            Tok::Ident(name) if !is_keyword(&name) || (is_sv_only(&name) && !self.is_p("'")) => {
                 if self.is_p("(") {
                     self.bump();
                     let mut args = Vec::new();
