@@ -60,7 +60,9 @@ fn body(code: &[Instr]) -> Option<(Vec<Instr>, bool)> {
             | Instr::Sys(_)
             | Instr::SysF { .. }
             | Instr::Fork { .. }
-            | Instr::Disable { .. } => return None,
+            | Instr::Disable { .. }
+            | Instr::Kick { .. }
+            | Instr::Unforce { .. } => return None,
             // fused members must see each other's results at once: only blocking writes
             Instr::Store { mode: StoreMode::Nba | StoreMode::NbaDelay(_), .. } => return None,
             Instr::Jmp { to } => Instr::Jmp { to: rel(*to)? },
@@ -121,9 +123,34 @@ pub fn fuse(prog: &mut Program) -> usize {
             }
         })
         .collect();
+    // signals and their writers: A may only be fused if nothing but A writes what A drives
+    // (another writer, e.g. a force, would re-trigger the fused process and A would undo it)
+    let mut writers: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut writes: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (p, pd) in prog.procs.iter().enumerate() {
+        for ins in &pd.code {
+            if let Instr::Store { t, .. } = ins {
+                let sig = match *t {
+                    Target::Whole { sig }
+                    | Target::Part { sig, .. }
+                    | Target::DynPart { sig, .. }
+                    | Target::Elem { sig, .. }
+                    | Target::ElemK { sig, .. }
+                    | Target::ElemPart { sig, .. } => sig,
+                };
+                let sig = prog.signals[sig as usize].alias_of.map(|a| a.0).unwrap_or(sig);
+                let w = writers.entry(sig).or_default();
+                if !w.contains(&(p as u32)) {
+                    w.push(p as u32);
+                }
+                writes[p].push(sig);
+            }
+        }
+    }
+    let sole_writer = |a: usize| writes[a].iter().all(|s| writers[s].len() == 1);
     let mut uf: Vec<u32> = (0..n as u32).collect();
     for a in 0..n {
-        if bodies[a].is_none() || succ[a].len() != 1 {
+        if bodies[a].is_none() || succ[a].len() != 1 || !sole_writer(a) {
             continue;
         }
         let b = succ[a][0] as usize;

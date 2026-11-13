@@ -237,6 +237,14 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// A disable target resolved after code generation (first candidate path with blocks).
+    pub(crate) fn disable_target(&mut self, cands: Vec<String>) -> u32 {
+        let target = self.prog.disables.len() as u32;
+        self.prog.disables.push(Vec::new());
+        self.pending_disables.push((target, cands, self.file.clone(), self.line));
+        target
+    }
+
     fn event_ctl(&mut self, ec: &EventCtl, body: &Stmt, sid: usize) -> R<u32> {
         let mut trig = Vec::new();
         match ec {
@@ -613,16 +621,61 @@ impl<'a> Compiler<'a> {
                 self.call(name, args, sid, true)?;
             }
             Stmt::Force { lhs, rhs, line } => {
+                // force / procedural assign: a spawned process keeps the target at the value of
+                // the expression (re-applied whenever the expression or the target changes)
+                // until release / deassign stops it
                 self.line = *line;
-                match rhs {
-                    Some(rhs) => {
-                        self.warn("force is executed as a procedural assignment (the value is not held)");
-                        let lw = self.ty(lhs, sid)?.0;
-                        let real = self.lvalue_is_real(lhs, sid);
-                        let v = self.value_for(rhs, sid, lw, real)?;
-                        self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Blocking)?;
+                let mut bases = Vec::new();
+                self.lvalue_bases(lhs, sid, &mut bases);
+                let key = format!("$force:{:?}:{:?}", bases, lhs);
+                for &b in &bases {
+                    self.prog.signals[b as usize].forced = true;
+                }
+                let stop = self.disable_target(vec![key.clone()]);
+                self.emit(Instr::Disable { target: stop });
+                if rhs.is_none() {
+                    // the bits are no longer forced; a net takes its drivers' value again
+                    let mut ts = Vec::new();
+                    self.targets(lhs, sid, &mut ts)?;
+                    for (t, _) in ts.into_iter() {
+                        if let Some(t) = t {
+                            self.emit(Instr::Unforce { t });
+                        }
                     }
-                    None => self.warn("release is ignored"),
+                    for &b in &bases {
+                        if self.sig(b).kind == SigKind::Wire {
+                            self.emit(Instr::Kick { sig: b });
+                        }
+                    }
+                }
+                if let Some(rhs) = rhs {
+                    // the forced value applies at once ...
+                    let lw = self.ty(lhs, sid)?.0;
+                    let real = self.lvalue_is_real(lhs, sid);
+                    let v = self.value_for(rhs, sid, lw, real)?;
+                    self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
+                    let parent = self.pb.last().unwrap().proc;
+                    let name = self.scopes[sid].name.clone();
+                    let c = self.begin_proc(name, ProcClass::Spawned);
+                    self.prog.procs[c as usize].parent = parent;
+                    let reg = self.open_block(key);
+                    if let Some(r) = reg {
+                        self.block_reg[r].1.children.push(c);
+                    }
+                    let top = self.here();
+                    // ... and is kept up to date by the spawned process
+                    let v = self.value_for(rhs, sid, lw, real)?;
+                    self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
+                    let mut reads = Vec::new();
+                    self.reads_expr(rhs, sid, &mut reads);
+                    self.reads_lvalue(lhs, sid, &mut reads);
+                    reads.extend(bases.iter().map(|&b| (b, NONE)));
+                    let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
+                    self.emit(Instr::Wait { ctl });
+                    self.emit(Instr::Jmp { to: top });
+                    self.close_block(reg);
+                    self.end_proc();
+                    self.emit(Instr::Fork { children: vec![c].into_boxed_slice(), join: 2 });
                 }
             }
             Stmt::Disable { name, line } => {
@@ -639,9 +692,7 @@ impl<'a> Compiler<'a> {
                         sc = self.scopes[x].parent;
                     }
                     cands.extend(self.tops.keys().map(|t| format!("{t}.{}", name.split_once('.').map(|x| x.1).unwrap_or(""))));
-                    let target = self.prog.disables.len() as u32;
-                    self.prog.disables.push(Vec::new());
-                    self.pending_disables.push((target, cands, self.file.clone(), *line));
+                    let target = self.disable_target(cands);
                     self.emit(Instr::Disable { target });
                 }
             }

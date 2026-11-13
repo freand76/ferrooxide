@@ -222,6 +222,11 @@ pub fn lower(code: &[Instr], sigs: &[SignalInfo], elem_sig: &std::collections::H
 }
 
 fn lower1(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::HashMap<(u32, u32), u32>) -> Op {
+    if let Instr::Store { t, .. } = ins {
+        if sigs[t_sig(t) as usize].forced {
+            return Op::Gen; // the generic store applies the force mask
+        }
+    }
     let op = lower_narrow(ins, sigs, elem_sig);
     if !matches!(op, Op::Gen) {
         return op;
@@ -415,7 +420,7 @@ fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::H
             match mode {
                 StoreMode::Blocking => Op::Store1 { sig, s, slot: info.slot },
                 StoreMode::Nba => Op::Nba1 { sig, s, slot: info.slot },
-                StoreMode::NbaDelay(_) => Op::Gen,
+                StoreMode::NbaDelay(_) | StoreMode::Force => Op::Gen,
             }
         }
         I::Store { t: Target::ElemK { sig, e }, s, mode } => {
@@ -428,7 +433,7 @@ fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::H
             match mode {
                 StoreMode::Blocking => Op::Store1 { sig, s, slot },
                 StoreMode::Nba => Op::Nba1 { sig, s, slot },
-                StoreMode::NbaDelay(_) => Op::Gen,
+                StoreMode::NbaDelay(_) | StoreMode::Force => Op::Gen,
             }
         }
         _ => Op::Gen,

@@ -314,6 +314,7 @@ impl<'a> Compiler<'a> {
             kind,
             alias_of: None,
             real: false,
+            forced: false,
         });
         self.prog.names.push((name, id));
         id
@@ -498,6 +499,7 @@ impl<'a> Compiler<'a> {
             kind: info.kind,
             alias_of: Some((arr, e)),
             real: info.real,
+            forced: false,
         });
         self.elem_alias.insert((arr, e), id);
         Some(id)
@@ -1155,7 +1157,7 @@ impl<'a> Compiler<'a> {
                     break;
                 }
             }
-            if ids.is_empty() {
+            if ids.is_empty() && !cands.iter().any(|c| c.starts_with("$force:")) {
                 let n = cands.first().map(|c| c.rsplit('.').next().unwrap_or(c).to_string()).unwrap_or_default();
                 let m = format!("{file}:{line}: warning: disable: no block or task named '{n}'");
                 if self.warned.insert(m.clone()) {

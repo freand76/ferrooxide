@@ -26,7 +26,7 @@ const KEYWORDS: &[&str] = &[
     "endfunction", "task", "endtask", "generate", "endgenerate", "genvar", "signed", "unsigned", "fork", "join",
     "wait", "disable", "tri", "supply0", "supply1", "wand", "wor", "logic", "bit", "int", "byte", "shortint",
     "longint", "always_comb", "always_ff", "always_latch", "automatic", "return", "do", "final", "defparam",
-    "specify", "endspecify", "join_any", "force", "release", "realtime", "event", "join_none", "break", "continue", "unique", "priority",
+    "specify", "endspecify", "join_any", "force", "release", "deassign", "realtime", "event", "join_none", "break", "continue", "unique", "priority",
 ];
 
 fn is_keyword(s: &str) -> bool {
@@ -1114,10 +1114,11 @@ impl Parser {
                     let body = Box::new(self.stmt()?);
                     Ok(Stmt::Wait { cond, body, line })
                 }
-                "force" | "release" => {
+                // force/release and the procedural continuous assignment assign/deassign
+                "force" | "release" | "assign" | "deassign" => {
                     self.bump();
                     let lhs = self.lvalue()?;
-                    let rhs = if kw == "force" {
+                    let rhs = if kw == "force" || kw == "assign" {
                         self.expect_p("=")?;
                         Some(self.expr()?)
                     } else {

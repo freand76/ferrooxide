@@ -122,6 +122,12 @@ pub struct Sim {
     groups: Vec<Vec<u32>>,
     /// number of real processes
     nprocs: u32,
+    /// signal -> processes that store to it (for Kick)
+    writers: HashMap<u32, Vec<u32>>,
+    /// forced bits per signal (value-plane words); stores keep these bits
+    force_mask: HashMap<u32, Vec<u64>>,
+    /// a force store is writing (the mask does not apply)
+    force_bypass: bool,
     /// per group: run the members last to first next time
     group_rev: Vec<bool>,
     /// (array, element) -> virtual signal of that element
@@ -358,6 +364,30 @@ impl Sim {
             comb_lo: comb_words,
             cfan,
             group_rev: vec![true; groups.len()],
+            force_mask: HashMap::new(),
+            force_bypass: false,
+            writers: {
+                let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
+                for (p, pd) in prog.procs.iter().enumerate() {
+                    for ins in &pd.code {
+                        if let Instr::Store { t, .. } = ins {
+                            let sig = match *t {
+                                Target::Whole { sig }
+                                | Target::Part { sig, .. }
+                                | Target::DynPart { sig, .. }
+                                | Target::Elem { sig, .. }
+                                | Target::ElemK { sig, .. }
+                                | Target::ElemPart { sig, .. } => sig,
+                            };
+                            let v = m.entry(sig).or_default();
+                            if !v.contains(&(p as u32)) {
+                                v.push(p as u32);
+                            }
+                        }
+                    }
+                }
+                m
+            },
             groups,
             nprocs,
             cur_comb: NONE,
@@ -843,6 +873,12 @@ impl Sim {
         let ns = nw(sw);
         let mut base = r.slot as usize;
         let old = if r.depth == 0 { lsb_code(&self.mem, r.slot, r.width) } else { 0 };
+        // forced bits keep their value (unless this is the force itself)
+        let snap = if !self.force_bypass && r.depth == 0 && self.force_mask.contains_key(&sig) {
+            Some(self.mem[base..base + 2 * n].to_vec())
+        } else {
+            None
+        };
         let changed = match res {
             Res::Whole | Res::Elem(_) => {
                 if let Res::Elem(e) = res {
@@ -877,6 +913,18 @@ impl Sim {
                 changed
             }
         };
+        let changed = match snap {
+            Some(old_words) => {
+                let m = &self.force_mask[&sig];
+                for i in 0..n {
+                    let k = m[i];
+                    self.mem[base + i] = (self.mem[base + i] & !k) | (old_words[i] & k);
+                    self.mem[base + n + i] = (self.mem[base + n + i] & !k) | (old_words[n + i] & k);
+                }
+                self.mem[base..base + 2 * n] != old_words[..]
+            }
+            None => changed,
+        };
         if changed {
             let e = match res {
                 Res::Elem(e) | Res::ElemBits { e, .. } => e,
@@ -887,6 +935,15 @@ impl Sim {
             } else {
                 self.notify(sig, old);
             }
+        }
+    }
+
+    /// The bit range [lsb, lsb + w) a resolved store covers in a (non-array) signal.
+    fn res_bits(&self, sig: u32, res: Res) -> Option<(u32, u32)> {
+        match res {
+            Res::Whole => Some((0, self.sigs[sig as usize].width)),
+            Res::Bits { lsb, w, .. } => Some((lsb, w)),
+            _ => None,
         }
     }
 
@@ -1017,6 +1074,19 @@ impl Sim {
         let n = 2 * nw(sw);
         let s = s as usize;
         match mode {
+            StoreMode::Force => {
+                if let Some((lsb, w)) = self.res_bits(sig, res) {
+                    let words = nw(self.sigs[sig as usize].width);
+                    let m = self.force_mask.entry(sig).or_insert_with(|| vec![0; words]);
+                    for b in lsb..lsb + w {
+                        m[(b / 64) as usize] |= 1 << (b % 64);
+                    }
+                }
+                let tmp: Vec<u64> = self.mem[s..s + n].to_vec();
+                self.force_bypass = true;
+                self.apply(sig, res, &tmp, sw);
+                self.force_bypass = false;
+            }
             StoreMode::Blocking => {
                 if n == 2 {
                     let tmp = [self.mem[s], self.mem[s + 1]];
@@ -1030,7 +1100,8 @@ impl Sim {
                 }
             }
             StoreMode::Nba => {
-                if n == 2 && matches!(res, Res::Whole) {
+                let forceable = (sig as usize) < self.prog.signals.len() && self.prog.signals[sig as usize].forced;
+                if n == 2 && matches!(res, Res::Whole) && !forceable {
                     let slot = self.sigs[sig as usize].slot;
                     let (a, b) = (self.mem[s], self.mem[s + 1]);
                     self.push_small(sig, slot, a, b);
@@ -1560,6 +1631,37 @@ impl Sim {
                         pr.pc = *pc as u32;
                         pr.wait = NONE;
                         return true;
+                    }
+                }
+                Instr::Unforce { t } => {
+                    if let Some((sig, res, _)) = self.resolve(t) {
+                        if let Some((lsb, w)) = self.res_bits(sig, res) {
+                            if let Some(m) = self.force_mask.get_mut(&sig) {
+                                for b in lsb..lsb + w {
+                                    m[(b / 64) as usize] &= !(1 << (b % 64));
+                                }
+                                if m.iter().all(|&x| x == 0) {
+                                    self.force_mask.remove(&sig);
+                                }
+                            }
+                        }
+                    }
+                }
+                Instr::Kick { sig } => {
+                    let ws = self.writers.get(sig).cloned().unwrap_or_default();
+                    for w in ws {
+                        let pr = &mut self.procs[w as usize];
+                        if pr.wait != NONE && pr.class != ProcClass::Spawned {
+                            pr.wait = NONE;
+                            if pr.rank != NONE {
+                                let c = pr.rank as usize;
+                                self.comb_bits[c >> 6] |= 1 << (c & 63);
+                                self.comb_lo = self.comb_lo.min(c >> 6);
+                                self.comb_wake();
+                            } else {
+                                self.push_active(w);
+                            }
+                        }
                     }
                 }
                 Instr::Disable { target } => {

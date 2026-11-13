@@ -72,6 +72,8 @@ pub struct SignalInfo {
     pub alias_of: Option<(u32, u32)>,
     /// a `real` variable: the value word holds f64 bits, the unknown word is 0
     pub real: bool,
+    /// the target of a force or procedural assign: stores take the generic path (force mask)
+    pub forced: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -171,7 +173,16 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, .. } => vec![*d],
-        Instr::Jmp { .. } | Instr::Wait { .. } | Instr::Halt | Instr::Fork { .. } | Instr::Disable { .. } => vec![],
+        Instr::Jmp { .. }
+        | Instr::Wait { .. }
+        | Instr::Halt
+        | Instr::Fork { .. }
+        | Instr::Disable { .. }
+        | Instr::Kick { .. } => vec![],
+        Instr::Unforce { t } => match t {
+            Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
+            _ => vec![],
+        },
         Instr::Sys(t) => {
             let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
                 args.iter()
@@ -318,6 +329,8 @@ pub enum StoreMode {
     Nba,
     /// NBA with intra-assignment delay; delay value is in the slot
     NbaDelay(u32),
+    /// force / procedural assign: writes the bits and marks them forced (other stores keep them)
+    Force,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,6 +434,11 @@ pub enum Instr {
     Fork { children: Box<[u32]>, join: u8 },
     /// disable the named blocks / tasks of `Program::disables[target]`
     Disable { target: u32 },
+    /// re-evaluate the waiting processes that write `sig` (a released net takes its drivers'
+    /// value again)
+    Kick { sig: u32 },
+    /// release / deassign: the bits of the target are no longer forced
+    Unforce { t: Target },
     /// integer (w bits) -> real; x/z bits count as 0
     IToR { d: u32, s: u32, w: u32, signed: bool },
     /// real -> integer of w bits (rounded half away from zero, or truncated toward zero)
