@@ -718,9 +718,67 @@ impl<'a> Compiler<'a> {
             }
         }
         let parent_scope = conns.map(|c| c.1);
+        let inst_line = self.line;
         self.elab_items(&m.items, sid, true, &port_conns, parent_scope)?;
+        if let Some(ps) = parent_scope {
+            // after the instance's own children, as Icarus orders them
+            self.port_width_warnings(m, sid, ps, &port_conns, &saved_file, inst_line)?;
+        }
         self.file = saved_file;
+        self.line = inst_line;
         Ok(sid)
+    }
+
+    /// Icarus's warnings for port connections whose width differs from the port's.
+    fn port_width_warnings(
+        &mut self,
+        m: &'a Module,
+        sid: usize,
+        ps: usize,
+        port_conns: &HashMap<String, Option<Expr>>,
+        pfile: &str,
+        line: u32,
+    ) -> R<()> {
+        let mut dirs: HashMap<&str, Dir> = HashMap::new();
+        for it in &m.items {
+            if let Item::Decl(d) = it {
+                if let Some(dir) = d.dir {
+                    for dl in &d.names {
+                        dirs.insert(dl.name.as_str(), dir);
+                    }
+                }
+            }
+        }
+        for (k, pn) in m.ports.iter().enumerate() {
+            let Some(Some(e)) = port_conns.get(pn) else { continue };
+            let Some(Sym::Sig(s)) = self.scopes[sid].syms.get(pn).cloned() else { continue };
+            let info = self.sig(s);
+            if info.real || info.depth != 0 || self.is_real(e, ps) {
+                continue;
+            }
+            let pw = info.width;
+            let ew = self.ty(e, ps)?.0;
+            if pw == ew {
+                continue;
+            }
+            let n = pw.abs_diff(ew);
+            let detail = match (dirs.get(pn.as_str()), ew < pw) {
+                (Some(Dir::Inout), true) => format!("Leaving {n} high bits of the port unconnected."),
+                (Some(Dir::Inout), false) => format!("Leaving {n} high bits of the expression dangling."),
+                (Some(Dir::Input), false) => format!("Pruning {n} high bits of the expression."),
+                (_, true) => format!("Padding {n} high bits of the port."),
+                (_, false) => format!("Padding {n} high bits of the expression."),
+            };
+            let w = format!(
+                "{pfile}:{line}: warning: Port {} ({pn}) of module {} expects {pw} bit(s), given {ew}.\n{pfile}:{line}:        : {detail}",
+                k + 1,
+                m.name
+            );
+            if self.warned.insert(w.clone()) {
+                self.warnings.push(w);
+            }
+        }
+        Ok(())
     }
 
     /// Evaluate the parameters of module `m` (with overrides) into scope `sid`, in order.
