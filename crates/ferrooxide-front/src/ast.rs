@@ -145,6 +145,8 @@ pub enum ProcKind {
 pub enum Item {
     Decl(Decl),
     Param(ParamDecl),
+    /// `defparam a.b.P = value;` (the target path includes the parameter name)
+    Defparam { target: Vec<String>, value: Expr, line: Line },
     ContAssign { delay: Option<Expr>, lhs: Expr, rhs: Expr, line: Line },
     Process { kind: ProcKind, body: Stmt, line: Line },
     Instances { module: String, params: Vec<Conn>, insts: Vec<Instance>, line: Line },

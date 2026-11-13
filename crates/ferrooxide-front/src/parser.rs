@@ -615,7 +615,25 @@ impl Parser {
                 self.opt_block_label()?;
                 items.push(Item::GenBlock { name, items: sub, line });
             }
-            "defparam" => return self.err("defparam is not supported"),
+            "defparam" => {
+                self.bump();
+                loop {
+                    let line = self.line();
+                    let first = self.ident()?;
+                    let target = match self.hier_tail(first)? {
+                        Expr::Hier(p) => p,
+                        Expr::Ident(n) => vec![n],
+                        _ => unreachable!(),
+                    };
+                    self.expect_p("=")?;
+                    let value = self.expr()?;
+                    items.push(Item::Defparam { target, value, line });
+                    if !self.eat_p(",") {
+                        break;
+                    }
+                }
+                self.expect_p(";")?;
+            }
             "specify" => {
                 while !self.eat_kw("endspecify") {
                     if matches!(self.peek(), Tok::Eof) {

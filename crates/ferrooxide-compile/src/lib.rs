@@ -108,6 +108,9 @@ pub struct Compiler<'a> {
     /// memory limit (words) and the error raised when a declaration exceeds it
     pub(crate) mem_limit_words: u64,
     pub(crate) mem_error: Option<Error>,
+    /// defparam overrides by full parameter path
+    defparams: HashMap<String, PVal>,
+    top_names: HashSet<String>,
     /// UDP name -> index of its runtime table
     pub(crate) udp_index: HashMap<String, u32>,
     /// counter for per-call storage of automatic functions and tasks
@@ -173,6 +176,18 @@ pub fn compile_lint(modules: &[Module], tops: &[String], lint: bool) -> Result<(
     if top_mods.is_empty() {
         return Err(Error { msg: "no top-level module found".into(), file: String::new(), line: 0 });
     }
+    c.top_names = top_mods.iter().map(|m| m.name.clone()).collect();
+    // defparams in top modules that reach into other top modules must be known before those
+    // are elaborated: evaluate them in a scratch copy of their module's parameters
+    for m in &top_mods {
+        if m.items.iter().any(|i| matches!(i, Item::Defparam { .. })) {
+            let saved = std::mem::replace(&mut c.file, m.file.clone());
+            let sid = c.new_scope(m.name.clone(), None, m.file.clone());
+            c.eval_params(m, &[], sid)?;
+            c.register_defparams(&m.items, sid)?;
+            c.file = saved;
+        }
+    }
     for m in top_mods {
         let sid = c.instantiate(m, m.name.clone(), &[], None)?;
         c.tops.insert(m.name.clone(), sid);
@@ -233,6 +248,8 @@ impl<'a> Compiler<'a> {
                 * (1 << 20)
                 / 8,
             mem_error: None,
+            defparams: HashMap::new(),
+            top_names: HashSet::new(),
             redirect: HashMap::new(),
         }
     }
@@ -676,6 +693,11 @@ impl<'a> Compiler<'a> {
                     }
                     pos += 1;
                 }
+                if !p.local {
+                    if let Some(d) = self.defparams.get(&format!("{}.{}", self.scopes[sid].name, p.name)) {
+                        ov = Some(d.clone());
+                    }
+                }
                 let v = self.param_value(p, ov, sid)?;
                 self.scopes[sid].syms.insert(p.name.clone(), v);
                 if p.range.is_some() && !p.real {
@@ -683,6 +705,37 @@ impl<'a> Compiler<'a> {
                     self.scopes[sid].param_ranges.insert(p.name.clone(), r);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Record the defparams among `items` (in scope `sid`) by the full path of their target.
+    fn register_defparams(&mut self, items: &'a [Item], sid: usize) -> R<()> {
+        for it in items {
+            let Item::Defparam { target, value, line } = it else { continue };
+            self.line = *line;
+            let v = self.pval(value, sid)?;
+            let rel = target.join(".");
+            // upwards: the first component names this scope or an enclosing one
+            let mut base = None;
+            let mut s = Some(sid);
+            while let Some(x) = s {
+                let name = &self.scopes[x].name;
+                if name.rsplit('.').next() == Some(target[0].as_str()) {
+                    base = Some(match name.rfind('.') {
+                        Some(i) => format!("{}.{rel}", &name[..i]),
+                        None => rel.clone(),
+                    });
+                    break;
+                }
+                s = self.scopes[x].parent;
+            }
+            let key = match base {
+                Some(k) => k,
+                None if self.top_names.contains(&target[0]) && target.len() > 1 => rel,
+                None => format!("{}.{rel}", self.scopes[sid].name),
+            };
+            self.defparams.insert(key, v);
         }
         Ok(())
     }
@@ -875,6 +928,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        self.register_defparams(items, sid)?;
         // 2. declarations (merged by name: `output [3:0] q; reg [3:0] q;`)
         struct Merged<'d> {
             dir: Option<Dir>,
@@ -1086,7 +1140,7 @@ impl<'a> Compiler<'a> {
         let mut genblk = 0;
         for it in items {
             match it {
-                Item::Decl(_) | Item::Param(_) | Item::Subroutine(_) => {}
+                Item::Decl(_) | Item::Param(_) | Item::Subroutine(_) | Item::Defparam { .. } => {}
                 Item::ContAssign { delay, lhs, rhs, line } => {
                     self.jobs.push(Job::Assign {
                         lhs: lhs.clone(),
@@ -1144,8 +1198,9 @@ impl<'a> Compiler<'a> {
                             let (l, r) = (self.const_int(l, sid)?, self.const_int(r, sid)?);
                             let n = ((l - r).abs() + 1) as u32;
                             let pws = self.port_widths(m, &ovs)?;
-                            for k in 0..n {
-                                let i = if l >= r { l - k as i64 } else { l + k as i64 };
+                            // elaborated lowest index first, like Icarus
+                            for i in l.min(r)..=l.max(r) {
+                                let k = (i - l).unsigned_abs() as u32;
                                 let mut conns = Vec::new();
                                 for (pos, c) in inst.conns.iter().enumerate() {
                                     let (port, e) = match c {
