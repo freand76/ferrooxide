@@ -12,8 +12,11 @@ pub struct Vcd {
     out: BufWriter<File>,
     /// per signal: VCD identifier codes (several names may alias one signal)
     pub ids: Vec<Vec<String>>,
-    /// per traced signal: the planes last written (empty: nothing written yet)
-    last: Vec<Vec<u64>>,
+    /// per traced signal: offset of the planes last written in `last_buf` (u32::MAX: not
+    /// traced), and whether anything was written yet
+    last_off: Vec<u32>,
+    last_buf: Vec<u64>,
+    written: Vec<bool>,
     last_time: Option<u64>,
     /// the time of the next value written (its "#t" line is written with it)
     time: u64,
@@ -102,8 +105,18 @@ impl Vcd {
         }
         emit(&mut out, &root, prog)?;
         writeln!(out, "$enddefinitions $end")?;
-        let last = vec![Vec::new(); ids.len()];
-        Ok(Vcd { out, ids, last, last_time: None, time: 0, line: Vec::new(), enabled: true })
+        // (as Icarus: the parameter block, which is empty here)
+        writeln!(out, "$comment Show the parameter values. $end\n$dumpall\n$end")?;
+        let mut last_off = vec![u32::MAX; ids.len()];
+        let mut last_buf = Vec::new();
+        for (sig, codes) in ids.iter().enumerate() {
+            if !codes.is_empty() {
+                last_off[sig] = last_buf.len() as u32;
+                last_buf.resize(last_buf.len() + 2 * nw(prog.signals[sig].width), 0);
+            }
+        }
+        let written = vec![false; ids.len()];
+        Ok(Vcd { out, ids, last_off, last_buf, written, last_time: None, time: 0, line: Vec::new(), enabled: true })
     }
 
     pub fn write_value(&mut self, sig: u32, mem: &[u64], slot: u32, w: u32) {
@@ -114,53 +127,33 @@ impl Vcd {
         let n = nw(w);
         let s = slot as usize;
         let cur = &mem[s..s + 2 * n];
-        let last = &mut self.last[sig as usize];
-        if last.as_slice() == cur {
+        let off = self.last_off[sig as usize] as usize;
+        let last = &mut self.last_buf[off..off + 2 * n];
+        let same = self.written[sig as usize] && last.iter().zip(cur).all(|(a, b)| a == b);
+        if same {
             return; // changed and changed back within the time step
         }
-        last.clear();
-        last.extend_from_slice(cur);
+        for (d, v) in last.iter_mut().zip(cur) {
+            *d = *v;
+        }
+        self.written[sig as usize] = true;
         if self.last_time != Some(self.time) {
             let _ = writeln!(self.out, "#{}", self.time);
             self.last_time = Some(self.time);
         }
-        let bit = |i: u32| -> u8 {
-            let wi = (i / 64) as usize;
-            let a = (mem[s + wi] >> (i % 64)) & 1;
-            let b = (mem[s + n + wi] >> (i % 64)) & 1;
-            match (a, b) {
-                (0, 0) => b'0',
-                (1, 0) => b'1',
-                (0, 1) => b'z',
-                _ => b'x',
-            }
-        };
+        let (va, vb) = (&cur[..n], &cur[n..]);
         let line = &mut self.line;
         line.clear();
         if w == 1 {
-            line.push(bit(0));
+            line.push(match (va[0] & 1, vb[0] & 1) {
+                (0, 0) => b'0',
+                (1, 0) => b'1',
+                (0, _) => b'z',
+                _ => b'x',
+            });
         } else {
             line.push(b'b');
-            // shortest form (VCD left-extends 0, x and z): a leading run of x or z becomes one
-            // character, leading zeros go when a 1 follows
-            let first = bit(w - 1);
-            let mut i = w - 1;
-            match first {
-                b'x' | b'z' => {
-                    while i > 0 && bit(i - 1) == first {
-                        i -= 1;
-                    }
-                }
-                b'0' => {
-                    while i > 0 && bit(i) == b'0' && bit(i - 1) != b'x' && bit(i - 1) != b'z' {
-                        i -= 1;
-                    }
-                }
-                _ => {}
-            }
-            for k in (0..=i).rev() {
-                line.push(bit(k));
-            }
+            render_vector(line, va, vb, w);
             line.push(b' ');
         }
         let k = line.len();
@@ -177,11 +170,17 @@ impl Vcd {
         self.time = t;
     }
 
+    /// The end of the simulation: its time is written even without changes.
+    pub fn end(&mut self, t: u64) {
+        if self.last_time != Some(t) {
+            let _ = writeln!(self.out, "#{t}");
+            self.last_time = Some(t);
+        }
+    }
+
     /// Forget the last values: the next write of every signal is a full dump.
     pub fn reset_values(&mut self) {
-        for l in &mut self.last {
-            l.clear();
-        }
+        self.written.iter_mut().for_each(|w| *w = false);
     }
 
     pub fn begin_dumpvars(&mut self) {
@@ -198,4 +197,74 @@ impl Vcd {
     pub fn flush(&mut self) {
         let _ = self.out.flush();
     }
+}
+
+/// "0"/"1" for the 8 bits of a byte, most significant first.
+static BYTE_BITS: [[u8; 8]; 256] = {
+    let mut t = [[0u8; 8]; 256];
+    let mut v = 0;
+    while v < 256 {
+        let mut k = 0;
+        while k < 8 {
+            t[v][k] = if (v >> (7 - k)) & 1 == 1 { b'1' } else { b'0' };
+            k += 1;
+        }
+        v += 1;
+    }
+    t
+};
+
+/// The shortest VCD text of a vector (VCD left-extends 0, x and z): a leading run of x or z
+/// becomes one character, leading zeros go when a 1 follows.
+fn render_vector(line: &mut Vec<u8>, a: &[u64], b: &[u64], w: u32) {
+    if b.iter().all(|&x| x == 0) {
+        // known bits: from the highest 1, eight at a time
+        let Some(top) = (0..a.len()).rev().find(|&k| a[k] != 0) else {
+            line.push(b'0');
+            return;
+        };
+        let hi = top as u32 * 64 + 63 - a[top].leading_zeros();
+        let mut i = hi as i64;
+        while i >= 0 && (i + 1) % 8 != 0 {
+            line.push(b'0' + ((a[(i / 64) as usize] >> (i % 64)) & 1) as u8);
+            i -= 1;
+        }
+        while i >= 7 {
+            let byte = (a[(i / 64) as usize] >> ((i - 7) % 64)) as u8;
+            line.extend_from_slice(&BYTE_BITS[byte as usize]);
+            i -= 8;
+        }
+        return;
+    }
+    let start = line.len();
+    for i in (0..w).rev() {
+        let (wi, sh) = ((i / 64) as usize, i % 64);
+        line.push(match ((a[wi] >> sh) & 1, (b[wi] >> sh) & 1) {
+            (0, 0) => b'0',
+            (1, 0) => b'1',
+            (0, _) => b'z',
+            _ => b'x',
+        });
+    }
+    // compress the leading run
+    let first = line[start];
+    let mut k = start;
+    let end = line.len();
+    match first {
+        b'x' | b'z' => {
+            while k + 1 < end && line[k + 1] == first {
+                k += 1;
+            }
+        }
+        _ => {
+            // leading zeros (a 1, x or z follows: x and z must keep a 0 in front)
+            while k + 1 < end && line[k] == b'0' && line[k + 1] == b'0' {
+                k += 1;
+            }
+            if k + 1 < end && line[k] == b'0' && line[k + 1] == b'1' {
+                k += 1;
+            }
+        }
+    }
+    line.drain(start..k);
 }

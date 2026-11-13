@@ -141,6 +141,8 @@ pub struct Sim {
     force_mask: HashMap<u32, Vec<u64>>,
     /// pending inertial (continuous-assignment delay) updates: target -> current generation
     inertial: HashMap<(u32, u32), u32>,
+    /// a $dumpvars block is due at the end of the current time step
+    dump_pending: bool,
     /// a force store is writing (the mask does not apply)
     force_bypass: bool,
     /// per group: run the members last to first next time
@@ -383,6 +385,7 @@ impl Sim {
             group_rev: vec![true; groups.len()],
             force_mask: HashMap::new(),
             inertial: HashMap::new(),
+            dump_pending: false,
             force_bypass: false,
             writers: {
                 let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -541,6 +544,9 @@ impl Sim {
 
     /// Run the final blocks and flush the outputs.
     pub fn finish(&mut self) {
+        if let (Some(v), true) = (&mut self.vcd, self.dumping) {
+            v.end(self.time);
+        }
         let finals: Vec<u32> =
             (0..self.procs.len() as u32).filter(|&p| self.procs[p as usize].class == ProcClass::Final).collect();
         self.finished = false;
@@ -587,24 +593,13 @@ impl Sim {
         if let Some(v) = &mut self.vcd {
             v.flush();
         }
-        let mut v = Vcd::create_filtered(path, &self.prog, keep).inspect_err(|e| {
+        let v = Vcd::create_filtered(path, &self.prog, keep).inspect_err(|e| {
             eprintln!("warning: cannot create VCD file {path}: {e}");
         })?;
-        v.time(self.time);
-        v.begin_dumpvars();
-        for (i, r) in self.sigs.iter().enumerate() {
-            if r.depth == 0 {
-                v.write_value(i as u32, &self.mem, r.slot, r.width);
-            }
-        }
-        v.end_dumpvars();
-        // changes recorded before now belong to no file
-        for &s in &self.dirty {
-            self.is_dirty[s as usize] = false;
-        }
-        self.dirty.clear();
+        // the initial values are written at the end of the current time step
         self.vcd = Some(v);
         self.dumping = true;
+        self.dump_pending = true;
         Ok(())
     }
 
@@ -741,7 +736,23 @@ impl Sim {
                 self.exec(p);
             }
         }
-        if self.dumping && !self.dirty.is_empty() {
+        if self.dump_pending {
+            // $dumpvars / a trace started in this time step: the values at its end
+            self.dump_pending = false;
+            let v = self.vcd.as_mut().unwrap();
+            v.time(self.time);
+            v.begin_dumpvars();
+            for (i, r) in self.sigs.iter().enumerate() {
+                if r.depth == 0 {
+                    v.write_value(i as u32, &self.mem, r.slot, r.width);
+                }
+            }
+            v.end_dumpvars();
+            for &s in &self.dirty {
+                self.is_dirty[s as usize] = false;
+            }
+            self.dirty.clear();
+        } else if self.dumping && !self.dirty.is_empty() {
             self.dump_dirty();
         }
     }
