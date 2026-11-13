@@ -10,6 +10,7 @@ pub struct Parser {
     file: String,
     /// `timescale in effect (carried from file to file by the caller)
     pub timescale: Option<(i32, i32)>,
+    pub default_nettype: Option<String>,
 }
 
 struct PType {
@@ -57,7 +58,8 @@ const STRENGTHS: &[&str] = &[
 
 impl Parser {
     pub fn new(toks: Vec<Token>, file: String) -> Self {
-        Parser { toks, pos: 0, file, timescale: None }
+        Parser { toks, pos: 0, file, timescale: None,
+            default_nettype: None }
     }
 
     // ---------- token helpers ----------
@@ -136,6 +138,14 @@ impl Parser {
             _ => self.err(format!("expected identifier, found {}", self.describe())),
         }
     }
+    /// Any identifier, keywords included (`default_nettype wire).
+    fn ident_or_kw(&mut self) -> Result<String> {
+        match self.bump() {
+            Tok::Ident(s) => Ok(s),
+            _ => self.err("expected a name"),
+        }
+    }
+
     /// a or a.b.c (hierarchical name as a dotted string)
     fn dotted_name(&mut self) -> Result<String> {
         let mut n = self.ident()?;
@@ -162,6 +172,12 @@ impl Parser {
                 Tok::Eof => break,
                 Tok::Ident(s) if s == "module" || s == "macromodule" => mods.push(self.module()?),
                 Tok::Ident(s) if s == "primitive" => mods.push(self.primitive()?),
+                Tok::Ident(s) if s == "__fx_nettype" => {
+                    self.bump();
+                    let t = self.ident_or_kw()?;
+                    self.expect_p(";")?;
+                    self.default_nettype = if t == "wire" { None } else { Some(t) };
+                }
                 Tok::Ident(s) if s == "__fx_timescale" => {
                     self.bump();
                     let num = |p: &mut Parser| -> Result<i32> {
@@ -290,7 +306,16 @@ impl Parser {
         }
         self.bump();
         self.opt_block_label()?;
-        Ok(Module { name, timescale: self.timescale, file: self.file.clone(), line, ports, items, udp: None })
+        Ok(Module {
+            name,
+            timescale: self.timescale,
+            default_nettype: self.default_nettype.clone(),
+            file: self.file.clone(),
+            line,
+            ports,
+            items,
+            udp: None,
+        })
     }
 
     /// primitive name (ports); declarations; [initial q = v;] table ... endtable endprimitive
@@ -389,6 +414,7 @@ impl Parser {
         Ok(Module {
             name,
             timescale: self.timescale,
+            default_nettype: None,
             file: self.file.clone(),
             line,
             ports,
@@ -452,11 +478,12 @@ impl Parser {
         let mut signed = false;
         let mut net = NetType::Wire;
         let mut real_net = false;
+        let mut strength = None;
         // `input bit;`: a SystemVerilog type name used as the port name
         let sv_name = dir.is_some() && self.sv_ident_here();
         if let Tok::Ident(s) = self.peek().clone() {
             if sv_name {
-                return Ok(Decl { dir, kind, net, explicit_kind, real_net: false, signed, range: None, names: vec![], line });
+                return Ok(Decl { dir, kind, net, explicit_kind, real_net: false, strength: None, signed, range: None, names: vec![], line });
             }
             net = match s.as_str() {
                 "tri0" => NetType::Tri0,
@@ -501,7 +528,7 @@ impl Parser {
                     real_net = true;
                 }
                 // drive / charge strength of a net declaration
-                self.skip_strength()?;
+                strength = self.strength()?;
             }
         }
         if self.eat_kw("signed") {
@@ -514,7 +541,7 @@ impl Parser {
         if self.eat_p("#") {
             self.delay_value()?;
         }
-        Ok(Decl { dir, kind, net, explicit_kind, real_net, signed, range, names: Vec::new(), line })
+        Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, signed, range, names: Vec::new(), line })
     }
 
     fn declarators(&mut self) -> Result<Vec<Declarator>> {
@@ -598,14 +625,14 @@ impl Parser {
             }
             "assign" => {
                 self.bump();
-                self.skip_strength()?;
+                let strength = self.strength()?;
                 let delay = if self.eat_p("#") { Some(self.delay_value()?) } else { None };
                 loop {
                     let line = self.line();
                     let lhs = self.lvalue()?;
                     self.expect_p("=")?;
                     let rhs = self.expr()?;
-                    items.push(Item::ContAssign { delay: delay.clone(), lhs, rhs, line });
+                    items.push(Item::ContAssign { delay: delay.clone(), lhs, rhs, strength, line });
                     if !self.eat_p(",") {
                         break;
                     }
@@ -690,7 +717,7 @@ impl Parser {
             _ if GATES.contains(&kw) => {
                 self.bump();
                 let kind = kw.to_string();
-                self.skip_strength()?;
+                let strength = self.strength()?;
                 if self.eat_p("#") {
                     self.delay_value()?;
                 }
@@ -707,7 +734,7 @@ impl Parser {
                         }
                     }
                     self.expect_p(")")?;
-                    items.push(Item::Gate { kind: kind.clone(), inst_name, dims, terms, line });
+                    items.push(Item::Gate { kind: kind.clone(), inst_name, dims, terms, strength, line });
                     if !self.eat_p(",") {
                         break;
                     }
@@ -986,17 +1013,41 @@ impl Parser {
 
     // ---------- statements ----------
     /// `( strength0, strength1 )` or a charge strength `(small)`: skipped (no strength model)
-    fn skip_strength(&mut self) -> Result<()> {
-        if self.is_p("(") && matches!(self.peek_at(1), Tok::Ident(s) if STRENGTHS.contains(&s.as_str())) {
-            while !self.eat_p(")") {
-                if matches!(self.peek(), Tok::Eof) {
-                    return self.err("unterminated strength");
+    /// `(strength0, strength1)` (either order, or one of them): levels 0 = highz .. 7 = supply;
+    /// a missing one is strong. Charge strengths (small, medium, large) give None.
+    fn strength(&mut self) -> Result<Option<(u8, u8)>> {
+        if !(self.is_p("(") && matches!(self.peek_at(1), Tok::Ident(s) if STRENGTHS.contains(&s.as_str()))) {
+            return Ok(None);
+        }
+        self.bump();
+        let (mut s0, mut s1, mut drive) = (6u8, 6u8, false);
+        while !self.eat_p(")") {
+            match self.bump() {
+                Tok::Ident(s) => {
+                    let lvl = match &s[..s.len() - 1] {
+                        "supply" => 7,
+                        "strong" => 6,
+                        "pull" => 5,
+                        "weak" => 3,
+                        "highz" => 0,
+                        _ => continue,
+                    };
+                    drive = true;
+                    if s.ends_with('0') {
+                        s0 = lvl;
+                    } else {
+                        s1 = lvl;
+                    }
                 }
-                self.bump();
+                Tok::Punct(",") => {}
+                Tok::Eof => return self.err("unterminated strength"),
+                _ => {}
             }
         }
-        Ok(())
+        Ok(drive.then_some((s0, s1)))
     }
+
+
 
     fn delay_value(&mut self) -> Result<Expr> {
         if self.eat_p("(") {

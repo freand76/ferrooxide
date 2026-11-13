@@ -7,6 +7,8 @@ pub struct Module {
     pub name: String,
     /// `timescale in effect for this module: (unit, precision) as powers of ten of seconds
     pub timescale: Option<(i32, i32)>,
+    /// `default_nettype in effect ("wire", "wand", ..., "none"); None: wire
+    pub default_nettype: Option<String>,
     pub file: String,
     pub line: Line,
     /// Port names in header order.
@@ -83,6 +85,8 @@ pub struct Decl {
     pub explicit_kind: bool,
     /// `wire real`: a real-valued net
     pub real_net: bool,
+    /// drive strength of a net declaration assignment (`wire (weak1, weak0) w = e;`)
+    pub strength: Option<(u8, u8)>,
     pub signed: bool,
     pub range: Option<Range>,
     pub names: Vec<Declarator>,
@@ -149,7 +153,8 @@ pub enum Item {
     Param(ParamDecl),
     /// `defparam a.b.P = value;` (the target path includes the parameter name)
     Defparam { target: Vec<String>, value: Expr, line: Line },
-    ContAssign { delay: Option<Expr>, lhs: Expr, rhs: Expr, line: Line },
+    /// `strength`: drive strength (strength0, strength1), levels 0 (highz) .. 7 (supply)
+    ContAssign { delay: Option<Expr>, lhs: Expr, rhs: Expr, strength: Option<(u8, u8)>, line: Line },
     Process { kind: ProcKind, body: Stmt, line: Line },
     Instances { module: String, params: Vec<Conn>, insts: Vec<Instance>, line: Line },
     Subroutine(SubroutineDecl),
@@ -159,7 +164,7 @@ pub enum Item {
     GenBlock { name: Option<String>, items: Vec<Item>, line: Line },
     /// gate primitive: and/or/nand/nor/xor/xnor/not/buf
     /// `dims`: an array of gate instances, e.g. `buf b[7:0] (o, i);`
-    Gate { kind: String, inst_name: Option<String>, dims: Option<Range>, terms: Vec<Expr>, line: Line },
+    Gate { kind: String, inst_name: Option<String>, dims: Option<Range>, terms: Vec<Expr>, strength: Option<(u8, u8)>, line: Line },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -92,23 +92,20 @@ code needs them.
    frames (a VM call stack and frame-relative slots in the JIT) instead of inlining; a fork
    branch restarted while still running (fork/join_none in a loop) should become a new
    process instance instead of restarting the old one.
-2. **Structural RTL gaps**: multi-dimensional arrays (`reg [7:0] m [0:3][0:15]`), arrays of
-   instances (`dff u[7:0] (...)`, port slicing rules), hierarchical references into generate
-   blocks (`gen[2].u.sig`), `defparam`, `` `default_nettype none `` enforcement (implicit nets
-   are currently always created for port connections), real-valued function arguments in
-   expressions everywhere.
-3. **Testbench I/O and system functions**: `$fgetc`/`$fgets`/`$fscanf`/`$sscanf`/`$feof`/
-   `$fread`/`$fseek`/`$rewind`/`$ungetc`; IEEE `$random` and `$dist_*` (Icarus-identical
-   sequences); `$timeformat`/`$printtimescale`; `$dumpvars` scope/level arguments and
-   `$dumpall`/`$dumplimit`; `force`/`release` that hold values (also on nets) and procedural
-   `assign`/`deassign`; real math (`$sqrt`, `$ln`, `$pow`, `$floor`, ...); `$countdrivers`,
-   `$q_*` (rare).
-4. **Gate level / netlists**: UDPs (`primitive ... endprimitive`, combinational and sequential
-   tables), net types `wand`/`wor`/`tri0`/`tri1`/`supply0`/`supply1`/`trireg`, drive and charge
-   strengths (`%v`), `bufif0/1`, `notif0/1`, pull gates, switch primitives (`nmos`, `pmos`,
-   `cmos`, `tran`, `rtran`...), gate and net delays (rise/fall/turn-off, min:typ:max),
-   inertial delays on `assign`, `specify` blocks (path delays, `$setup`/`$hold`/`$width`/...
-   timing checks) and SDF back-annotation.
+2. **Structural RTL gaps**: multi-dimensional arrays (`reg [7:0] m [0:3][0:15]`),
+   hierarchical references with genvar indices (`gen[i].u.sig`; constant indices work),
+   real-valued function arguments in expressions everywhere. Done: arrays of instances,
+   `defparam`, `` `default_nettype ``, implicit nets.
+3. **Testbench I/O and system functions**: `$fread`, `$dist_*`, `%u`/`%z` in `$fscanf`;
+   `$dumpvars` scope/level arguments and `$dumpall`/`$dumplimit`; force on array elements; real
+   math (`$sqrt`, `$ln`, `$pow`, `$floor`, ...); `$countdrivers`, `$q_*` (rare). Done: file
+   input, `$random`/`$urandom` (Icarus sequences), `$timeformat`/`$printtimescale`,
+   `$writemem*`, force/release and assign/deassign.
+4. **Gate level / netlists**: done: UDPs, net types, static drive strengths (per driver;
+   the strongest wins per bit), pull gates, MOS switches, `tran`/`tranif` (islands solved in
+   one process). Remaining: strength values on nets (`%v`, strength reduction through
+   switches, `trireg` charge), gate and net delays (rise/fall/turn-off), inertial delays on
+   `assign`, `specify` path delays and timing checks, SDF back-annotation.
 5. **Tool interfaces and the rest**: VPI/PLI (cocotb and friends), Verilog-2001 configurations
    and libraries (`config`, `-y`/`-v` library search, `` `uselib ``), `$dumpports`, VCD of
    reals and events.

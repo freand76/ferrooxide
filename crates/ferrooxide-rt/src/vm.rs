@@ -1693,6 +1693,7 @@ impl Sim {
                         }
                     }
                 }
+                Instr::ResolveStr { d, w, drv } => ops::resolve_strength(m, *d as usize, *w, drv),
                 Instr::Touch { sig } => {
                     let r = self.sigs[*sig as usize];
                     let cur = if r.depth == 0 { lsb_code(&self.mem, r.slot, r.width) } else { 0 };

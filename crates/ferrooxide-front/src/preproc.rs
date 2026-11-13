@@ -234,7 +234,16 @@ impl Preprocessor {
                             out.push_str(" __fx_timescale 0 0 ; ");
                         }
                     }
-                    "default_nettype" | "celldefine" | "endcelldefine"
+                    "default_nettype" => {
+                        let t = read_ident(&s, &mut i);
+                        if active(&conds) {
+                            out.push_str(&format!(" __fx_nettype {t} ; "));
+                        }
+                        while i < s.len() && s[i] != '\n' {
+                            i += 1;
+                        }
+                    }
+                    "celldefine" | "endcelldefine"
                     | "unconnected_drive" | "nounconnected_drive" | "pragma" | "line" | "begin_keywords"
                     | "end_keywords" => {
                         while i < s.len() && s[i] != '\n' {

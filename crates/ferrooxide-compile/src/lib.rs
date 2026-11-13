@@ -57,6 +57,8 @@ pub(crate) struct Scope<'a> {
     /// time unit and precision of the enclosing module (powers of ten of seconds)
     pub tunit: i32,
     pub tprec: i32,
+    /// `default_nettype of the module (None: wire)
+    pub nettype: Option<String>,
 }
 
 enum Job<'a> {
@@ -136,13 +138,16 @@ pub struct Compiler<'a> {
     /// nets of a special type (tri0, wand, ...): resolved even with one or no driver
     pub(crate) net_types: HashMap<u32, NetType>,
     /// nets with a pullup (true) or pulldown (false) gate
-    pub(crate) pulls: HashMap<u32, bool>,
+    pub(crate) pulls: HashMap<u32, Vec<(u32, u32, bool)>>,
     /// nets with several continuous drivers -> their driver signals
     drivers: HashMap<u32, Vec<u32>>,
     /// while compiling a driver of a multi-driven net: net -> this driver's signal
     redirect: HashMap<u32, u32>,
     dialect: Dialect,
     links: Vec<Link>,
+    /// drive strength of the continuous assignments being created, and per job index
+    cur_strength: Option<(u8, u8)>,
+    job_strength: HashMap<usize, (u8, u8)>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -292,6 +297,8 @@ impl<'a> Compiler<'a> {
             init_touch_net: Vec::new(),
             dialect: Dialect::default(),
             links: Vec::new(),
+            cur_strength: None,
+            job_strength: HashMap::new(),
             top_names: HashSet::new(),
             redirect: HashMap::new(),
         }
@@ -476,6 +483,7 @@ impl<'a> Compiler<'a> {
             file,
             tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
             tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
+            nettype: parent.and_then(|p| self.scopes[p].nettype.clone()),
         });
         self.scopes.len() - 1
     }
@@ -683,6 +691,7 @@ impl<'a> Compiler<'a> {
         let sid = self.new_scope(path.clone(), None, m.file.clone());
         self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
         self.scopes[sid].tprec = m.timescale.map(|t| t.1).unwrap_or(0);
+        self.scopes[sid].nettype = m.default_nettype.clone();
         for it in &m.items {
             if let Item::Subroutine(f) = it {
                 self.scopes[sid].funcs.insert(f.name.clone(), f);
@@ -727,6 +736,13 @@ impl<'a> Compiler<'a> {
         self.file = saved_file;
         self.line = inst_line;
         Ok(sid)
+    }
+
+    fn push_job(&mut self, j: Job<'a>) {
+        if let (Some(st), Job::Assign { .. }) = (self.cur_strength, &j) {
+            self.job_strength.insert(self.jobs.len(), st);
+        }
+        self.jobs.push(j);
     }
 
     /// Icarus's warnings for port connections whose width differs from the port's.
@@ -1041,6 +1057,7 @@ impl<'a> Compiler<'a> {
             kind: NetKind,
             net: NetType,
             real_net: bool,
+            strength: Option<(u8, u8)>,
             signed: bool,
             range: Option<&'d Range>,
             dims: &'d [Range],
@@ -1067,6 +1084,9 @@ impl<'a> Compiler<'a> {
                                 mg.net = d.net;
                             }
                             mg.real_net |= d.real_net;
+                            if d.strength.is_some() {
+                                mg.strength = d.strength;
+                            }
                             mg.signed |= d.signed;
                             if d.range.is_some() {
                                 mg.range = d.range.as_ref();
@@ -1087,6 +1107,7 @@ impl<'a> Compiler<'a> {
                                     kind: d.kind,
                                     net: d.net,
                                     real_net: d.real_net,
+                                    strength: d.strength,
                                     signed: d.signed,
                                     range: d.range.as_ref(),
                                     dims: &dl.dims,
@@ -1154,9 +1175,8 @@ impl<'a> Compiler<'a> {
                                     Some(s) => Some(s),
                                     None => {
                                         // implicit net in the parent
-                                        let pfull = format!("{}.{}", self.scopes[ps].name, pn);
-                                        let s = self.new_signal(pfull, width, false, 0, msb, lsb, 0, SigKind::Wire);
-                                        self.scopes[ps].syms.insert(pn.clone(), Sym::Sig(s));
+                                        let s = self.implicit_net(pn, width, ps)?;
+                                        let _ = (msb, lsb);
                                         Some(Sym::Sig(s))
                                     }
                                 };
@@ -1220,19 +1240,23 @@ impl<'a> Compiler<'a> {
                     let d = if mg.net == NetType::Supply1 { "1" } else { "0" };
                     let rhs = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: d.into(), fill: true });
                     let line = self.line;
-                    self.jobs.push(Job::Assign { lhs: Expr::Ident(name.clone()), rhs, delay: None, scope: sid, line });
+                    self.cur_strength = Some((7, 7));
+                    self.push_job(Job::Assign { lhs: Expr::Ident(name.clone()), rhs, delay: None, scope: sid, line });
+                    self.cur_strength = None;
                 }
             }
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
             if let Some(init) = mg.init {
                 if kind == SigKind::Wire {
-                    self.jobs.push(Job::Assign {
+                    self.cur_strength = mg.strength;
+                    self.push_job(Job::Assign {
                         lhs: Expr::Ident(name.clone()),
                         rhs: init.clone(),
                         delay: None,
                         scope: sid,
                         line: self.line,
                     });
+                    self.cur_strength = None;
                 } else if is_real {
                     let r = self.const_real(init, sid)?;
                     let slot = self.sig(s).slot as usize;
@@ -1273,9 +1297,7 @@ impl<'a> Compiler<'a> {
         }
         for n in implicit {
             if self.lookup(n, sid).is_none() {
-                let full = format!("{}.{}", self.scopes[sid].name, n);
-                let s = self.new_signal(full, 1, false, 0, 0, 0, 0, SigKind::Wire);
-                self.scopes[sid].syms.insert(n.clone(), Sym::Sig(s));
+                self.implicit_net(n, 1, sid)?;
             }
         }
         // 3c. static tasks and functions, so hierarchical names can reach their variables
@@ -1291,14 +1313,16 @@ impl<'a> Compiler<'a> {
         for it in items {
             match it {
                 Item::Decl(_) | Item::Param(_) | Item::Subroutine(_) | Item::Defparam { .. } => {}
-                Item::ContAssign { delay, lhs, rhs, line } => {
-                    self.jobs.push(Job::Assign {
+                Item::ContAssign { delay, lhs, rhs, strength, line } => {
+                    self.cur_strength = *strength;
+                    self.push_job(Job::Assign {
                         lhs: lhs.clone(),
                         rhs: rhs.clone(),
                         delay: delay.clone(),
                         scope: sid,
                         line: *line,
                     });
+                    self.cur_strength = None;
                 }
                 Item::Process { kind, body, line } => {
                     self.jobs.push(Job::Proc { kind: *kind, body, scope: sid, line: *line });
@@ -1465,10 +1489,22 @@ impl<'a> Compiler<'a> {
                     genblk += 1;
                     self.gen_scope(its, name, genblk, sid)?;
                 }
-                Item::Gate { kind, terms, line, dims, .. } => {
+                Item::Gate { kind, terms, line, dims, strength, .. } => {
                     self.line = *line;
+                    self.cur_strength = *strength;
+                    let r = self.gate_items(kind, terms, dims, sid, *line);
+                    self.cur_strength = None;
+                    r?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A gate instance or an array of them (1-bit terminals per instance).
+    fn gate_items(&mut self, kind: &str, terms: &'a [Expr], dims: &Option<Range>, sid: usize, line: u32) -> R<()> {
                     match dims {
-                        None => self.gate(kind, terms, sid, *line)?,
+                        None => self.gate(kind, terms, sid, line)?,
                         Some((l, r)) => {
                             // an array of gates: 1-bit terminals per instance
                             let (l, r) = (self.const_int(l, sid)?, self.const_int(r, sid)?);
@@ -1479,13 +1515,10 @@ impl<'a> Compiler<'a> {
                                     let tw = self.ty(t, sid)?.0;
                                     ts.push(if tw == n && n > 1 { self.array_slice(t, k, n, 1, sid)? } else { t.clone() });
                                 }
-                                self.gate(kind, &ts, sid, *line)?;
+                                self.gate(kind, &ts, sid, line)?;
                             }
                         }
                     }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -1582,11 +1615,22 @@ impl<'a> Compiler<'a> {
         let z = || Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "z".into(), fill: true });
         match kind {
             "pullup" | "pulldown" => {
+                // the pulled bits: (net, lsb, width, up)
                 for t in terms {
-                    let mut v = Vec::new();
-                    self.lvalue_bases(t, sid, &mut v);
-                    for s in v {
-                        self.pulls.insert(s, kind == "pullup");
+                    match self.net_segs(t, sid) {
+                        Some(segs) => {
+                            for (s, lsb, w) in segs {
+                                self.pulls.entry(s).or_default().push((lsb, w, kind == "pullup"));
+                            }
+                        }
+                        None => {
+                            let mut v = Vec::new();
+                            self.lvalue_bases(t, sid, &mut v);
+                            for s in v {
+                                let w = self.sig(s).width;
+                                self.pulls.entry(s).or_default().push((0, w, kind == "pullup"));
+                            }
+                        }
                     }
                 }
             }
@@ -1609,7 +1653,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     Expr::Cond(b(&terms[2]), Box::new(z()), Box::new(data))
                 };
-                self.jobs.push(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
             }
             "cmos" | "rcmos" => {
                 // (out, in, ncontrol, pcontrol)
@@ -1618,7 +1662,7 @@ impl<'a> Compiler<'a> {
                 }
                 let p_side = Expr::Cond(b(&terms[3]), Box::new(z()), b(&terms[1]));
                 let rhs = Expr::Cond(b(&terms[2]), b(&terms[1]), Box::new(p_side));
-                self.jobs.push(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: None, scope: sid, line });
             }
             "not" | "buf" => {
                 let input = terms.last().unwrap();
@@ -1629,7 +1673,7 @@ impl<'a> Compiler<'a> {
                     } else {
                         Expr::Binary(BinOp::And, b(input), b(input))
                     };
-                    self.jobs.push(Job::Assign { lhs: out.clone(), rhs, delay: None, scope: sid, line });
+                    self.push_job(Job::Assign { lhs: out.clone(), rhs, delay: None, scope: sid, line });
                 }
             }
             _ => {
@@ -1648,7 +1692,7 @@ impl<'a> Compiler<'a> {
                 if inv {
                     e = Expr::Unary(UnOp::Not, Box::new(e));
                 }
-                self.jobs.push(Job::Assign { lhs: terms[0].clone(), rhs: e, delay: None, scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: e, delay: None, scope: sid, line });
             }
         }
         Ok(())
@@ -1758,8 +1802,20 @@ impl<'a> Compiler<'a> {
             })
             .map(|(s, _)| s)
             .collect();
-        // linked nets (tran, inout ports on parts of nets) are always resolved
+        // linked nets (tran, inout ports on parts of nets) and nets with drivers of a
+        // non-default strength are always resolved
         let mut multi = multi;
+        let job_strength = std::mem::take(&mut self.job_strength);
+        for (k, job) in jobs.iter().enumerate() {
+            if job_strength.get(&k).is_some_and(|st| *st != (6, 6)) {
+                for s in self.job_targets(job) {
+                    let i = self.sig(s);
+                    if i.kind == SigKind::Wire && i.depth == 0 && i.alias_of.is_none() {
+                        multi.insert(s);
+                    }
+                }
+            }
+        }
         for l in &self.links {
             for s in [l.a, l.b] {
                 if self.sig(s).alias_of.is_none() {
@@ -1776,23 +1832,17 @@ impl<'a> Compiler<'a> {
             .filter(|s| !multi.contains(s))
             .collect();
         for s in undriven {
-            let pull = match (self.net_types.get(&s), self.pulls.get(&s)) {
-                (_, Some(&p)) => Some(p),
-                (Some(NetType::Tri0), _) => Some(false),
-                (Some(NetType::Tri1), _) => Some(true),
-                _ => None,
-            };
-            if let Some(p) = pull {
+            if let Some(c) = self.pull_const(s) {
                 let i = self.sig(s).clone();
                 let n = rt::nw(i.width);
                 for k in 0..n {
-                    let m = if k == n - 1 { rt::tmask(i.width) } else { !0 };
-                    self.prog.mem[i.slot as usize + k] = if p { m } else { 0 };
-                    self.prog.mem[i.slot as usize + n + k] = 0;
+                    self.prog.mem[i.slot as usize + k] = c.a[k];
+                    self.prog.mem[i.slot as usize + n + k] = c.b[k];
                 }
             }
         }
-        for job in &jobs {
+        let mut drv_strength: HashMap<u32, (u8, u8)> = HashMap::new();
+        for (jk, job) in jobs.iter().enumerate() {
             self.redirect.clear();
             for s in self.job_targets(job) {
                 if multi.contains(&s) {
@@ -1800,6 +1850,9 @@ impl<'a> Compiler<'a> {
                     let k = self.drivers.get(&s).map(|v| v.len()).unwrap_or(0);
                     let d = self.new_signal(format!("{}$drv{k}", i.name), i.width, i.signed, 0, i.msb, i.lsb, 0, SigKind::Wire);
                     self.prog.names.pop(); // driver signals are not dumped
+                    if let Some(&st) = job_strength.get(&jk) {
+                        drv_strength.insert(d, st);
+                    }
                     self.drivers.entry(s).or_default().push(d);
                     self.redirect.insert(s, d);
                 }
@@ -1824,21 +1877,31 @@ impl<'a> Compiler<'a> {
                 _ => rt::BinOp::Resolve,
             };
             let mut v = self.sig(drv[0]).slot;
-            for &d in &drv[1..] {
+            let strengths = drv.iter().any(|d| drv_strength.get(d).is_some_and(|st| *st != (6, 6)));
+            if strengths && rop == rt::BinOp::Resolve {
+                // drivers of different strengths: the strongest wins (per bit)
+                let list: Vec<(u32, u8, u8)> = drv
+                    .iter()
+                    .map(|d| {
+                        let (s0, s1) = drv_strength.get(d).copied().unwrap_or((6, 6));
+                        (self.sig(*d).slot, s0, s1)
+                    })
+                    .collect();
                 let t = self.tmp(i.width);
-                let b = self.sig(d).slot;
-                self.emit(Instr::Bin { op: rop, d: t, a: v, b, w: i.width });
+                self.emit(Instr::ResolveStr { d: t, w: i.width, drv: list.into_boxed_slice() });
                 v = t;
+                self.prog.procs[p as usize].fusible = false;
+            } else {
+                for &d in &drv[1..] {
+                    let t = self.tmp(i.width);
+                    let b = self.sig(d).slot;
+                    self.emit(Instr::Bin { op: rop, d: t, a: v, b, w: i.width });
+                    v = t;
+                }
             }
             // pulled nets: undriven (z) bits read as 0 / 1
-            let pull = match (self.pulls.get(&net), nt) {
-                (Some(&p), _) => Some(p),
-                (None, NetType::Tri0) => Some(false),
-                (None, NetType::Tri1) => Some(true),
-                _ => None,
-            };
-            if let Some(p) = pull {
-                let c = self.const_slot(&Const::fill(if p { '1' } else { '0' }, i.width));
+            if let Some(c) = self.pull_const(net) {
+                let c = self.const_slot(&c);
                 let t = self.tmp(i.width);
                 self.emit(Instr::Bin { op: rt::BinOp::PullZ, d: t, a: v, b: c, w: i.width });
                 v = t;
@@ -1896,6 +1959,52 @@ impl<'a> Compiler<'a> {
         }
         self.emit(Instr::Halt);
         self.end_proc();
+    }
+
+    /// An implicitly declared net (`default_nettype; `none` makes it an error).
+    fn implicit_net(&mut self, n: &str, width: u32, sid: usize) -> R<u32> {
+        let nt = self.scopes[sid].nettype.clone();
+        let net = match nt.as_deref() {
+            None => NetType::Wire,
+            Some("none") => return self.err(format!("undeclared identifier '{n}' (`default_nettype none)")),
+            Some("wand" | "triand") => NetType::Wand,
+            Some("wor" | "trior") => NetType::Wor,
+            Some("tri0") => NetType::Tri0,
+            Some("tri1") => NetType::Tri1,
+            Some("supply0") => NetType::Supply0,
+            Some("supply1") => NetType::Supply1,
+            Some(_) => NetType::Wire,
+        };
+        let full = format!("{}.{}", self.scopes[sid].name, n);
+        let s = self.new_signal(full, width, false, 0, width as i64 - 1, 0, 0, SigKind::Wire);
+        self.scopes[sid].syms.insert(n.to_string(), Sym::Sig(s));
+        if net != NetType::Wire {
+            self.net_types.insert(s, net);
+        }
+        Ok(s)
+    }
+
+    /// What undriven (z) bits of a net read as: 1 (pullup, tri1), 0 (pulldown, tri0) or z.
+    fn pull_const(&self, s: u32) -> Option<Const> {
+        let w = self.sig(s).width;
+        let mut c = match self.net_types.get(&s) {
+            Some(NetType::Tri0) => Const::fill('0', w),
+            Some(NetType::Tri1) => Const::fill('1', w),
+            _ if self.pulls.contains_key(&s) => Const::fill('z', w),
+            _ => return None,
+        };
+        for &(lsb, pw, up) in self.pulls.get(&s).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for b in lsb..(lsb + pw).min(w) {
+                let (i, m) = ((b / 64) as usize, 1u64 << (b % 64));
+                c.b[i] &= !m;
+                if up {
+                    c.a[i] |= m;
+                } else {
+                    c.a[i] &= !m;
+                }
+            }
+        }
+        Some(c)
     }
 
     /// Linked nets form islands (connected through links). One process per island computes all
@@ -2035,15 +2144,8 @@ impl<'a> Compiler<'a> {
             for &n in &nets {
                 let w = self.sig(n).width;
                 let mut v = cur[&n];
-                let nt = self.net_types.get(&n).copied().unwrap_or(NetType::Wire);
-                let pull = match (self.pulls.get(&n), nt) {
-                    (Some(&p), _) => Some(p),
-                    (None, NetType::Tri0) => Some(false),
-                    (None, NetType::Tri1) => Some(true),
-                    _ => None,
-                };
-                if let Some(p) = pull {
-                    let c = self.const_slot(&Const::fill(if p { '1' } else { '0' }, w));
+                if let Some(c) = self.pull_const(n) {
+                    let c = self.const_slot(&c);
                     let t = self.tmp(w);
                     self.emit(Instr::Bin { op: rt::BinOp::PullZ, d: t, a: v, b: c, w });
                     v = t;

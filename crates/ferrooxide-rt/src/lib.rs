@@ -204,6 +204,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, f: SysFn::UrandomRange(a, b) } => vec![*d, *a, *b],
+        Instr::ResolveStr { d, drv, .. } => std::iter::once(*d).chain(drv.iter().map(|x| x.0)).collect(),
         Instr::SysF { d, .. } => vec![*d],
         Instr::Jmp { .. }
         | Instr::Wait { .. }
@@ -521,6 +522,9 @@ pub enum Instr {
     /// re-evaluate the waiting processes that write `sig` (a released net takes its drivers'
     /// value again)
     Kick { sig: u32 },
+    /// net resolution with drive strengths: per bit the strongest non-z drivers decide (x if
+    /// they disagree); `drv`: (value slot, strength0, strength1), levels 0 (highz) .. 7 (supply)
+    ResolveStr { d: u32, w: u32, drv: Box<[(u32, u8, u8)]> },
     /// a change event on `sig` without an edge (time-0 events of initial values, like Icarus)
     Touch { sig: u32 },
     /// release / deassign: the bits of the target are no longer forced

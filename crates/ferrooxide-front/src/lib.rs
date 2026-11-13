@@ -38,14 +38,17 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
     let mut modules = Vec::new();
     // `timescale stays in effect across files, in command-line order
     let mut timescale = None;
+    let mut nettype = None;
     for f in files {
         let text = pp.process_file(f)?;
         let name = f.display().to_string();
         let toks = lexer::lex(&text, &name)?;
         let mut p = parser::Parser::new(toks, name);
         p.timescale = timescale;
+        p.default_nettype = nettype.clone();
         modules.extend(p.parse_source()?);
         timescale = p.timescale;
+        nettype = p.default_nettype.clone();
     }
     Ok(modules)
 }

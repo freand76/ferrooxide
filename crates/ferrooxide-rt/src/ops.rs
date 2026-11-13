@@ -406,8 +406,9 @@ fn bitwise(op: BinOp, va: u64, xa: u64, vb: u64, xb: u64, mk: u64) -> (u64, u64)
             (rv & mk, rx & mk)
         }
         BinOp::PullZ => {
+            // z bits of a take b's bits (b may be z itself where nothing pulls)
             let za = !va & xa;
-            ((va & !za) | (vb & za), xa & !za)
+            ((va & !za) | (vb & za), (xa & !za) | (xb & za))
         }
         BinOp::Resolve => {
             // z (v=0, x=1) yields to the other driver; equal values stay; conflicts are x
@@ -1104,4 +1105,44 @@ pub fn exec_real(ins: &crate::Instr, m: &mut [u64]) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Resolve drivers with (strength0, strength1) per driver: for each bit the strongest
+/// contributions decide; if they disagree the bit is x; no contribution gives z.
+pub fn resolve_strength(m: &mut [u64], d: usize, w: u32, drv: &[(u32, u8, u8)]) {
+    let n = nw(w);
+    let mut out = vec![0u64; 2 * n];
+    for bit in 0..w {
+        let (wi, sh) = ((bit / 64) as usize, bit % 64);
+        // best strength so far and the values seen at it: bit0 = 0 seen, bit1 = 1 seen
+        let (mut best, mut seen) = (0u8, 0u8);
+        for &(s, s0, s1) in drv {
+            let s = s as usize;
+            let (a, b) = ((m[s + wi] >> sh) & 1, (m[s + n + wi] >> sh) & 1);
+            let (st, v) = match (a, b) {
+                (0, 0) => (s0, 1u8),
+                (1, 0) => (s1, 2u8),
+                (0, _) => continue, // z
+                _ => (s0.max(s1), 3u8),
+            };
+            if st == 0 {
+                continue; // highz drive
+            }
+            if st > best {
+                best = st;
+                seen = v;
+            } else if st == best {
+                seen |= v;
+            }
+        }
+        let (a, b) = match (best, seen) {
+            (0, _) => (0, 1),
+            (_, 1) => (0, 0),
+            (_, 2) => (1, 0),
+            _ => (1, 1),
+        };
+        out[wi] |= a << sh;
+        out[n + wi] |= b << sh;
+    }
+    m[d..d + 2 * n].copy_from_slice(&out);
 }

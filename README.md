@@ -43,21 +43,30 @@ Verilog-2005 plus common SystemVerilog:
 - functions and tasks (inlined), all operators with IEEE width/sign rules and x/z semantics
 - `` `timescale `` (per module, fractional delays), `$time`/`$stime`/`$realtime`, `%t`
 - `real`/`realtime` variables, arrays, parameters, task arguments and function results
-- nets with several drivers (tri-state buses through `inout` ports), hierarchical names
-  (reads, writes, parameters, task calls), `force`/`release` (as assignment)
+- nets with several drivers (tri-state buses through `inout` ports, also on parts of nets),
+  drive strengths (`assign (pull0, pull1) ...`), `wand`/`wor`/`tri0`/`tri1`/`supply0`/`supply1`,
+  `pullup`/`pulldown`, `tran`/`tranif0`/`tranif1`, `wire real`, `` `default_nettype ``
+- gate primitives, UDPs, arrays of gate and module instances, `defparam`, hierarchical names
+  (reads, writes, parameters, task calls, `inst[2].sig`), `force`/`release`,
+  `assign`/`deassign`
 - `fork`/`join` (and SystemVerilog `join_any`/`join_none`, `disable fork`), named events
   (`event`, `->`, `@(ev)`), `disable` of named blocks and tasks in any process, `automatic`
   tasks and functions (per-call storage); processes woken together run in Icarus's order
-- `$display`/`$write`/`$monitor`/`$strobe`/`$finish`/`$random`/`$signed`/`$unsigned`/`$clog2`/
-  `$readmemh`/`$readmemb`/`$fopen` (modes)/`$fdisplay`/`$fwrite`/`$fclose`/`$sformat`,
+- `$display`/`$write`/`$monitor`/`$strobe` (and their `b`/`h`/`o` and file variants),
+  `$finish`, `$random`/`$urandom`/`$urandom_range` (Icarus's sequences), `$signed`/`$unsigned`/
+  `$clog2`, `$readmemh`/`$readmemb`/`$writememh`/`$writememb`, `$fopen` (modes)/`$fclose`,
+  file input (`$fgetc`/`$fgets`/`$ungetc`/`$feof`/`$fscanf`/`$sscanf`/`$fseek`/`$ftell`/
+  `$rewind`), `$sformat`/`$swrite`, `$timeformat`/`$printtimescale`,
   `$test$plusargs`/`$value$plusargs` (`+name=value` on the command line), `$error`/`$fatal`,
   `%f`/`%e`/`%g`
 - VCD output: `$dumpfile`, `$dumpvars`, `$dumpon`, `$dumpoff`
 - preprocessor: `` `define `` (with arguments), `` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``, `` `include ``
 
-Not yet: recursive functions, drive strengths, `force` holding its value, `$fgetc`/`$fscanf`,
-arrays of instances, multi-dimensional arrays. See "Road to full Verilog-2005" in
-[PLAN.md](PLAN.md). See the milestones in [PLAN.md](PLAN.md).
+Not yet: recursive functions, multi-dimensional arrays, `%v` strength display, gate/net
+rise/fall delays, `specify` path delays and SDF. See "Road to full Verilog-2005" in
+[PLAN.md](PLAN.md). Icarus's regression suite (ivtest) passes at about 83%; places where
+Icarus seems to deviate from the standard (ferrooxide matches Icarus) are listed in
+[ICARUS_NOTES.md](ICARUS_NOTES.md).
 
 ## Usage
 
