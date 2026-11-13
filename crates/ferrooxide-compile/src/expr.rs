@@ -240,6 +240,19 @@ impl<'a> Compiler<'a> {
     }
 
     /// Compile in a self-determined context.
+    /// A value used as a condition: (slot, width); a real is true when it is not 0.0.
+    pub(crate) fn truth(&mut self, e: &Expr, sid: usize) -> R<(u32, u32)> {
+        if self.is_real(e, sid) {
+            let r = self.rexpr(e, sid)?;
+            let z = self.const_slot(&Const::zero(64));
+            let d = self.tmp(1);
+            self.emit(Instr::RCmp { op: CmpOp::Ne, d, a: r, b: z });
+            return Ok((d, 1));
+        }
+        let (v, w, _) = self.self_expr(e, sid)?;
+        Ok((v, w))
+    }
+
     pub(crate) fn self_expr(&mut self, e: &Expr, sid: usize) -> R<(u32, u32, bool)> {
         let (w, s) = self.ty(e, sid)?;
         let slot = self.expr(e, sid, w, s)?;
@@ -400,7 +413,7 @@ impl<'a> Compiler<'a> {
                     Ok(d)
                 }
                 _ => {
-                    let (v, vw, _) = self.self_expr(a, sid)?;
+                    let (v, vw) = if *op == UnOp::LNot { self.truth(a, sid)? } else { self.self_expr(a, sid).map(|x| (x.0, x.1))? };
                     let op = match op {
                         UnOp::LNot => RedOp::Nor,
                         UnOp::RedAnd => RedOp::And,
@@ -417,7 +430,7 @@ impl<'a> Compiler<'a> {
             },
             Expr::Binary(op, a, b) => self.binary(*op, a, b, sid, w, s),
             Expr::Cond(c, t, f) => {
-                let (cv, cw, _) = self.self_expr(c, sid)?;
+                let (cv, cw) = self.truth(c, sid)?;
                 let tv = self.expr(t, sid, w, s)?;
                 let fv = self.expr(f, sid, w, s)?;
                 let d = self.tmp(w);
@@ -559,8 +572,8 @@ impl<'a> Compiler<'a> {
                 Ok(d)
             }
             B::LAnd | B::LOr => {
-                let (av, aw, _) = self.self_expr(a, sid)?;
-                let (bv, bw, _) = self.self_expr(b, sid)?;
+                let (av, aw) = self.truth(a, sid)?;
+                let (bv, bw) = self.truth(b, sid)?;
                 let ta = self.tmp(1);
                 self.emit(Instr::Red { op: RedOp::Bool, d: ta, s: av, w: aw });
                 let tb = self.tmp(1);
@@ -1143,7 +1156,7 @@ impl<'a> Compiler<'a> {
                 Ok(d)
             }
             Expr::Cond(c, t, f) => {
-                let (cv, cw, _) = self.self_expr(c, sid)?;
+                let (cv, cw) = self.truth(c, sid)?;
                 let (tv, fv) = (self.rexpr(t, sid)?, self.rexpr(f, sid)?);
                 let d = self.tmp(64);
                 self.emit(Instr::Mux { d, c: cv, cw, t: tv, f: fv, w: 64 });

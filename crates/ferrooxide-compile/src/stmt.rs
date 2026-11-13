@@ -499,7 +499,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::If { cond, then_s, else_s, line } => {
                 self.line = *line;
-                let (c, cw, _) = self.self_expr(cond, sid)?;
+                let (c, cw) = self.truth(cond, sid)?;
                 let jz = self.emit(Instr::Jz { c, w: cw, to: 0 });
                 self.stmt(then_s, sid)?;
                 if let Some(e) = else_s {
@@ -573,7 +573,7 @@ impl<'a> Compiler<'a> {
                 self.line = *line;
                 self.stmt(init, sid)?;
                 let top = self.here();
-                let (c, cw, _) = self.self_expr(cond, sid)?;
+                let (c, cw) = self.truth(cond, sid)?;
                 let jz = self.emit(Instr::Jz { c, w: cw, to: 0 });
                 self.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
                 self.stmt(body, sid)?;
@@ -593,7 +593,7 @@ impl<'a> Compiler<'a> {
             Stmt::While { cond, body, line } => {
                 self.line = *line;
                 let top = self.here();
-                let (c, cw, _) = self.self_expr(cond, sid)?;
+                let (c, cw) = self.truth(cond, sid)?;
                 let jz = self.emit(Instr::Jz { c, w: cw, to: 0 });
                 self.loop_body(body, sid, top)?;
                 self.emit(Instr::Jmp { to: top });
@@ -607,7 +607,7 @@ impl<'a> Compiler<'a> {
                 self.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
                 self.stmt(body, sid)?;
                 let ctop = self.here();
-                let (c, cw, _) = self.self_expr(cond, sid)?;
+                let (c, cw) = self.truth(cond, sid)?;
                 let jz = self.emit(Instr::Jz { c, w: cw, to: 0 });
                 self.emit(Instr::Jmp { to: top });
                 let h = self.here();
@@ -654,7 +654,7 @@ impl<'a> Compiler<'a> {
             Stmt::Wait { cond, body, line } => {
                 self.line = *line;
                 let top = self.here();
-                let (c, cw, _) = self.self_expr(cond, sid)?;
+                let (c, cw) = self.truth(cond, sid)?;
                 let jz = self.emit(Instr::Jz { c, w: cw, to: 0 });
                 let jdone = self.emit(Instr::Jmp { to: 0 });
                 let h = self.here();
