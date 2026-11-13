@@ -15,6 +15,8 @@ const HELP: &str = "commands:
   watch NAME [b|o|d|h] print NAME whenever it changes during run/step (unwatch NAME)
   break NAME [VALUE]  stop when NAME changes (or becomes VALUE); delete removes all
   info                list watches and breakpoints
+  trace FILE [RE...]  write a VCD of the signals whose name matches a regular expression
+                      (all without one), from now on; trace off / trace on pause and resume
   help                (h) this text
   quit                (q) run final blocks and exit
 NAME is a hierarchical name or a unique suffix of one (`top.u1.q`, `u1.q`, `q`).
@@ -174,6 +176,23 @@ pub fn run(sim: &mut Sim, precision: i32) {
                     }
                 }
             }
+            "trace" => match arg(1) {
+                None => println!("{} signals traced", sim.traced_signals()),
+                Some("off") => sim.trace_enable(false),
+                Some("on") => sim.trace_enable(true),
+                Some(file) => {
+                    let pats: Vec<&str> = words[2..].to_vec();
+                    match regex::RegexSet::new(&pats) {
+                        Ok(set) => {
+                            let all = pats.is_empty();
+                            if sim.trace_start(file, &|n| all || set.is_match(n)).is_ok() {
+                                println!("tracing {} signals to {file}", sim.traced_signals());
+                            }
+                        }
+                        Err(e) => println!("bad pattern: {e}"),
+                    }
+                }
+            },
             "release" => {
                 let Some(name) = arg(1) else {
                     println!("release NAME");

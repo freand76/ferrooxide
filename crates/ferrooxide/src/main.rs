@@ -18,6 +18,10 @@ options:
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
   -gspecify         apply specify path delays (ignored by default)
+  --vcd <file>      write a VCD of the signals selected by --trace (all without --trace),
+                    without $dumpvars in the testbench
+  --trace <regex>   trace the signals whose hierarchical name matches (repeatable; implies
+                    --vcd dump.vcd)
   -i, --interactive commands on stdin: run, step, print, list, set, force, release (help)
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
@@ -34,6 +38,8 @@ fn main() -> ExitCode {
     let mut fuse = true;
     let mut lint = false;
     let mut interactive = false;
+    let mut vcd: Option<String> = None;
+    let mut traces: Vec<String> = Vec::new();
     let mut dialect = ferrooxide_compile::Dialect::default();
     let mut max_time = None;
     let mut args = std::env::args().skip(1);
@@ -70,6 +76,14 @@ fn main() -> ExitCode {
                 None => return ExitCode::from(2),
             },
             "--stats" => stats = true,
+            "--vcd" => match val("--vcd") {
+                Some(v) => vcd = Some(v),
+                None => return ExitCode::from(2),
+            },
+            "--trace" => match val("--trace") {
+                Some(v) => traces.push(v),
+                None => return ExitCode::from(2),
+            },
             "--dump-code" => dump_code = true,
             "--no-jit" => jit = false,
             "--no-fuse" => fuse = false,
@@ -152,6 +166,23 @@ fn main() -> ExitCode {
     if jit {
         if let Err(e) = sim.enable_jit() {
             eprintln!("ferrooxide: JIT compilation failed ({e}), interpreting");
+        }
+    }
+    if vcd.is_some() || !traces.is_empty() {
+        let path = vcd.clone().unwrap_or_else(|| "dump.vcd".into());
+        let set = match regex::RegexSet::new(&traces) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ferrooxide: bad --trace pattern: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let all = traces.is_empty();
+        if sim.trace_start(&path, &|n| all || set.is_match(n)).is_err() {
+            return ExitCode::from(1);
+        }
+        if stats {
+            eprintln!("ferrooxide: tracing {} signals to {path}", sim.traced_signals());
         }
     }
     let t2b = Instant::now();

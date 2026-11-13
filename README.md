@@ -82,10 +82,25 @@ ferrooxide [options] <files...>
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
   -gspecify         apply specify path delays (ignored by default)
+  --vcd <file>      write a VCD without $dumpvars in the testbench (all signals, or --trace)
+  --trace <regex>   trace only signals whose hierarchical name matches (repeatable)
   -i, --interactive interactive mode, see below
   --lint            check the design and exit (status 1 on findings), see below
   +<arg>            plusarg for $test$plusargs / $value$plusargs
 ```
+
+### Tracing from the command line
+
+`--vcd FILE` writes a VCD file without `$dumpfile`/`$dumpvars` in the testbench. `--trace REGEX`
+(repeatable) limits it to signals whose full hierarchical name matches a regular expression; it
+implies `--vcd dump.vcd`:
+
+```
+ferrooxide --vcd cpu.vcd --trace '^tb\.cpu\.(pc|ir)$' --trace 'alu\.' tb.v
+```
+
+A value is written only when it differs from the last one written for the signal (glitches inside
+a time step are not dumped).
 
 ### Interactive mode
 
@@ -103,6 +118,7 @@ fx> list u1              signals whose name contains the text
 fx> release q
 fx> watch q d            print q whenever it changes during run/step
 fx> break q 8'd5         stop when q becomes 5 (without a value: on any change)
+fx> trace w.vcd 'u1\.'   start a VCD of the matching signals now; `trace off` / `trace on`
 fx> quit                 run final blocks and exit
 ```
 

@@ -9,3 +9,4 @@ repository.workspace = true
 ferrooxide-front = { path = "../ferrooxide-front" }
 ferrooxide-rt = { path = "../ferrooxide-rt" }
 ferrooxide-compile = { path = "../ferrooxide-compile" }
+regex = "1"

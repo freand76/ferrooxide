@@ -581,6 +581,56 @@ impl Sim {
         }
     }
 
+    /// Start a VCD of the signals whose name `keep` accepts (replacing an open one); the current
+    /// values are written at the current time.
+    pub fn trace_start(&mut self, path: &str, keep: &dyn Fn(&str) -> bool) -> std::io::Result<()> {
+        if let Some(v) = &mut self.vcd {
+            v.flush();
+        }
+        let mut v = Vcd::create_filtered(path, &self.prog, keep).inspect_err(|e| {
+            eprintln!("warning: cannot create VCD file {path}: {e}");
+        })?;
+        v.time(self.time);
+        v.begin_dumpvars();
+        for (i, r) in self.sigs.iter().enumerate() {
+            if r.depth == 0 {
+                v.write_value(i as u32, &self.mem, r.slot, r.width);
+            }
+        }
+        v.end_dumpvars();
+        // changes recorded before now belong to no file
+        for &s in &self.dirty {
+            self.is_dirty[s as usize] = false;
+        }
+        self.dirty.clear();
+        self.vcd = Some(v);
+        self.dumping = true;
+        Ok(())
+    }
+
+    /// Pause (false) or resume (true) dumping; resuming writes all traced values.
+    pub fn trace_enable(&mut self, on: bool) {
+        if self.vcd.is_none() || self.dumping == on {
+            return;
+        }
+        if on {
+            let v = self.vcd.as_mut().unwrap();
+            v.time(self.time);
+            v.reset_values();
+            for (i, r) in self.sigs.iter().enumerate() {
+                if r.depth == 0 {
+                    v.write_value(i as u32, &self.mem, r.slot, r.width);
+                }
+            }
+        }
+        self.dumping = on;
+    }
+
+    /// The number of traced signals (0: no trace).
+    pub fn traced_signals(&self) -> usize {
+        self.vcd.as_ref().map_or(0, |v| v.ids.iter().filter(|c| !c.is_empty()).count())
+    }
+
     /// Whether a (non-array) signal has exactly this value (value and unknown planes).
     pub fn signal_equals(&self, sig: u32, planes: &[u64]) -> bool {
         let r = self.sigs[sig as usize];
@@ -2044,22 +2094,11 @@ impl Sim {
             }
             SysTask::DumpFile(f) => self.vcd_path = f.clone(),
             SysTask::DumpVars => {
+                // (a trace started from the command line takes precedence)
                 if self.vcd.is_none() {
-                    match Vcd::create(&self.vcd_path, &self.prog) {
-                        Ok(mut v) => {
-                            let _ = writeln!(self.out, "VCD info: dumpfile {} opened for output.", self.vcd_path);
-                            v.time(self.time);
-                            v.begin_dumpvars();
-                            for (i, r) in self.sigs.iter().enumerate() {
-                                if r.depth == 0 {
-                                    v.write_value(i as u32, &self.mem, r.slot, r.width);
-                                }
-                            }
-                            v.end_dumpvars();
-                            self.vcd = Some(v);
-                            self.dumping = true;
-                        }
-                        Err(e) => eprintln!("warning: cannot create VCD file {}: {e}", self.vcd_path),
+                    let path = self.vcd_path.clone();
+                    if self.trace_start(&path, &|_| true).is_ok() {
+                        let _ = writeln!(self.out, "VCD info: dumpfile {path} opened for output.");
                     }
                 }
             }
