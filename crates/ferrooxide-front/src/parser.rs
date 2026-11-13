@@ -12,6 +12,8 @@ pub struct Parser {
     pub timescale: Option<(i32, i32)>,
     pub default_nettype: Option<String>,
     pub unconnected_drive: Option<bool>,
+    /// counter for names of unnamed instances
+    unnamed: u32,
 }
 
 struct PType {
@@ -60,7 +62,7 @@ const STRENGTHS: &[&str] = &[
 impl Parser {
     pub fn new(toks: Vec<Token>, file: String) -> Self {
         Parser { toks, pos: 0, file, timescale: None,
-            default_nettype: None, unconnected_drive: None }
+            default_nettype: None, unconnected_drive: None, unnamed: 0 }
     }
 
     // ---------- token helpers ----------
@@ -593,6 +595,7 @@ impl Parser {
                     delay: None,
                     signed,
                     range: None,
+                    packed: vec![],
                     names: vec![],
                     line,
                 });
@@ -649,9 +652,13 @@ impl Parser {
             signed = false;
         }
         let range = if self.is_p("[") { Some(self.range()?) } else { None };
+        let mut packed = Vec::new();
+        while range.is_some() && self.is_p("[") {
+            packed.push(self.range()?);
+        }
         // optional net delay: wire #5 w;
         let delay = if self.eat_p("#") { Some(self.delay_value()?) } else { None };
-        Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, names: Vec::new(), line })
+        Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, packed, names: Vec::new(), line })
     }
 
     fn declarators(&mut self) -> Result<Vec<Declarator>> {
@@ -888,7 +895,13 @@ impl Parser {
                 let mut insts = Vec::new();
                 loop {
                     let line = self.line();
-                    let name = self.ident()?;
+                    // an instance without a name (allowed for primitives, accepted for modules)
+                    let name = if self.is_p("(") {
+                        self.unnamed += 1;
+                        format!("${module}${}", self.unnamed)
+                    } else {
+                        self.ident()?
+                    };
                     let mut dims = Vec::new();
                     while self.is_p("[") {
                         dims.push(self.range()?);

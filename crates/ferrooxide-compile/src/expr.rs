@@ -35,10 +35,13 @@ impl<'a> Compiler<'a> {
     /// An index chain on a multi-dimensional array (`m[i][j]`, also with selects after it) as
     /// one index into the flat storage: `m[(i - lo0) * n1 + (j - lo1)]`.
     pub(crate) fn md_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
-        if self.md_dims.is_empty() {
+        if self.md_dims.is_empty() && self.packed_dims.is_empty() {
             return None;
         }
         let b = |x: Expr| Box::new(x);
+        if let Some(n) = self.packed_slice(e, sid) {
+            return Some(n);
+        }
         match e {
             Expr::Range(a, m, l) => return Some(Expr::Range(b(self.md_norm(a, sid)?), m.clone(), l.clone())),
             Expr::IndexedRange(a, base, w, up) => {
@@ -65,6 +68,9 @@ impl<'a> Compiler<'a> {
             }
             _ => return None,
         };
+        if let Some(e) = self.packed_norm(cur, &flat, &idx, sid) {
+            return Some(e);
+        }
         let s = self.array_of(cur, sid)?;
         let dims = self.md_dims.get(&s)?;
         if idx.len() < dims.len() {
@@ -91,6 +97,162 @@ impl<'a> Compiler<'a> {
             out = Expr::Index(b(out), b((*i).clone()));
         }
         Some(out)
+    }
+
+    /// Selects of a vector with several packed dimensions: `x[i]` is a slice of the flat
+    /// vector, `x[i][j]` (all dimensions) a bit, further indices select inside an element.
+    fn packed_norm(&self, base: &Expr, flat: &Expr, idx: &[&Expr], sid: usize) -> Option<Expr> {
+        let sym = match base {
+            Expr::Ident(n) => self.lookup(n, sid)?,
+            Expr::Hier(p) => self.lookup_hier(p, sid)?,
+            _ => return None,
+        };
+        let Sym::Sig(s) = sym else { return None };
+        let dims = self.packed_dims.get(&s)?;
+        let b = |x: Expr| Box::new(x);
+        let num = |v: i64| -> Expr {
+            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            if v < 0 {
+                Expr::Unary(UnOp::Neg, b(n))
+            } else {
+                n
+            }
+        };
+        let k = idx.len().min(dims.len());
+        let width = |d: &(i64, i64)| (d.0 - d.1).abs() + 1;
+        let mut off: Option<Expr> = None;
+        for t in 0..k {
+            let (l, r) = dims[t];
+            let stride: i64 = dims[t + 1..].iter().map(width).product();
+            // position from the right end of the dimension
+            let pos = if l >= r {
+                Expr::Binary(BinOp::Sub, b(idx[t].clone()), b(num(r)))
+            } else {
+                Expr::Binary(BinOp::Sub, b(num(r)), b(idx[t].clone()))
+            };
+            let term = Expr::Binary(BinOp::Mul, b(pos), b(num(stride)));
+            off = Some(match off {
+                None => term,
+                Some(o) => Expr::Binary(BinOp::Add, b(o), b(term)),
+            });
+        }
+        let rem: i64 = dims[k..].iter().map(width).product();
+        let mut out = if rem == 1 {
+            Expr::Index(b(flat.clone()), b(off?))
+        } else {
+            Expr::IndexedRange(b(flat.clone()), b(off?), b(num(rem)), true)
+        };
+        for i in &idx[k..] {
+            out = Expr::Index(b(out), b((*i).clone()));
+        }
+        Some(out)
+    }
+
+    /// `x[m:l]`, `x[b +: w]`, `x[b -: w]` on a vector with several packed dimensions: whole
+    /// elements of the first dimension, as a part of the flat vector.
+    fn packed_slice(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        let base = match e {
+            Expr::Range(a, ..) | Expr::IndexedRange(a, ..) => &**a,
+            _ => return None,
+        };
+        // a part of an element of the last dimension: x[i][m:l], x[i][b +: w]
+        if let Expr::Index(..) = base {
+            return self.packed_elem_part(e, base, sid);
+        }
+        let (flat, s) = match base {
+            Expr::Ident(n) if !n.starts_with("$flat:") => match self.lookup(n, sid)? {
+                Sym::Sig(s) => (Expr::Ident(format!("$flat:{n}")), s),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let dims = self.packed_dims.get(&s)?;
+        let ew: i64 = dims[1..].iter().map(|d| (d.0 - d.1).abs() + 1).product();
+        let (l0, r0) = dims[0];
+        let pos = |i: i64| if l0 >= r0 { i - r0 } else { r0 - i };
+        let b = |x: Expr| Box::new(x);
+        let num = |v: i64| -> Expr {
+            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            if v < 0 {
+                Expr::Unary(UnOp::Neg, b(n))
+            } else {
+                n
+            }
+        };
+        match e {
+            Expr::Range(_, m, l) => {
+                let (m, l) = (self.const_value(m, sid)?, self.const_value(l, sid)?);
+                let lo = pos(m).min(pos(l));
+                let n = (m - l).abs() + 1;
+                Some(Expr::IndexedRange(b(flat), b(num(lo * ew)), b(num(n * ew)), true))
+            }
+            Expr::IndexedRange(_, bx, w, up) => {
+                let w = self.const_value(w, sid)?;
+                // the lowest position of the selected elements
+                let first = match (l0 >= r0, *up) {
+                    (true, true) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r0))),
+                    (true, false) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r0 + w - 1))),
+                    (false, true) => Expr::Binary(BinOp::Sub, b(num(r0 - w + 1)), bx.clone()),
+                    (false, false) => Expr::Binary(BinOp::Sub, b(num(r0)), bx.clone()),
+                };
+                let off = Expr::Binary(BinOp::Mul, b(first), b(num(ew)));
+                Some(Expr::IndexedRange(b(flat), b(off), b(num(w * ew)), true))
+            }
+            _ => None,
+        }
+    }
+
+    /// `x[i][m:l]` / `x[i][b +: w]` where `x[i]` is an element of the last packed dimension.
+    fn packed_elem_part(&self, e: &Expr, inner: &Expr, sid: usize) -> Option<Expr> {
+        let mut idx = Vec::new();
+        let mut cur = inner;
+        while let Expr::Index(a, i) = cur {
+            idx.push(&**i);
+            cur = a;
+        }
+        idx.reverse();
+        let Expr::Ident(n) = cur else { return None };
+        if n.starts_with("$flat:") {
+            return None;
+        }
+        let Sym::Sig(s) = self.lookup(n, sid)? else { return None };
+        let dims = self.packed_dims.get(&s)?;
+        if idx.len() + 1 != dims.len() {
+            return None;
+        }
+        // the element's offset (as an expression), then the part inside it
+        let Some(Expr::IndexedRange(flat, off, _, _)) = self.md_norm(inner, sid) else { return None };
+        let (l, r) = dims[dims.len() - 1];
+        let pos = |i: i64| if l >= r { i - r } else { r - i };
+        let b = |x: Expr| Box::new(x);
+        let num = |v: i64| -> Expr {
+            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            if v < 0 {
+                Expr::Unary(UnOp::Neg, b(n))
+            } else {
+                n
+            }
+        };
+        match e {
+            Expr::Range(_, m, lx) => {
+                let (m, lx) = (self.const_value(m, sid)?, self.const_value(lx, sid)?);
+                let lo = pos(m).min(pos(lx));
+                let off = Expr::Binary(BinOp::Add, off, b(num(lo)));
+                Some(Expr::IndexedRange(flat, b(off), b(num((m - lx).abs() + 1)), true))
+            }
+            Expr::IndexedRange(_, bx, w, up) => {
+                let w = self.const_value(w, sid)?;
+                let first = match (l >= r, *up) {
+                    (true, true) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r))),
+                    (true, false) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r + w - 1))),
+                    (false, true) => Expr::Binary(BinOp::Sub, b(num(r - w + 1)), bx.clone()),
+                    (false, false) => Expr::Binary(BinOp::Sub, b(num(r)), bx.clone()),
+                };
+                let off = Expr::Binary(BinOp::Add, off, b(first));
+                Some(Expr::IndexedRange(flat, b(off), b(num(w)), true))
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn array_of(&self, e: &Expr, sid: usize) -> Option<u32> {

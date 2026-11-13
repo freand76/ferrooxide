@@ -156,6 +156,8 @@ pub struct Compiler<'a> {
     cur_strength: Option<(u8, u8)>,
     /// multi-dimensional arrays (stored flat): per dimension (lowest index, size)
     pub(crate) md_dims: HashMap<u32, Vec<(i64, u32)>>,
+    /// vectors with several packed dimensions (stored [W-1:0]): per dimension (left, right)
+    pub(crate) packed_dims: HashMap<u32, Vec<(i64, i64)>>,
     /// delay of the gate being instantiated
     cur_delay: Option<Expr>,
     job_strength: HashMap<usize, (u8, u8)>,
@@ -331,6 +333,7 @@ impl<'a> Compiler<'a> {
             links: Vec::new(),
             cur_strength: None,
             md_dims: HashMap::new(),
+            packed_dims: HashMap::new(),
             cur_delay: None,
             job_strength: HashMap::new(),
             func_reads: std::cell::Cell::new(false),
@@ -1166,6 +1169,7 @@ impl<'a> Compiler<'a> {
             delay: Option<&'d Expr>,
             signed: bool,
             range: Option<&'d Range>,
+            packed: &'d [Range],
             dims: &'d [Range],
             init: Option<&'d Expr>,
             line: u32,
@@ -1199,6 +1203,7 @@ impl<'a> Compiler<'a> {
                             mg.signed |= d.signed;
                             if d.range.is_some() {
                                 mg.range = d.range.as_ref();
+                                mg.packed = &d.packed;
                             }
                             if !dl.dims.is_empty() {
                                 mg.dims = &dl.dims;
@@ -1220,6 +1225,7 @@ impl<'a> Compiler<'a> {
                                     delay: d.delay.as_ref(),
                                     signed: d.signed,
                                     range: d.range.as_ref(),
+                                    packed: &d.packed,
                                     dims: &dl.dims,
                                     init: dl.init.as_ref(),
                                     line: dl.line,
@@ -1241,6 +1247,17 @@ impl<'a> Compiler<'a> {
                 Some((a, b)) => (self.const_int(a, sid)?, self.const_int(b, sid)?),
                 None => (0, 0),
             };
+            // packed dimensions: one flat vector [W-1:0], the dimensions kept for selects
+            let mut pk: Option<Vec<(i64, i64)>> = None;
+            if !mg.packed.is_empty() {
+                let mut dims = vec![(msb, lsb)];
+                for (a, b) in mg.packed {
+                    dims.push((self.const_int(a, sid)?, self.const_int(b, sid)?));
+                }
+                let w: i64 = dims.iter().map(|(a, b)| (a - b).abs() + 1).product();
+                (msb, lsb) = (w - 1, 0);
+                pk = Some(dims);
+            }
             let mut signed = mg.signed;
             let kind = match mg.kind {
                 NetKind::Wire => SigKind::Wire,
@@ -1358,6 +1375,10 @@ impl<'a> Compiler<'a> {
                 }
             }
             let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
+            if let Some(d) = pk.take() {
+                self.packed_dims.insert(s, d);
+                self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));
+            }
             if let Some(d) = md.take() {
                 self.md_dims.insert(s, d);
                 // the flat storage, for index chains already turned into one index
@@ -1509,6 +1530,9 @@ impl<'a> Compiler<'a> {
                     }
                     for inst in insts {
                         self.line = inst.line;
+                        if inst.name.starts_with('$') {
+                            return self.err(format!("Instantiation of module {} requires an instance name.", m.name));
+                        }
                         if inst.dims.len() > 1 {
                             return self.err("multi-dimensional arrays of instances are not supported");
                         }

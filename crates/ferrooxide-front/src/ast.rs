@@ -93,6 +93,8 @@ pub struct Decl {
     pub delay: Option<Expr>,
     pub signed: bool,
     pub range: Option<Range>,
+    /// further packed dimensions (`reg [3:0][7:0] x`: range [3:0], packed [[7:0]])
+    pub packed: Vec<Range>,
     pub names: Vec<Declarator>,
     pub line: Line,
 }
