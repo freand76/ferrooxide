@@ -154,6 +154,8 @@ pub struct Compiler<'a> {
     links: Vec<Link>,
     /// drive strength of the continuous assignments being created, and per job index
     cur_strength: Option<(u8, u8)>,
+    /// multi-dimensional arrays (stored flat): per dimension (lowest index, size)
+    pub(crate) md_dims: HashMap<u32, Vec<(i64, u32)>>,
     /// delay of the gate being instantiated
     cur_delay: Option<Expr>,
     job_strength: HashMap<usize, (u8, u8)>,
@@ -328,6 +330,7 @@ impl<'a> Compiler<'a> {
             dialect: Dialect::default(),
             links: Vec::new(),
             cur_strength: None,
+            md_dims: HashMap::new(),
             cur_delay: None,
             job_strength: HashMap::new(),
             func_reads: std::cell::Cell::new(false),
@@ -1266,13 +1269,29 @@ impl<'a> Compiler<'a> {
             let is_real = mg.kind == NetKind::Real;
             let is_event = mg.kind == NetKind::Event;
             let width = ((msb - lsb).abs() + 1) as u32;
+            // a multi-dimensional array is stored flat (row-major); `md` keeps its dimensions
+            let mut md: Option<Vec<(i64, u32)>> = None;
             let (depth, arr_lo) = match mg.dims.len() {
                 0 => (0, 0),
                 1 => {
                     let (a, b) = (self.const_int(&mg.dims[0].0, sid)?, self.const_int(&mg.dims[0].1, sid)?);
                     (((a - b).abs() + 1) as u32, a.min(b))
                 }
-                _ => return self.err(format!("multi-dimensional array '{name}' is not supported yet")),
+                _ => {
+                    let mut dims = Vec::new();
+                    let mut total: u64 = 1;
+                    for (x, y) in mg.dims {
+                        let (a, b) = (self.const_int(x, sid)?, self.const_int(y, sid)?);
+                        let n = ((a - b).abs() + 1) as u32;
+                        total *= n as u64;
+                        dims.push((a.min(b), n));
+                    }
+                    if total > u32::MAX as u64 {
+                        return self.err(format!("array '{name}' is too large"));
+                    }
+                    md = Some(dims);
+                    (total as u32, 0)
+                }
             };
             let full = format!("{}.{}", self.scopes[sid].name, name);
             // port aliasing
@@ -1339,6 +1358,11 @@ impl<'a> Compiler<'a> {
                 }
             }
             let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
+            if let Some(d) = md.take() {
+                self.md_dims.insert(s, d);
+                // the flat storage, for index chains already turned into one index
+                self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));
+            }
             if is_real {
                 self.mark_real(s);
             }

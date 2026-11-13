@@ -24,6 +24,9 @@ impl<'a> Compiler<'a> {
 
     /// Store targets of an lvalue, msb-first, with widths.
     fn targets(&mut self, e: &Expr, sid: usize, out: &mut Vec<(Option<Target>, u32)>) -> R<()> {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.targets(&n, sid, out);
+        }
         match e {
             Expr::Concat(v) => {
                 for x in v {

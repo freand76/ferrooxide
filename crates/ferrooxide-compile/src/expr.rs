@@ -32,6 +32,67 @@ impl<'a> Compiler<'a> {
     }
 
     /// If `e` names an array, return its signal.
+    /// An index chain on a multi-dimensional array (`m[i][j]`, also with selects after it) as
+    /// one index into the flat storage: `m[(i - lo0) * n1 + (j - lo1)]`.
+    pub(crate) fn md_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        if self.md_dims.is_empty() {
+            return None;
+        }
+        let b = |x: Expr| Box::new(x);
+        match e {
+            Expr::Range(a, m, l) => return Some(Expr::Range(b(self.md_norm(a, sid)?), m.clone(), l.clone())),
+            Expr::IndexedRange(a, base, w, up) => {
+                return Some(Expr::IndexedRange(b(self.md_norm(a, sid)?), base.clone(), w.clone(), *up))
+            }
+            Expr::Index(..) => {}
+            _ => return None,
+        }
+        let mut idx = Vec::new();
+        let mut cur = e;
+        while let Expr::Index(a, i) = cur {
+            idx.push(&**i);
+            cur = a;
+        }
+        idx.reverse();
+        // already flat: the base names the storage (`$flat:m`)
+        let flat = match cur {
+            Expr::Ident(n) if !n.starts_with("$flat:") => Expr::Ident(format!("$flat:{n}")),
+            Expr::Hier(p) if !p.last()?.starts_with("$flat:") => {
+                let mut p = p.clone();
+                let l = p.last_mut()?;
+                *l = format!("$flat:{l}");
+                Expr::Hier(p)
+            }
+            _ => return None,
+        };
+        let s = self.array_of(cur, sid)?;
+        let dims = self.md_dims.get(&s)?;
+        if idx.len() < dims.len() {
+            return None;
+        }
+        let num = |v: i64| -> Expr {
+            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            if v < 0 {
+                Expr::Unary(UnOp::Neg, b(n))
+            } else {
+                n
+            }
+        };
+        let mut lin: Option<Expr> = None;
+        for (k, &(lo, n)) in dims.iter().enumerate() {
+            let term = Expr::Binary(BinOp::Sub, b(idx[k].clone()), b(num(lo)));
+            lin = Some(match lin {
+                None => term,
+                Some(l) => Expr::Binary(BinOp::Add, b(Expr::Binary(BinOp::Mul, b(l), b(num(n as i64)))), b(term)),
+            });
+        }
+        let mut out = Expr::Index(b(flat), b(lin.unwrap()));
+        for i in &idx[dims.len()..] {
+            out = Expr::Index(b(out), b((*i).clone()));
+        }
+        Some(out)
+    }
+
     pub(crate) fn array_of(&self, e: &Expr, sid: usize) -> Option<u32> {
         let sym = match e {
             Expr::Ident(n) => self.lookup(n, sid)?,
@@ -118,6 +179,9 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------------ typing
     pub(crate) fn ty(&mut self, e: &Expr, sid: usize) -> R<(u32, bool)> {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.ty(&n, sid);
+        }
         if self.is_real(e, sid) {
             // converted to a 64-bit integer where an integer is needed
             return Ok((64, true));
@@ -271,6 +335,9 @@ impl<'a> Compiler<'a> {
 
     /// Compile `e` to a value of width `w`, with expression signedness `s` (IEEE context propagation).
     pub(crate) fn expr(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.expr(&n, sid, w, s);
+        }
         // a real expression where an integer is needed: round
         if self.is_real(e, sid) {
             let v = self.rexpr(e, sid)?;
@@ -977,6 +1044,9 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------------ read sets
     pub(crate) fn reads_expr(&self, e: &Expr, sid: usize, out: &mut Vec<(u32, u32)>) {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.reads_expr(&n, sid, out);
+        }
         match e {
             Expr::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
@@ -1045,6 +1115,9 @@ impl<'a> Compiler<'a> {
 
     /// Signals read by an lvalue's index expressions.
     pub(crate) fn reads_lvalue(&self, e: &Expr, sid: usize, out: &mut Vec<(u32, u32)>) {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.reads_lvalue(&n, sid, out);
+        }
         match e {
             Expr::Index(a, b) => {
                 if !matches!(&**a, Expr::Ident(_) | Expr::Hier(_)) {
@@ -1070,6 +1143,9 @@ impl<'a> Compiler<'a> {
     /// Whether an expression has type real (IEEE: an operand of an arithmetic operator being real
     /// makes the operation real; comparisons and logical operators give integers).
     pub(crate) fn is_real(&self, e: &Expr, sid: usize) -> bool {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.is_real(&n, sid);
+        }
         match e {
             Expr::Real(_) => true,
             Expr::Ident(_) | Expr::Hier(_) => {
@@ -1098,6 +1174,9 @@ impl<'a> Compiler<'a> {
 
     /// Whether an assignment target is a real variable.
     pub(crate) fn lvalue_is_real(&self, e: &Expr, sid: usize) -> bool {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.lvalue_is_real(&n, sid);
+        }
         match e {
             Expr::Ident(_) | Expr::Hier(_) | Expr::Index(..) => self.is_real(e, sid),
             _ => false,
@@ -1106,6 +1185,9 @@ impl<'a> Compiler<'a> {
 
     /// Compile an expression as a real value: slot holding f64 bits (unknown word 0).
     pub(crate) fn rexpr(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        if let Some(n) = self.md_norm(e, sid) {
+            return self.rexpr(&n, sid);
+        }
         if !self.is_real(e, sid) {
             let (s, w, signed) = self.self_expr(e, sid)?;
             let d = self.tmp(64);
