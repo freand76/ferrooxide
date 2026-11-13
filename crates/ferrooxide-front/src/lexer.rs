@@ -139,6 +139,8 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
                         b't' => v.push('\t'),
                         b'\\' => v.push('\\'),
                         b'"' => v.push('"'),
+                        // backslash-newline: the string continues on the next line
+                        b'\n' => line += 1,
                         b'0'..=b'7' => {
                             let mut n = 0u32;
                             let mut k = 0;

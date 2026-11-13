@@ -331,9 +331,10 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                     let pad = explicit_w.is_none();
                     let arg = args.get(i);
                     i += 1;
-                    // a string literal formatted as a number: its characters' bits
+                    // a string literal consumed by a format: its characters' bits (also for %s:
+                    // NUL bytes and the empty string "" (8'h00) print like those of a value)
                     let lit_bits: Option<(Vec<u64>, u32)> = match arg {
-                        Some(FmtArg::Lit(l)) if spec != 's' => {
+                        Some(FmtArg::Lit(l)) => {
                             let bytes = l.as_bytes();
                             let w = (8 * bytes.len() as u32).max(8);
                             let n = nw(w);
