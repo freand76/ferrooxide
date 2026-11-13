@@ -125,6 +125,37 @@ pub struct Program {
     pub blocks: Vec<BlockDef>,
     /// `Disable { target }`: the blocks each target names
     pub disables: Vec<Vec<u32>>,
+    /// user-defined primitive tables (Instr::Udp)
+    pub udps: Vec<UdpTable>,
+}
+
+/// Value masks of UDP table symbols: bit 0 = 0, bit 1 = 1, bit 2 = x (z reads as x).
+pub const UDP_0: u8 = 1;
+pub const UDP_1: u8 = 2;
+pub const UDP_X: u8 = 4;
+
+/// One input entry of a UDP row: a level (`prev` unused) or an edge (prev -> cur, a change).
+#[derive(Clone, Copy, Debug)]
+pub struct UdpSym {
+    pub edge: bool,
+    pub prev: u8,
+    pub cur: u8,
+}
+
+#[derive(Clone, Debug)]
+pub struct UdpRow {
+    pub ins: Vec<UdpSym>,
+    /// current-state mask (sequential), 7 = any
+    pub state: u8,
+    /// 0, 1, 2 = x, 3 = no change ('-')
+    pub out: u8,
+    pub has_edge: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UdpTable {
+    pub sequential: bool,
+    pub rows: Vec<UdpRow>,
 }
 
 /// A named block (or inlined task body): code range [start, end) of `proc`, and the fork
@@ -179,6 +210,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         | Instr::Fork { .. }
         | Instr::Disable { .. }
         | Instr::Kick { .. } => vec![],
+        Instr::Udp { ins, prev, q, .. } => ins.iter().chain(prev.iter()).copied().chain(std::iter::once(*q)).collect(),
         Instr::Unforce { t } => match t {
             Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
             _ => vec![],
@@ -439,6 +471,9 @@ pub enum Instr {
     Kick { sig: u32 },
     /// release / deassign: the bits of the target are no longer forced
     Unforce { t: Target },
+    /// evaluate UDP table `table` for the 1-bit inputs `ins` (previous values in `prev`, updated)
+    /// and the state / output in `q` (updated)
+    Udp { table: u32, ins: Box<[u32]>, prev: Box<[u32]>, q: u32 },
     /// integer (w bits) -> real; x/z bits count as 0
     IToR { d: u32, s: u32, w: u32, signed: bool },
     /// real -> integer of w bits (rounded half away from zero, or truncated toward zero)

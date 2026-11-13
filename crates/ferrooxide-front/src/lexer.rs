@@ -96,7 +96,17 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
             while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'_' || s[i] == b'$') {
                 i += 1;
             }
-            toks.push(Token { tok: Tok::Ident(text[st..i].to_string()), line });
+            let word = &text[st..i];
+            toks.push(Token { tok: Tok::Ident(word.to_string()), line });
+            // a UDP table body does not tokenise like Verilog: keep it as raw text
+            if word == "table" {
+                if let Some(end) = text[i..].find("endtable") {
+                    let raw = &text[i..i + end];
+                    toks.push(Token { tok: Tok::Str(raw.to_string()), line });
+                    line += raw.matches('\n').count() as u32;
+                    i += end;
+                }
+            }
             continue;
         }
         if c == b'\\' {

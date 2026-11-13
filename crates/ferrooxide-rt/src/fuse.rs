@@ -62,7 +62,8 @@ fn body(code: &[Instr]) -> Option<(Vec<Instr>, bool)> {
             | Instr::Fork { .. }
             | Instr::Disable { .. }
             | Instr::Kick { .. }
-            | Instr::Unforce { .. } => return None,
+            | Instr::Unforce { .. }
+            | Instr::Udp { .. } => return None,
             // fused members must see each other's results at once: only blocking writes
             Instr::Store { mode: StoreMode::Nba | StoreMode::NbaDelay(_), .. } => return None,
             Instr::Jmp { to } => Instr::Jmp { to: rel(*to)? },

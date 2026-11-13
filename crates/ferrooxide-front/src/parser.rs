@@ -26,7 +26,7 @@ const KEYWORDS: &[&str] = &[
     "endfunction", "task", "endtask", "generate", "endgenerate", "genvar", "signed", "unsigned", "fork", "join",
     "wait", "disable", "tri", "supply0", "supply1", "wand", "wor", "logic", "bit", "int", "byte", "shortint",
     "longint", "always_comb", "always_ff", "always_latch", "automatic", "return", "do", "final", "defparam",
-    "specify", "endspecify", "join_any", "force", "release", "deassign", "realtime", "event", "join_none", "break", "continue", "unique", "priority",
+    "specify", "endspecify", "primitive", "endprimitive", "table", "endtable", "join_any", "force", "release", "deassign", "realtime", "event", "join_none", "break", "continue", "unique", "priority",
 ];
 
 fn is_keyword(s: &str) -> bool {
@@ -149,6 +149,7 @@ impl Parser {
             match self.peek() {
                 Tok::Eof => break,
                 Tok::Ident(s) if s == "module" || s == "macromodule" => mods.push(self.module()?),
+                Tok::Ident(s) if s == "primitive" => mods.push(self.primitive()?),
                 Tok::Ident(s) if s == "__fx_timescale" => {
                     self.bump();
                     let num = |p: &mut Parser| -> Result<i32> {
@@ -277,7 +278,111 @@ impl Parser {
         }
         self.bump();
         self.opt_block_label()?;
-        Ok(Module { name, timescale: self.timescale, file: self.file.clone(), line, ports, items })
+        Ok(Module { name, timescale: self.timescale, file: self.file.clone(), line, ports, items, udp: None })
+    }
+
+    /// primitive name (ports); declarations; [initial q = v;] table ... endtable endprimitive
+    fn primitive(&mut self) -> Result<Module> {
+        let line = self.line();
+        self.bump();
+        let name = self.ident()?;
+        let mut items = Vec::new();
+        let mut ports = Vec::new();
+        let mut sequential = false;
+        self.expect_p("(")?;
+        loop {
+            if matches!(self.peek(), Tok::Ident(s) if s == "input" || s == "output") {
+                let mut d = self.decl_head(true)?;
+                if d.kind == NetKind::Reg {
+                    sequential = true;
+                }
+                let dl = self.line();
+                let n = self.ident()?;
+                if self.eat_p("=") {
+                    self.expr()?;
+                }
+                d.names = vec![Declarator { name: n.clone(), dims: vec![], init: None, line: dl }];
+                items.push(Item::Decl(d));
+                ports.push(n);
+            } else {
+                ports.push(self.ident()?);
+            }
+            if !self.eat_p(",") {
+                break;
+            }
+        }
+        self.expect_p(")")?;
+        self.expect_p(";")?;
+        let mut rows = Vec::new();
+        let mut init = None;
+        loop {
+            if self.eat_kw("endprimitive") {
+                break;
+            }
+            if matches!(self.peek(), Tok::Eof) {
+                return self.err("unexpected end of file in primitive");
+            }
+            if self.eat_kw("initial") {
+                self.ident()?;
+                self.expect_p("=")?;
+                init = Some(self.expr()?);
+                self.expect_p(";")?;
+            } else if self.eat_kw("table") {
+                let raw = match self.bump() {
+                    Tok::Str(s) => s,
+                    _ => return self.err("bad table"),
+                };
+                self.expect_kw("endtable")?;
+                for row in raw.split(';') {
+                    let row = row.trim();
+                    if row.is_empty() {
+                        continue;
+                    }
+                    let parts: Vec<&str> = row.split(':').collect();
+                    let syms = |t: &str| -> Vec<String> {
+                        let mut v = Vec::new();
+                        let cs: Vec<char> = t.chars().filter(|c| !c.is_whitespace()).collect();
+                        let mut k = 0;
+                        while k < cs.len() {
+                            if cs[k] == '(' {
+                                let e: String = cs[k..(k + 4).min(cs.len())].iter().collect();
+                                v.push(e.to_ascii_lowercase());
+                                k += 4;
+                            } else {
+                                v.push(cs[k].to_ascii_lowercase().to_string());
+                                k += 1;
+                            }
+                        }
+                        v
+                    };
+                    match parts.len() {
+                        2 => rows.push((syms(parts[0]), None, parts[1].trim().to_ascii_lowercase())),
+                        3 => rows.push((syms(parts[0]), Some(parts[1].trim().to_ascii_lowercase()), parts[2].trim().to_ascii_lowercase())),
+                        _ => return self.err(format!("bad UDP table row '{row}'")),
+                    }
+                }
+            } else if self.is_decl_start() {
+                let mut d = self.decl_head(true)?;
+                if d.kind == NetKind::Reg {
+                    sequential = true;
+                }
+                d.names = self.declarators()?;
+                items.push(Item::Decl(d));
+            } else {
+                return self.err(format!("unexpected {} in primitive", self.describe()));
+            }
+        }
+        self.opt_block_label()?;
+        let sequential = sequential || rows.iter().any(|r| r.1.is_some());
+        Ok(Module {
+            name,
+            timescale: self.timescale,
+            file: self.file.clone(),
+            line,
+            ports,
+            items,
+            udp: Some(UdpDef { sequential, rows, init }),
+        })
     }
 
     fn param_type(&mut self) -> Result<PType> {

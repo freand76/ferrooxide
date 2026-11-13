@@ -71,6 +71,7 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
 | M7 | FST output, VPI-lite, better diagnostics | |
+| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | planned (see notes) |
 | M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
 
 ## Road to full Verilog-2005 (notes)
@@ -110,6 +111,54 @@ code needs them.
 5. **Tool interfaces and the rest**: VPI/PLI (cocotb and friends), Verilog-2001 configurations
    and libraries (`config`, `-y`/`-v` library search, `` `uselib ``), `$dumpports`, VCD of
    reals and events.
+
+## M9: CXXRTL Debug Server Protocol (notes)
+
+Spec: https://cxxrtl.org/protocol.html (v0.14.0, protocol version 0, still changing). Lets a
+client (waveform viewer / debugger front end, e.g. Surfer; client support to be verified) attach to
+a running simulation, run/pause it and query waveforms of any signal over any past interval.
+
+**Protocol in short.** Byte stream (TCP or Unix socket), each message a UTF-8 JSON object
+terminated by NUL. Greeting both ways (`version: 0`; the server lists its commands, events and
+`item_values_encoding: ["base64(u32)"]`). Commands: `list_scopes`, `list_items` (scope = direct
+children only; ids are space-separated hierarchical names, root scope `""`), `reference_items`
+(bind a name to a list of items / memory row ranges), `query_interval` (samples with item values
+and diagnostics for an inclusive time interval, optionally collapsed to one sample per time),
+`get_simulation_status`, `run_simulation` (`until_time`, `until_diagnostics`, async),
+`pause_simulation`. Events: `simulation_paused`, `simulation_finished`. Times are strings
+`"<s>.<fs>"`. Values: per item little-endian u32 words, concatenated, base64. Diagnostics:
+`print`/`break`/`assert`/`assume` with source location. No value setting yet.
+
+**Design for ferrooxide.**
+1. *Server thread + simulation thread.* `--debug-server tcp:HOST:PORT` (or `unix:PATH`). The
+   simulation thread runs time steps and checks a command channel between time steps (cheap
+   atomic flag), so run/pause/until_time need no locking inside the hot loop. Paused = the
+   simulation thread blocks on the channel.
+2. *Hierarchy.* Scopes from instance paths (`tb.u1.sub` → `"tb u1 sub"`), items from signal
+   names (all `prog.names` including port aliases); `type` node/memory, `width`, `lsb_at` from the
+   declared range, `input`/`output` from port direction (keep it in `SignalInfo`), memories with
+   `depth`/`zero_at`, `src` from file:line (keep declaration locations), `settable: false`.
+3. *History for query_interval.* Phase 1: an in-memory change log (time, signal, value) fed by
+   the same per-time-step dirty list as VCD (`notify` already marks changed signals when dumping),
+   for all non-array signals, with a memory budget (drop or compress old history; follow the
+   project's memory rules). Memories: log element writes (`notify_elem` knows the element).
+   Phase 2 (CXXRTL's approach): periodic checkpoints of the whole simulation state (`mem`,
+   process states, queues, NBA buffer, RNG, file handles muted) and deterministic re-simulation
+   from the nearest checkpoint; only cheap checkpoints are stored, values are recomputed on demand.
+4. *Values.* `base64(u32)` is two-state: x/z bits are sent as the value plane (x→1, z→0) for now.
+   Propose/negotiate a four-state encoding (value + unknown planes, e.g. a `base64(u32,4state)`
+   feature) since 4-state is the point of this simulator; check what clients accept.
+5. *Diagnostics.* `$display`/`$write` output → `print` (with time and src), `$finish`/`$stop` →
+   `break`, SystemVerilog immediate assertions later → `assert`. Keep them in the history so
+   `query_interval` can return them; `run_simulation until_diagnostics` pauses on them.
+6. *Time.* ticks × 10^(15 + precision) femtoseconds; `run_simulation until_time` stops before the
+   first time step after the target and emits `simulation_paused` (cause `until_time`).
+7. *Later.* Setting values (when the spec adds it: force-like writes through the force mask),
+   breakpoints on signal conditions, scope/item attributes (`(* ... *)` are currently dropped by
+   the lexer and would need keeping), a VCD/FST import mode as a read-only server.
+
+Open questions: exact client behaviour (Surfer's CDSP support and which encodings it accepts),
+how large a history is useful by default, and whether to expose x/z before the spec defines it.
 
 ## Testing strategy
 - `tests/verilog/*.v`: self-contained testbenches. `tests/difftest.sh` runs each through `iverilog`+`vvp`

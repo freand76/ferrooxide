@@ -9,7 +9,14 @@ Pass criteria follow ivtest's vvp_reg.pl: with a gold file the output must match
 output must contain a line with only "PASSED". Only "normal" tests are run; the summary groups
 failures by their first error line.
 """
-import argparse, collections, concurrent.futures as cf, os, re, subprocess, sys
+import argparse, collections, concurrent.futures as cf, os, re, resource, subprocess, sys
+
+# per-test address-space limit: a test with a huge memory must not take the machine down
+MEM_LIMIT = 2 << 30
+
+
+def limit_memory():
+    resource.setrlimit(resource.RLIMIT_AS, (MEM_LIMIT, MEM_LIMIT))
 
 FX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "ferrooxide")
 
@@ -62,7 +69,7 @@ def run(t, root, timeout):
     args.append(src)
     args += plargs
     try:
-        p = subprocess.run(args, cwd=root, capture_output=True, timeout=timeout)
+        p = subprocess.run(args, cwd=root, capture_output=True, timeout=timeout, preexec_fn=limit_memory)
     except subprocess.TimeoutExpired:
         return "TIMEOUT", "timeout"
     out = p.stdout.decode(errors="replace")
@@ -99,7 +106,7 @@ def main():
     ap.add_argument("ivtest")
     ap.add_argument("--list", default="regress-vlg.list")
     ap.add_argument("--filter", default="")
-    ap.add_argument("-j", type=int, default=os.cpu_count())
+    ap.add_argument("-j", type=int, default=4)
     ap.add_argument("--timeout", type=float, default=20)
     ap.add_argument("--show", type=int, default=25, help="failure groups to show")
     ap.add_argument("--results", help="write name<TAB>status<TAB>reason lines here")

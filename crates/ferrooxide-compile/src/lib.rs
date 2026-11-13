@@ -53,6 +53,8 @@ enum Job<'a> {
     PortIn { child_sig: u32, expr: Expr, scope: usize, line: u32 },
     /// parent lvalue driven by a child output port
     PortOut { lhs: Expr, child_sig: u32, scope: usize, line: u32 },
+    /// an instance of a user-defined primitive: output, inputs (in the instantiating scope)
+    Udp { module: &'a Module, terms: Vec<Expr>, delay: Option<Expr>, scope: usize, line: u32 },
 }
 
 #[derive(Default)]
@@ -103,6 +105,11 @@ pub struct Compiler<'a> {
     pub(crate) open_blocks: Vec<usize>,
     /// disable targets to resolve after code generation: (target, candidate paths, file, line)
     pub(crate) pending_disables: Vec<(u32, Vec<String>, String, u32)>,
+    /// memory limit (words) and the error raised when a declaration exceeds it
+    pub(crate) mem_limit_words: u64,
+    pub(crate) mem_error: Option<Error>,
+    /// UDP name -> index of its runtime table
+    pub(crate) udp_index: HashMap<String, u32>,
     /// counter for per-call storage of automatic functions and tasks
     pub(crate) auto_count: u32,
     /// nets of a special type (tri0, wand, ...): resolved even with one or no driver
@@ -150,7 +157,7 @@ pub fn compile_lint(modules: &[Module], tops: &[String], lint: bool) -> Result<(
         for m in modules {
             scan(&m.items, &mut used);
         }
-        modules.iter().filter(|m| !used.contains(m.name.as_str())).collect()
+        modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none()).collect()
     } else {
         let mut v = Vec::new();
         for t in tops {
@@ -170,8 +177,14 @@ pub fn compile_lint(modules: &[Module], tops: &[String], lint: bool) -> Result<(
         let sid = c.instantiate(m, m.name.clone(), &[], None)?;
         c.tops.insert(m.name.clone(), sid);
     }
+    if let Some(e) = c.mem_error.take() {
+        return Err(e);
+    }
     c.codegen_jobs()?;
     c.resolve_disables();
+    if let Some(e) = c.mem_error.take() {
+        return Err(e);
+    }
     c.prog.scratch_words = SCRATCH_WORDS;
     c.prog.precision = c.gprec;
     Ok((c.prog, c.warnings, c.lint))
@@ -211,6 +224,15 @@ impl<'a> Compiler<'a> {
             open_blocks: Vec::new(),
             pending_disables: Vec::new(),
             auto_count: 0,
+            udp_index: HashMap::new(),
+            mem_limit_words: std::env::var("FX_MAX_MEM_MB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(2048)
+                .min(32 * 1024)
+                * (1 << 20)
+                / 8,
+            mem_error: None,
             redirect: HashMap::new(),
         }
     }
@@ -285,7 +307,26 @@ impl<'a> Compiler<'a> {
         kind: SigKind,
     ) -> u32 {
         let total_w = width;
-        let elems = depth.max(1);
+        let mut depth = depth;
+        let mut elems = depth.max(1);
+        // refuse designs that would not fit (instead of running the machine out of memory)
+        let need = elems as u64 * 2 * rt::nw(total_w) as u64 + self.prog.mem.len() as u64;
+        if need > self.mem_limit_words {
+            if self.mem_error.is_none() {
+                self.mem_error = Some(Error {
+                    msg: format!(
+                        "'{}' needs {} MB of simulation memory, more than the limit of {} MB (set FX_MAX_MEM_MB to raise it)",
+                        name,
+                        need * 8 >> 20,
+                        self.mem_limit_words * 8 >> 20
+                    ),
+                    file: self.file.clone(),
+                    line: self.line,
+                });
+            }
+            depth = depth.min(1);
+            elems = 1;
+        }
         let slot = self.prog.mem.len() as u32;
         let n = rt::nw(total_w);
         for _ in 0..elems {
@@ -949,6 +990,27 @@ impl<'a> Compiler<'a> {
                         Some(m) => *m,
                         None => return self.err(format!("unknown module '{module}'")),
                     };
+                    if m.udp.is_some() {
+                        // a user-defined primitive: positional terminals, an optional delay
+                        let delay = match params.first() {
+                            Some(Conn::Positional(Some(e))) => Some(e.clone()),
+                            _ => None,
+                        };
+                        for inst in insts {
+                            let mut terms = Vec::new();
+                            for c in &inst.conns {
+                                match c {
+                                    Conn::Positional(Some(e)) | Conn::Named(_, Some(e)) => terms.push(e.clone()),
+                                    _ => return self.err("unconnected UDP terminal"),
+                                }
+                            }
+                            if terms.len() != m.ports.len() {
+                                return self.err(format!("primitive '{module}' needs {} terminals", m.ports.len()));
+                            }
+                            self.jobs.push(Job::Udp { module: m, terms, delay: delay.clone(), scope: sid, line: inst.line });
+                        }
+                        continue;
+                    }
                     let mut ovs = Vec::new();
                     for p in params {
                         match p {
@@ -1202,6 +1264,7 @@ impl<'a> Compiler<'a> {
         match job {
             Job::Assign { lhs, scope, .. } | Job::PortOut { lhs, scope, .. } => self.lvalue_bases(lhs, *scope, &mut v),
             Job::PortIn { child_sig, .. } => v.push(*child_sig),
+            Job::Udp { terms, scope, .. } => self.lvalue_bases(&terms[0], *scope, &mut v),
             Job::Proc { .. } => {}
         }
         v.sort_unstable();
@@ -1362,6 +1425,11 @@ impl<'a> Compiler<'a> {
                     self.file = self.scopes[*scope].file.clone();
                     self.assign_proc(stmt::Lhs::Sig(*child_sig), stmt::Rhs::Expr(expr, *scope), None)?;
                 }
+                Job::Udp { module, terms, delay, scope, line } => {
+                    self.line = *line;
+                    self.file = self.scopes[*scope].file.clone();
+                    self.udp_instance(module, terms, delay.as_ref(), *scope)?;
+                }
                 Job::PortOut { lhs, child_sig, scope, line } => {
                     self.line = *line;
                     self.file = self.scopes[*scope].file.clone();
@@ -1369,6 +1437,138 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The runtime table of a UDP (converted once per primitive).
+    fn udp_table(&mut self, m: &Module) -> R<u32> {
+        if let Some(&i) = self.udp_index.get(&m.name) {
+            return Ok(i);
+        }
+        let def = m.udp.as_ref().unwrap();
+        let mask = |c: &str| -> Option<u8> {
+            Some(match c {
+                "0" => rt::UDP_0,
+                "1" => rt::UDP_1,
+                "x" => rt::UDP_X,
+                "?" => rt::UDP_0 | rt::UDP_1 | rt::UDP_X,
+                "b" => rt::UDP_0 | rt::UDP_1,
+                _ => return None,
+            })
+        };
+        let mut rows = Vec::new();
+        for (ins, state, out) in &def.rows {
+            let mut syms = Vec::new();
+            let mut has_edge = false;
+            for s in ins {
+                let any = rt::UDP_0 | rt::UDP_1 | rt::UDP_X;
+                let sym = match s.as_str() {
+                    "r" => rt::UdpSym { edge: true, prev: rt::UDP_0, cur: rt::UDP_1 },
+                    "f" => rt::UdpSym { edge: true, prev: rt::UDP_1, cur: rt::UDP_0 },
+                    "p" => rt::UdpSym { edge: true, prev: rt::UDP_0 | rt::UDP_X, cur: rt::UDP_1 | rt::UDP_X },
+                    "n" => rt::UdpSym { edge: true, prev: rt::UDP_1 | rt::UDP_X, cur: rt::UDP_0 | rt::UDP_X },
+                    "*" => rt::UdpSym { edge: true, prev: any, cur: any },
+                    e if e.starts_with('(') && e.len() == 4 => {
+                        let (a, b) = (mask(&e[1..2]), mask(&e[2..3]));
+                        match (a, b) {
+                            (Some(a), Some(b)) => rt::UdpSym { edge: true, prev: a, cur: b },
+                            _ => return self.err(format!("bad edge '{e}' in table of '{}'", m.name)),
+                        }
+                    }
+                    l => match mask(l) {
+                        Some(c) => rt::UdpSym { edge: false, prev: 0, cur: c },
+                        None => return self.err(format!("bad symbol '{l}' in table of '{}'", m.name)),
+                    },
+                };
+                has_edge |= sym.edge;
+                syms.push(sym);
+            }
+            if syms.len() != m.ports.len() - 1 {
+                return self.err(format!("table row of '{}' has {} inputs, expected {}", m.name, syms.len(), m.ports.len() - 1));
+            }
+            let st = match state {
+                Some(s) => mask(s).ok_or_else(|| self.mkerr(format!("bad state '{s}' in table of '{}'", m.name)))?,
+                None => 7,
+            };
+            let out = match out.as_str() {
+                "0" => 0,
+                "1" => 1,
+                "x" => 2,
+                "-" => 3,
+                o => return self.err(format!("bad output '{o}' in table of '{}'", m.name)),
+            };
+            rows.push(rt::UdpRow { ins: syms, state: st, out, has_edge });
+        }
+        let i = self.prog.udps.len() as u32;
+        self.prog.udps.push(rt::UdpTable { sequential: def.sequential, rows });
+        self.udp_index.insert(m.name.clone(), i);
+        Ok(i)
+    }
+
+    /// A process for a UDP instance: evaluate the table on every input change, drive the output.
+    fn udp_instance(&mut self, m: &'a Module, terms: &[Expr], delay: Option<&Expr>, sid: usize) -> R<()> {
+        let table = self.udp_table(m)?;
+        let def = m.udp.as_ref().unwrap();
+        let name = self.scopes[sid].name.clone();
+        self.begin_proc(name, ProcClass::Normal);
+        // state / output and previous inputs persist between activations (start as x)
+        let set = |c: &mut Self, s: u32, v: (u64, u64)| {
+            c.prog.mem[s as usize] = v.0;
+            c.prog.mem[s as usize + 1] = v.1;
+        };
+        let q = self.ptmp(1);
+        let init = match &def.init {
+            Some(e) => {
+                let c = self.const_eval(e, sid)?;
+                (c.a[0] & 1, c.b[0] & 1)
+            }
+            None => (1, 1),
+        };
+        set(self, q, init);
+        let mut prev = Vec::new();
+        for _ in 1..terms.len() {
+            let s = self.ptmp(1);
+            set(self, s, (1, 1));
+            prev.push(s);
+        }
+        // a UDP output starts as x (not z) until the table drives it
+        let mut outs = Vec::new();
+        self.lvalue_bases(&terms[0], sid, &mut outs);
+        for o in outs {
+            let i = self.sig(o).clone();
+            if i.kind == SigKind::Wire && i.depth == 0 {
+                let n = rt::nw(i.width);
+                for k in 0..n {
+                    let m = if k == n - 1 { rt::tmask(i.width) } else { !0 };
+                    self.prog.mem[i.slot as usize + k] = m;
+                    self.prog.mem[i.slot as usize + n + k] = m;
+                }
+            }
+        }
+        let top = self.here();
+        let mut ins = Vec::new();
+        for e in &terms[1..] {
+            let v = self.rhs_value(e, sid, 1)?;
+            let t = self.tmp(1);
+            self.emit(Instr::Copy { d: t, s: v, w: 1 });
+            ins.push(t);
+        }
+        self.emit(Instr::Udp { table, ins: ins.into_boxed_slice(), prev: prev.into_boxed_slice(), q });
+        if let Some(d) = delay {
+            // the output changes `d` later; evaluation goes on meanwhile (no input change is missed)
+            let ds = self.delay_ticks(d, sid)?;
+            self.store_value(&stmt::Lhs::Expr(&terms[0], sid), q, 1, rt::StoreMode::NbaDelay(ds))?;
+        } else {
+            self.store_value(&stmt::Lhs::Expr(&terms[0], sid), q, 1, rt::StoreMode::Blocking)?;
+        }
+        let mut reads = Vec::new();
+        for e in &terms[1..] {
+            self.reads_expr(e, sid, &mut reads);
+        }
+        let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect());
+        self.emit(Instr::Wait { ctl });
+        self.emit(Instr::Jmp { to: top });
+        self.end_proc();
         Ok(())
     }
 }

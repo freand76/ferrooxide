@@ -1633,6 +1633,37 @@ impl Sim {
                         return true;
                     }
                 }
+                Instr::Udp { table, ins, prev, q } => {
+                    let code = |m: &[u64], s: u32| -> u8 {
+                        let s = s as usize;
+                        match (m[s] & 1, m[s + 1] & 1) {
+                            (0, 0) => UDP_0,
+                            (1, 0) => UDP_1,
+                            _ => UDP_X,
+                        }
+                    };
+                    let cur: Vec<u8> = ins.iter().map(|&s| code(m, s)).collect();
+                    let old: Vec<u8> = prev.iter().map(|&s| code(m, s)).collect();
+                    let qv = code(m, *q);
+                    let r = udp_eval(&self.prog.udps[*table as usize], &cur, &old, qv);
+                    let (a, b) = match r {
+                        UDP_0 => (0, 0),
+                        UDP_1 => (1, 0),
+                        _ => (1, 1),
+                    };
+                    let m = &mut self.mem;
+                    m[*q as usize] = a;
+                    m[*q as usize + 1] = b;
+                    for (k, &s) in prev.iter().enumerate() {
+                        let (a, b) = match cur[k] {
+                            UDP_0 => (0, 0),
+                            UDP_1 => (1, 0),
+                            _ => (1, 1),
+                        };
+                        m[s as usize] = a;
+                        m[s as usize + 1] = b;
+                    }
+                }
                 Instr::Unforce { t } => {
                     if let Some((sig, res, _)) = self.resolve(t) {
                         if let Some((lsb, w)) = self.res_bits(sig, res) {
@@ -2424,4 +2455,47 @@ fn edge_groups(prog: &Program, ranks: &[u32]) -> (Vec<(Vec<u32>, Vec<(u32, Edge,
         groups.push((members, first.triggers.clone()));
     }
     (groups, group_of)
+}
+
+/// Evaluate a UDP table: level rows first, then (for a changed input) edge rows. No matching row
+/// gives x (combinational, or a sequential UDP whose inputs changed); otherwise the state stays.
+fn udp_eval(t: &UdpTable, cur: &[u8], prev: &[u8], q: u8) -> u8 {
+    let level_ok = |row: &UdpRow| row.ins.iter().zip(cur).all(|(s, &v)| s.edge || s.cur & v != 0);
+    let state_ok = |row: &UdpRow| !t.sequential || row.state & q != 0;
+    let result = |row: &UdpRow| -> u8 {
+        match row.out {
+            0 => UDP_0,
+            1 => UDP_1,
+            3 => q,
+            _ => UDP_X,
+        }
+    };
+    for row in &t.rows {
+        if !row.has_edge && level_ok(row) && state_ok(row) {
+            return result(row);
+        }
+    }
+    let changed = cur.iter().zip(prev).any(|(a, b)| a != b);
+    if t.sequential && changed {
+        for row in &t.rows {
+            if !row.has_edge || !state_ok(row) {
+                continue;
+            }
+            let ok = row.ins.iter().enumerate().all(|(k, s)| {
+                if s.edge {
+                    prev[k] != cur[k] && s.prev & prev[k] != 0 && s.cur & cur[k] != 0
+                } else {
+                    s.cur & cur[k] != 0
+                }
+            });
+            if ok {
+                return result(row);
+            }
+        }
+    }
+    if t.sequential && !changed {
+        q
+    } else {
+        UDP_X
+    }
 }

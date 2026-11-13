@@ -12,6 +12,19 @@ pub struct Module {
     /// Port names in header order.
     pub ports: Vec<String>,
     pub items: Vec<Item>,
+    /// a user-defined primitive (`primitive ... endprimitive`): its table
+    pub udp: Option<UdpDef>,
+}
+
+/// A UDP table. Each row: input symbols ("0", "1", "x", "?", "b", "r", "f", "p", "n", "*" or an
+/// edge like "(01)"), the current-state symbol for sequential UDPs, and the output ("0", "1",
+/// "x", "-").
+#[derive(Debug, Clone)]
+pub struct UdpDef {
+    pub sequential: bool,
+    pub rows: Vec<(Vec<String>, Option<String>, String)>,
+    /// `initial q = <value>;`
+    pub init: Option<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
