@@ -1749,9 +1749,10 @@ impl<'a> Compiler<'a> {
             self.codegen_job(job)?;
         }
         self.redirect.clear();
-        self.link_drivers()?;
+        let island = self.link_islands()?;
         // resolver processes: net = resolve(driver 0, driver 1, ...)
-        let mut nets: Vec<(u32, Vec<u32>)> = std::mem::take(&mut self.drivers).into_iter().collect();
+        let mut nets: Vec<(u32, Vec<u32>)> =
+            std::mem::take(&mut self.drivers).into_iter().filter(|(n, _)| !island.contains(n)).collect();
         nets.sort();
         for (net, drv) in nets {
             let i = self.sig(net).clone();
@@ -1839,72 +1840,169 @@ impl<'a> Compiler<'a> {
         self.end_proc();
     }
 
-    /// For each side of each link, a driver signal that carries the other side's drivers (those
-    /// not coming back through the same link) into the linked bits, z elsewhere.
-    fn link_drivers(&mut self) -> R<()> {
+    /// Linked nets form islands (connected through links). One process per island computes all
+    /// its nets at once: each net starts from its own drivers, then the links exchange values
+    /// (resolve the two sides; a tranif with an unknown control blends) until every path is
+    /// covered. Solving the island in one activation (as Icarus does) avoids the oscillation of
+    /// separate per-link processes in loops. Returns the island nets (they get no resolver).
+    fn link_islands(&mut self) -> R<HashSet<u32>> {
         let links = std::mem::take(&mut self.links);
-        let mut from_link: HashMap<u32, usize> = HashMap::new();
-        let mut todo = Vec::new();
-        for (k, l) in links.iter().enumerate() {
-            for (dst, dl, src, sl) in [(l.b, l.b_lsb, l.a, l.a_lsb), (l.a, l.a_lsb, l.b, l.b_lsb)] {
-                let i = self.sig(dst).clone();
-                let d = self.new_signal(format!("{}$tran{k}", i.name), i.width, false, 0, i.msb, i.lsb, 0, SigKind::Wire);
-                self.prog.names.pop();
-                self.drivers.entry(dst).or_default().push(d);
-                from_link.insert(d, k);
-                todo.push((d, dst, dl, src, sl, k));
+        let mut nets_done = HashSet::new();
+        if links.is_empty() {
+            return Ok(nets_done);
+        }
+        // union-find over the linked nets
+        let mut parent: HashMap<u32, u32> = HashMap::new();
+        fn find(p: &mut HashMap<u32, u32>, x: u32) -> u32 {
+            let mut r = x;
+            while let Some(&q) = p.get(&r) {
+                if q == r {
+                    break;
+                }
+                r = q;
+            }
+            p.insert(x, r);
+            r
+        }
+        for l in &links {
+            for s in [l.a, l.b] {
+                parent.entry(s).or_insert(s);
+            }
+            let (ra, rb) = (find(&mut parent, l.a), find(&mut parent, l.b));
+            if ra != rb {
+                parent.insert(ra, rb);
             }
         }
-        for (d, dst, dl, src, sl, k) in todo {
-            let l = &links[k];
-            let (sw, dw) = (self.sig(src).width, self.sig(dst).width);
-            let inputs: Vec<u32> =
-                self.drivers.get(&src).cloned().unwrap_or_default().into_iter().filter(|x| from_link.get(x) != Some(&k)).collect();
-            let name = self.sig(dst).name.clone();
-            let p = self.begin_proc(name, ProcClass::Normal);
-            let _ = p;
-            let top = self.here();
-            let zs = self.const_slot(&Const::fill('z', sw));
-            let mut v = zs;
-            for (j, &x) in inputs.iter().enumerate() {
-                let xs = self.sig(x).slot;
-                if j == 0 {
-                    v = xs;
-                } else {
-                    let t = self.tmp(sw);
-                    self.emit(Instr::Bin { op: rt::BinOp::Resolve, d: t, a: v, b: xs, w: sw });
-                    v = t;
+        let mut islands: Vec<(u32, Vec<usize>)> = Vec::new();
+        for (k, l) in links.iter().enumerate() {
+            let r = find(&mut parent, l.a);
+            match islands.iter_mut().find(|(x, _)| *x == r) {
+                Some((_, v)) => v.push(k),
+                None => islands.push((r, vec![k])),
+            }
+        }
+        for (_, ks) in islands {
+            let mut nets: Vec<u32> = Vec::new();
+            for &k in &ks {
+                for s in [links[k].a, links[k].b] {
+                    if !nets.contains(&s) {
+                        nets.push(s);
+                    }
                 }
             }
-            let mut part = self.tmp(l.w);
-            self.emit(Instr::Slice { d: part, s: v, sw, lsb: sl, w: l.w });
-            let mut trig: Vec<(u32, rt::Edge, u32)> = inputs.iter().map(|&x| (x, rt::Edge::Any, NONE)).collect();
-            if let Some((ce, cs, on1)) = &l.ctl {
-                let (c, cw, _) = self.self_expr(ce, *cs)?;
-                let zw = self.const_slot(&Const::fill('z', l.w));
-                let t = self.tmp(l.w);
-                let (on, off) = if *on1 { (part, zw) } else { (zw, part) };
-                self.emit(Instr::Mux { d: t, c, cw, t: on, f: off, w: l.w });
-                part = t;
-                let mut r = Vec::new();
-                self.reads_expr(ce, *cs, &mut r);
-                trig.extend(r.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)));
+            let name = self.sig(nets[0]).name.clone();
+            self.begin_proc(name, ProcClass::Normal);
+            let top = self.here();
+            let mut trig: Vec<(u32, rt::Edge, u32)> = Vec::new();
+            // controls, evaluated once per activation; a control that is a net of the island
+            // itself takes its value from the relaxation (starting from its own drivers)
+            let mut ctls: Vec<Option<(u32, u32, bool)>> = Vec::new();
+            let mut ctl_net: Vec<Option<u32>> = Vec::new();
+            for &k in &ks {
+                let own = match &links[k].ctl {
+                    Some((ce @ (Expr::Ident(_) | Expr::Hier(_)), cs, _)) => match self.resolve_base(ce, *cs)? {
+                        Some(expr::Base::Sig(s)) if nets.contains(&s) => Some(s),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                ctl_net.push(own);
+                if let (Some(s), Some((_, _, on1))) = (own, &links[k].ctl) {
+                    ctls.push(Some((s, self.sig(s).width, *on1)));
+                    continue;
+                }
+                ctls.push(match &links[k].ctl {
+                    Some((ce, cs, on1)) => {
+                        let (c, cw, _) = self.self_expr(ce, *cs)?;
+                        let keep = self.tmp(cw);
+                        self.emit(Instr::Copy { d: keep, s: c, w: cw });
+                        let mut r = Vec::new();
+                        self.reads_expr(ce, *cs, &mut r);
+                        trig.extend(r.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)));
+                        Some((keep, cw, *on1))
+                    }
+                    None => None,
+                });
             }
-            let zd = self.const_slot(&Const::fill('z', dw));
-            let o = self.tmp(dw);
-            self.emit(Instr::Copy { d: o, s: zd, w: dw });
-            self.emit(Instr::Insert { d: o, dw, s: part, sw: l.w, off: dl });
-            self.emit(Instr::Store { t: rt::Target::Whole { sig: d }, s: o, mode: rt::StoreMode::Blocking });
-            if !trig.is_empty() {
+            // each net from its own drivers
+            let mut cur: HashMap<u32, u32> = HashMap::new();
+            for &n in &nets {
+                let w = self.sig(n).width;
+                let drv = self.drivers.get(&n).cloned().unwrap_or_default();
+                let v = self.tmp(w);
+                if drv.is_empty() {
+                    let z = self.const_slot(&Const::fill('z', w));
+                    self.emit(Instr::Copy { d: v, s: z, w });
+                } else {
+                    let first = self.sig(drv[0]).slot;
+                    self.emit(Instr::Copy { d: v, s: first, w });
+                    for &d in &drv[1..] {
+                        let ds = self.sig(d).slot;
+                        self.emit(Instr::Bin { op: rt::BinOp::Resolve, d: v, a: v, b: ds, w });
+                    }
+                }
+                trig.extend(drv.iter().map(|&d| (d, rt::Edge::Any, NONE)));
+                cur.insert(n, v);
+            }
+            // relax over the links: one pass per link covers every path
+            for _ in 0..ks.len() {
+                for (j, &k) in ks.iter().enumerate() {
+                    let l = links[k].clone();
+                    let (ca, cb) = (cur[&l.a], cur[&l.b]);
+                    let (wa, wb) = (self.sig(l.a).width, self.sig(l.b).width);
+                    let ta = self.tmp(l.w);
+                    let tb = self.tmp(l.w);
+                    self.emit(Instr::Slice { d: ta, s: ca, sw: wa, lsb: l.a_lsb, w: l.w });
+                    self.emit(Instr::Slice { d: tb, s: cb, sw: wb, lsb: l.b_lsb, w: l.w });
+                    let r = self.tmp(l.w);
+                    self.emit(Instr::Bin { op: rt::BinOp::Resolve, d: r, a: ta, b: tb, w: l.w });
+                    let (ra, rb) = match ctls[j] {
+                        None => (r, r),
+                        Some((c, cw, on1)) => {
+                            let c = match ctl_net[j] {
+                                Some(n) => cur[&n],
+                                None => c,
+                            };
+                            let (xa, xb) = (self.tmp(l.w), self.tmp(l.w));
+                            let (ta2, tb2) = if on1 { ((r, ta), (r, tb)) } else { ((ta, r), (tb, r)) };
+                            self.emit(Instr::Mux { d: xa, c, cw, t: ta2.0, f: ta2.1, w: l.w });
+                            self.emit(Instr::Mux { d: xb, c, cw, t: tb2.0, f: tb2.1, w: l.w });
+                            (xa, xb)
+                        }
+                    };
+                    self.emit(Instr::Insert { d: ca, dw: wa, s: ra, sw: l.w, off: l.a_lsb });
+                    self.emit(Instr::Insert { d: cb, dw: wb, s: rb, sw: l.w, off: l.b_lsb });
+                }
+            }
+            for &n in &nets {
+                let w = self.sig(n).width;
+                let mut v = cur[&n];
+                let nt = self.net_types.get(&n).copied().unwrap_or(NetType::Wire);
+                let pull = match (self.pulls.get(&n), nt) {
+                    (Some(&p), _) => Some(p),
+                    (None, NetType::Tri0) => Some(false),
+                    (None, NetType::Tri1) => Some(true),
+                    _ => None,
+                };
+                if let Some(p) = pull {
+                    let c = self.const_slot(&Const::fill(if p { '1' } else { '0' }, w));
+                    let t = self.tmp(w);
+                    self.emit(Instr::Bin { op: rt::BinOp::PullZ, d: t, a: v, b: c, w });
+                    v = t;
+                }
+                self.emit(Instr::Store { t: rt::Target::Whole { sig: n }, s: v, mode: rt::StoreMode::Blocking });
+                nets_done.insert(n);
+            }
+            if trig.is_empty() {
+                self.emit(Instr::Halt);
+            } else {
                 let ctl = self.make_ctl(trig);
                 self.emit(Instr::Wait { ctl });
                 self.emit(Instr::Jmp { to: top });
-            } else {
-                self.emit(Instr::Halt);
             }
             self.end_proc();
         }
-        Ok(())
+        Ok(nets_done)
     }
 
     fn codegen_job(&mut self, job: &Job<'a>) -> R<()> {

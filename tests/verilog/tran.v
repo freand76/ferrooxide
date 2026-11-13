@@ -25,6 +25,14 @@ module top;
   wire f;
   tranif1 t2 (e, f, ctl);
   rtranif0 t3 (f, c, ctl);
+  // a control that is a net of the island itself
+  wire g2 = 1'b0;
+  wire cc = 1'b1;
+  wire ga, gb;
+  tran u1 (g2, ga);
+  tran u2 (ga, gb);
+  tranif1 u3 (gb, cc, g2);
+  initial #10 $display("%b %b %b", g2, ga, gb);
   initial begin
     ext = 4'bzzzz; en0 = 0; en1 = 0; en2 = 0; v0 = 2'b01; v1 = 2'b10;
     da = 1'bz; dc = 1'bz; ctl = 0;
