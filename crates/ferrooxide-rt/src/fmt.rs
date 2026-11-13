@@ -327,9 +327,28 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                         continue;
                     }
                     let explicit_w: Option<usize> = width_s.parse().ok();
+                    let zero_fill = width_s.len() > 1 && width_s.starts_with('0');
                     let pad = explicit_w.is_none();
                     let arg = args.get(i);
                     i += 1;
+                    // a string literal formatted as a number: its characters' bits
+                    let lit_bits: Option<(Vec<u64>, u32)> = match arg {
+                        Some(FmtArg::Lit(l)) if spec != 's' => {
+                            let bytes = l.as_bytes();
+                            let w = (8 * bytes.len() as u32).max(8);
+                            let n = nw(w);
+                            let mut words = vec![0u64; 2 * n];
+                            for (k, &c) in bytes.iter().rev().enumerate() {
+                                words[k / 8] |= (c as u64) << (8 * (k % 8));
+                            }
+                            Some((words, w))
+                        }
+                        _ => None,
+                    };
+                    let arg = match (&lit_bits, arg) {
+                        (Some(_), _) => Some(&FmtArg::Empty),
+                        (None, a) => a,
+                    };
                     let s = match arg {
                         Some(FmtArg::Real { s }) => {
                             let r = f64::from_bits(mem[*s as usize]);
@@ -370,14 +389,16 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 }
                             }
                         }
-                        Some(FmtArg::Val { .. }) | Some(FmtArg::Time { .. }) => {
-                            let (s, w, signed) = match arg {
-                                Some(FmtArg::Val { s, w, signed }) => (*s, *w, *signed),
-                                Some(FmtArg::Time { s }) => (*s, 64, false),
+                        Some(FmtArg::Val { .. }) | Some(FmtArg::Time { .. }) | Some(FmtArg::Empty) if lit_bits.is_some() || !matches!(arg, Some(FmtArg::Empty)) => {
+                            let (v, w, signed) = match (arg, &lit_bits) {
+                                (_, Some((words, w))) => {
+                                    let n = nw(*w);
+                                    (Val { a: &words[..n], b: &words[n..], w: *w, signed: false }, *w, false)
+                                }
+                                (Some(FmtArg::Val { s, w, signed }), _) => (view(*s, *w, *signed), *w, *signed),
+                                (Some(FmtArg::Time { s }), _) => (view(*s, 64, false), 64, false),
                                 _ => unreachable!(),
                             };
-                            let v = view(s, w, signed);
-                            let _ = s;
                             match spec {
                                 'd' => fmt_dec(&v, pad),
                                 'b' => fmt_radix(&v, 1, pad),
@@ -397,8 +418,8 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                     }
                                 }
                                 'e' | 'f' | 'g' => {
-                                    let n = nw(w);
-                                    let r = crate::ops::int_to_real(&mem[s as usize..s as usize + 2 * n], 0, w, signed);
+                                    let planes: Vec<u64> = v.a.iter().chain(v.b.iter()).copied().collect();
+                                    let r = crate::ops::int_to_real(&planes, 0, w, signed);
                                     let t = fmt_real(r, spec, prec.unwrap_or(6));
                                     if upper {
                                         t.to_uppercase()
@@ -425,7 +446,7 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                         Some(wd) if wd > 0 => {
                             if left {
                                 out.push_str(&format!("{:<wd$}", s));
-                            } else if matches!(spec, 'b' | 'h' | 'x' | 'o') {
+                            } else if matches!(spec, 'b' | 'h' | 'x' | 'o') || (zero_fill && spec == 'd') {
                                 out.push_str(&format!("{:0>wd$}", s));
                             } else {
                                 out.push_str(&format!("{:>wd$}", s));
