@@ -139,6 +139,93 @@ impl Parser {
         }
     }
     /// Any identifier, keywords included (`default_nettype wire).
+    /// Skip a balanced `( ... )`.
+    fn skip_parens(&mut self) -> Result<()> {
+        let mut depth = 0;
+        loop {
+            match self.bump() {
+                Tok::Punct("(") => depth += 1,
+                Tok::Punct(")") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                Tok::Eof => return self.err("unbalanced parentheses"),
+                _ => {}
+            }
+        }
+    }
+
+    /// `(sources =>|*> destinations) = delays;` in a specify block; None if it is not a path.
+    fn spec_path(&mut self, line: Line) -> Result<Option<Item>> {
+        // the tokens of the parenthesised path
+        self.bump();
+        let mut toks = Vec::new();
+        let mut depth = 0;
+        loop {
+            let t = self.bump();
+            match t {
+                Tok::Punct("(") => depth += 1,
+                Tok::Punct(")") if depth == 0 => break,
+                Tok::Punct(")") => depth -= 1,
+                Tok::Eof => return self.err("unterminated specify path"),
+                _ => {}
+            }
+            toks.push(t);
+        }
+        // the arrow: => *> (also +=> -=> and the full-connection forms)
+        let arrow = (0..toks.len().saturating_sub(1)).find(|&i| {
+            matches!(toks[i], Tok::Punct("=" | "*" | "+=" | "-=")) && matches!(toks[i + 1], Tok::Punct(">"))
+        });
+        let names = |ts: &[Tok]| -> Vec<String> {
+            let mut v = Vec::new();
+            let mut br = 0;
+            for t in ts {
+                match t {
+                    Tok::Punct("[") => br += 1,
+                    Tok::Punct("]") => br -= 1,
+                    Tok::Ident(s) if br == 0 && !matches!(s.as_str(), "posedge" | "negedge" | "edge") => v.push(s.clone()),
+                    _ => {}
+                }
+            }
+            v
+        };
+        let Some(ai) = arrow else {
+            while !self.eat_p(";") {
+                if matches!(self.peek(), Tok::Eof) {
+                    break;
+                }
+                self.bump();
+            }
+            return Ok(None);
+        };
+        let srcs = names(&toks[..ai]);
+        let rest = &toks[ai + 2..];
+        // data path `(q +: d)`: the destination is the first name
+        let dsts = if matches!(rest.first(), Some(Tok::Punct("("))) {
+            names(rest).into_iter().take(1).collect()
+        } else {
+            names(rest)
+        };
+        self.expect_p("=")?;
+        let delay = if self.is_p("(") {
+            self.delay_value()?
+        } else {
+            self.primary()?
+        };
+        // more than three delays (6 or 12 transitions): rise, fall, turn-off are the first three
+        let delay = match delay {
+            Expr::SysCall(n, mut v) if n == "$__delays" && v.len() > 3 => {
+                v.truncate(3);
+                Expr::SysCall(n, v)
+            }
+            d => d,
+        };
+        self.expect_p(";")?;
+        Ok(Some(Item::SpecPath { srcs, dsts, delay, line }))
+    }
+
     fn ident_or_kw(&mut self) -> Result<String> {
         match self.bump() {
             Tok::Ident(s) => Ok(s),
@@ -705,7 +792,8 @@ impl Parser {
                 self.expect_p(";")?;
             }
             "specify" => {
-                // only specparams are kept; paths and timing checks are ignored
+                // specparams and path delays are kept; timing checks are ignored
+                self.bump();
                 while !self.eat_kw("endspecify") {
                     if matches!(self.peek(), Tok::Eof) {
                         return self.err("unterminated specify");
@@ -716,7 +804,30 @@ impl Parser {
                         }
                         continue;
                     }
-                    self.bump();
+                    // path delays (a condition in front is ignored)
+                    if self.eat_kw("if") {
+                        if self.is_p("(") {
+                            self.skip_parens()?;
+                        }
+                        continue;
+                    }
+                    if self.eat_kw("ifnone") {
+                        continue;
+                    }
+                    if self.is_p("(") {
+                        let line = self.line();
+                        if let Some(it) = self.spec_path(line)? {
+                            items.push(it);
+                        }
+                        continue;
+                    }
+                    // timing checks and anything else: up to the next ';'
+                    while !self.eat_p(";") {
+                        if matches!(self.peek(), Tok::Eof) || self.is_kw("endspecify") {
+                            break;
+                        }
+                        self.bump();
+                    }
                 }
             }
             _ if self.is_decl_start() => {

@@ -65,6 +65,8 @@ def run(t, root, timeout):
             plargs.append(o)
         elif o.startswith("-D") or o.startswith("-I"):
             args.append(o)
+        elif o == "-gspecify":
+            args.append(o)
         elif o.startswith("-s"):
             args += ["-s", o[2:]]
         # -g... (language generation), -T..., -p... are ignored

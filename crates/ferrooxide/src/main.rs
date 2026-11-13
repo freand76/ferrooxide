@@ -15,6 +15,7 @@ options:
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
+  -gspecify         apply specify path delays (ignored by default)
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help";
@@ -71,6 +72,7 @@ fn main() -> ExitCode {
             "--lint" => lint = true,
             "-g2005" | "-g2001" | "-g1995" => dialect.v2005 = true,
             "-g2005-sv" | "-g2009" | "-g2012" | "-g2017" => dialect.v2005 = false,
+            "-gspecify" => dialect.specify = true,
             _ if a.starts_with("-D") => {
                 let v = &a[2..];
                 let (k, v) = v.split_once('=').unwrap_or((v, "1"));

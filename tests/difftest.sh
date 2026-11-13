@@ -20,6 +20,7 @@ for f in "${files[@]}"; do
   iflags="$(sed -n 's|^// iverilog:||p' "$f" | head -1)"
   # the same language generation for ferrooxide
   gflag=""; case " $iflags " in *" -g2005 "*) gflag="-g2005";; esac
+  case " $iflags " in *" -gspecify "*) gflag="$gflag -gspecify";; esac
   # each simulator runs in its own directory: tests may write (and read back) files
   rm -rf "$tmp/iv" "$tmp/fx"; mkdir -p "$tmp/iv" "$tmp/fx"
   ( cd "$(dirname "$f")" && iverilog ${iflags:--g2012} -o "$tmp/$name.vvp" "$f" 2>"$tmp/$name.ierr" ) || { echo "SKIP $name (iverilog failed)"; continue; }

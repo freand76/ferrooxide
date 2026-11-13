@@ -1145,26 +1145,47 @@ impl Sim {
                 self.push_generic(Nba { sig, res, off, sw });
             }
             StoreMode::Inertial(ds) => {
-                // the delay for this value: rise (to 1), fall (to 0), turn-off (to z),
-                // the smallest for x; a vector counts as falling when it becomes 0
+                // the delay: per changed bit rise (to 1), fall (to 0), turn-off (to z) or the
+                // smallest (to x), the largest of those; word 3 = 1: only the LSB's transition
+                // decides (module paths; rise when the LSB does not change)
                 let ds = ds as usize;
-                let (r, f, t) = (self.mem[ds], self.mem[ds + 1], self.mem[ds + 2]);
+                let (r, f, t, lsb_rule) = (self.mem[ds], self.mem[ds + 1], self.mem[ds + 2], self.mem[ds + 3] == 1);
                 let t = if t == u64::MAX { r.min(f) } else { t };
                 let hn = n / 2;
-                let (a, b) = (&self.mem[s..s + hn], &self.mem[s + hn..s + n]);
-                let mask_last = if sw % 64 == 0 { !0 } else { (1u64 << (sw % 64)) - 1 };
-                let all_z = a.iter().all(|&x| x == 0)
-                    && b.iter().enumerate().all(|(i, &x)| x == if i == hn - 1 { mask_last } else { !0 });
-                let any_x = a.iter().zip(b).any(|(&x, &y)| x & y != 0);
-                let d = if all_z {
-                    t
-                } else if any_x {
-                    r.min(f).min(t)
-                } else if a.iter().all(|&x| x == 0) && b.iter().all(|&x| x == 0) {
-                    f
-                } else {
-                    r
+                let rs = self.sigs[sig as usize];
+                let nws = nw(rs.width);
+                let (base, lsb0) = match res {
+                    Res::Whole => (rs.slot as usize, 0),
+                    Res::Bits { lsb, soff, .. } => (rs.slot as usize, lsb as i64 - soff as i64),
+                    Res::Elem(e) => (rs.slot as usize + e as usize * 2 * nws, 0),
+                    Res::ElemBits { e, lsb, soff, .. } => (rs.slot as usize + e as usize * 2 * nws, lsb as i64 - soff as i64),
                 };
+                let bit_delay = |na: u64, nb: u64| match (na, nb) {
+                    (1, 0) => r,
+                    (0, 0) => f,
+                    (0, _) => t,
+                    _ => r.min(f).min(t),
+                };
+                let mut d = 0u64;
+                let mut changed = false;
+                let nbits = if lsb_rule { 1 } else { sw };
+                for i in 0..nbits {
+                    let (na, nb) = (ops::get_bits(&self.mem, s, i, 1), ops::get_bits(&self.mem, s + hn, i, 1));
+                    let tb = lsb0 + i as i64;
+                    let (oa, ob) = if tb >= 0 && (tb as u32) < rs.width {
+                        (ops::get_bits(&self.mem, base, tb as u32, 1), ops::get_bits(&self.mem, base + nws, tb as u32, 1))
+                    } else {
+                        (na, nb)
+                    };
+                    if (oa, ob) != (na, nb) {
+                        changed = true;
+                        d = d.max(bit_delay(na, nb));
+                    }
+                }
+                if lsb_rule && !changed {
+                    // the LSB stays: the rise delay if anything else changes
+                    d = r;
+                }
                 let lsb = match res {
                     Res::Bits { lsb, .. } | Res::ElemBits { lsb, .. } => lsb,
                     Res::Elem(e) => e,

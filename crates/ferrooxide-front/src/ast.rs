@@ -153,6 +153,8 @@ pub enum ProcKind {
 pub enum Item {
     Decl(Decl),
     Param(ParamDecl),
+    /// a `specify` path delay: `(a, b *> q) = (rise, fall);` (conditions and edges ignored)
+    SpecPath { srcs: Vec<String>, dsts: Vec<String>, delay: Expr, line: Line },
     /// `defparam a.b.P = value;` (the target path includes the parameter name)
     Defparam { target: Vec<String>, value: Expr, line: Line },
     /// `strength`: drive strength (strength0, strength1), levels 0 (highz) .. 7 (supply)

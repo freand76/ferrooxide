@@ -1252,7 +1252,7 @@ impl<'a> Compiler<'a> {
     /// A delay in the scope's time unit converted to simulation ticks (slot of a 64-bit value).
     pub(crate) fn delay_ticks(&mut self, d: &Expr, sid: usize) -> R<u32> {
         if let Expr::SysCall(n, v) = d {
-            if n == "$__delays" {
+            if n == "$__delays" || n == "$__pathdelays" {
                 // (rise, fall, ...) where one delay is needed: the first
                 return self.delay_ticks(&v[0], sid);
             }
@@ -1287,19 +1287,24 @@ impl<'a> Compiler<'a> {
     /// Rise, fall and turn-off delays (ticks) as one 192-bit value for `StoreMode::Inertial`;
     /// a missing turn-off delay is all ones (the runtime takes the smaller of rise and fall).
     pub(crate) fn delays3(&mut self, d: &Expr, sid: usize) -> R<u32> {
-        let ds: Vec<Expr> = match d {
-            Expr::SysCall(n, v) if n == "$__delays" => v.clone(),
-            _ => vec![d.clone()],
+        let (ds, lsb_rule): (Vec<Expr>, bool) = match d {
+            Expr::SysCall(n, v) if n == "$__delays" => (v.clone(), false),
+            Expr::SysCall(n, v) if n == "$__pathdelays" => (v.clone(), true),
+            _ => (vec![d.clone()], false),
         };
-        let out = self.tmp(192);
-        let z = self.const_slot(&Const::zero(192));
-        self.emit(Instr::Copy { d: out, s: z, w: 192 });
+        let out = self.tmp(256);
+        let mut init = Const::zero(256);
+        if lsb_rule {
+            init.a[3] = 1;
+        }
+        let z = self.const_slot(&init);
+        self.emit(Instr::Copy { d: out, s: z, w: 256 });
         for k in 0..3 {
             let t = match ds.get(k).or(if ds.len() == 1 { ds.first() } else { None }) {
                 Some(e) => self.delay_ticks(e, sid)?,
                 None => self.const_slot(&Const::from_i64(-1, 64, true)),
             };
-            self.emit(Instr::Insert { d: out, dw: 192, s: t, sw: 64, off: 64 * k as u32 });
+            self.emit(Instr::Insert { d: out, dw: 256, s: t, sw: 64, off: 64 * k as u32 });
         }
         Ok(out)
     }
