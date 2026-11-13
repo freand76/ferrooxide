@@ -217,6 +217,16 @@ how to present large memories.
 | `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 2.96 G | 5.0 G | **11.3x** |
 | `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.5 G | 0.66 G | 1.4 G | **20.3x** |
 
+With a full VCD dump (all signals; wall time, same machine, 2026-11-13):
+
+| benchmark | Icarus | Icarus + `$dumpvars` | ferrooxide | ferrooxide `--vcd` | VCD size |
+|-----------|--------|----------------------|------------|--------------------|----------|
+| `bench/cpuish.v` | 14.3 s | 19.5 s | 0.73 s | 1.95 s | 707 MB (Icarus 720 MB) |
+| `bench/mixed.v` | 3.1 s | 7.4 s | 0.15 s | 0.51 s | 175 MB (Icarus 308 MB) |
+
+Dumping everything costs ferrooxide 2.7-3.4x (mostly formatting and writing the text); the lead
+over Icarus with a dump is 10-14x. `--trace REGEX` limits the cost to the selected signals.
+
 What got us here (in order of impact):
 1. Lowering to single-word fast ops with the 2-state check inline (`rt/fast.rs`).
 2. Cranelift JIT per *process shape*: identical processes of different instances share one native
