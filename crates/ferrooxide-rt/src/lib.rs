@@ -13,7 +13,7 @@ pub mod ops;
 pub mod vcd;
 pub mod vm;
 
-pub use vm::Sim;
+pub use vm::{RunState, Sim};
 
 pub const NONE: u32 = u32::MAX;
 

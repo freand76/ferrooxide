@@ -73,6 +73,7 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M7 | FST output, VPI-lite, better diagnostics | |
 | M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | planned (see notes) |
 | M10 | MCP server: the simulator as a tool for AI agents (load, run, inspect, force, waveforms, lint) | planned (see notes) |
+| M11 | Interactive mode (`-i`): run/step/print/list/set/force/release commands on stdin | ✅ first version (next: watch, breakpoints on conditions, waveform history, scopes) |
 | M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
 
 ## Road to full Verilog-2005 (notes)
@@ -169,7 +170,10 @@ streamable HTTP later). No design on the command line needed: the agent loads on
 Use an existing Rust MCP SDK if it is mature (e.g. the official `rmcp` crate), else implement
 the small subset (initialize, tools/list, tools/call, resources) by hand.
 
-**Shares the M9 core.** Simulation thread + command channel checked between time steps, the
+**Shares the M9 core.** The interactive mode (M11) already has the basic pieces: the simulator
+can be started, advanced to a time and stopped between time steps (`Sim::start/advance/finish`),
+and signals read, deposited, forced and released by name; an MCP or CDSP front end can drive the
+same API from a server thread. Simulation thread + command channel checked between time steps, the
 hierarchy model, the change-log history and diagnostics capture are the same as for CDSP; MCP and
 CDSP are two front ends. Build that core once (M9 step 1-3), then add whichever front end first.
 

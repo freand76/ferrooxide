@@ -106,6 +106,17 @@ enum Fut {
     Inertial { key: (u32, u32), gen: u32, sig: u32, res: Res, sw: u32, val: Box<[u64]> },
 }
 
+/// Why `advance` returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunState {
+    /// the requested time was reached; more events are scheduled
+    Paused,
+    /// nothing is scheduled any more
+    Idle,
+    /// $finish
+    Finished,
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Stats {
     pub activations: u64,
@@ -451,7 +462,15 @@ impl Sim {
     }
 
     /// Run until no events remain, $finish, or `max_time` is passed.
+    /// Run until no events remain, $finish, or `max_time` is passed.
     pub fn run(&mut self, max_time: Option<u64>) {
+        self.start();
+        self.advance(max_time);
+        self.finish();
+    }
+
+    /// Start every process (time 0); then `advance` runs the simulation.
+    pub fn start(&mut self) {
         fmt::set_precision(self.prog.precision);
         fmt::set_time_format(None);
         // combinational processes first: they evaluate (assigns) or reach their first wait
@@ -473,19 +492,24 @@ impl Sim {
                 self.push_active(i as u32);
             }
         }
+    }
+
+    /// Run the current time step and the following ones up to and including `until`.
+    pub fn advance(&mut self, until: Option<u64>) -> RunState {
         loop {
             self.stats.time_steps += 1;
             self.timestep();
             if self.finished {
-                break;
+                return RunState::Finished;
             }
-            let Some((t, evs)) = self.future.pop_first() else { break };
-            if let Some(mt) = max_time {
+            let Some(&t) = self.future.keys().next() else { return RunState::Idle };
+            if let Some(mt) = until {
                 if t > mt {
-                    self.time = mt;
-                    break;
+                    self.time = mt.max(self.time);
+                    return RunState::Paused;
                 }
             }
+            let (t, evs) = self.future.pop_first().unwrap();
             self.time = t;
             for ev in evs {
                 match ev {
@@ -508,7 +532,15 @@ impl Sim {
                 }
             }
         }
-        // final blocks
+    }
+
+    /// The time of the next scheduled event, if any.
+    pub fn next_event_time(&self) -> Option<u64> {
+        self.future.keys().next().copied()
+    }
+
+    /// Run the final blocks and flush the outputs.
+    pub fn finish(&mut self) {
         let finals: Vec<u32> =
             (0..self.procs.len() as u32).filter(|&p| self.procs[p as usize].class == ProcClass::Final).collect();
         self.finished = false;
@@ -516,6 +548,85 @@ impl Sim {
             self.exec(p);
         }
         self.flush();
+    }
+
+    // ---------------------------------------------------------------- interactive access
+
+    /// Signal names (hierarchical) and ids.
+    pub fn signal_names(&self) -> &[(String, u32)] {
+        &self.prog.names
+    }
+
+    /// Width and array depth (0: not an array) of a signal.
+    pub fn signal_shape(&self, sig: u32) -> (u32, u32) {
+        let r = self.sigs[sig as usize];
+        (r.width, r.depth)
+    }
+
+    /// The value of a (non-array) signal formatted in `radix` ('b', 'h', 'o', 'd').
+    pub fn format_signal(&self, sig: u32, radix: char) -> String {
+        let r = self.sigs[sig as usize];
+        let n = nw(r.width);
+        let s = r.slot as usize;
+        let info = &self.prog.signals[sig as usize];
+        if info.real {
+            return fmt::fmt_real(f64::from_bits(self.mem[s]), 'g', 6);
+        }
+        let v = fmt::Val { a: &self.mem[s..s + n], b: &self.mem[s + n..s + 2 * n], w: r.width, signed: info.signed };
+        match radix {
+            'b' => fmt::fmt_radix(&v, 1, true),
+            'o' => fmt::fmt_radix(&v, 3, true),
+            'd' => fmt::fmt_dec(&v, false),
+            _ => fmt::fmt_radix(&v, 4, true),
+        }
+    }
+
+    /// Whether a (non-array) signal has exactly this value (value and unknown planes).
+    pub fn signal_equals(&self, sig: u32, planes: &[u64]) -> bool {
+        let r = self.sigs[sig as usize];
+        let n = 2 * nw(r.width);
+        self.mem[r.slot as usize..r.slot as usize + n] == planes[..n]
+    }
+
+    /// Set a signal (value and unknown planes, `width` bits) as a blocking assignment would;
+    /// processes it wakes run at the next `advance`.
+    pub fn deposit(&mut self, sig: u32, planes: &[u64]) {
+        let w = self.sigs[sig as usize].width;
+        self.apply(sig, Res::Whole, planes, w);
+    }
+
+    /// Force a signal to a value until `release`.
+    pub fn force(&mut self, sig: u32, planes: &[u64]) {
+        let w = self.sigs[sig as usize].width;
+        // the value goes through a scratch slot (no process is running)
+        let n = 2 * nw(w);
+        self.mem[..n].copy_from_slice(&planes[..n]);
+        self.store(&Target::Whole { sig }, 0, StoreMode::Force);
+    }
+
+    /// Release a forced signal: a net takes its drivers' value again, a variable keeps it.
+    pub fn release(&mut self, sig: u32) {
+        self.force_mask.remove(&sig);
+        self.kick(sig);
+    }
+
+    /// Re-evaluate the waiting processes that write `sig`.
+    fn kick(&mut self, sig: u32) {
+        let ws = self.writers.get(&sig).cloned().unwrap_or_default();
+        for w in ws {
+            let pr = &mut self.procs[w as usize];
+            if pr.wait != NONE && pr.class != ProcClass::Spawned {
+                pr.wait = NONE;
+                if pr.rank != NONE {
+                    let c = pr.rank as usize;
+                    self.comb_bits[c >> 6] |= 1 << (c & 63);
+                    self.comb_lo = self.comb_lo.min(c >> 6);
+                    self.comb_wake();
+                } else {
+                    self.push_active(w);
+                }
+            }
+        }
     }
 
     pub fn flush(&mut self) {
@@ -1783,23 +1894,7 @@ impl Sim {
                     let cur = if r.depth == 0 { lsb_code(&self.mem, r.slot, r.width) } else { 0 };
                     self.notify(*sig, cur);
                 }
-                Instr::Kick { sig } => {
-                    let ws = self.writers.get(sig).cloned().unwrap_or_default();
-                    for w in ws {
-                        let pr = &mut self.procs[w as usize];
-                        if pr.wait != NONE && pr.class != ProcClass::Spawned {
-                            pr.wait = NONE;
-                            if pr.rank != NONE {
-                                let c = pr.rank as usize;
-                                self.comb_bits[c >> 6] |= 1 << (c & 63);
-                                self.comb_lo = self.comb_lo.min(c >> 6);
-                                self.comb_wake();
-                            } else {
-                                self.push_active(w);
-                            }
-                        }
-                    }
-                }
+                Instr::Kick { sig } => self.kick(*sig),
                 Instr::Disable { target } => {
                     let (np, stopped) = self.disable(p, *target, *pc);
                     if stopped {

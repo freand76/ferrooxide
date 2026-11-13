@@ -80,9 +80,33 @@ ferrooxide [options] <files...>
   --dump-code       print the compiled bytecode to stderr
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
+  -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
+  -gspecify         apply specify path delays (ignored by default)
+  -i, --interactive interactive mode, see below
   --lint            check the design and exit (status 1 on findings), see below
   +<arg>            plusarg for $test$plusargs / $value$plusargs
 ```
+
+### Interactive mode
+
+`ferrooxide -i <files>` compiles the design and then reads commands from stdin (a terminal, or
+a script piped in):
+
+```
+fx> run 50ns             run to a time (ticks, or with a unit); `run +T` runs T more, `run` to the end
+stopped at time 50
+fx> print u1.q d         a signal by hierarchical name or unique suffix; radix b, o, d or h
+top.q = 8'd4
+fx> force q 8'h80        force a value until `release`; `set` assigns once
+fx> step                 the current and the next time step
+fx> list u1              signals whose name contains the text
+fx> release q
+fx> watch q d            print q whenever it changes during run/step
+fx> break q 8'd5         stop when q becomes 5 (without a value: on any change)
+fx> quit                 run final blocks and exit
+```
+
+`help` lists the commands. `$display` output appears as the simulation runs.
 
 ### Lint
 

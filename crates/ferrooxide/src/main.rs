@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
+mod repl;
+
 const USAGE: &str = "usage: ferrooxide [options] <files...> [+plusarg...]
 options:
   -s <top>          top-level module (may be repeated; default: all uninstantiated modules)
@@ -16,6 +18,7 @@ options:
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
   -gspecify         apply specify path delays (ignored by default)
+  -i, --interactive commands on stdin: run, step, print, list, set, force, release (help)
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help";
@@ -30,6 +33,7 @@ fn main() -> ExitCode {
     let mut jit = true;
     let mut fuse = true;
     let mut lint = false;
+    let mut interactive = false;
     let mut dialect = ferrooxide_compile::Dialect::default();
     let mut max_time = None;
     let mut args = std::env::args().skip(1);
@@ -70,6 +74,7 @@ fn main() -> ExitCode {
             "--no-jit" => jit = false,
             "--no-fuse" => fuse = false,
             "--lint" => lint = true,
+            "-i" | "--interactive" => interactive = true,
             "-g2005" | "-g2001" | "-g1995" => dialect.v2005 = true,
             "-g2005-sv" | "-g2009" | "-g2012" | "-g2017" => dialect.v2005 = false,
             "-gspecify" => dialect.specify = true,
@@ -133,6 +138,15 @@ fn main() -> ExitCode {
         eprintln!("ferrooxide: memory {} words", prog.mem.len());
     }
     let nproc = prog.procs.len();
+    let precision = prog.precision;
+    if interactive {
+        // any signal may be forced from the command line: stores take the masked path
+        for s in prog.signals.iter_mut() {
+            if s.depth == 0 {
+                s.forced = true;
+            }
+        }
+    }
     let mut sim = ferrooxide_rt::Sim::new(prog);
     sim.set_plusargs(plusargs);
     if jit {
@@ -141,7 +155,11 @@ fn main() -> ExitCode {
         }
     }
     let t2b = Instant::now();
-    sim.run(max_time);
+    if interactive {
+        repl::run(&mut sim, precision);
+    } else {
+        sim.run(max_time);
+    }
     let t3 = Instant::now();
     if stats {
         eprintln!(

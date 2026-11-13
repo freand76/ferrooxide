@@ -1,0 +1,31 @@
+top.q = x
+5: top.q = 0
+15: top.q = 1
+25: top.q = 2
+35: top.q = 3
+45: top.q = 4
+55: top.q = 5
+break: top.q = 05 at time 55
+stopped at time 55
+stopped at time 250
+top.q = 8'd24
+top.clk = 1'b0
+top.msb = 1'h0
+stopped at time 255
+top.msb = 1'b1
+stopped at time 275
+top.q = 8'd128
+stopped at time 295
+top.q = 8'd131
+stopped at time 315
+top.q = 8'd0
+stopped at time 347
+top.q = 8'h03
+top.u1.clk
+top.u1.rst
+top.u1.q
+no signal 'nope'
+break top.msb == value
+tests/interactive/counter.v:12: $finish called at 1000 (1ns)
+time 1000: $finish
+time 1000
