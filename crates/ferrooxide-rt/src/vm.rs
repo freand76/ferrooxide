@@ -180,7 +180,7 @@ pub struct Sim {
     postponed: Vec<u32>,
     pub time: u64,
     finished: bool,
-    out: BufWriter<std::io::Stdout>,
+    out: BufWriter<Box<dyn Write>>,
     monitor: u32,
     monitor_on: bool,
     seed: i32,
@@ -439,7 +439,7 @@ impl Sim {
             postponed: Vec::new(),
             time: 0,
             finished: false,
-            out: BufWriter::with_capacity(1 << 16, std::io::stdout()),
+            out: BufWriter::with_capacity(1 << 16, Box::new(std::io::stdout())),
             monitor: NONE,
             monitor_on: true,
             seed: 0,
@@ -557,6 +557,22 @@ impl Sim {
     }
 
     // ---------------------------------------------------------------- interactive access
+
+    /// Send the simulation's output ($display & co.) to `w` instead of stdout.
+    pub fn set_output(&mut self, w: Box<dyn Write>) {
+        let _ = self.out.flush();
+        self.out = BufWriter::with_capacity(1 << 16, w);
+    }
+
+    /// The simulation time.
+    pub fn now(&self) -> u64 {
+        self.time
+    }
+
+    /// Whether $finish has been called.
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
 
     /// Signal names (hierarchical) and ids.
     pub fn signal_names(&self) -> &[(String, u32)] {

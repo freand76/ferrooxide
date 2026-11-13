@@ -1,4 +1,5 @@
-top.q = x
+watching top.q = x
+break when top.q becomes 8'd5
 5: top.q = 0
 15: top.q = 1
 25: top.q = 2
@@ -7,24 +8,31 @@ top.q = x
 55: top.q = 5
 break: top.q = 05 at time 55
 stopped at time 55
+1 breakpoints removed
+top.q no longer watched
 stopped at time 250
 top.q = 8'd24
 top.clk = 1'b0
+top.q forced to 80
 top.msb = 1'h0
 stopped at time 255
 top.msb = 1'b1
 stopped at time 275
 top.q = 8'd128
+top.q released
 stopped at time 295
 top.q = 8'd131
+top.rst = 1 (processes it wakes run on the next run/step)
 stopped at time 315
 top.q = 8'd0
+top.rst = 0 (processes it wakes run on the next run/step)
 stopped at time 347
 top.q = 8'h03
 top.u1.clk
 top.u1.rst
 top.u1.q
 no signal 'nope'
+break when top.msb becomes 1
 break top.msb == value
 tests/interactive/counter.v:12: $finish called at 1000 (1ns)
 time 1000: $finish

@@ -87,6 +87,7 @@ ferrooxide [options] <files...>
   --vcd <file>      write a VCD without $dumpvars in the testbench (all signals, or --trace)
   --trace <regex>   trace only signals whose hierarchical name matches (repeatable)
   -i, --interactive interactive mode, see below
+  --mcp             MCP server for AI agents (JSON-RPC on stdio), see below
   --lint            check the design and exit (status 1 on findings), see below
   +<arg>            plusarg for $test$plusargs / $value$plusargs
 ```
@@ -125,6 +126,20 @@ fx> quit                 run final blocks and exit
 ```
 
 `help` lists the commands. `$display` output appears as the simulation runs.
+
+### MCP server (for AI agents)
+
+`ferrooxide --mcp [files...]` serves the same operations as the interactive mode as
+[Model Context Protocol](https://modelcontextprotocol.io) tools over stdio, so an agent can
+debug a design by running and probing it instead of reading logs or dumping waveforms:
+`load_design`, `lint`, `run`, `step`, `status`, `get_values`, `list_signals`, `set_value`,
+`force`, `release`, `watch`/`unwatch`, `add_breakpoint`/`clear_breakpoints`, `trace` (VCD of
+signals matching regular expressions), `trace_control` and `finish`. The design's `$display`
+output is returned with each result (at most 200 lines). Register it with an MCP client, e.g.:
+
+```
+claude mcp add ferrooxide -- /path/to/ferrooxide --mcp
+```
 
 ### Lint
 

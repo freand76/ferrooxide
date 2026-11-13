@@ -10,3 +10,4 @@ ferrooxide-front = { path = "../ferrooxide-front" }
 ferrooxide-rt = { path = "../ferrooxide-rt" }
 ferrooxide-compile = { path = "../ferrooxide-compile" }
 regex = "1"
+serde_json = "1"

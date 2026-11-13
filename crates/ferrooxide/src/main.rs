@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
+mod mcp;
 mod repl;
+mod session;
 
 const USAGE: &str = "usage: ferrooxide [options] <files...> [+plusarg...]
 options:
@@ -24,6 +26,8 @@ options:
   --trace <regex>   trace the signals whose hierarchical name matches (repeatable; implies
                     --vcd dump.vcd)
   -i, --interactive commands on stdin: run, step, print, list, set, force, release (help)
+  --mcp             serve the simulator as MCP tools (JSON-RPC on stdio) for AI agents; files
+                    on the command line are loaded at start, else with the load_design tool
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help";
@@ -40,6 +44,7 @@ fn main() -> ExitCode {
     let mut fuse = true;
     let mut lint = false;
     let mut interactive = false;
+    let mut mcp_mode = false;
     let mut vcd: Option<String> = None;
     let mut traces: Vec<String> = Vec::new();
     let mut dialect = ferrooxide_compile::Dialect::default();
@@ -92,6 +97,7 @@ fn main() -> ExitCode {
             "--no-fuse" => fuse = false,
             "--lint" => lint = true,
             "-i" | "--interactive" => interactive = true,
+            "--mcp" => mcp_mode = true,
             "-g2005" | "-g2001" | "-g1995" => dialect.v2005 = true,
             "-g2005-sv" | "-g2009" | "-g2012" | "-g2017" => dialect.v2005 = false,
             "-gspecify" => dialect.specify = true,
@@ -108,6 +114,20 @@ fn main() -> ExitCode {
             }
             _ => files.push(PathBuf::from(a)),
         }
+    }
+    if mcp_mode {
+        let initial = (!files.is_empty()).then(|| session::LoadOptions {
+            files: files.clone(),
+            defines: opts.defines.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            incdirs: opts.incdirs.clone(),
+            tops: tops.clone(),
+            plusargs: plusargs.clone(),
+            dialect,
+            jit,
+            fuse,
+        });
+        mcp::serve(initial);
+        return ExitCode::SUCCESS;
     }
     if files.is_empty() {
         eprintln!("{USAGE}");
@@ -203,7 +223,9 @@ fn main() -> ExitCode {
         );
     }
     if interactive {
-        repl::run(&mut sim, precision);
+        let mut ses = session::Session::from_sim(sim, precision, String::new());
+        repl::run(&mut ses);
+        sim = ses.sim;
     } else {
         sim.run(max_time);
     }
