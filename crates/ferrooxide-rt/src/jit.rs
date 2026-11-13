@@ -761,10 +761,11 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
                 let c0 = b.ins().icmp_imm(IntCC::Equal, cb, 0);
                 for i in 0..n {
                     let (ta, tb, fa, fb) = (ldw(b, t, i), ldw(b, t, n + i), ldw(b, f, i), ldw(b, f, n + i));
-                    let x = b.ins().bor(tb, fb);
+                    let dx = b.ins().bxor(tb, fb);
                     let df = b.ins().bxor(ta, fa);
-                    let x = b.ins().bor(x, df);
-                    let mv = b.ins().bor(ta, x);
+                    let diff = b.ins().bor(dx, df);
+                    let mv = b.ins().bor(ta, diff);
+                    let x = b.ins().bor(tb, diff);
                     let v0 = b.ins().select(c0, fa, mv);
                     let x0 = b.ins().select(c0, fb, x);
                     let rv = b.ins().select(c1, ta, v0);
@@ -1028,10 +1029,11 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
                 let c1 = b.ins().band_not(ca, cb);
                 let c1 = b.ins().icmp_imm(IntCC::NotEqual, c1, 0);
                 let c0 = b.ins().icmp_imm(IntCC::Equal, cb, 0);
-                let x = b.ins().bor(tb, fb);
+                let dx = b.ins().bxor(tb, fb);
                 let df = b.ins().bxor(ta, fa);
-                let x = b.ins().bor(x, df);
-                let mv = b.ins().bor(ta, x);
+                let diff = b.ins().bor(dx, df);
+                let mv = b.ins().bor(ta, diff);
+                let x = b.ins().bor(tb, diff);
                 let v0 = b.ins().select(c0, fa, mv);
                 let x0 = b.ins().select(c0, fb, x);
                 let rv = b.ins().select(c1, ta, v0);

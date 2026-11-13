@@ -209,7 +209,8 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         | Instr::Halt
         | Instr::Fork { .. }
         | Instr::Disable { .. }
-        | Instr::Kick { .. } => vec![],
+        | Instr::Kick { .. }
+        | Instr::Touch { .. } => vec![],
         Instr::Udp { ins, prev, q, .. } => ins.iter().chain(prev.iter()).copied().chain(std::iter::once(*q)).collect(),
         Instr::Unforce { t } => match t {
             Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
@@ -233,7 +234,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                     v
                 }
                 SysTask::MonitorPrint { args, .. } => fa(args),
-                SysTask::ReadMem { start, end, file, .. } => {
+                SysTask::ReadMem { start, end, file, .. } | SysTask::WriteMem { start, end, file, .. } => {
                     let mut v: Vec<u32> = start.iter().chain(end.iter()).map(|x| x.0).collect();
                     if let FileName::Val { s, .. } = file {
                         v.push(*s);
@@ -429,6 +430,8 @@ pub enum SysTask {
     DumpVars,
     DumpOn(bool),
     ReadMem { hex: bool, file: FileName, sig: u32, start: Option<(u32, u32)>, end: Option<(u32, u32)>, loc: String },
+    /// $writememh / $writememb
+    WriteMem { hex: bool, file: FileName, sig: u32, start: Option<(u32, u32)>, end: Option<(u32, u32)> },
     /// `mode`: "r", "w", "a" (+ "b"/"+"); without a mode the file is opened for writing
     FOpen { d: u32, dw: u32, file: FileName, mode: String },
     FClose { s: u32 },
@@ -511,6 +514,8 @@ pub enum Instr {
     /// re-evaluate the waiting processes that write `sig` (a released net takes its drivers'
     /// value again)
     Kick { sig: u32 },
+    /// a change event on `sig` without an edge (time-0 events of initial values, like Icarus)
+    Touch { sig: u32 },
     /// release / deassign: the bits of the target are no longer forced
     Unforce { t: Target },
     /// evaluate UDP table `table` for the 1-bit inputs `ins` (previous values in `prev`, updated)

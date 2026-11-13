@@ -1230,7 +1230,8 @@ impl Sim {
                 }
                 Op::DynSlice1 { d, s, ix, w, sw } => {
                     let (off, x) = (m!(ix), m!(ix + 1));
-                    if x == 0 && off + (w as u64) <= sw as u64 {
+                    // (w <= sw, so the in-range test cannot overflow)
+                    if x == 0 && off <= (sw - w) as u64 {
                         let mask = fast::mk(w);
                         m!(d) = (m!(s) >> off) & mask;
                         m!(d + 1) = (m!(s + 1) >> off) & mask;
@@ -1444,10 +1445,11 @@ impl Sim {
                         m!(d) = m!(f);
                         m!(d + 1) = m!(f + 1);
                     } else {
+                        // unknown condition: bits where both sides agree are kept
                         let (ta, tb, fa, fb) = (m!(t), m!(t + 1), m!(f), m!(f + 1));
-                        let x = tb | fb | (ta ^ fa);
-                        m!(d) = ta | x;
-                        m!(d + 1) = x;
+                        let diff = (ta ^ fa) | (tb ^ fb);
+                        m!(d) = ta | diff;
+                        m!(d + 1) = tb | diff;
                     }
                 }
                 Op::Bool1 { d, s } => {
@@ -1680,6 +1682,11 @@ impl Sim {
                         }
                     }
                 }
+                Instr::Touch { sig } => {
+                    let r = self.sigs[*sig as usize];
+                    let cur = if r.depth == 0 { lsb_code(&self.mem, r.slot, r.width) } else { 0 };
+                    self.notify(*sig, cur);
+                }
                 Instr::Kick { sig } => {
                     let ws = self.writers.get(sig).cloned().unwrap_or_default();
                     for w in ws {
@@ -1862,6 +1869,12 @@ impl Sim {
                 let end = end.and_then(|(s, w)| ops::read_u64(&self.mem, s as usize, w));
                 let file = self.file_name(file);
                 self.readmem(*hex, &file, *sig, start, end, loc);
+            }
+            SysTask::WriteMem { hex, file, sig, start, end } => {
+                let start = start.and_then(|(s, w)| ops::read_u64(&self.mem, s as usize, w));
+                let end = end.and_then(|(s, w)| ops::read_u64(&self.mem, s as usize, w));
+                let file = self.file_name(file);
+                self.writemem(*hex, &file, *sig, start, end);
             }
             SysTask::TestPlusargs { d, prefix } => {
                 let found = self.plusargs.iter().any(|a| a.starts_with(prefix.as_str()));
@@ -2111,6 +2124,36 @@ impl Sim {
                 self.out,
                 "WARNING: {loc}: {name}({file}): Not enough words in the file for the requested range [{first}:{last}]."
             );
+        }
+    }
+
+    /// $writememh/$writememb: one word per line from `start` to `end` (either direction),
+    /// after an address comment, like Icarus.
+    fn writemem(&mut self, hex: bool, file: &str, sig: u32, start: Option<u64>, end: Option<u64>) {
+        let r = self.sigs[sig as usize];
+        let lo = self.prog.signals[sig as usize].arr_lo;
+        let hi = lo + r.depth as i64 - 1;
+        let from = start.map(|s| s as i64).unwrap_or(lo);
+        let to = end.map(|e| e as i64).unwrap_or(hi);
+        let n = nw(r.width);
+        let mut out = String::from("// 0x00000000\n");
+        let step = if to >= from { 1 } else { -1 };
+        let mut a = from;
+        loop {
+            let e = a - lo;
+            if e >= 0 && e < r.depth as i64 {
+                let base = r.slot as usize + e as usize * 2 * n;
+                let v = fmt::Val { a: &self.mem[base..base + n], b: &self.mem[base + n..base + 2 * n], w: r.width, signed: false };
+                out.push_str(&fmt::fmt_radix(&v, if hex { 4 } else { 1 }, true));
+                out.push('\n');
+            }
+            if a == to {
+                break;
+            }
+            a += step;
+        }
+        if let Err(e) = std::fs::write(file, out) {
+            eprintln!("warning: $writemem: cannot write '{file}': {e}");
         }
     }
 

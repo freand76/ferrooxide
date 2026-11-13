@@ -27,6 +27,8 @@ struct Cond {
 impl Preprocessor {
     pub fn new(opts: &Options) -> Self {
         let mut macros = HashMap::new();
+        // Icarus-compatible output is the goal, so code written for Icarus takes its paths
+        macros.insert("__ICARUS__".to_string(), Macro { params: None, body: "1".into() });
         for (k, v) in &opts.defines {
             macros.insert(k.clone(), Macro { params: None, body: v.clone() });
         }

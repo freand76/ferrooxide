@@ -47,7 +47,7 @@ impl<'a> Compiler<'a> {
                 if let Some(arr) = self.array_of(a, sid) {
                     let info = self.sig(arr).clone();
                     if self.is_const(i, sid) {
-                        let e = self.const_int(i, sid)? - info.arr_lo;
+                        let e = self.const_index(i, sid)?.map_or(-1, |v| v - info.arr_lo);
                         let t = if e >= 0 && e < info.depth as i64 {
                             Some(Target::ElemK { sig: arr, e: e as u32 })
                         } else {
@@ -66,8 +66,11 @@ impl<'a> Compiler<'a> {
                         let info = self.sig(arr).clone();
                         let ix = self.index_of(ai, sid, false, -info.arr_lo)?;
                         let (neg, k) = Self::bit_map(info.msb, info.lsb);
-                        let b = self.const_int(i, sid)?;
-                        let off = if neg { k - b } else { b + k };
+                        let off = match self.const_index(i, sid)? {
+                            Some(b) if neg => k - b,
+                            Some(b) => b + k,
+                            None => -1,
+                        };
                         if off < 0 || off >= info.width as i64 {
                             out.push((None, 1));
                         } else {
@@ -80,8 +83,11 @@ impl<'a> Compiler<'a> {
                 let info = self.sig(s).clone();
                 let (neg, k) = Self::bit_map(info.msb, info.lsb);
                 if self.is_const(i, sid) {
-                    let b = self.const_int(i, sid)?;
-                    let off = if neg { k - b } else { b + k };
+                    let off = match self.const_index(i, sid)? {
+                        Some(b) if neg => k - b,
+                        Some(b) => b + k,
+                        None => -1,
+                    };
                     if off < 0 || off >= info.width as i64 {
                         out.push((None, 1));
                     } else {
@@ -94,7 +100,11 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
             Expr::Range(a, m, l) => {
-                let (mv, lv) = (self.const_int(m, sid)?, self.const_int(l, sid)?);
+                let (Some(mv), Some(lv)) = (self.const_index(m, sid)?, self.const_index(l, sid)?) else {
+                    // an x/z bound: nothing is written
+                    out.push((None, 1));
+                    return Ok(());
+                };
                 let pw = ((mv - lv).abs() + 1) as u32;
                 if let Expr::Index(arr_e, ai) = &**a {
                     if let Some(arr) = self.array_of(arr_e, sid) {
@@ -102,10 +112,19 @@ impl<'a> Compiler<'a> {
                         let ix = self.index_of(ai, sid, false, -info.arr_lo)?;
                         let (neg, k) = Self::bit_map(info.msb, info.lsb);
                         let off = if neg { k - lv } else { lv + k };
-                        if off < 0 || off + pw as i64 > info.width as i64 {
-                            return self.err("part select of array element out of range");
+                        // only the bits inside the element are written
+                        let (lo, hi) = (off.max(0), (off + pw as i64).min(info.width as i64));
+                        if lo >= hi {
+                            out.push((None, pw));
+                            return Ok(());
                         }
-                        out.push((Some(Target::ElemPart { sig: arr, ix, lsb: off as u32, w: pw }), pw));
+                        if off + pw as i64 > hi {
+                            out.push((None, (off + pw as i64 - hi) as u32));
+                        }
+                        out.push((Some(Target::ElemPart { sig: arr, ix, lsb: lo as u32, w: (hi - lo) as u32 }), (hi - lo) as u32));
+                        if lo > off {
+                            out.push((None, (lo - off) as u32));
+                        }
                         return Ok(());
                     }
                 }
@@ -199,7 +218,11 @@ impl<'a> Compiler<'a> {
         let mut reads = Vec::new();
         let v = match &rhs {
             Rhs::Expr(e, sid) => {
-                let v = self.rhs_value(e, *sid, lw)?;
+                let real = match &lhs {
+                    Lhs::Expr(l, ls) => self.lvalue_is_real(l, *ls),
+                    Lhs::Sig(s) => self.sig(*s).real,
+                };
+                let v = self.value_for(e, *sid, lw, real)?;
                 self.reads_expr(e, *sid, &mut reads);
                 v
             }
@@ -895,7 +918,7 @@ impl<'a> Compiler<'a> {
                 self.emit(sys(SysTask::DumpOn(false)));
             }
             "$dumpall" | "$dumpflush" | "$dumplimit" | "$timeformat" | "$printtimescale" => {}
-            "$readmemh" | "$readmemb" => {
+            "$readmemh" | "$readmemb" | "$writememh" | "$writememb" => {
                 let file = match args.first() {
                     Some(Some(e)) => self.file_name(e, sid)?,
                     _ => return self.err(format!("{name}: missing file name")),
@@ -919,7 +942,12 @@ impl<'a> Compiler<'a> {
                 let start = opt(2, self)?;
                 let end = opt(3, self)?;
                 let loc = format!("{}:{}", self.file, self.line);
-                self.emit(sys(SysTask::ReadMem { hex: name == "$readmemh", file, sig, start, end, loc }));
+                let hex = name.ends_with('h');
+                if name.starts_with("$write") {
+                    self.emit(sys(SysTask::WriteMem { hex, file, sig, start, end }));
+                } else {
+                    self.emit(sys(SysTask::ReadMem { hex, file, sig, start, end, loc }));
+                }
             }
             "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
                 // called as a task: the result is dropped

@@ -108,6 +108,11 @@ pub struct Compiler<'a> {
     /// memory limit (words) and the error raised when a declaration exceeds it
     pub(crate) mem_limit_words: u64,
     pub(crate) mem_error: Option<Error>,
+    /// signals given an initial value before time 0 (declaration initializers, constant
+    /// continuous assignments): they get a change event at time 0, as with Icarus
+    init_touch: Vec<u32>,
+    /// the same for nets with constant drivers (their events come first)
+    init_touch_net: Vec<u32>,
     /// defparam overrides by full parameter path
     defparams: HashMap<String, PVal>,
     top_names: HashSet<String>,
@@ -123,6 +128,7 @@ pub struct Compiler<'a> {
     drivers: HashMap<u32, Vec<u32>>,
     /// while compiling a driver of a multi-driven net: net -> this driver's signal
     redirect: HashMap<u32, u32>,
+    dialect: Dialect,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -130,10 +136,28 @@ pub fn compile(modules: &[Module], tops: &[String]) -> Result<(Program, Vec<Stri
     compile_lint(modules, tops, false).map(|(p, w, _)| (p, w))
 }
 
+/// Language rules where Verilog-2005 and SystemVerilog differ.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Dialect {
+    /// Verilog-2005 (`-g2005`): a variable declaration initializer is an assignment at time 0,
+    /// with a change event; in SystemVerilog (the default) it sets the value before time 0
+    pub v2005: bool,
+}
+
 /// Compile and, with `lint`, also collect lint findings: (program, warnings, lint findings).
 pub fn compile_lint(modules: &[Module], tops: &[String], lint: bool) -> Result<(Program, Vec<String>, Vec<String>), Error> {
+    compile_dialect(modules, tops, lint, Dialect::default())
+}
+
+pub fn compile_dialect(
+    modules: &[Module],
+    tops: &[String],
+    lint: bool,
+    dialect: Dialect,
+) -> Result<(Program, Vec<String>, Vec<String>), Error> {
     let mut c = Compiler::new(modules);
     c.lint_enabled = lint;
+    c.dialect = dialect;
     c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
     let top_mods: Vec<&Module> = if tops.is_empty() {
         let mut used = HashSet::new();
@@ -196,6 +220,7 @@ pub fn compile_lint(modules: &[Module], tops: &[String], lint: bool) -> Result<(
         return Err(e);
     }
     c.codegen_jobs()?;
+    c.init_events();
     c.resolve_disables();
     if let Some(e) = c.mem_error.take() {
         return Err(e);
@@ -249,6 +274,9 @@ impl<'a> Compiler<'a> {
                 / 8,
             mem_error: None,
             defparams: HashMap::new(),
+            init_touch: Vec::new(),
+            init_touch_net: Vec::new(),
+            dialect: Dialect::default(),
             top_names: HashSet::new(),
             redirect: HashMap::new(),
         }
@@ -608,6 +636,11 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// A constant index: None when it has x/z bits (such a select reads x, writes nothing).
+    pub(crate) fn const_index(&mut self, e: &Expr, sid: usize) -> R<Option<i64>> {
+        Ok(self.const_eval(e, sid)?.to_i64())
+    }
+
     pub(crate) fn const_int(&mut self, e: &Expr, sid: usize) -> R<i64> {
         let c = self.const_eval(e, sid)?;
         match c.to_i64() {
@@ -934,6 +967,7 @@ impl<'a> Compiler<'a> {
             dir: Option<Dir>,
             kind: NetKind,
             net: NetType,
+            real_net: bool,
             signed: bool,
             range: Option<&'d Range>,
             dims: &'d [Range],
@@ -959,6 +993,7 @@ impl<'a> Compiler<'a> {
                             if d.net != NetType::Wire {
                                 mg.net = d.net;
                             }
+                            mg.real_net |= d.real_net;
                             mg.signed |= d.signed;
                             if d.range.is_some() {
                                 mg.range = d.range.as_ref();
@@ -978,6 +1013,7 @@ impl<'a> Compiler<'a> {
                                     dir: d.dir,
                                     kind: d.kind,
                                     net: d.net,
+                                    real_net: d.real_net,
                                     signed: d.signed,
                                     range: d.range.as_ref(),
                                     dims: &dl.dims,
@@ -1004,6 +1040,10 @@ impl<'a> Compiler<'a> {
                     (msb, lsb) = (31, 0);
                     signed = true;
                     SigKind::Integer
+                }
+                NetKind::Real if mg.real_net => {
+                    (msb, lsb) = (63, 0);
+                    SigKind::Wire
                 }
                 NetKind::Time | NetKind::Real => {
                     (msb, lsb) = (63, 0);
@@ -1124,7 +1164,11 @@ impl<'a> Compiler<'a> {
                     let slot = self.sig(s).slot as usize;
                     self.prog.mem[slot] = r.to_bits();
                     self.prog.mem[slot + 1] = 0;
+                    self.init_touch.push(s);
                 } else {
+                    if depth == 0 {
+                        self.init_touch.push(s);
+                    }
                     let c = self.const_eval(init, sid)?;
                     let c = c.resize(width, c.signed);
                     let slot = self.sig(s).slot as usize;
@@ -1650,6 +1694,52 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// A continuous assignment of a constant to a whole net (or net driver) sets its initial
+    /// value, so processes see it already at time 0, as with Icarus.
+    fn const_assign_init(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<()> {
+        if !matches!(lhs, Expr::Ident(_) | Expr::Hier(_)) || !self.is_const(rhs, sid) || self.is_real(rhs, sid) {
+            return Ok(());
+        }
+        let Some(expr::Base::Sig(s0)) = self.resolve_base(lhs, sid)? else { return Ok(()) };
+        let s = self.redir(s0);
+        let info = self.sig(s).clone();
+        if info.depth != 0 || info.real || info.forced {
+            return Ok(());
+        }
+        let c = self.const_eval(rhs, sid)?;
+        let c = c.resize(info.width, c.signed);
+        let n = rt::nw(info.width);
+        for i in 0..n {
+            self.prog.mem[info.slot as usize + i] = c.a[i];
+            self.prog.mem[info.slot as usize + n + i] = c.b[i];
+        }
+        self.init_touch_net.push(s);
+        if s != s0 {
+            self.init_touch_net.push(s0);
+        }
+        Ok(())
+    }
+
+    /// The time-0 change events of initial values: a process that runs after all others have
+    /// started.
+    fn init_events(&mut self) {
+        let mut v = std::mem::take(&mut self.init_touch_net);
+        if self.dialect.v2005 {
+            v.append(&mut self.init_touch);
+        }
+        let mut seen = HashSet::new();
+        v.retain(|s| seen.insert(*s));
+        if v.is_empty() {
+            return;
+        }
+        self.begin_proc("$init".into(), ProcClass::Normal);
+        for sig in v {
+            self.emit(Instr::Touch { sig });
+        }
+        self.emit(Instr::Halt);
+        self.end_proc();
+    }
+
     fn codegen_job(&mut self, job: &Job<'a>) -> R<()> {
         {
             match job {
@@ -1695,6 +1785,9 @@ impl<'a> Compiler<'a> {
                 Job::Assign { lhs, rhs, delay, scope, line } => {
                     self.line = *line;
                     self.file = self.scopes[*scope].file.clone();
+                    if delay.is_none() {
+                        self.const_assign_init(lhs, rhs, *scope)?;
+                    }
                     self.assign_proc(stmt::Lhs::Expr(lhs, *scope), stmt::Rhs::Expr(rhs, *scope), delay.as_ref())?;
                 }
                 Job::PortIn { child_sig, expr, scope, line } => {

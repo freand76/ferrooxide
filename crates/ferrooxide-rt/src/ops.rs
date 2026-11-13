@@ -824,9 +824,10 @@ pub fn mux(m: &mut [u64], d: usize, c: usize, cw: u32, t: usize, f: usize, w: u3
             let n = nw(w);
             for i in 0..n {
                 let (ta, tb, fa, fb) = (m[t + i], m[t + n + i], m[f + i], m[f + n + i]);
-                let x = tb | fb | (ta ^ fa);
-                m[d + i] = ta | x;
-                m[d + n + i] = x;
+                // bits where both sides agree (also z) are kept, the others become x
+                let diff = (ta ^ fa) | (tb ^ fb);
+                m[d + i] = ta | diff;
+                m[d + n + i] = tb | diff;
             }
         }
     }

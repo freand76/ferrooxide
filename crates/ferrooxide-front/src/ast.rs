@@ -81,6 +81,8 @@ pub struct Decl {
     pub net: NetType,
     /// true if the kind was given explicitly (e.g. `output reg`) vs. implied
     pub explicit_kind: bool,
+    /// `wire real`: a real-valued net
+    pub real_net: bool,
     pub signed: bool,
     pub range: Option<Range>,
     pub names: Vec<Declarator>,

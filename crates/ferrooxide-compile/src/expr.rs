@@ -150,10 +150,11 @@ impl<'a> Compiler<'a> {
                     (1, false)
                 }
             }
-            Expr::Range(_, m, l) => {
-                let (m, l) = (self.const_int(m, sid)?, self.const_int(l, sid)?);
-                (((m - l).abs() + 1) as u32, false)
-            }
+            Expr::Range(_, m, l) => match (self.const_index(m, sid)?, self.const_index(l, sid)?) {
+                (Some(m), Some(l)) => (((m - l).abs() + 1) as u32, false),
+                // an x/z bound: a 1-bit x
+                _ => (1, false),
+            },
             Expr::IndexedRange(_, _, w, _) => (self.const_int(w, sid)? as u32, false),
             Expr::Unary(op, a) => match op {
                 UnOp::Plus | UnOp::Neg | UnOp::Not => self.ty(a, sid)?,
@@ -354,7 +355,16 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(d, 1, w, false))
             }
             Expr::Range(a, m, l) => {
-                let (mv, lv) = (self.const_int(m, sid)?, self.const_int(l, sid)?);
+                let (Some(mv), Some(lv)) = (self.const_index(m, sid)?, self.const_index(l, sid)?) else {
+                    // an x/z bound: all x (also in a wider context, like Icarus)
+                    let n = rt::nw(w);
+                    let mut a = vec![u64::MAX; n];
+                    if w % 64 != 0 {
+                        a[n - 1] = (1u64 << (w % 64)) - 1;
+                    }
+                    let x = Const { w, signed: false, a: a.clone(), b: a };
+                    return Ok(self.const_slot(&x));
+                };
                 let (bs, bw, msb, lsb) = self.vec_base(a, sid)?;
                 let (neg, k) = Self::bit_map(msb, lsb);
                 let pw = ((mv - lv).abs() + 1) as u32;

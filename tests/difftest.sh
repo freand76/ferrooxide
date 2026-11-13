@@ -18,11 +18,13 @@ for f in "${files[@]}"; do
   args="$(sed -n 's|^// args:||p' "$f" | head -1)"
   # optional Icarus flags: a line "// iverilog: -g2005" (default -g2012)
   iflags="$(sed -n 's|^// iverilog:||p' "$f" | head -1)"
+  # the same language generation for ferrooxide
+  gflag=""; case " $iflags " in *" -g2005 "*) gflag="-g2005";; esac
   # each simulator runs in its own directory: tests may write (and read back) files
   rm -rf "$tmp/iv" "$tmp/fx"; mkdir -p "$tmp/iv" "$tmp/fx"
   ( cd "$(dirname "$f")" && iverilog ${iflags:--g2012} -o "$tmp/$name.vvp" "$f" 2>"$tmp/$name.ierr" ) || { echo "SKIP $name (iverilog failed)"; continue; }
   ( cd "$tmp/iv" && vvp -n "$tmp/$name.vvp" $args 2>&1 | grep -v -e '\$finish called' -e '\$stop called' > "$tmp/$name.exp" )
-  ( cd "$tmp/fx" && timeout 60 "$bin" ${FX_FLAGS:-} "$f" $args 2>"$tmp/$name.err" | grep -v -e '\$finish called' -e '\$stop called' > "$tmp/$name.out" )
+  ( cd "$tmp/fx" && timeout 60 "$bin" ${FX_FLAGS:-} $gflag "$f" $args 2>"$tmp/$name.err" | grep -v -e '\$finish called' -e '\$stop called' > "$tmp/$name.out" )
   if diff -u "$tmp/$name.exp" "$tmp/$name.out" > "$tmp/$name.diff"; then
     pass=$((pass+1))
   else

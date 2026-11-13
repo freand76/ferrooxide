@@ -72,6 +72,7 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
 | M7 | FST output, VPI-lite, better diagnostics | |
 | M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | planned (see notes) |
+| M10 | MCP server: the simulator as a tool for AI agents (load, run, inspect, force, waveforms, lint) | planned (see notes) |
 | M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
 
 ## Road to full Verilog-2005 (notes)
@@ -159,6 +160,49 @@ and diagnostics for an inclusive time interval, optionally collapsed to one samp
 
 Open questions: exact client behaviour (Surfer's CDSP support and which encodings it accepts),
 how large a history is useful by default, and whether to expose x/z before the spec defines it.
+
+## M10: MCP server (notes)
+
+The Model Context Protocol (https://modelcontextprotocol.io) lets an AI agent (Claude Code,
+other MCP clients) call tools of a server. Exposing ferrooxide this way lets an agent debug a
+design by running and probing it instead of reading logs and dumping huge VCDs.
+
+**Transport.** `ferrooxide --mcp` speaks JSON-RPC 2.0 over stdio (the standard local transport;
+streamable HTTP later). No design on the command line needed: the agent loads one through a tool.
+Use an existing Rust MCP SDK if it is mature (e.g. the official `rmcp` crate), else implement
+the small subset (initialize, tools/list, tools/call, resources) by hand.
+
+**Shares the M9 core.** Simulation thread + command channel checked between time steps, the
+hierarchy model, the change-log history and diagnostics capture are the same as for CDSP; MCP and
+CDSP are two front ends. Build that core once (M9 step 1-3), then add whichever front end first.
+
+**Tools (first cut).**
+- `load_design {files, defines, include_dirs, top, plusargs, dialect}` → top scopes, warnings and
+  compile errors with file:line (an agent's edit-compile loop wants these structured).
+- `lint` → incomplete sensitivity lists etc. (existing `--lint`).
+- `run {until_time | for_time | until_condition, max_steps}` → stop reason, current time,
+  `$display` output produced meanwhile (truncated, with a count).
+- `list_scopes {scope}` / `list_signals {scope, pattern}` → names, widths, directions, kinds.
+- `get_values {signals, radix}` → current 4-state values (x/z shown as in `$display`).
+- `get_history {signals, from, to, max_changes}` → value changes (from the change log), so an
+  agent can ask "when did `state` change before `err` rose?" without a VCD.
+- `set_value {signal, value}` (deposit), `force {signal, value}`, `release {signal}` → existing
+  force masks.
+- `add_breakpoint {condition}` (expression over signals, compiled like a `wait`), `list` /
+  `remove_breakpoint`; `run` stops on them.
+- `dump_vcd {file, scopes, from, to}` → write a VCD for a human (or a viewer) from history.
+- `reset` / `restart` (re-elaborate) and `status` (time, finished, memory use).
+
+**Resources.** Source files of the loaded design, the elaborated hierarchy, the simulation log.
+
+**Agent-oriented details.** Every result small and bounded (agents pay per token): truncation
+with counts, pattern filters, no unbounded dumps. Errors as structured content with locations.
+Deterministic (same commands → same results), long runs cancellable, memory budget for history
+(same rules as the rest: an out-of-memory crash takes the client down with it).
+
+Open questions: one server per design or several sessions; whether conditions/breakpoints use
+the normal expression compiler (likely: compile to a small process that wakes on the signals);
+how to present large memories.
 
 ## Testing strategy
 - `tests/verilog/*.v`: self-contained testbenches. `tests/difftest.sh` runs each through `iverilog`+`vvp`

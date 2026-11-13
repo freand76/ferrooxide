@@ -450,7 +450,13 @@ impl Parser {
         let mut explicit_kind = false;
         let mut signed = false;
         let mut net = NetType::Wire;
+        let mut real_net = false;
+        // `input bit;`: a SystemVerilog type name used as the port name
+        let sv_name = dir.is_some() && self.sv_ident_here();
         if let Tok::Ident(s) = self.peek().clone() {
+            if sv_name {
+                return Ok(Decl { dir, kind, net, explicit_kind, real_net: false, signed, range: None, names: vec![], line });
+            }
             net = match s.as_str() {
                 "tri0" => NetType::Tri0,
                 "tri1" => NetType::Tri1,
@@ -488,6 +494,11 @@ impl Parser {
                 if self.is_kw("logic") || self.is_kw("reg") {
                     self.bump();
                 }
+                // `wire real`: a real-valued net
+                if kind == NetKind::Wire && self.eat_kw("real") {
+                    kind = NetKind::Real;
+                    real_net = true;
+                }
                 // drive / charge strength of a net declaration
                 self.skip_strength()?;
             }
@@ -502,7 +513,7 @@ impl Parser {
         if self.eat_p("#") {
             self.delay_value()?;
         }
-        Ok(Decl { dir, kind, net, explicit_kind, signed, range, names: Vec::new(), line })
+        Ok(Decl { dir, kind, net, explicit_kind, real_net, signed, range, names: Vec::new(), line })
     }
 
     fn declarators(&mut self) -> Result<Vec<Declarator>> {
@@ -1689,6 +1700,22 @@ impl Parser {
                     return Ok(Expr::Call(name, args));
                 }
                 let base = self.hier_tail(name)?;
+                if let (Expr::Hier(parts), true) = (&base, self.is_p("(")) {
+                    // hierarchical function call: inst.f(args)
+                    let name = parts.join(".");
+                    self.bump();
+                    let mut args = Vec::new();
+                    if !self.is_p(")") {
+                        loop {
+                            args.push(self.expr()?);
+                            if !self.eat_p(",") {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_p(")")?;
+                    return Ok(Expr::Call(name, args));
+                }
                 return self.selects(base);
             }
             _ => {

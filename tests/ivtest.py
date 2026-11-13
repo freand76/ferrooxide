@@ -56,6 +56,9 @@ def run(t, root, timeout):
     src = os.path.join(".", t["dir"], t["name"] + ".v")
     args = [FX]
     plargs = []
+    # Icarus's default generation is Verilog-2005
+    if not any(o.startswith("-g2005-sv") or o.startswith("-g2009") or o.startswith("-g2012") or o.startswith("-g2017") for o in t["opts"]):
+        args.append("-g2005")
     for o in t["opts"]:
         if o.startswith("+"):
             plargs.append(o)

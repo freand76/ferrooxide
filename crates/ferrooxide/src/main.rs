@@ -14,6 +14,7 @@ options:
   --dump-code       print the compiled bytecode to stderr
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
+  -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help";
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
     let mut jit = true;
     let mut fuse = true;
     let mut lint = false;
+    let mut dialect = ferrooxide_compile::Dialect::default();
     let mut max_time = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -67,6 +69,8 @@ fn main() -> ExitCode {
             "--no-jit" => jit = false,
             "--no-fuse" => fuse = false,
             "--lint" => lint = true,
+            "-g2005" | "-g2001" | "-g1995" => dialect.v2005 = true,
+            "-g2005-sv" | "-g2009" | "-g2012" | "-g2017" => dialect.v2005 = false,
             _ if a.starts_with("-D") => {
                 let v = &a[2..];
                 let (k, v) = v.split_once('=').unwrap_or((v, "1"));
@@ -95,7 +99,7 @@ fn main() -> ExitCode {
         }
     };
     let t1 = Instant::now();
-    let (mut prog, warnings, findings) = match ferrooxide_compile::compile_lint(&modules, &tops, lint) {
+    let (mut prog, warnings, findings) = match ferrooxide_compile::compile_dialect(&modules, &tops, lint, dialect) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");

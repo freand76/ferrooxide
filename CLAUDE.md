@@ -32,6 +32,11 @@ instructions, notifies), `FX_MAX_MEM_MB` (design memory limit, default 2048).
   2 GB and runs 4 at a time.
 - Commit finished, tested steps locally; push only when asked.
 
+## Icarus quirks
+`ICARUS_NOTES.md` lists places where Icarus seems to deviate from the standard (we match it);
+add to it when you find one. ferrooxide defaults to SystemVerilog rules; `-g2005` selects
+Verilog-2005 where they differ (ivtest.py passes it unless a test asks for SV).
+
 ## Invariants worth knowing
 - Value = `nw` value words + `nw` unknown words (00=0, 10=1, 01=z, 11=x); bits above the width
   are always 0. Slots below `Program::scratch_words` are shared temporaries, dead at every

@@ -119,7 +119,7 @@ pub fn fmt_dec(v: &Val, pad: bool) -> String {
     format!("{:>width$}", s, width = width)
 }
 
-fn fmt_radix(v: &Val, bits_per: u32, pad: bool) -> String {
+pub fn fmt_radix(v: &Val, bits_per: u32, pad: bool) -> String {
     let ndig = v.w.div_ceil(bits_per).max(1);
     let mut out = Vec::with_capacity(ndig as usize);
     for dgt in (0..ndig).rev() {
@@ -167,10 +167,37 @@ fn fmt_str(v: &Val) -> String {
         for i in 0..8 {
             let bit = k * 8 + i;
             if bit < v.w {
-                byte |= (v.bit(bit).0 as u32) << i;
+                // x/z bits count as 0 (as in Icarus)
+                let (a, b) = v.bit(bit);
+                byte |= ((a & !b & 1) as u32) << i;
             }
         }
         if byte != 0 {
+            s.push(char::from_u32(byte).unwrap_or('?'));
+        }
+    }
+    s
+}
+
+/// %s: one character per byte, NUL (or unknown) bytes as spaces; without padding (%0s) the
+/// leading NUL bytes are dropped. As Icarus does it.
+fn fmt_disp_str(v: &Val, pad: bool) -> String {
+    let mut s = String::new();
+    let nbytes = v.w.div_ceil(8);
+    for k in (0..nbytes).rev() {
+        let mut byte = 0u32;
+        for i in 0..8 {
+            let bit = k * 8 + i;
+            if bit < v.w {
+                let (a, b) = v.bit(bit);
+                byte |= ((a & !b & 1) as u32) << i;
+            }
+        }
+        if byte == 0 {
+            if pad || !s.is_empty() {
+                s.push(' ');
+            }
+        } else {
             s.push(char::from_u32(byte).unwrap_or('?'));
         }
     }
@@ -301,7 +328,7 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 'o' => fmt_radix(&v, 3, pad),
                                 'h' | 'x' => fmt_radix(&v, 4, pad),
                                 'c' => fmt_char(&v),
-                                's' => fmt_str(&v),
+                                's' => fmt_disp_str(&v, pad),
                                 't' => {
                                     let s = scaled_time(&v, texp);
                                     if pad {

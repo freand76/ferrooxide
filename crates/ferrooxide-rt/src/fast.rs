@@ -330,7 +330,7 @@ fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::H
             let i = &sigs[sig as usize];
             Op::ArrRead1 { d, base: i.slot, ix: ix.slot, depth: i.depth }
         }
-        I::DynSlice { d, s, sw, ix, w } if plain(&ix) && sw <= 64 && w <= 64 => {
+        I::DynSlice { d, s, sw, ix, w } if plain(&ix) && sw <= 64 && w <= sw => {
             Op::DynSlice1 { d, s, ix: ix.slot, w: w as u8, sw: sw as u8 }
         }
         I::Red { op: RedOp::Nor, d, s, w } if w <= 64 => Op::LNot1 { d, s },
