@@ -1663,6 +1663,19 @@ impl Parser {
                 return Some(format!("{name}[{v}]"));
             }
         }
+        // a computed index (genvar expression): kept aside, resolved during elaboration
+        self.pos = save;
+        self.eat_p("[");
+        if let Ok(e) = self.expr() {
+            if self.eat_p("]") && self.is_p(".") && matches!(self.peek_at(1), Tok::Ident(_)) {
+                let n = HIER_INDEX.with(|h| {
+                    let mut h = h.borrow_mut();
+                    h.push(e);
+                    h.len() - 1
+                });
+                return Some(format!("{name}[@{n}]"));
+            }
+        }
         self.pos = save;
         None
     }
@@ -1936,6 +1949,17 @@ fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
         }
     }
     out
+}
+
+thread_local! {
+    /// Index expressions of hierarchical-name segments that are not literals (`blk[i].x`): the
+    /// segment is stored as `blk[@N]` and resolved by the compiler in the referencing scope.
+    static HIER_INDEX: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The index expression of a `name[@N]` hierarchical-name segment.
+pub fn hier_index_expr(n: usize) -> Option<Expr> {
+    HIER_INDEX.with(|h| h.borrow().get(n).cloned())
 }
 
 pub fn dec(v: u64) -> Number {

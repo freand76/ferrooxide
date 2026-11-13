@@ -130,6 +130,11 @@ pub struct Compiler<'a> {
     init_touch_net: Vec<u32>,
     /// defparam overrides by full parameter path
     defparams: HashMap<String, PVal>,
+    /// parameters already evaluated (full paths), a defparam for one of them came too late,
+    /// and whether this is the second elaboration
+    params_done: HashSet<String>,
+    late_defparam: bool,
+    restarted: bool,
     top_names: HashSet<String>,
     /// UDP name -> index of its runtime table
     pub(crate) udp_index: HashMap<String, u32>,
@@ -180,10 +185,6 @@ pub fn compile_dialect(
     lint: bool,
     dialect: Dialect,
 ) -> Result<(Program, Vec<String>, Vec<String>), Error> {
-    let mut c = Compiler::new(modules);
-    c.lint_enabled = lint;
-    c.dialect = dialect;
-    c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
     let top_mods: Vec<&Module> = if tops.is_empty() {
         let mut used = HashSet::new();
         fn scan<'b>(items: &'b [Item], used: &mut HashSet<&'b str>) {
@@ -225,6 +226,18 @@ pub fn compile_dialect(
     if top_mods.is_empty() {
         return Err(Error { msg: "no top-level module found".into(), file: String::new(), line: 0 });
     }
+    // elaboration; a defparam found after its target parameter was evaluated restarts it once,
+    // with all defparams known from the start
+    let mut seed: Option<HashMap<String, PVal>> = None;
+    let mut c = loop {
+    let mut c = Compiler::new(modules);
+    c.lint_enabled = lint;
+    c.dialect = dialect;
+    c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
+    if let Some(sd) = &seed {
+        c.defparams = sd.clone();
+        c.restarted = true;
+    }
     c.top_names = top_mods.iter().map(|m| m.name.clone()).collect();
     // defparams in top modules that reach into other top modules must be known before those
     // are elaborated: evaluate them in a scratch copy of their module's parameters
@@ -237,10 +250,16 @@ pub fn compile_dialect(
             c.file = saved;
         }
     }
-    for m in top_mods {
+    for m in &top_mods {
         let sid = c.instantiate(m, m.name.clone(), &[], None)?;
         c.tops.insert(m.name.clone(), sid);
     }
+    if c.late_defparam && seed.is_none() {
+        seed = Some(c.defparams.clone());
+        continue;
+    }
+    break c;
+    };
     if let Some(e) = c.mem_error.take() {
         return Err(e);
     }
@@ -299,6 +318,9 @@ impl<'a> Compiler<'a> {
                 / 8,
             mem_error: None,
             defparams: HashMap::new(),
+            params_done: HashSet::new(),
+            late_defparam: false,
+            restarted: false,
             init_touch: Vec::new(),
             init_touch_net: Vec::new(),
             dialect: Dialect::default(),
@@ -555,16 +577,41 @@ impl<'a> Compiler<'a> {
 
     /// Resolve a hierarchical path a.b.c to a symbol.
     pub(crate) fn lookup_hier(&self, parts: &[String], sid: usize) -> Option<Sym> {
+        let parts = &self.hier_parts(parts, sid)?;
         let cur = self.hier_scope(&parts[..parts.len() - 1], sid)?;
         self.scopes[cur].syms.get(parts.last().unwrap()).cloned()
     }
 
     /// The scope named by a hierarchical path (instance names), searched from `sid` upwards and
     /// then from the top-level modules.
+    /// Hierarchical-name segments with computed indices (`blk[@N]`) evaluated in scope `sid`.
+    pub(crate) fn hier_parts(&self, parts: &[String], sid: usize) -> Option<Vec<String>> {
+        let mut out = Vec::with_capacity(parts.len());
+        for p in parts {
+            match p.find("[@") {
+                Some(i) if p.ends_with(']') => {
+                    let n: usize = p[i + 2..p.len() - 1].parse().ok()?;
+                    let e = ferrooxide_front::parser::hier_index_expr(n)?;
+                    let v = self.const_value(&e, sid)?;
+                    out.push(format!("{}[{v}]", &p[..i]));
+                }
+                _ => out.push(p.clone()),
+            }
+        }
+        Some(out)
+    }
+
     pub(crate) fn hier_scope(&self, parts: &[String], sid: usize) -> Option<usize> {
         if parts.is_empty() {
             return Some(sid);
         }
+        let normalized;
+        let parts = if parts.iter().any(|p| p.contains("[@")) {
+            normalized = self.hier_parts(parts, sid)?;
+            &normalized[..]
+        } else {
+            parts
+        };
         // find the scope for parts[0]
         let mut s = Some(sid);
         let mut start = None;
@@ -660,9 +707,17 @@ impl<'a> Compiler<'a> {
                     BinOp::Add => Some(a + b),
                     BinOp::Sub => Some(a - b),
                     BinOp::Mul => Some(a * b),
+                    BinOp::Div if b != 0 => Some(a / b),
+                    BinOp::Mod if b != 0 => Some(a % b),
+                    BinOp::And => Some(a & b),
+                    BinOp::Or => Some(a | b),
+                    BinOp::Xor => Some(a ^ b),
+                    BinOp::Shl if (0..63).contains(&b) => Some(a << b),
+                    BinOp::Shr if (0..63).contains(&b) => Some(a >> b),
                     _ => None,
                 }
             }
+            Expr::Unary(UnOp::Neg, a) => Some(-self.const_value(a, sid)?),
             _ => None,
         }
     }
@@ -824,9 +879,11 @@ impl<'a> Compiler<'a> {
                     pos += 1;
                 }
                 if !p.local {
-                    if let Some(d) = self.defparams.get(&format!("{}.{}", self.scopes[sid].name, p.name)) {
+                    let key = format!("{}.{}", self.scopes[sid].name, p.name);
+                    if let Some(d) = self.defparams.get(&key) {
                         ov = Some(d.clone());
                     }
+                    self.params_done.insert(key);
                 }
                 let v = self.param_value(p, ov, sid)?;
                 self.scopes[sid].syms.insert(p.name.clone(), v);
@@ -844,6 +901,11 @@ impl<'a> Compiler<'a> {
         for it in items {
             let Item::Defparam { target, value, line } = it else { continue };
             self.line = *line;
+            // generate-loop indices in the path (`Loop[i].m.p`)
+            let target = &match self.hier_parts(target, sid) {
+                Some(t) => t,
+                None => return self.err(format!("defparam: cannot evaluate '{}'", target.join("."))),
+            };
             let v = self.pval(value, sid)?;
             let rel = target.join(".");
             // upwards: the first component names this scope or an enclosing one
@@ -860,11 +922,39 @@ impl<'a> Compiler<'a> {
                 }
                 s = self.scopes[x].parent;
             }
+            // relative: to this scope if it declares the first name (an instance or generate
+            // block), else to the nearest enclosing scope that has it, else to the module
+            let first = target[0].split('[').next().unwrap_or("");
+            let declares = |its: &[Item]| {
+                its.iter().any(|i| match i {
+                    Item::Instances { insts, .. } => insts.iter().any(|x| x.name == first),
+                    Item::GenFor { name: Some(name), .. } | Item::GenBlock { name: Some(name), .. } => name == first,
+                    Item::GenIf { .. } | Item::GenCase { .. } => true,
+                    _ => false,
+                })
+            };
+            let rel_base = if declares(items) {
+                sid
+            } else {
+                let mut x = sid;
+                loop {
+                    if self.scopes[x].children.contains_key(&target[0]) {
+                        break x;
+                    }
+                    match self.scopes[x].parent {
+                        Some(p) => x = p,
+                        None => break x,
+                    }
+                }
+            };
             let key = match base {
                 Some(k) => k,
                 None if self.top_names.contains(&target[0]) && target.len() > 1 => rel,
-                None => format!("{}.{rel}", self.scopes[sid].name),
+                None => format!("{}.{rel}", self.scopes[rel_base].name),
             };
+            if !self.restarted && self.params_done.contains(&key) && !self.defparams.contains_key(&key) {
+                self.late_defparam = true;
+            }
             self.defparams.insert(key, v);
         }
         Ok(())
