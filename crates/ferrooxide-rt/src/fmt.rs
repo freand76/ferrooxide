@@ -1,6 +1,57 @@
 //! $display-style formatting, compatible with Icarus Verilog output.
 
 use crate::{nw, FmtArg};
+use std::cell::RefCell;
+
+/// `$timeformat` settings: (units exponent, precision, suffix, minimum width), and the
+/// simulation precision exponent. None: %t prints simulation ticks.
+#[derive(Clone, Debug)]
+pub struct TimeFormat {
+    pub units: i32,
+    pub prec: usize,
+    pub suffix: String,
+    pub width: usize,
+}
+
+thread_local! {
+    static TIME_FORMAT: RefCell<(Option<TimeFormat>, i32)> = const { RefCell::new((None, 0)) };
+}
+
+/// Set by the simulator: the simulation precision (power of ten of seconds).
+pub fn set_precision(p: i32) {
+    TIME_FORMAT.with(|t| t.borrow_mut().1 = p);
+}
+
+/// `$timeformat` (None: the default).
+pub fn set_time_format(f: Option<TimeFormat>) {
+    TIME_FORMAT.with(|t| t.borrow_mut().0 = f);
+}
+
+/// %t of a time in simulation ticks, with the `$timeformat` settings if any.
+fn fmt_time(ticks: f64, int: Option<String>, pad: bool) -> String {
+    TIME_FORMAT.with(|t| {
+        let t = t.borrow();
+        match &t.0 {
+            Some(f) => {
+                let v = ticks * 10f64.powi(t.1 - f.units);
+                let s = format!("{:.*}{}", f.prec, v, f.suffix);
+                if pad {
+                    format!("{:>w$}", s, w = f.width)
+                } else {
+                    s
+                }
+            }
+            None => {
+                let s = int.unwrap_or_else(|| format!("{}", ticks as i128));
+                if pad {
+                    format!("{:>20}", s)
+                } else {
+                    s
+                }
+            }
+        }
+    })
+}
 
 /// A value view: planes (aval, bval) as word vectors.
 pub struct Val<'a> {
@@ -294,13 +345,8 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 // an infinite (or NaN) real prints as such also with %d
                                 'd' if !r.is_finite() => fmt_real(r, 'f', 0),
                                 't' => {
-                                    let t = (r * 10f64.powi(texp as i32)).round();
-                                    let s = format!("{}", t as i128);
-                                    if pad {
-                                        format!("{:>20}", s)
-                                    } else {
-                                        s
-                                    }
+                                    let t = r * 10f64.powi(texp as i32);
+                                    fmt_time(t, Some(format!("{}", t.round() as i128)), pad)
                                 }
                                 's' | 'c' => String::new(),
                                 'b' | 'o' | 'h' | 'x' => {
@@ -341,7 +387,10 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 's' => fmt_disp_str(&v, pad),
                                 't' => {
                                     let s = scaled_time(&v, texp);
-                                    if pad {
+                                    if v.known() && v.w <= 64 {
+                                        let t = v.a[0] as f64 * 10f64.powi(texp as i32);
+                                        fmt_time(t, Some(s), pad)
+                                    } else if pad {
                                         format!("{:>20}", s)
                                     } else {
                                         s

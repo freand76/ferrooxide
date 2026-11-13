@@ -435,6 +435,8 @@ pub enum SysTask {
     /// `mode`: "r", "w", "a" (+ "b"/"+"); without a mode the file is opened for writing
     FOpen { d: u32, dw: u32, file: FileName, mode: String },
     FClose { s: u32, loc: String },
+    /// `$timeformat(units, precision, suffix, min_width)`; None resets the default
+    TimeFormat(Option<fmt::TimeFormat>),
     /// d (1 bit) = some plusarg starts with `prefix`
     TestPlusargs { d: u32, prefix: String },
     /// d (1 bit) = a plusarg `<prefix><value>` exists; its value, converted by `conv`

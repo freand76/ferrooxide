@@ -899,6 +899,90 @@ impl<'a> Compiler<'a> {
                 self.emit(sys(SysTask::SFormat { d, w: vw, args: fargs, scope, texp, radix }));
                 self.store_value(&Lhs::Expr(var, sid), d, vw, StoreMode::Blocking)?;
             }
+            "$timeformat" => {
+                let f = if args.is_empty() {
+                    None
+                } else {
+                    let int = |c: &mut Self, i: usize, d: i64| -> R<i64> {
+                        match args.get(i) {
+                            Some(Some(e)) => c.const_int(e, sid),
+                            _ => Ok(d),
+                        }
+                    };
+                    let units = int(self, 0, self.gprec as i64)? as i32;
+                    let prec = int(self, 1, 0)?.max(0) as usize;
+                    let suffix = match args.get(2) {
+                        Some(Some(Expr::Str(s))) => s.clone(),
+                        Some(Some(_)) => return self.err("$timeformat: the suffix must be a string literal"),
+                        _ => String::new(),
+                    };
+                    let width = int(self, 3, 20)?.max(0) as usize;
+                    Some(rt::fmt::TimeFormat { units, prec, suffix, width })
+                };
+                self.emit(sys(SysTask::TimeFormat(f)));
+            }
+            "$printtimescale" => {
+                // resolved now: the unit and precision of the module the named object is in;
+                // the name is printed as given (bit selects of vectors as [i:i])
+                let (target, item) = match args.first() {
+                    Some(Some(e)) => {
+                        let (base, sel) = match e {
+                            Expr::Index(b, i) => (&**b, Some(&**i)),
+                            _ => (e, None),
+                        };
+                        let parts: Vec<String> = match base {
+                            Expr::Ident(n) => vec![n.clone()],
+                            Expr::Hier(p) => p.clone(),
+                            _ => return self.err("$printtimescale needs a scope name"),
+                        };
+                        // the longest prefix that names a scope
+                        let mut t = None;
+                        for k in (0..=parts.len()).rev() {
+                            if let Some(x) = self.hier_scope(&parts[..k], sid) {
+                                t = Some((x, k));
+                                break;
+                            }
+                        }
+                        let Some((t, k)) = t else {
+                            return self.err(format!("$printtimescale: unknown scope '{}'", parts.join(".")));
+                        };
+                        let mut name = self.scopes[t].name.clone();
+                        for p in &parts[k..] {
+                            name = format!("{name}.{p}");
+                        }
+                        if let Some(i) = sel {
+                            let iv = self.const_value(i, sid).unwrap_or(0);
+                            let is_array = matches!(self.resolve_base(base, sid), Ok(Some(expr::Base::Sig(s))) if self.sig(s).depth > 0);
+                            name = if is_array { format!("{name}[{iv}]") } else { format!("{name}[{iv}:{iv}]") };
+                        }
+                        (t, Some(name))
+                    }
+                    _ => {
+                        // the enclosing module instance
+                        let mut t = sid;
+                        while let Some(p) = self.scopes[t].parent {
+                            t = p;
+                        }
+                        (t, None)
+                    }
+                };
+                let unit = |e: i32| -> String {
+                    let base = ["s", "ms", "us", "ns", "ps", "fs"][(-e.div_euclid(3)).clamp(0, 5) as usize];
+                    format!("{}{base}", ["1", "10", "100"][e.rem_euclid(3) as usize])
+                };
+                let sc = &self.scopes[target];
+                let name = item.unwrap_or_else(|| sc.name.clone());
+                let msg = format!("Time scale of ({name}) is {} / {}", unit(sc.tunit), unit(sc.tprec));
+                self.emit(sys(SysTask::Display {
+                    nl: true,
+                    args: vec![rt::FmtArg::Lit(msg.replace('%', "%%"))],
+                    scope,
+                    fd: None,
+                    prefix: "",
+                    texp: 0,
+                    radix: 'd',
+                }));
+            }
             "$monitoron" => {
                 self.emit(sys(SysTask::MonitorOn(true)));
             }
@@ -925,7 +1009,7 @@ impl<'a> Compiler<'a> {
             "$dumpoff" => {
                 self.emit(sys(SysTask::DumpOn(false)));
             }
-            "$dumpall" | "$dumpflush" | "$dumplimit" | "$timeformat" | "$printtimescale" => {}
+            "$dumpall" | "$dumpflush" | "$dumplimit" => {}
             "$readmemh" | "$readmemb" | "$writememh" | "$writememb" => {
                 let file = match args.first() {
                     Some(Some(e)) => self.file_name(e, sid)?,

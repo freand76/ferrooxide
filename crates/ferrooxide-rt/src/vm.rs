@@ -443,6 +443,8 @@ impl Sim {
 
     /// Run until no events remain, $finish, or `max_time` is passed.
     pub fn run(&mut self, max_time: Option<u64>) {
+        fmt::set_precision(self.prog.precision);
+        fmt::set_time_format(None);
         // combinational processes first: they evaluate (assigns) or reach their first wait
         // (always @*) before any other process can change their inputs at time 0
         for i in 0..self.nprocs as usize {
@@ -1817,6 +1819,7 @@ impl Sim {
                 }
             }
             SysTask::MonitorOn(on) => self.monitor_on = *on,
+            SysTask::TimeFormat(f) => fmt::set_time_format(f.clone()),
             SysTask::Strobe { proc } => {
                 self.procs[*proc as usize].pc = 0;
                 self.postponed.push(*proc);

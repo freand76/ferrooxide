@@ -96,7 +96,9 @@ def run(t, root, timeout):
             gold = open(os.path.join(root, t["gold"]), errors="replace").read().replace("\r\n", "\n").splitlines()
         except OSError:
             return "FAIL", "missing gold"
-        lines = out.splitlines()
+        # vvp_reg.pl logs the compiler's and vvp's output, stderr included: our stderr
+        # (compile warnings) comes first
+        lines = err.splitlines() + out.splitlines()
         ok = sorted(gold) == sorted(lines) if t["unordered"] else gold == lines
         return ("PASS", "") if ok else ("FAIL", "output differs from gold" + (": " + errline if errline else ""))
     if any(re.match(r"^\s*passed\s*$", l, re.I) for l in out.splitlines()):
