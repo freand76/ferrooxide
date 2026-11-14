@@ -870,6 +870,15 @@ fn emit_proc(b: &mut FunctionBuilder, r: &Refs, shape: &Shape, proc_size: u32) {
                 }
                 goto_next(b);
             }
+            Op::To21 { d, s } => {
+                let (a, x) = (ld(b, s), ld(b, s + 1));
+                let nx = b.ins().bnot(x);
+                let r = b.ins().band(a, nx);
+                st(b, d, r);
+                let z = c64(b, 0);
+                st(b, d + 1, z);
+                goto_next(b);
+            }
             Op::Not1 { d, s, w } => {
                 let m = c64(b, mk(w));
                 let (a, x) = (ld(b, s), ld(b, s + 1));

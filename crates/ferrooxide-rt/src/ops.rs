@@ -308,6 +308,10 @@ pub fn unop(m: &mut [u64], op: UnOp, d: usize, s: usize, w: u32) {
                     m[d + 1] = 0;
                 }
             }
+            UnOp::To2 => {
+                m[d] = a & !b;
+                m[d + 1] = 0;
+            }
         }
         return;
     }
@@ -324,6 +328,10 @@ pub fn unop(m: &mut [u64], op: UnOp, d: usize, s: usize, w: u32) {
                 let r = w_neg(&a);
                 store_plane(m, d, w, &r, &[]);
             }
+        }
+        UnOp::To2 => {
+            let ra: Vec<u64> = a.iter().zip(&b).map(|(x, y)| x & !y).collect();
+            store_plane(m, d, w, &ra, &[]);
         }
     }
 }

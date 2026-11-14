@@ -1043,6 +1043,13 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(v, vw, w, s))
             }
             "$__str" => self.expr(&args[0], sid, w, s),
+            // any bit x or z: the reduction xor is x exactly then
+            "$isunknown" => {
+                let Some(a) = args.first() else { return self.err("$isunknown needs an argument") };
+                let x = Expr::Num(ferrooxide_front::ast::Number { size: Some(1), signed: false, base: 2, based: true, digits: "x".into(), fill: false });
+                let e = Expr::Binary(BinOp::CaseEq, Box::new(Expr::Unary(UnOp::RedXor, Box::new(a.clone()))), Box::new(x));
+                self.expr(&e, sid, w, s)
+            }
             "$__cast" => {
                 // the operand is evaluated as if assigned to a variable of the cast's width
                 let (cw, _) = self.ty(&Expr::SysCall(name.into(), args.to_vec()), sid)?;
@@ -1183,6 +1190,7 @@ impl<'a> Compiler<'a> {
                 if d.kind == NetKind::Event {
                     self.zero_init(sg);
                 }
+                self.mark_two_state(sg, d.kind);
                 self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
                 if let Some(dir) = d.dir {
                     ports.push((dir, sg));

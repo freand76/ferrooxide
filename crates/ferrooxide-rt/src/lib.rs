@@ -295,6 +295,8 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
 pub enum UnOp {
     Not,
     Neg,
+    /// to a 2-state value: x and z bits become 0 (stores into bit/int/byte/... variables)
+    To2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

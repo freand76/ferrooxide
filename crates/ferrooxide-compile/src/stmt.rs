@@ -423,6 +423,7 @@ impl<'a> Compiler<'a> {
                             if d.kind == NetKind::Event {
                                 self.zero_init(s);
                             }
+                            self.mark_two_state(s, d.kind);
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
                             if let Some(init) = &dl.init {
                                 let v = self.value_for(init, b, w, is_real)?;

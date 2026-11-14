@@ -125,6 +125,8 @@ pub struct Compiler<'a> {
     pub lint: Vec<String>,
     lint_seen: HashSet<String>,
     pub lint_enabled: bool,
+    /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
+    pub(crate) two_state: HashSet<u32>,
     pub(crate) call_depth: u32,
     /// functions being inlined: (definition scope, name, instance key)
     pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
@@ -350,6 +352,7 @@ impl<'a> Compiler<'a> {
             lint: Vec::new(),
             lint_seen: HashSet::new(),
             lint_enabled: false,
+            two_state: HashSet::new(),
             call_depth: 0,
             inline_stack: Vec::new(),
             subs: Vec::new(),
@@ -517,7 +520,47 @@ impl<'a> Compiler<'a> {
         id
     }
 
-    pub(crate) fn emit(&mut self, i: Instr) -> usize {
+    pub(crate) fn emit(&mut self, mut i: Instr) -> usize {
+        // a store into a 2-state variable: x/z bits of the value become 0 first
+        if let Instr::Store { t, s, mode } = i {
+            use rt::Target;
+            let sig = match t {
+                Target::Whole { sig }
+                | Target::Part { sig, .. }
+                | Target::DynPart { sig, .. }
+                | Target::Elem { sig, .. }
+                | Target::ElemK { sig, .. }
+                | Target::ElemPart { sig, .. }
+                | Target::ElemDynPart { sig, .. } => sig,
+            };
+            // (a value converted from a real keeps its x from inf/nan, as in the reference
+            // simulator: ICARUS_NOTES.md)
+            let from_real = {
+                let code = &self.pb.last().unwrap().code;
+                let mut v = s;
+                let mut found = false;
+                for ins in code.iter().rev().take(4) {
+                    match *ins {
+                        Instr::Resize { d, s: x, .. } | Instr::Copy { d, s: x, .. } if d == v => v = x,
+                        Instr::RToI { d, .. } if d == v => {
+                            found = true;
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                found
+            };
+            if self.two_state.contains(&sig) && !from_real {
+                let w = match t {
+                    Target::Part { w, .. } | Target::DynPart { w, .. } | Target::ElemPart { w, .. } | Target::ElemDynPart { w, .. } => w,
+                    _ => self.sig(sig).width,
+                };
+                let d = self.tmp(w);
+                self.pb.last_mut().unwrap().code.push(Instr::Un { op: rt::UnOp::To2, d, s, w });
+                i = Instr::Store { t, s: d, mode };
+            }
+        }
         let c = &mut self.pb.last_mut().unwrap().code;
         c.push(i);
         c.len() - 1
@@ -594,6 +637,15 @@ impl<'a> Compiler<'a> {
         let (slot, n) = (info.slot as usize, rt::words(info.width) as usize * info.depth.max(1) as usize);
         for w in &mut self.prog.mem[slot..slot + n] {
             *w = 0;
+        }
+    }
+
+    /// A variable of a 2-state type (bit, byte, shortint, int, longint): starts at 0, stores
+    /// turn x/z into 0.
+    pub(crate) fn mark_two_state(&mut self, s: u32, kind: NetKind) {
+        if matches!(kind, NetKind::Bit) || matches!(kind, NetKind::Int(n) if n > 0) {
+            self.two_state.insert(s);
+            self.zero_init(s);
         }
     }
 
@@ -1468,6 +1520,7 @@ impl<'a> Compiler<'a> {
             if is_event {
                 self.zero_init(s);
             }
+            self.mark_two_state(s, mg.kind);
             if mg.net != NetType::Wire {
                 self.net_types.insert(s, mg.net);
                 if matches!(mg.net, NetType::Supply0 | NetType::Supply1) {

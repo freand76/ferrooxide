@@ -1695,6 +1695,11 @@ impl Sim {
                     m!(d) = (!a | b) & mask;
                     m!(d + 1) = b;
                 }
+                Op::To21 { d, s } => {
+                    let (a, b) = (m!(s), m!(s + 1));
+                    m!(d) = a & !b;
+                    m!(d + 1) = 0;
+                }
                 Op::And1 { d, a, b } => {
                     let (r, x) = fast::and1(m!(a), m!(a + 1), m!(b), m!(b + 1));
                     m!(d) = r;

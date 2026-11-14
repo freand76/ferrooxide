@@ -71,6 +71,8 @@ pub enum Op {
     /// sign-extend from `sw` bits, then mask
     Sext1 { d: u32, s: u32, sw: u8, w: u8 },
     Not1 { d: u32, s: u32, w: u8 },
+    /// to 2-state: x/z bits become 0
+    To21 { d: u32, s: u32 },
     And1 { d: u32, a: u32, b: u32 },
     Or1 { d: u32, a: u32, b: u32 },
     Xor1 { d: u32, a: u32, b: u32 },
@@ -182,6 +184,7 @@ pub fn map_op(op: Op, f: &mut dyn FnMut(Field, u32) -> u32) -> Op {
         Op::Trunc1 { d, s: x, w } => Op::Trunc1 { d: s(d), s: s(x), w },
         Op::Sext1 { d, s: x, sw, w } => Op::Sext1 { d: s(d), s: s(x), sw, w },
         Op::Not1 { d, s: x, w } => Op::Not1 { d: s(d), s: s(x), w },
+        Op::To21 { d, s: x } => Op::To21 { d: s(d), s: s(x) },
         Op::And1 { d, a, b } => Op::And1 { d: s(d), a: s(a), b: s(b) },
         Op::Or1 { d, a, b } => Op::Or1 { d: s(d), a: s(a), b: s(b) },
         Op::Xor1 { d, a, b } => Op::Xor1 { d: s(d), a: s(a), b: s(b) },
@@ -375,6 +378,7 @@ fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::H
             }
         }
         I::Un { op: UnOp::Not, d, s, w } if w <= 64 => Op::Not1 { d, s, w: w as u8 },
+        I::Un { op: UnOp::To2, d, s, w } if w <= 64 => Op::To21 { d, s },
         I::Bin { op, d, a, b, w } if w <= 64 => match op {
             BinOp::And => Op::And1 { d, a, b },
             BinOp::Or => Op::Or1 { d, a, b },
