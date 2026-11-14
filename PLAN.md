@@ -118,7 +118,7 @@ code needs them.
 ## M9: CXXRTL Debug Server Protocol (notes)
 
 Spec: https://cxxrtl.org/protocol.html (v0.14.0, protocol version 0, still changing). Lets a
-client (waveform viewer / debugger front end, e.g. Surfer; client support to be verified) attach to
+client (waveform viewer / debugger front end; Surfer has a client, see below) attach to
 a running simulation, run/pause it and query waveforms of any signal over any past interval.
 
 **Protocol in short.** Byte stream (TCP or Unix socket), each message a UTF-8 JSON object
@@ -160,8 +160,49 @@ and diagnostics for an inclusive time interval, optionally collapsed to one samp
    breakpoints on signal conditions, scope/item attributes (`(* ... *)` are currently dropped by
    the lexer and would need keeping), a VCD/FST import mode as a read-only server.
 
-Open questions: exact client behaviour (Surfer's CDSP support and which encodings it accepts),
-how large a history is useful by default, and whether to expose x/z before the spec defines it.
+**Surfer as client** (checked in its source, 2026-11-03 snapshot, `libsurfer/src/cxxrtl*`).
+Connect with `surfer cxxrtl+tcp://HOST:PORT` (TCP only in native builds). What it sends, and so
+what a server must handle:
+- greeting `version: 0`; the server greeting needs `commands`, `events`, `features` (contents
+  of `features` ignored).
+- `list_scopes {scope: null}`: expects *all* scopes in one flat map (space-separated names);
+  Surfer builds the tree itself. `list_items` with `null` (all items) and per scope; only
+  `width` is read, unknown fields are ignored (send the full spec fields anyway).
+- `reference_items "ALL_VARIABLES"` with `[[name], ...]`, re-sent whenever a signal is added.
+- `query_interval`: always `[0, latest_time]`, `collapse: true`, `base64(u32)`, no
+  diagnostics, re-sent after every status change. No incremental fetch: each pause transfers
+  the whole history of the displayed signals. Surfer looks up the latest sample <= t, so
+  samples only at times where a referenced item changed are enough.
+- `run_simulation`: the play button asks for `until_time = latest + 100 ns` (hard-coded),
+  `sample_item_values: true`, no diagnostics. `pause_simulation` expects `{time}` back.
+  `get_simulation_status` → `{status, latest_time}`; events `simulation_paused` (with cause),
+  `simulation_finished`. No polling while running: the view updates at events and pauses.
+- Responses carry no ids; Surfer pairs them FIFO with its requests (an error pops one too), so
+  the server must answer strictly in order.
+- Values are decoded as unsigned integers: two-state only, x/z are lost. Value setting and
+  diagnostics are not used.
+
+**WCP: driving the viewer.** Surfer's Waveform Control Protocol (`surfer-wcp`, unfinished,
+NUL-terminated JSON like CDSP) lets a tool control the viewer: `add_items` (signals or scopes,
+recursive), `set_cursor`, `set_viewport_to/range`, `add_markers`, `load`, `reload`, `clear`,
+`zoom_to_fit`, `set_item_color`, `get_item_list/info`, `remove_items`, `focus_item`. Events from
+Surfer: `waveforms_loaded`, and, if the tool lists them in its greeting, `goto_declaration`,
+`add_drivers`, `add_loads` (requests to the tool). `surfer --wcp-initiate PORT` makes Surfer
+connect to a listening tool; WCP `load` accepts a `cxxrtl+tcp://` source.
+
+**Pairing plan (`--surfer`).** ferrooxide opens a CDSP and a WCP listener, starts
+`surfer --wcp-initiate <port>` and sends `load cxxrtl+tcp://127.0.0.1:<cdsp>`. It then pushes
+views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
+`$display`/assertions as markers. It answers `goto_declaration` from declaration locations and
+`add_drivers`/`add_loads` from the elaborated netlist (something a VCD-only viewer cannot do).
+Without a server Surfer also reads `--vcd` files directly. Both protocols still change.
+
+**Upstream proposals.** A four-state value encoding (value + unknown planes) in CDSP and in
+Surfer's decoder; incremental `query_interval` (only the new interval after a pause); a
+configurable run step instead of the fixed 100 ns.
+
+Open questions: how large a history is useful by default (it is re-sent at every pause), and
+whether to expose x/z before the spec defines it.
 
 ## M10: MCP server (notes)
 
