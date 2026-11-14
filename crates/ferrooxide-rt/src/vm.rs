@@ -180,6 +180,8 @@ pub struct Sim {
     /// sequence number of the first pending combinational wake, u64::MAX if none is pending
     comb_seq: u64,
     inactive: Vec<(u32, u32)>,
+    /// always_comb / always_latch processes still to be woken for their time-0 run
+    kicks: Vec<u32>,
     nba: Vec<Nba>,
     nba_vals: Vec<u64>,
     /// the NBA queue (length in `hot.nba_len`); `nba` holds the generic entries it refers to
@@ -451,6 +453,7 @@ impl Sim {
             seq: 0,
             comb_seq: u64::MAX,
             inactive: Vec::new(),
+            kicks: Vec::new(),
             nba: Vec::new(),
             nba_vals: Vec::new(),
             nbaq: Vec::new(),
@@ -523,6 +526,10 @@ impl Sim {
                 self.push_active(i);
             }
         }
+        // always_comb / always_latch: once more after everything has started (see `timestep`)
+        self.kicks = (0..self.nprocs)
+            .filter(|&i| self.prog.procs[i as usize].kick0 && self.procs[i as usize].class == ProcClass::Normal)
+            .collect();
     }
 
     /// Run the current time step and the following ones up to and including `until`.
@@ -772,6 +779,13 @@ impl Sim {
                     return;
                 }
                 continue;
+            }
+            if !self.kicks.is_empty() {
+                // the time-0 run of always_comb blocks: in the reference after the inactive
+                // events the first active pass scheduled
+                for p in std::mem::take(&mut self.kicks) {
+                    self.delay(p, 0);
+                }
             }
             if !self.inactive.is_empty() {
                 for (p, g) in std::mem::take(&mut self.inactive) {

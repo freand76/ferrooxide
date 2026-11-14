@@ -201,8 +201,10 @@ pub fn fuse(prog: &mut Program) -> usize {
         }
         code.push(Instr::Wait { ctl });
         code.push(Instr::Jmp { to: top });
+        let kick0 = members.iter().any(|&m| prog.procs[m as usize].kick0);
         for &m in &members[1..] {
             let m = m as usize;
+            prog.procs[m].kick0 = false;
             prog.ctls[ctl_of[m] as usize].triggers.clear();
             prog.procs[m].code = vec![Instr::Halt];
             prog.procs[m].fusible = false;
@@ -210,6 +212,7 @@ pub fn fuse(prog: &mut Program) -> usize {
         }
         prog.ctls[ctl as usize].triggers = triggers;
         prog.procs[rep].code = code;
+        prog.procs[rep].kick0 = kick0;
     }
     removed
 }

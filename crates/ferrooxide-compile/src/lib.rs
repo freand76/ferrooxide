@@ -653,7 +653,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
         self.proc_scope.push(self.job_scope);
-        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false });
+        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false, kick0: false });
         self.pb.push(PState { proc: id, ..Default::default() });
         self.scratch_saved.push(self.scratch_top);
         self.scratch_top = 0;
@@ -3155,8 +3155,6 @@ impl<'a> Compiler<'a> {
                         ProcKind::AlwaysComb | ProcKind::AlwaysLatch => {
                             let p = self.pb.last().unwrap().proc;
                             self.prog.procs[p as usize].fusible = *kind == ProcKind::AlwaysComb;
-                            let top = self.here();
-                            self.stmt(body, *scope)?;
                             // IEEE 1800 9.2.2.2.1: what the block and the functions it calls read,
                             // except what the block writes itself
                             let mut reads = Vec::new();
@@ -3167,8 +3165,13 @@ impl<'a> Compiler<'a> {
                             self.blocking_writes(body, *scope, &mut written);
                             reads.retain(|(s, _)| !written.contains(s));
                             let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect());
+                            // 9.2.2.2.2: it runs once at time 0 after all initial and always
+                            // procedures have started: it waits first and gets a time-0 wake
+                            let top = self.here();
                             self.emit(Instr::Wait { ctl });
+                            self.stmt(body, *scope)?;
                             self.emit(Instr::Jmp { to: top });
+                            self.prog.procs[p as usize].kick0 = true;
                         }
                     }
                     self.end_proc();

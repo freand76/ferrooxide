@@ -108,6 +108,8 @@ pub struct ProcDef {
     /// a pure combinational process (assign, always @*, always_comb) whose sensitivity is its
     /// full read set: re-evaluating it is harmless, so it may be fused with others
     pub fusible: bool,
+    /// woken once at time 0 after every process has started (always_comb, always_latch)
+    pub kick0: bool,
 }
 
 #[derive(Default, Clone, Debug)]
