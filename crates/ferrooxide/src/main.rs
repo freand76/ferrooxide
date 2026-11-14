@@ -34,8 +34,9 @@ options:
   --cdsp [host:]port  serve the simulation over the CXXRTL debug server protocol (waveform
                     viewers attach live: surfer cxxrtl+tcp://127.0.0.1:port); starts paused
   --surfer          start the Surfer waveform viewer on a debug server and show the --trace
-                    signals (else the top modules' signals); exits with Surfer (FX_SURFER:
-                    the Surfer executable); with -i the console runs next to the viewer
+                    signals (else all signals); the simulation runs at once (pausing after
+                    2 s if it has not ended); exits with Surfer (FX_SURFER: the Surfer
+                    executable); with -i the console runs next to the viewer and controls it
   --lint            check the design (incomplete sensitivity lists, SystemVerilog keywords
                     as names) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs

@@ -209,8 +209,12 @@ connect to a listening tool (always 127.0.0.1). WCP `load` accepts only files an
 starts `surfer cxxrtl+tcp://127.0.0.1:<cdsp> --wcp-initiate <wcp>`. After Surfer's WCP greeting
 it sends `add_items` (dotted names), retried every 250 ms while Surfer answers "No waveform
 loaded"; `$finish` gets a marker (WCP times are femtoseconds for a CXXRTL source); ferrooxide
-exits with Surfer. Tested with a stand-in (`tests/cdsp/fake_surfer.py`), not yet with Surfer
-itself. Still to do; it then pushes views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
+exits with Surfer. Checked with Surfer 0.7.0 (2026-11-14, a logging proxy on both
+connections): greeting, scopes, items, `reference_items`, `query_interval` and WCP
+`add_items` work. Surfer shows nothing until the simulation has run (it queries only at
+status changes), so `--surfer` without `-i` now runs at once and pauses after 2 s of wall
+time if the simulation has not ended; without `--trace` all signals are shown (at most
+2000). Still to do; it then pushes views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
 `$display`/assertions as markers. It answers `goto_declaration` from declaration locations and
 `add_drivers`/`add_loads` from the elaborated netlist (something a VCD-only viewer cannot do).
 Without a server Surfer also reads `--vcd` files directly. Both protocols still change.

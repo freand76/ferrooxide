@@ -4,7 +4,8 @@
 //!
 //! With `--surfer`, ferrooxide also starts Surfer and drives it over Surfer's Waveform Control
 //! Protocol (WCP, same framing): Surfer connects back (`--wcp-initiate`), and the initial
-//! signals (`--trace` patterns, else the top modules' signals) are added to its view; `$finish`
+//! signals (`--trace` patterns, else all) are added to its view; without a console the
+//! simulation runs at once (pausing after a while if it does not end); `$finish`
 //! gets a marker. Surfer reports no `waveforms_loaded` for a CXXRTL source, so `add_items` is
 //! retried while Surfer answers that no waveform is loaded.
 //!
@@ -43,7 +44,7 @@ enum In {
 pub struct Viewer {
     /// the Surfer executable
     pub bin: String,
-    /// regular expressions selecting the signals shown first (empty: the top modules' signals)
+    /// regular expressions selecting the signals shown first (empty: all signals)
     pub traces: Vec<String>,
 }
 
@@ -88,6 +89,11 @@ struct Server {
     out: Option<(u32, TcpStream)>,
     warned_full: bool,
     wcp: Wcp,
+    /// running on its own (`--surfer` without a console): pause at this wall time, so a
+    /// simulation without an end still shows its waves
+    auto_pause: Option<Instant>,
+    /// run on its own once the viewer has referenced its signals
+    auto_run: bool,
     /// time steps per `advance_steps` call while running
     chunk: u64,
 }
@@ -145,7 +151,7 @@ impl Server {
             }
             items.insert(id, Item { sig: *sig, width: info.width, lsb: info.lsb.min(info.msb) });
         }
-        Server { ses, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default(), chunk: 64 }
+        Server { ses, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default(), chunk: 64, auto_pause: None, auto_run: false }
     }
 
     fn time_str(&self, ticks: u64) -> String {
@@ -250,6 +256,11 @@ impl Server {
                 }
                 self.refs.insert(name.to_string(), ids);
                 self.send(json!({"type": "response", "command": cmd}));
+                if self.auto_run && self.status == Status::Paused {
+                    self.auto_run = false;
+                    self.status = Status::Running(None);
+                    self.auto_pause = Some(Instant::now() + AUTO_RUN);
+                }
             }
             "query_interval" => self.query_interval(m),
             "get_simulation_status" => {
@@ -281,6 +292,7 @@ impl Server {
                 self.send(json!({"type": "response", "command": cmd}));
             }
             "pause_simulation" => {
+                self.auto_pause = None;
                 if let Status::Running(_) = self.status {
                     self.status = Status::Paused;
                     self.ses.sim.flush();
@@ -381,7 +393,12 @@ impl Server {
         } else if dt > Duration::from_millis(40) {
             self.chunk = (self.chunk / 2).max(1);
         }
-        if st == RunState::Paused && until.is_some_and(|u| self.ses.sim.now() >= u) {
+        let auto = st == RunState::Paused && self.auto_pause.is_some_and(|t| Instant::now() >= t);
+        if auto {
+            self.auto_pause = None;
+            eprintln!("ferrooxide: paused at time {} after running for a while; continue from the viewer", self.ses.sim.now());
+        }
+        if auto || (st == RunState::Paused && until.is_some_and(|u| self.ses.sim.now() >= u)) {
             self.status = Status::Paused;
             self.ses.sim.flush();
             let t = self.time_str(self.ses.sim.now());
@@ -494,7 +511,9 @@ impl Server {
     }
 }
 
-/// The signals shown first: those matching `traces`, else the signals of the top modules.
+/// The signals shown first: those matching `traces`, else all (not arrays; at most
+/// `MAX_SHOWN`).
+const MAX_SHOWN: usize = 2000;
 fn initial_items(sim: &Sim, traces: &[String]) -> Result<Vec<String>, String> {
     let set = regex::RegexSet::new(traces).map_err(|e| format!("bad --trace pattern: {e}"))?;
     let mut v: Vec<String> = sim
@@ -502,14 +521,16 @@ fn initial_items(sim: &Sim, traces: &[String]) -> Result<Vec<String>, String> {
         .iter()
         .filter(|(n, s)| {
             let info = sim.signal_info(*s);
-            info.depth == 0 && !n.contains(' ')
-                && if traces.is_empty() { n.matches('.').count() == 1 } else { set.is_match(n) }
+            info.depth == 0 && !n.contains(' ') && (traces.is_empty() || set.is_match(n))
         })
         .map(|(n, _)| n.clone())
         .collect();
     v.sort();
     v.dedup();
-    v.truncate(500);
+    if v.len() > MAX_SHOWN {
+        eprintln!("ferrooxide: {} signals; the viewer shows the first {MAX_SHOWN} (select with --trace)", v.len());
+        v.truncate(MAX_SHOWN);
+    }
     Ok(v)
 }
 
@@ -532,6 +553,8 @@ fn reader(mut s: TcpStream, tx: mpsc::Sender<In>, msg: impl Fn(String) -> In, cl
     }
     let _ = tx.send(closed);
 }
+
+const AUTO_RUN: Duration = Duration::from_secs(2);
 
 /// Serve `sim` (not started yet) on `addr` until the process is stopped, the viewer started
 /// with `viewer` exits, or (with `console`: commands on stdin) the console quits.
@@ -559,6 +582,11 @@ pub fn serve(mut sim: Sim, addr: &str, viewer: Option<Viewer>, console: bool) ->
         srv.ses.mark_finished();
     }
     srv.ses.sim.flush();
+    // with a viewer and no console: run at once (the viewer shows the waves at the end, or
+    // after AUTO_RUN when the simulation goes on)
+    // (it starts when the viewer has referenced its signals: Surfer fetches values only
+    // after a status event, so the run must end after it is listening)
+    srv.auto_run = viewer.is_some() && !console && srv.status == Status::Paused;
     let (tx, rx) = mpsc::channel();
     if let Some(v) = &viewer {
         let wl = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot listen for the viewer: {e}"))?;
