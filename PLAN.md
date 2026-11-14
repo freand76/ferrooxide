@@ -71,7 +71,7 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
 | M7 | FST output, VPI-lite, better diagnostics | |
-| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | ✅ first version (`--cdsp`): hierarchy, references, history queries, run/pause; `--surfer` (starts Surfer, adds signals over WCP); next: arrays, reals, port directions, diagnostics, cursor at breakpoints, goto_declaration |
+| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | ✅ first version (`--cdsp`): hierarchy, references, history queries, run/pause; `--surfer` (starts Surfer, adds signals over WCP); reals; `-i` console next to the viewer (cursor follows run/step/breakpoints); next: arrays, port directions, diagnostics, goto_declaration |
 | M10 | MCP server: the simulator as a tool for AI agents (load, run, inspect, force, waveforms, lint) | ✅ first version over stdio (`--mcp`); next: value history queries, resources, HTTP transport |
 | M11 | Interactive mode (`-i`): run/step/print/list/set/force/release commands on stdin | ✅ first version (next: watch, breakpoints on conditions, waveform history, scopes) |
 | M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |

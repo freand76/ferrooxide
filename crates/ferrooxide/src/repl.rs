@@ -23,24 +23,40 @@ NAME is a hierarchical name or a unique suffix of one (`top.u1.q`, `u1.q`, `q`).
 VALUE is a Verilog number: 5, 8'hff, 4'b10x1, 'z. T is in simulation ticks or has a unit:
 10ns, 2.5us.";
 
+/// Print the prompt when stdin is a terminal.
+pub fn prompt() {
+    if std::io::stdin().is_terminal() {
+        print!("fx> ");
+        let _ = std::io::stdout().flush();
+    }
+}
+
 pub fn run(ses: &mut Session) {
     let stdin = std::io::stdin();
-    let tty = stdin.is_terminal();
     let mut lines = stdin.lock().lines();
     loop {
-        if tty {
-            print!("fx> ");
-            let _ = std::io::stdout().flush();
-        }
+        prompt();
         let Some(Ok(line)) = lines.next() else { break };
+        match execute(ses, &line) {
+            Some(out) if out.is_empty() => {}
+            Some(out) => println!("{out}"),
+            None => break,
+        }
+    }
+    ses.finish();
+}
+
+/// Run one command line; its report (empty for a blank line), or None for quit.
+pub fn execute(ses: &mut Session, line: &str) -> Option<String> {
+    {
         let words: Vec<&str> = line.split_whitespace().collect();
-        let Some(&cmd) = words.first() else { continue };
+        let Some(&cmd) = words.first() else { return Some(String::new()) };
         let arg = |k: usize| words.get(k).copied();
         let radix = |k: usize| arg(k).and_then(|r| r.chars().next()).unwrap_or('h');
         let need = |k: usize, usage: &str| -> Result<String, String> { arg(k).map(str::to_string).ok_or_else(|| usage.to_string()) };
         let r: Result<String, String> = match cmd {
             "help" | "h" | "?" => Ok(HELP.into()),
-            "quit" | "q" | "exit" => break,
+            "quit" | "q" | "exit" => return None,
             "time" => Ok(format!("time {}", ses.time())),
             "run" | "r" | "continue" | "c" => match arg(1) {
                 None => Ok(ses.run(None)),
@@ -67,10 +83,9 @@ pub fn run(ses: &mut Session) {
             },
             _ => Err(format!("unknown command '{cmd}' (help lists the commands)")),
         };
-        match r {
-            Ok(s) => println!("{s}"),
-            Err(e) => println!("{e}"),
-        }
+        Some(match r {
+            Ok(s) => s,
+            Err(e) => e,
+        })
     }
-    ses.finish();
 }

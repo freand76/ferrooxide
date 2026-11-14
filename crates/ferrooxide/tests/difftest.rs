@@ -181,3 +181,51 @@ fn surfer_pairing() {
          wcp add_markers [{'move_focus': False, 'name': '$finish', 'time': 1022000000}]\n"
     );
 }
+
+/// `-i --surfer`: console commands move the simulation; the viewer gets simulation_paused and
+/// the cursor follows (breakpoint stop, run to a time); quit ends the session.
+#[test]
+fn surfer_console() {
+    use std::io::Write;
+    if std::process::Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("python3 not found, skipping");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
+    assert!(st.success());
+    let log = std::env::temp_dir().join(format!("fx_fake_surfer_console_{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let mut child = std::process::Command::new(root.join("target/release/ferrooxide"))
+        .args(["-q", "-i", "--surfer", "tests/cdsp/counter.v"])
+        .env("FX_SURFER", "tests/cdsp/fake_surfer.py")
+        .env("FAKE_SURFER_MODE", "watch")
+        .env("FAKE_SURFER_LOG", &log)
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let read = || std::fs::read_to_string(&log).unwrap_or_default();
+    let wait = |what: &str| {
+        for _ in 0..100 {
+            if read().contains(what) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("no '{what}' from the viewer: {}", read());
+    };
+    wait("ready");
+    child.stdin.take().unwrap().write_all(b"break x 4'd9\nrun\nprint x d\nrun 100ns\nquit\n").unwrap();
+    let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    assert!(out.contains("break: tb.x = 9 at time 22000") && out.contains("stopped at time 100000"), "{out}");
+    wait("closed");
+    let got = read();
+    let _ = std::fs::remove_file(&log);
+    // (the two connections are read in no fixed order: compare each on its own)
+    let only = |p: &str| got.lines().filter(|l| l.starts_with(p)).collect::<Vec<_>>().join("\n");
+    assert_eq!(only("cdsp"), "cdsp simulation_paused 0.000000022000000\ncdsp simulation_paused 0.000000100000000", "{got}");
+    assert_eq!(only("wcp"), "wcp set_cursor 22000000\nwcp set_cursor 100000000", "{got}");
+    assert!(got.starts_with("ready\n") && got.ends_with("closed\n"), "{got}");
+}

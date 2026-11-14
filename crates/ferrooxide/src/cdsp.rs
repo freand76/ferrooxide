@@ -8,11 +8,16 @@
 //! gets a marker. Surfer reports no `waveforms_loaded` for a CXXRTL source, so `add_items` is
 //! retried while Surfer answers that no waveform is loaded.
 //!
+//! With `-i`, the interactive console runs next to the server (stdin): its run/step commands
+//! (and breakpoints) move the simulation; the viewer then gets `simulation_paused` and, with
+//! `--surfer`, the cursor moves to the new time.
+//!
 //! Messages are JSON objects terminated by NUL. One client at a time (a new connection replaces
 //! the old one); the simulation keeps its state across connections. Values are sent as
 //! `base64(u32)`, which is two-state: x is sent as 1, z as 0. Reals are 64-bit items holding the
 //! IEEE double. Arrays are not listed yet (Surfer designates every item as a plain node).
 
+use crate::session::Session;
 use ferrooxide_rt::{RunState, Sim};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -30,6 +35,8 @@ enum In {
     WcpMsg(String),
     WcpClosed,
     ViewerExited,
+    Console(String),
+    ConsoleEof,
 }
 
 /// Start a viewer (Surfer) that attaches to the server and is driven over WCP.
@@ -68,7 +75,7 @@ struct Item {
 }
 
 struct Server {
-    sim: Sim,
+    ses: Session,
     status: Status,
     /// femtoseconds per tick
     fs_per_tick: u128,
@@ -119,7 +126,8 @@ fn parent(id: &str) -> &str {
 }
 
 impl Server {
-    fn new(sim: Sim) -> Server {
+    fn new(ses: Session) -> Server {
+        let sim = &ses.sim;
         let fs_per_tick = 10u128.pow((15 + sim.precision()).clamp(0, 30) as u32);
         let mut scopes = BTreeSet::new();
         scopes.insert(String::new());
@@ -137,7 +145,7 @@ impl Server {
             }
             items.insert(id, Item { sig: *sig, width: info.width, lsb: info.lsb.min(info.msb) });
         }
-        Server { sim, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default(), chunk: 64 }
+        Server { ses, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default(), chunk: 64 }
     }
 
     fn time_str(&self, ticks: u64) -> String {
@@ -245,14 +253,14 @@ impl Server {
             }
             "query_interval" => self.query_interval(m),
             "get_simulation_status" => {
-                let mut r = json!({"type": "response", "command": cmd, "latest_time": self.time_str(self.sim.now())});
+                let mut r = json!({"type": "response", "command": cmd, "latest_time": self.time_str(self.ses.sim.now())});
                 r["status"] = json!(match self.status {
                     Status::Paused => "paused",
                     Status::Running(_) => "running",
                     Status::Finished => "finished",
                 });
                 if self.status == Status::Paused {
-                    let next = self.sim.next_event_time().unwrap_or(self.sim.now());
+                    let next = self.ses.sim.next_event_time().unwrap_or(self.ses.sim.now());
                     r["next_sample_time"] = json!(self.time_str(next));
                 }
                 self.send(r);
@@ -275,9 +283,9 @@ impl Server {
             "pause_simulation" => {
                 if let Status::Running(_) = self.status {
                     self.status = Status::Paused;
-                    self.sim.flush();
+                    self.ses.sim.flush();
                 }
-                let t = self.time_str(self.sim.now());
+                let t = self.time_str(self.ses.sim.now());
                 self.send(json!({"type": "response", "command": cmd, "time": t}));
             }
             _ => self.error("invalid_command", format!("unknown command '{cmd}'")),
@@ -288,7 +296,7 @@ impl Server {
         let (Some(b), Some(e)) = (self.parse_time(&m["interval"][0]), self.parse_time(&m["interval"][1])) else {
             return self.error("invalid_args", format!("bad interval {}", m["interval"]));
         };
-        let now = self.sim.now();
+        let now = self.ses.sim.now();
         if b > e || e > now {
             return self.error("invalid_args", format!("interval {} is outside [0, latest time]", m["interval"]));
         }
@@ -306,8 +314,8 @@ impl Server {
         let sigs: Vec<(u32, u32)> =
             ids.into_iter().flatten().map(|id| (self.items[id].sig, self.items[id].width)).collect();
         let only: Vec<u32> = sigs.iter().map(|&(s, _)| s).collect();
-        self.sim.history_mut().unwrap().prepare(&only);
-        let h = self.sim.history().unwrap();
+        self.ses.sim.history_mut().unwrap().prepare(&only);
+        let h = self.ses.sim.history().unwrap();
         // sample times: the interval start, then every change of a referenced item
         let mut times = vec![b];
         for &(s, _) in &sigs {
@@ -366,21 +374,21 @@ impl Server {
     fn step(&mut self) {
         let Status::Running(until) = self.status else { return };
         let t0 = Instant::now();
-        let st = self.sim.advance_steps(until, self.chunk);
+        let st = self.ses.sim.advance_steps(until, self.chunk);
         let dt = t0.elapsed();
         if dt < Duration::from_millis(10) {
             self.chunk = (self.chunk * 2).min(1 << 20);
         } else if dt > Duration::from_millis(40) {
             self.chunk = (self.chunk / 2).max(1);
         }
-        if st == RunState::Paused && until.is_some_and(|u| self.sim.now() >= u) {
+        if st == RunState::Paused && until.is_some_and(|u| self.ses.sim.now() >= u) {
             self.status = Status::Paused;
-            self.sim.flush();
-            let t = self.time_str(self.sim.now());
+            self.ses.sim.flush();
+            let t = self.time_str(self.ses.sim.now());
             self.send(json!({"type": "event", "event": "simulation_paused", "time": t, "cause": "until_time"}));
             return;
         }
-        if let Some(h) = self.sim.history() {
+        if let Some(h) = self.ses.sim.history() {
             if let (Some(t), false) = (h.full_at, self.warned_full) {
                 self.warned_full = true;
                 eprintln!("ferrooxide: value history full at time {t} (FX_HISTORY_MB); later changes are not recorded");
@@ -388,11 +396,42 @@ impl Server {
         }
         if st != RunState::Paused {
             self.status = Status::Finished;
-            self.sim.finish();
-            let t = self.time_str(self.sim.now());
+            self.ses.sim.finish();
+            self.ses.mark_finished();
+            let t = self.time_str(self.ses.sim.now());
             self.send(json!({"type": "event", "event": "simulation_finished", "time": t}));
             self.mark_finish(if st == RunState::Finished { "$finish" } else { "end" });
         }
+    }
+
+    /// A console command (`-i`); false for quit. A command that moved the simulation is
+    /// reported to the viewer, and the viewer's cursor follows it.
+    fn console(&mut self, line: &str) -> bool {
+        let was_running = matches!(self.status, Status::Running(_));
+        if was_running {
+            self.status = Status::Paused; // the console takes over
+        }
+        let t0 = self.ses.time();
+        match crate::repl::execute(&mut self.ses, line) {
+            None => return false,
+            Some(out) if out.is_empty() => {}
+            Some(out) => println!("{out}"),
+        }
+        if self.ses.is_finished() && self.status != Status::Finished {
+            self.status = Status::Finished;
+            let t = self.time_str(self.ses.sim.now());
+            self.send(json!({"type": "event", "event": "simulation_finished", "time": t}));
+            self.mark_finish("$finish");
+        } else if was_running || self.ses.time() != t0 {
+            let t = self.time_str(self.ses.sim.now());
+            self.send(json!({"type": "event", "event": "simulation_paused", "time": t, "cause": "until_time"}));
+            if self.wcp.ready && self.ses.time() != t0 {
+                let fs = self.ses.time() as u128 * self.fs_per_tick;
+                self.wcp_send("set_cursor", json!({"type": "command", "command": "set_cursor", "timestamp": fs as u64}));
+            }
+        }
+        crate::repl::prompt();
+        true
     }
 
     // ------------------------------------------------------------ WCP (viewer control)
@@ -448,7 +487,7 @@ impl Server {
     /// A marker at the time of $finish (or the end of the events) in the viewer.
     fn mark_finish(&mut self, name: &str) {
         if self.wcp.ready {
-            let fs = self.sim.now() as u128 * self.fs_per_tick;
+            let fs = self.ses.sim.now() as u128 * self.fs_per_tick;
             self.wcp_send("add_markers", json!({"type": "command", "command": "add_markers",
                 "markers": [{"time": fs as u64, "name": name, "move_focus": false}]}));
         }
@@ -494,9 +533,9 @@ fn reader(mut s: TcpStream, tx: mpsc::Sender<In>, msg: impl Fn(String) -> In, cl
     let _ = tx.send(closed);
 }
 
-/// Serve `sim` (not started yet) on `addr` until the process is stopped (or the viewer started
-/// with `viewer` exits).
-pub fn serve(mut sim: Sim, addr: &str, viewer: Option<Viewer>) -> Result<(), String> {
+/// Serve `sim` (not started yet) on `addr` until the process is stopped, the viewer started
+/// with `viewer` exits, or (with `console`: commands on stdin) the console quits.
+pub fn serve(mut sim: Sim, addr: &str, viewer: Option<Viewer>, console: bool) -> Result<(), String> {
     let addr = if addr.contains(':') { addr.to_string() } else { format!("127.0.0.1:{addr}") };
     let listener = TcpListener::bind(&addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
     // (port 0: the system picks one; report the real address)
@@ -509,13 +548,17 @@ pub fn serve(mut sim: Sim, addr: &str, viewer: Option<Viewer>) -> Result<(), Str
         Some(v) => Some(initial_items(&sim, &v.traces)?),
         None => None,
     };
-    let mut srv = Server::new(sim);
+    let precision = sim.precision();
+    let mut ses = Session::from_sim(sim, precision, String::new());
+    ses.mark_started();
+    let mut srv = Server::new(ses);
     srv.wcp.pending = pending;
     if st != RunState::Paused {
         srv.status = Status::Finished;
-        srv.sim.finish();
+        srv.ses.sim.finish();
+        srv.ses.mark_finished();
     }
-    srv.sim.flush();
+    srv.ses.sim.flush();
     let (tx, rx) = mpsc::channel();
     if let Some(v) = &viewer {
         let wl = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot listen for the viewer: {e}"))?;
@@ -546,6 +589,20 @@ pub fn serve(mut sim: Sim, addr: &str, viewer: Option<Viewer>) -> Result<(), Str
         });
     } else {
         eprintln!("ferrooxide: debug server on {addr}; connect with: surfer cxxrtl+tcp://{addr}");
+    }
+    if console {
+        let t = tx.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if t.send(In::Console(line)).is_err() {
+                    return;
+                }
+            }
+            let _ = t.send(In::ConsoleEof);
+        });
+        crate::repl::prompt();
     }
     std::thread::spawn(move || {
         for (id, s) in listener.incoming().flatten().enumerate() {
@@ -596,11 +653,19 @@ pub fn serve(mut sim: Sim, addr: &str, viewer: Option<Viewer>) -> Result<(), Str
             }
             Some(In::WcpMsg(text)) => srv.wcp_handle(&text),
             Some(In::WcpClosed) => srv.wcp = Wcp::default(),
-            Some(In::ViewerExited) => {
+            Some(In::ViewerExited) | Some(In::ConsoleEof) => {
                 if srv.status != Status::Finished {
-                    srv.sim.finish();
+                    srv.ses.finish();
                 }
                 return Ok(());
+            }
+            Some(In::Console(line)) => {
+                if !srv.console(&line) {
+                    if srv.status != Status::Finished {
+                        srv.ses.finish();
+                    }
+                    return Ok(());
+                }
             }
             Some(_) => {}
             None => srv.step(),

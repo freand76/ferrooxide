@@ -33,7 +33,7 @@ options:
                     viewers attach live: surfer cxxrtl+tcp://127.0.0.1:port); starts paused
   --surfer          start the Surfer waveform viewer on a debug server and show the --trace
                     signals (else the top modules' signals); exits with Surfer (FX_SURFER:
-                    the Surfer executable)
+                    the Surfer executable); with -i the console runs next to the viewer
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help
@@ -264,7 +264,7 @@ fn main() -> ExitCode {
             bin: std::env::var("FX_SURFER").unwrap_or_else(|_| "surfer".into()),
             traces: traces.clone(),
         });
-        if let Err(e) = cdsp::serve(sim, &addr, viewer) {
+        if let Err(e) = cdsp::serve(sim, &addr, viewer, interactive) {
             eprintln!("ferrooxide: {e}");
             return ExitCode::from(1);
         }

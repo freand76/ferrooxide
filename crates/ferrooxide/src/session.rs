@@ -115,6 +115,20 @@ impl Session {
         Session { sim, precision, started: false, finished: false, watches: Vec::new(), breaks: Vec::new(), load_report }
     }
 
+    /// The simulator was started by the caller (`Sim::start`).
+    pub fn mark_started(&mut self) {
+        self.started = true;
+    }
+
+    /// $finish was called (or the simulation was ended by the caller).
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    pub fn mark_finished(&mut self) {
+        self.finished = true;
+    }
+
     fn ensure_started(&mut self) {
         if !self.started {
             self.started = true;

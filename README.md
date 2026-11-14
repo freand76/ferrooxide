@@ -160,6 +160,11 @@ surfer cxxrtl+tcp://127.0.0.1:6618
 signals matching `--trace` (or, without it, the top modules' signals) to the view and puts a
 marker at `$finish`. ferrooxide exits when Surfer is closed.
 
+Add `-i` to get the interactive console next to the viewer: `run`, `step`, breakpoints,
+`force` and `print` work as in the interactive mode, and after each `run` or `step` the viewer
+refreshes and Surfer's cursor moves to where the simulation stopped (e.g. a breakpoint hit).
+`quit` ends the session.
+
 The simulation starts paused after time 0. The value history of every signal is kept in
 memory (`FX_HISTORY_MB`, default 512; changes after that are not recorded). The protocol's
 value encoding is two-state, so x bits show as 1 and z bits as 0. Reals are 64-bit items
