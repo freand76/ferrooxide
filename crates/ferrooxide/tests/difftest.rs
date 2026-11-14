@@ -229,3 +229,29 @@ fn surfer_console() {
     assert_eq!(only("wcp"), "wcp set_cursor 22000000\nwcp set_cursor 100000000", "{got}");
     assert!(got.starts_with("ready\n") && got.ends_with("closed\n"), "{got}");
 }
+
+/// Features the reference simulator lacks: each tests/sv/X.v must print tests/sv/X.expected,
+/// in all three modes (default, --no-jit, --no-fuse).
+#[test]
+fn sv_expected_outputs() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
+    assert!(st.success());
+    let mut files: Vec<_> = std::fs::read_dir(root.join("tests/sv"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "v"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty());
+    for f in files {
+        let expected = std::fs::read_to_string(f.with_extension("expected")).unwrap();
+        for mode in [None, Some("--no-jit"), Some("--no-fuse")] {
+            let mut cmd = std::process::Command::new(root.join("target/release/ferrooxide"));
+            // (a relative path: it appears in the $finish message)
+            cmd.arg("-q").args(mode).arg(std::path::Path::new("tests/sv").join(f.file_name().unwrap())).current_dir(&root);
+            let out = cmd.output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{} {:?}", f.display(), mode);
+        }
+    }
+}

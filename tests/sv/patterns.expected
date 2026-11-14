@@ -1,0 +1,12 @@
+P0 0b43 tag 5 data a1 valid 1
+p 0001
+p 03fe
+p 1fff
+w 5a5a5a5a
+w 01020304 w[0] 04
+arr[0] 0000
+arr[1] 022f
+arr[2] 1e40
+arr[3] 0661
+pair 0110001
+tests/sv/patterns.v:41: $finish called at 0 (1s)

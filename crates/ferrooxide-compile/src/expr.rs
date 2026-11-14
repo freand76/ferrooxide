@@ -296,7 +296,7 @@ impl<'a> Compiler<'a> {
             Expr::Repl(n, v) => self.is_const(n, sid) && v.iter().all(|x| self.is_const(x, sid)),
             Expr::Call(..) => false,
             Expr::SysCall(n, args) => {
-                matches!(n.as_str(), "$clog2" | "$signed" | "$unsigned" | "$bits")
+                matches!(n.as_str(), "$clog2" | "$signed" | "$unsigned" | "$bits" | "$__cast")
                     && args.iter().all(|x| self.is_const(x, sid))
             }
         }
@@ -449,6 +449,20 @@ impl<'a> Compiler<'a> {
                     (self.ty(a, sid)?.0, name == "$signed")
                 }
                 "$clog2" | "$bits" => (32, false),
+                // SV cast T'(e) / N'(e): (width, sign: 0, 1, 2 = the expression's, e)
+                "$__cast" => {
+                    let w = self.const_int(&args[0], sid)?;
+                    if !(1..=1 << 20).contains(&w) {
+                        return self.err(format!("bad cast width {w}"));
+                    }
+                    let sg = match self.const_int(&args[1], sid)? {
+                        0 => false,
+                        1 => true,
+                        _ => self.ty(&args[2], sid)?.1,
+                    };
+                    (w as u32, sg)
+                }
+                "$__pattern" => return self.err("an assignment pattern needs a known target type here"),
                 "$fopen" => (32, false),
                 "$test$plusargs" | "$value$plusargs" => (32, true),
                 "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
@@ -1026,6 +1040,15 @@ impl<'a> Compiler<'a> {
             "$signed" | "$unsigned" => {
                 let (v, vw, _) = self.self_expr(&args[0], sid)?;
                 Ok(self.resize(v, vw, w, s))
+            }
+            "$__cast" => {
+                // the operand is evaluated as if assigned to a variable of the cast's width
+                let (cw, _) = self.ty(&Expr::SysCall(name.into(), args.to_vec()), sid)?;
+                let (ew, es) = if self.is_real(&args[2], sid) { (cw, true) } else { self.ty(&args[2], sid)? };
+                let ctx = cw.max(ew);
+                let v = self.expr(&args[2], sid, ctx, es)?;
+                let v = self.resize(v, ctx, cw, false);
+                Ok(self.resize(v, cw, w, s))
             }
             "$clog2" => {
                 let (v, vw, _) = self.self_expr(&args[0], sid)?;

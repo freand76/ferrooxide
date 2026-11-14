@@ -4,6 +4,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod preproc;
+pub mod svtypes;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -40,6 +41,9 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
     let mut timescale = None;
     let mut nettype = None;
     let mut uncdrive = None;
+    // file-scope typedefs and items ($unit) stay visible in later files
+    let mut types = HashMap::new();
+    let mut unit = Vec::new();
     for f in files {
         let text = pp.process_file(f)?;
         let name = f.display().to_string();
@@ -48,7 +52,11 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
         p.timescale = timescale;
         p.default_nettype = nettype.clone();
         p.unconnected_drive = uncdrive;
+        p.types = std::mem::take(&mut types);
+        p.unit_items = std::mem::take(&mut unit);
         modules.extend(p.parse_source()?);
+        types = std::mem::take(&mut p.types);
+        unit = std::mem::take(&mut p.unit_items);
         timescale = p.timescale;
         nettype = p.default_nettype.clone();
         uncdrive = p.unconnected_drive;

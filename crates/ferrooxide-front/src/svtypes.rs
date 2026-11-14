@@ -1,0 +1,585 @@
+//! SystemVerilog data types in the parser: `typedef`, `enum`, packed `struct`/`union`, casts
+//! and assignment patterns. Types are resolved here, so elaboration only sees vectors:
+//!
+//! - a type without a struct becomes the declaration's kind, sign and packed ranges;
+//! - a type containing a struct is declared as one flat vector `[W-1:0]`, and every access
+//!   chain (`v[i].f.g[3:0]`) becomes one select `v[off +: w]` (offsets are expressions, so
+//!   parameterized widths and run-time indexes work);
+//! - enum constants become `localparam`s of the base type;
+//! - `T'(e)`, `N'(e)` are `$__cast(width, sign, e)` (sign 0, 1 or 2: keep);
+//! - `'{...}` is resolved against the target type into a concatenation of casts.
+
+use crate::ast::*;
+use crate::lexer::Tok;
+use crate::parser::{dec, Parser};
+use crate::Result;
+use std::rc::Rc;
+
+#[derive(Clone, Debug)]
+pub struct SvType {
+    pub kind: NetKind,
+    pub signed: bool,
+    /// packed dimensions, outermost first; integer types have their implicit [n-1:0]
+    pub dims: Vec<Range>,
+    /// the element is a packed struct / union
+    pub fields: Option<Rc<Struct>>,
+    /// `int`, `integer`, `byte`, ...: declared without a range
+    pub int_kind: bool,
+}
+
+#[derive(Debug)]
+pub struct Struct {
+    pub union: bool,
+    pub fields: Vec<(String, SvType)>,
+}
+
+/// The value of a plain literal (no x/z), possibly negated.
+fn lit(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
+            i64::from_str_radix(&n.digits.replace('_', ""), n.base as u32).ok()
+        }
+        Expr::Unary(UnOp::Neg, a) => lit(a).map(|v| -v),
+        _ => None,
+    }
+}
+
+fn num(v: i64) -> Expr {
+    if v < 0 {
+        Expr::Unary(UnOp::Neg, Box::new(Expr::Num(dec(-v as u64))))
+    } else {
+        Expr::Num(dec(v as u64))
+    }
+}
+
+fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
+    if let (Some(x), Some(y)) = (lit(&a), lit(&b)) {
+        match op {
+            BinOp::Add => return num(x + y),
+            BinOp::Sub => return num(x - y),
+            BinOp::Mul => return num(x * y),
+            _ => {}
+        }
+    }
+    match (op, lit(&a), lit(&b)) {
+        (BinOp::Add, Some(0), _) => return b,
+        (BinOp::Add | BinOp::Sub, _, Some(0)) => return a,
+        (BinOp::Mul, Some(1), _) => return b,
+        (BinOp::Mul, _, Some(1)) => return a,
+        _ => {}
+    }
+    Expr::Binary(op, Box::new(a), Box::new(b))
+}
+
+fn add(a: Expr, b: Expr) -> Expr {
+    bin(BinOp::Add, a, b)
+}
+fn sub(a: Expr, b: Expr) -> Expr {
+    bin(BinOp::Sub, a, b)
+}
+fn mul(a: Expr, b: Expr) -> Expr {
+    bin(BinOp::Mul, a, b)
+}
+
+/// Number of elements of a dimension [a:b].
+fn dim_size(r: &Range) -> Expr {
+    if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
+        return num((a - b).abs() + 1);
+    }
+    let ge = Expr::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
+    let d = Expr::Cond(Box::new(ge), Box::new(sub(r.0.clone(), r.1.clone())), Box::new(sub(r.1.clone(), r.0.clone())));
+    add(d, num(1))
+}
+
+/// Position of index `k` in dimension [msb:lsb], counted from the lsb side.
+fn dim_pos(r: &Range, k: Expr) -> Expr {
+    if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
+        return if a >= b { sub(k, num(b)) } else { sub(num(b), k) };
+    }
+    let ge = Expr::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
+    Expr::Cond(Box::new(ge), Box::new(sub(k.clone(), r.1.clone())), Box::new(sub(r.1.clone(), k)))
+}
+
+/// Whether a dimension counts down ([7:0]); unknown (parameterized) ones are assumed to.
+fn descending(r: &Range) -> bool {
+    match (lit(&r.0), lit(&r.1)) {
+        (Some(a), Some(b)) => a >= b,
+        _ => true,
+    }
+}
+
+impl SvType {
+    pub fn vector(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
+        SvType { kind, signed, dims, fields: None, int_kind: false }
+    }
+
+    /// Width of one element after the packed dimensions.
+    pub fn leaf_width(&self) -> Expr {
+        match &self.fields {
+            None => num(1),
+            Some(s) if s.union => s.fields.first().map_or(num(0), |f| f.1.width()),
+            Some(s) => s.fields.iter().fold(num(0), |acc, f| add(acc, f.1.width())),
+        }
+    }
+
+    /// Width of the dimensions from `from` on, times the element width.
+    pub fn width_from(&self, from: usize) -> Expr {
+        self.dims[from..].iter().fold(self.leaf_width(), |acc, d| mul(dim_size(d), acc))
+    }
+
+    pub fn width(&self) -> Expr {
+        self.width_from(0)
+    }
+
+    pub fn has_struct(&self) -> bool {
+        self.fields.is_some()
+    }
+
+    /// Declaration parts: kind, sign, range, further packed ranges.
+    pub fn decl_parts(&self) -> (NetKind, bool, Option<Range>, Vec<Range>) {
+        if self.has_struct() {
+            let kind = if self.kind == NetKind::Bit { NetKind::Bit } else { NetKind::Reg };
+            return (kind, self.signed, Some((sub(self.width(), num(1)), num(0))), vec![]);
+        }
+        if self.int_kind {
+            return (self.kind, self.signed, None, vec![]);
+        }
+        let mut it = self.dims.iter().cloned();
+        (self.kind, self.signed, it.next(), it.collect())
+    }
+}
+
+/// Builtin type keywords: (kind, signed, width of an integer type).
+fn builtin(s: &str) -> Option<(NetKind, bool, Option<u32>)> {
+    Some(match s {
+        "logic" | "reg" => (NetKind::Reg, false, None),
+        "bit" => (NetKind::Bit, false, None),
+        "int" => (NetKind::Int(32), true, Some(32)),
+        "integer" => (NetKind::Integer, true, Some(32)),
+        "byte" => (NetKind::Int(8), true, Some(8)),
+        "shortint" => (NetKind::Int(16), true, Some(16)),
+        "longint" => (NetKind::Int(64), true, Some(64)),
+        "time" => (NetKind::Time, false, Some(64)),
+        _ => return None,
+    })
+}
+
+impl Parser {
+    /// The current token is a typedef name (not a call or an instance name).
+    pub(crate) fn is_type_name(&self) -> bool {
+        matches!(self.peek(), Tok::Ident(s) if self.types.contains_key(s))
+            && !matches!(self.peek_at(1), Tok::Punct("(" | "#" | "." | "=" | "<=" | ";"))
+    }
+
+    /// A data type with a struct, union or enum, or a typedef name, starts here.
+    pub(crate) fn is_sv_type_start(&self) -> bool {
+        self.is_kw("struct") || self.is_kw("union") || self.is_kw("enum") || self.is_type_name()
+    }
+
+    /// `[signed|unsigned]` after a type.
+    fn signing(&mut self, default: bool) -> bool {
+        if self.eat_kw("signed") {
+            true
+        } else if self.eat_kw("unsigned") {
+            false
+        } else {
+            default
+        }
+    }
+
+    /// A data type: builtin vector/integer types, struct/union, enum, or a typedef name, each
+    /// with optional packed dimensions. None if no type starts here.
+    pub(crate) fn data_type(&mut self) -> Result<Option<SvType>> {
+        let Tok::Ident(s) = self.peek().clone() else { return Ok(None) };
+        if s == "struct" || s == "union" {
+            self.bump();
+            let union = s == "union";
+            self.eat_kw("tagged");
+            self.eat_kw("packed");
+            let signed = self.signing(false);
+            self.expect_p("{")?;
+            let mut fields = Vec::new();
+            while !self.eat_p("}") {
+                let Some(ft) = self.data_type()? else {
+                    return self.err(format!("expected a member type, found {}", self.describe()));
+                };
+                loop {
+                    let name = self.ident()?;
+                    fields.push((name, ft.clone()));
+                    if !self.eat_p(",") {
+                        break;
+                    }
+                }
+                self.expect_p(";")?;
+            }
+            let mut dims = Vec::new();
+            while self.is_p("[") {
+                dims.push(self.range()?);
+            }
+            let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
+            return Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union, fields })), int_kind: false }));
+        }
+        if s == "enum" {
+            self.bump();
+            let base = match self.data_type()? {
+                Some(t) => t,
+                None => {
+                    let signed = self.signing(true);
+                    SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true }
+                }
+            };
+            self.expect_p("{")?;
+            let mut prev: Option<String> = None;
+            let (_, signed, range, _) = base.decl_parts();
+            let range = range.or_else(|| base.int_kind.then(|| base.dims[0].clone()));
+            loop {
+                let line = self.line();
+                let name = self.ident()?;
+                let value = if self.eat_p("=") {
+                    self.expr()?
+                } else {
+                    match &prev {
+                        Some(p) => add(Expr::Ident(p.clone()), num(1)),
+                        None => num(0),
+                    }
+                };
+                self.pending.push(Item::Param(ParamDecl {
+                    local: true,
+                    signed,
+                    range: range.clone(),
+                    integer: false,
+                    real: false,
+                    name: name.clone(),
+                    value,
+                    line,
+                }));
+                prev = Some(name);
+                if !self.eat_p(",") {
+                    break;
+                }
+            }
+            self.expect_p("}")?;
+            return Ok(Some(base));
+        }
+        if let Some((kind, signed, iw)) = builtin(&s) {
+            self.bump();
+            let signed = self.signing(signed);
+            let mut dims = Vec::new();
+            if let Some(w) = iw {
+                dims.push((num(w as i64 - 1), num(0)));
+            }
+            while self.is_p("[") {
+                dims.push(self.range()?);
+            }
+            return Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some() }));
+        }
+        if let Some(t) = self.types.get(&s).cloned() {
+            self.bump();
+            let mut t = (*t).clone();
+            t.signed = self.signing(t.signed);
+            // dimensions after a type name are outer to the type's own
+            let mut outer = Vec::new();
+            while self.is_p("[") {
+                outer.push(self.range()?);
+            }
+            if !outer.is_empty() {
+                t.int_kind = false;
+                outer.extend(t.dims);
+                t.dims = outer;
+            }
+            return Ok(Some(t));
+        }
+        Ok(None)
+    }
+
+    /// `typedef type name;` (also `typedef enum ... name;`, forward `typedef name;`).
+    pub(crate) fn typedef(&mut self) -> Result<()> {
+        self.bump();
+        let Some(t) = self.data_type()? else {
+            // forward declaration: typedef [struct|enum] name;
+            self.eat_kw("struct");
+            self.eat_kw("union");
+            self.eat_kw("enum");
+            self.ident()?;
+            return self.expect_p(";");
+        };
+        let name = self.ident()?;
+        if self.is_p("[") {
+            return self.err("unpacked dimensions in typedefs are not supported");
+        }
+        self.expect_p(";")?;
+        self.types.insert(name, Rc::new(t));
+        Ok(())
+    }
+
+    /// A declaration head for a data type (after the direction): kind, sign, ranges. Records
+    /// the type for the declarators that follow.
+    pub(crate) fn typed_decl_head(&mut self, dir: Option<Dir>, line: Line) -> Result<Decl> {
+        let t = self.data_type()?.expect("caller checked for a type");
+        let (kind, signed, range, packed) = t.decl_parts();
+        self.decl_type = Some(Rc::new(t));
+        Ok(Decl {
+            dir,
+            kind,
+            net: NetType::Wire,
+            explicit_kind: true,
+            real_net: false,
+            strength: None,
+            delay: None,
+            signed,
+            range,
+            packed,
+            names: vec![],
+            line,
+        })
+    }
+
+    /// Note the type of a declared name (struct members are resolved through it).
+    pub(crate) fn declare_var(&mut self, name: &str, unpacked: usize) {
+        match &self.decl_type {
+            Some(t) => {
+                self.vars.insert(name.to_string(), (t.clone(), unpacked));
+            }
+            None => {
+                self.vars.remove(name);
+            }
+        }
+    }
+
+    /// A reference to a variable with a struct type, from its name: indexes, members and
+    /// selects become one `[off +: w]` select of the flat vector. Records the selected type
+    /// (`self.last_type`) for an assignment pattern on the other side.
+    pub(crate) fn struct_access(&mut self, name: String, lvalue: bool) -> Result<Expr> {
+        let (t, unpacked) = self.vars[&name].clone();
+        let mut base = Expr::Ident(name);
+        for _ in 0..unpacked {
+            if !self.is_p("[") {
+                self.last_type = None;
+                return Ok(base);
+            }
+            self.bump();
+            let i = self.expr()?;
+            self.expect_p("]")?;
+            base = Expr::Index(Box::new(base), Box::new(i));
+        }
+        let mut cur: SvType = (*t).clone();
+        let mut di = 0;
+        let mut off = num(0);
+        let mut width = cur.width();
+        let mut touched = false;
+        let mut whole = true; // the selection is a whole (sub)type, not a part of it
+        loop {
+            if self.is_p("[") && di < cur.dims.len() {
+                self.bump();
+                let r = cur.dims[di].clone();
+                let elem = cur.width_from(di + 1);
+                let a = self.expr()?;
+                if self.eat_p(":") {
+                    let b = self.expr()?;
+                    self.expect_p("]")?;
+                    off = add(off, mul(dim_pos(&r, b.clone()), elem.clone()));
+                    width = mul(dim_size(&(a, b)), elem);
+                    whole = false;
+                } else if self.is_p("+:") || self.is_p("-:") {
+                    let up = self.eat_p("+:");
+                    if !up {
+                        self.bump();
+                    }
+                    let n = self.expr()?;
+                    self.expect_p("]")?;
+                    // the element on the lsb side of the selected ones: [a +: n] is a..a+n-1,
+                    // [a -: n] is a-n+1..a; the lower index is on the lsb side of [7:0]
+                    let low = match (up, descending(&r)) {
+                        (true, true) | (false, false) => a,
+                        (true, false) => sub(add(a, n.clone()), num(1)),
+                        (false, true) => add(sub(a, n.clone()), num(1)),
+                    };
+                    off = add(off, mul(dim_pos(&r, low), elem.clone()));
+                    width = mul(n, elem);
+                    whole = false;
+                } else {
+                    self.expect_p("]")?;
+                    off = add(off, mul(dim_pos(&r, a), elem.clone()));
+                    width = elem;
+                    di += 1;
+                    touched = true;
+                    continue;
+                }
+                touched = true;
+                break;
+            }
+            if self.is_p(".") && di == cur.dims.len() && cur.fields.is_some() {
+                let Tok::Ident(m) = self.peek_at(1).clone() else { break };
+                let st = cur.fields.clone().unwrap();
+                let Some(k) = st.fields.iter().position(|f| f.0 == m) else {
+                    return self.err(format!("no member '{m}' in the struct"));
+                };
+                self.bump();
+                self.bump();
+                if !st.union {
+                    for f in &st.fields[k + 1..] {
+                        off = add(off, f.1.width());
+                    }
+                }
+                cur = st.fields[k].1.clone();
+                di = 0;
+                width = cur.width();
+                touched = true;
+                continue;
+            }
+            break;
+        }
+        self.last_type = if whole {
+            let mut rest = cur.clone();
+            rest.dims.drain(..di);
+            if di > 0 {
+                rest.int_kind = false;
+            }
+            Some(rest)
+        } else {
+            None
+        };
+        if !touched {
+            return Ok(base);
+        }
+        let e = Expr::IndexedRange(Box::new(base), Box::new(off), Box::new(width), true);
+        // a whole signed member reads as signed
+        if !lvalue && whole && cur.signed && di == 0 {
+            return Ok(Expr::SysCall("$signed".into(), vec![e]));
+        }
+        Ok(e)
+    }
+
+    /// `'{...}` after the `'`: positional values, `name: value`, `default: value`.
+    pub(crate) fn pattern(&mut self) -> Result<Expr> {
+        self.expect_p("{")?;
+        let mut items = Vec::new();
+        if !self.is_p("}") {
+            loop {
+                let key = match (self.peek().clone(), self.peek_at(1).clone()) {
+                    (Tok::Ident(k), Tok::Punct(":")) => {
+                        self.bump();
+                        self.bump();
+                        Some(k)
+                    }
+                    _ => None,
+                };
+                let v = self.expr()?;
+                items.push(match key {
+                    Some(k) => Expr::SysCall("$__named".into(), vec![Expr::Str(k), v]),
+                    None => v,
+                });
+                if !self.eat_p(",") {
+                    break;
+                }
+            }
+        }
+        self.expect_p("}")?;
+        Ok(Expr::SysCall("$__pattern".into(), items))
+    }
+
+    /// Replace assignment patterns in `e` (at its top, or in a conditional's branches) by
+    /// concatenations for type `t`.
+    pub(crate) fn resolve_pattern(&self, e: Expr, t: &SvType) -> Result<Expr> {
+        match e {
+            Expr::SysCall(n, items) if n == "$__pattern" => self.build_pattern(items, t),
+            Expr::Cond(c, a, b) => Ok(Expr::Cond(c, Box::new(self.resolve_pattern(*a, t)?), Box::new(self.resolve_pattern(*b, t)?))),
+            e => Ok(e),
+        }
+    }
+
+    fn build_pattern(&self, items: Vec<Expr>, t: &SvType) -> Result<Expr> {
+        let mut pos = Vec::new();
+        let mut named = Vec::new();
+        let mut default = None;
+        for it in items {
+            match it {
+                Expr::SysCall(n, mut kv) if n == "$__named" => {
+                    let v = kv.pop().unwrap();
+                    let Some(Expr::Str(k)) = kv.pop() else { unreachable!() };
+                    if k == "default" {
+                        default = Some(v);
+                    } else {
+                        named.push((k, v));
+                    }
+                }
+                v => pos.push(v),
+            }
+        }
+        // the parts: members of a struct, or the elements of the outermost dimension
+        let parts: Vec<(Option<String>, SvType)> = if !t.dims.is_empty() && !t.int_kind {
+            let r = &t.dims[0];
+            let n = match (lit(&r.0), lit(&r.1)) {
+                (Some(a), Some(b)) => (a - b).unsigned_abs() as usize + 1,
+                _ => return self.err("an assignment pattern needs constant dimensions"),
+            };
+            let mut el = t.clone();
+            el.dims.remove(0);
+            (0..n).map(|_| (None, el.clone())).collect()
+        } else if let Some(s) = &t.fields {
+            if s.union {
+                return self.err("assignment patterns for unions are not supported");
+            }
+            s.fields.iter().map(|(n, ft)| (Some(n.clone()), ft.clone())).collect()
+        } else {
+            // a vector: '{default: v} fills it, else the values are its bits
+            return match default {
+                Some(v) => Ok(cast(t.width(), v, 0)),
+                None => Ok(Expr::Concat(pos.into_iter().map(|v| cast(num(1), v, 0)).collect())),
+            };
+        };
+        if !pos.is_empty() && pos.len() != parts.len() {
+            return self.err(format!("assignment pattern has {} values for {} elements", pos.len(), parts.len()));
+        }
+        let mut out = Vec::new();
+        for (k, (name, pt)) in parts.iter().enumerate() {
+            let v = if let Some(v) = pos.get(k) {
+                v.clone()
+            } else if let Some((_, v)) = named.iter().find(|(n, _)| Some(n) == name.as_ref()) {
+                v.clone()
+            } else if let Some(v) = &default {
+                v.clone()
+            } else {
+                return self.err(format!("assignment pattern has no value for member {}", name.clone().unwrap_or_default()));
+            };
+            let v = self.resolve_pattern(v, pt)?;
+            out.push(match v {
+                Expr::Concat(_) => v,
+                v => cast(pt.width(), v, 0),
+            });
+        }
+        Ok(Expr::Concat(out))
+    }
+
+    /// `T'(e)` with the type already parsed.
+    pub(crate) fn cast_to(&mut self, t: &SvType) -> Result<Expr> {
+        self.expect_p("'")?;
+        self.expect_p("(")?;
+        let e = self.expr()?;
+        self.expect_p(")")?;
+        let e = self.resolve_pattern(e, t)?;
+        Ok(cast(t.width(), e, if t.signed { 1 } else { 0 }))
+    }
+
+    /// The width of a type name or type keyword at the cursor (for `$bits(T)`), consuming it.
+    pub(crate) fn type_width_here(&mut self) -> Result<Option<Expr>> {
+        let is_type = match self.peek() {
+            Tok::Ident(s) => self.types.contains_key(s) || builtin(s).is_some() || s == "struct" || s == "enum",
+            _ => false,
+        };
+        if !is_type || !matches!(self.peek_at(1), Tok::Punct(")" | "," | "[")) && !matches!(self.peek(), Tok::Ident(s) if s == "struct" || s == "enum") {
+            return Ok(None);
+        }
+        Ok(self.data_type()?.map(|t| t.width()))
+    }
+}
+
+/// `w - 1`, folded for literals.
+pub fn minus_one(w: Expr) -> Expr {
+    sub(w, num(1))
+}
+
+/// `$__cast(width, sign, e)`: sign 0 unsigned, 1 signed, 2 the expression's.
+pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
+    Expr::SysCall("$__cast".into(), vec![width, Expr::Num(dec(sign)), e])
+}

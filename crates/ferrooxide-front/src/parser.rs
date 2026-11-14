@@ -2,7 +2,10 @@
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
+use crate::svtypes::SvType;
 use crate::{Error, Result};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 pub struct Parser {
     toks: Vec<Token>,
@@ -14,6 +17,18 @@ pub struct Parser {
     pub unconnected_drive: Option<bool>,
     /// counter for names of unnamed instances
     unnamed: u32,
+    /// typedefs in scope (file scope and packages carry over to the next file)
+    pub types: HashMap<String, Rc<SvType>>,
+    /// variables of the current module with a typedef'd or struct type: (type, unpacked dims)
+    pub(crate) vars: HashMap<String, (Rc<SvType>, usize)>,
+    /// the data type of the declaration being parsed
+    pub(crate) decl_type: Option<Rc<SvType>>,
+    /// the type selected by the last lvalue (for an assignment pattern on the right)
+    pub(crate) last_type: Option<SvType>,
+    /// items produced while parsing a declaration (enum constants)
+    pub(crate) pending: Vec<Item>,
+    /// items at file scope ($unit): added to every module that follows
+    pub unit_items: Vec<Item>,
 }
 
 struct PType {
@@ -21,6 +36,8 @@ struct PType {
     integer: bool,
     real: bool,
     range: Option<Range>,
+    /// a typedef'd type (for assignment patterns)
+    sv: Option<SvType>,
 }
 
 const KEYWORDS: &[&str] = &[
@@ -41,7 +58,7 @@ fn is_keyword(s: &str) -> bool {
 /// wherever an identifier is required.
 const SV_ONLY: &[&str] = &[
     "logic", "bit", "int", "byte", "shortint", "longint", "always_comb", "always_ff", "always_latch", "return", "do",
-    "final", "join_any", "join_none", "break", "continue", "unique", "priority",
+    "final", "join_any", "join_none", "break", "continue", "unique", "priority", "var",
 ];
 
 fn is_sv_only(s: &str) -> bool {
@@ -61,38 +78,51 @@ const STRENGTHS: &[&str] = &[
 
 impl Parser {
     pub fn new(toks: Vec<Token>, file: String) -> Self {
-        Parser { toks, pos: 0, file, timescale: None,
-            default_nettype: None, unconnected_drive: None, unnamed: 0 }
+        Parser {
+            toks,
+            pos: 0,
+            file,
+            timescale: None,
+            default_nettype: None,
+            unconnected_drive: None,
+            unnamed: 0,
+            types: HashMap::new(),
+            vars: HashMap::new(),
+            decl_type: None,
+            last_type: None,
+            pending: Vec::new(),
+            unit_items: Vec::new(),
+        }
     }
 
     // ---------- token helpers ----------
-    fn peek(&self) -> &Tok {
+    pub(crate) fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
-    fn peek_at(&self, k: usize) -> &Tok {
+    pub(crate) fn peek_at(&self, k: usize) -> &Tok {
         let i = (self.pos + k).min(self.toks.len() - 1);
         &self.toks[i].tok
     }
-    fn line(&self) -> u32 {
+    pub(crate) fn line(&self) -> u32 {
         self.toks[self.pos].line
     }
-    fn bump(&mut self) -> Tok {
+    pub(crate) fn bump(&mut self) -> Tok {
         let t = self.toks[self.pos].tok.clone();
         if self.pos < self.toks.len() - 1 {
             self.pos += 1;
         }
         t
     }
-    fn err<T>(&self, msg: impl Into<String>) -> Result<T> {
+    pub(crate) fn err<T>(&self, msg: impl Into<String>) -> Result<T> {
         Err(Error { msg: msg.into(), file: self.file.clone(), line: self.line() })
     }
-    fn is_p(&self, p: &str) -> bool {
+    pub(crate) fn is_p(&self, p: &str) -> bool {
         matches!(self.peek(), Tok::Punct(q) if *q == p)
     }
-    fn is_kw(&self, k: &str) -> bool {
+    pub(crate) fn is_kw(&self, k: &str) -> bool {
         matches!(self.peek(), Tok::Ident(q) if q == k)
     }
-    fn eat_p(&mut self, p: &str) -> bool {
+    pub(crate) fn eat_p(&mut self, p: &str) -> bool {
         if self.is_p(p) {
             self.bump();
             true
@@ -100,7 +130,7 @@ impl Parser {
             false
         }
     }
-    fn eat_kw(&mut self, k: &str) -> bool {
+    pub(crate) fn eat_kw(&mut self, k: &str) -> bool {
         if self.is_kw(k) {
             self.bump();
             true
@@ -108,21 +138,21 @@ impl Parser {
             false
         }
     }
-    fn expect_p(&mut self, p: &str) -> Result<()> {
+    pub(crate) fn expect_p(&mut self, p: &str) -> Result<()> {
         if self.eat_p(p) {
             Ok(())
         } else {
             self.err(format!("expected '{p}', found {}", self.describe()))
         }
     }
-    fn expect_kw(&mut self, k: &str) -> Result<()> {
+    pub(crate) fn expect_kw(&mut self, k: &str) -> Result<()> {
         if self.eat_kw(k) {
             Ok(())
         } else {
             self.err(format!("expected '{k}', found {}", self.describe()))
         }
     }
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self.peek() {
             Tok::Ident(s) => format!("'{s}'"),
             Tok::SysIdent(s) => format!("'{s}'"),
@@ -132,7 +162,7 @@ impl Parser {
             Tok::Eof => "end of file".into(),
         }
     }
-    fn ident(&mut self) -> Result<String> {
+    pub(crate) fn ident(&mut self) -> Result<String> {
         match self.peek().clone() {
             Tok::Ident(s) if !is_keyword(&s) || is_sv_only(&s) => {
                 self.bump();
@@ -262,6 +292,12 @@ impl Parser {
                 Tok::Eof => break,
                 Tok::Ident(s) if s == "module" || s == "macromodule" => mods.push(self.module()?),
                 Tok::Ident(s) if s == "primitive" => mods.push(self.primitive()?),
+                // file-scope ($unit) declarations: visible in the modules that follow
+                Tok::Ident(s) if matches!(s.as_str(), "typedef" | "localparam" | "parameter" | "function" | "task") => {
+                    let mut v = Vec::new();
+                    self.module_item(&mut v)?;
+                    self.unit_items.extend(v);
+                }
                 Tok::Ident(s) if s == "__fx_uncdrive" => {
                     self.bump();
                     let t = self.ident_or_kw()?;
@@ -308,13 +344,16 @@ impl Parser {
         let line = self.line();
         self.bump();
         let name = self.ident()?;
+        // typedefs of the module stay in it
+        let saved_types = self.types.clone();
+        self.vars.clear();
         let mut items = Vec::new();
         let mut ports = Vec::new();
         // parameter port list
         if self.eat_p("#") {
             self.expect_p("(")?;
             let mut local = false;
-            let mut pt = PType { signed: false, integer: false, real: false, range: None };
+            let mut pt = PType { signed: false, integer: false, real: false, range: None, sv: None };
             loop {
                 if self.eat_kw("parameter") {
                     local = false;
@@ -324,6 +363,7 @@ impl Parser {
                     pt = self.param_type()?;
                 } else if matches!(self.peek(), Tok::Ident(s) if s == "integer" || s == "signed" || s == "int" || s == "logic" || s == "bit" || s == "real")
                     || self.is_p("[")
+                    || self.is_sv_type_start()
                 {
                     pt = self.param_type()?;
                 }
@@ -331,6 +371,13 @@ impl Parser {
                 let pname = self.ident()?;
                 self.expect_p("=")?;
                 let value = self.expr()?;
+                let value = match &pt.sv {
+                    Some(t) => self.resolve_pattern(value, t)?,
+                    None => value,
+                };
+                self.decl_type = pt.sv.clone().map(Rc::new);
+                self.declare_var(&pname, 0);
+                items.append(&mut self.pending);
                 items.push(Item::Param(ParamDecl {
                     local,
                     signed: pt.signed,
@@ -360,7 +407,7 @@ impl Parser {
                             cur = Some(d);
                         } else if cur.is_none() {
                             return self.err("expected port direction");
-                        } else if matches!(self.peek(), Tok::Ident(s) if is_keyword(s)) || self.is_p("[") {
+                        } else if matches!(self.peek(), Tok::Ident(s) if is_keyword(s)) || self.is_p("[") || self.is_sv_type_start() {
                             // new type without direction: inherits direction
                             let dir = cur.as_ref().unwrap().dir;
                             let mut d = self.decl_head(false)?;
@@ -373,6 +420,8 @@ impl Parser {
                             dims.push(self.range()?);
                         }
                         let init = if self.eat_p("=") { Some(self.expr()?) } else { None };
+                        self.declare_var(&pname, dims.len());
+                        items.append(&mut self.pending);
                         let mut d = cur.clone().unwrap();
                         d.line = pline;
                         d.names = vec![Declarator { name: pname.clone(), dims, init, line: pline }];
@@ -406,6 +455,15 @@ impl Parser {
         }
         self.bump();
         self.opt_block_label()?;
+        self.types = saved_types;
+        // file-scope items first, unless the module declares the name itself
+        if !self.unit_items.is_empty() {
+            let own = declared_names(&items);
+            let mut all: Vec<Item> =
+                self.unit_items.iter().filter(|it| item_name(it).is_none_or(|n| !own.contains(n))).cloned().collect();
+            all.extend(items);
+            items = all;
+        }
         Ok(Module {
             name,
             timescale: self.timescale,
@@ -526,6 +584,14 @@ impl Parser {
     }
 
     fn param_type(&mut self) -> Result<PType> {
+        if self.is_sv_type_start() {
+            let t = self.data_type()?.unwrap();
+            let (kind, signed, range, packed) = t.decl_parts();
+            // a parameter has one range: the whole width
+            let range = if packed.is_empty() { range } else { Some((crate::svtypes::minus_one(t.width()), Expr::Num(dec(0)))) };
+            let integer = matches!(kind, NetKind::Int(_) | NetKind::Integer) && range.is_none();
+            return Ok(PType { signed, integer, real: false, range, sv: Some(t) });
+        }
         let mut signed = false;
         let mut integer = false;
         let mut real = false;
@@ -544,10 +610,10 @@ impl Parser {
             }
         }
         let range = if self.is_p("[") { Some(self.range()?) } else { None };
-        Ok(PType { signed, integer, real, range })
+        Ok(PType { signed, integer, real, range, sv: None })
     }
 
-    fn range(&mut self) -> Result<Range> {
+    pub(crate) fn range(&mut self) -> Result<Range> {
         self.expect_p("[")?;
         let a = self.expr()?;
         let r = if self.eat_p(":") {
@@ -574,6 +640,13 @@ impl Parser {
             } else if self.eat_kw("inout") {
                 dir = Some(Dir::Inout)
             }
+        }
+        self.decl_type = None;
+        if !self.sv_ident_here() {
+            self.eat_kw("var");
+        }
+        if self.is_sv_type_start() {
+            return self.typed_decl_head(dir, line);
         }
         let mut kind = NetKind::Wire;
         let mut explicit_kind = false;
@@ -658,6 +731,12 @@ impl Parser {
         }
         // optional net delay: wire #5 w;
         let delay = if self.eat_p("#") { Some(self.delay_value()?) } else { None };
+        // the type of a vector, for assignment patterns
+        if let Some(r) = &range {
+            let mut dims = vec![r.clone()];
+            dims.extend(packed.iter().cloned());
+            self.decl_type = Some(Rc::new(SvType::vector(kind, signed, dims)));
+        }
         Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, packed, names: Vec::new(), line })
     }
 
@@ -670,7 +749,11 @@ impl Parser {
             while self.is_p("[") {
                 dims.push(self.range()?);
             }
-            let init = if self.eat_p("=") { Some(self.expr()?) } else { None };
+            let mut init = if self.eat_p("=") { Some(self.expr()?) } else { None };
+            if let (Some(e), Some(t)) = (&init, self.decl_type.clone()) {
+                init = Some(self.resolve_pattern(e.clone(), &t)?);
+            }
+            self.declare_var(&name, dims.len());
             v.push(Declarator { name, dims, init, line });
             if !self.eat_p(",") {
                 break;
@@ -693,7 +776,8 @@ impl Parser {
         }
         matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
             "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"|"event"
-            |"tri"|"wand"|"wor"|"triand"|"trior"|"trireg"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"))
+            |"tri"|"wand"|"wor"|"triand"|"trior"|"trireg"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"|"var"))
+            || self.is_sv_type_start()
     }
 
     fn param_items(&mut self, local: bool) -> Result<Vec<ParamDecl>> {
@@ -704,6 +788,12 @@ impl Parser {
             let name = self.ident()?;
             self.expect_p("=")?;
             let value = self.expr()?;
+            let value = match &pt.sv {
+                Some(t) => self.resolve_pattern(value, t)?,
+                None => value,
+            };
+            self.decl_type = pt.sv.clone().map(Rc::new);
+            self.declare_var(&name, 0);
             v.push(ParamDecl {
                 local,
                 signed: pt.signed,
@@ -740,6 +830,10 @@ impl Parser {
                     items.push(Item::Param(p));
                 }
             }
+            "typedef" => {
+                self.typedef()?;
+                items.append(&mut self.pending);
+            }
             "assign" => {
                 self.bump();
                 let strength = self.strength()?;
@@ -747,8 +841,13 @@ impl Parser {
                 loop {
                     let line = self.line();
                     let lhs = self.lvalue()?;
+                    let lt = self.last_type.take();
                     self.expect_p("=")?;
                     let rhs = self.expr()?;
+                    let rhs = match &lt {
+                        Some(t) => self.resolve_pattern(rhs, t)?,
+                        None => rhs,
+                    };
                     items.push(Item::ContAssign { delay: delay.clone(), lhs, rhs, strength, line });
                     if !self.eat_p(",") {
                         break;
@@ -853,6 +952,7 @@ impl Parser {
             _ if self.is_decl_start() => {
                 let mut d = self.decl_head(true)?;
                 d.names = self.declarators()?;
+                items.append(&mut self.pending);
                 items.push(Item::Decl(d));
             }
             _ if GATES.contains(&kw) => {
@@ -1075,7 +1175,25 @@ impl Parser {
         let mut signed = false;
         let mut range = None;
         let mut ret_kind = NetKind::Reg;
-        if !is_task {
+        let mut ret_type = None;
+        if !is_task && self.is_sv_type_start() {
+            let t = self.data_type()?.unwrap();
+            let (k, sg, r, packed) = t.decl_parts();
+            if !packed.is_empty() {
+                range = Some((crate::svtypes::minus_one(t.width()), Expr::Num(dec(0))));
+            } else {
+                range = r;
+            }
+            signed = sg;
+            ret_kind = match k {
+                NetKind::Int(_) | NetKind::Integer if range.is_none() => NetKind::Integer,
+                _ => NetKind::Reg,
+            };
+            if ret_kind == NetKind::Integer {
+                range = None;
+            }
+            ret_type = Some(Rc::new(t));
+        } else if !is_task {
             if self.eat_kw("void") {
                 ret_kind = NetKind::Int(0);
             }
@@ -1097,6 +1215,9 @@ impl Parser {
             }
         }
         let name = self.ident()?;
+        // the function's own name is its result variable
+        self.decl_type = ret_type;
+        self.declare_var(&name, 0);
         let mut decls = Vec::new();
         if self.eat_p("(") {
             if !self.is_p(")") {
@@ -1104,6 +1225,7 @@ impl Parser {
                 loop {
                     if matches!(self.peek(), Tok::Ident(s) if s == "input" || s == "output" || s == "inout")
                         || cur.is_none()
+                        || self.is_decl_start()
                     {
                         let mut d = self.decl_head(true)?;
                         if d.dir.is_none() {
@@ -1116,6 +1238,7 @@ impl Parser {
                     }
                     let dl = self.line();
                     let n = self.ident()?;
+                    self.declare_var(&n, 0);
                     let mut d = cur.clone().unwrap();
                     d.names = vec![Declarator { name: n, dims: vec![], init: None, line: dl }];
                     decls.push(d);
@@ -1576,6 +1699,7 @@ impl Parser {
     fn simple_assign_noterm(&mut self) -> Result<Stmt> {
         let line = self.line();
         let lhs = self.lvalue()?;
+        let lt = self.last_type.take();
         let nonblocking = if self.eat_p("=") {
             false
         } else if self.eat_p("<=") {
@@ -1628,6 +1752,10 @@ impl Parser {
             None
         };
         let rhs = self.expr()?;
+        let rhs = match &lt {
+            Some(t) => self.resolve_pattern(rhs, t)?,
+            None => rhs,
+        };
         Ok(Stmt::Assign { lhs, rhs, nonblocking, timing, line })
     }
 
@@ -1644,6 +1772,16 @@ impl Parser {
             return Ok(Expr::Concat(v));
         }
         let name = self.ident()?;
+        self.last_type = None;
+        if let Some((t, unpacked)) = self.vars.get(&name).cloned() {
+            if t.has_struct() {
+                let e = self.struct_access(name, true)?;
+                return self.selects(e);
+            }
+            if unpacked == 0 && !self.is_p("[") {
+                self.last_type = Some((*t).clone());
+            }
+        }
         let base = self.hier_tail(name)?;
         self.selects(base)
     }
@@ -1819,7 +1957,17 @@ impl Parser {
     fn primary(&mut self) -> Result<Expr> {
         let t = self.bump();
         let e = match t {
+            // size cast: 8'(e)
+            Tok::Num(n) if self.is_p("'") && matches!(self.peek_at(1), Tok::Punct("(")) => {
+                self.bump();
+                self.bump();
+                let e = self.expr()?;
+                self.expect_p(")")?;
+                crate::svtypes::cast(Expr::Num(n), e, 2)
+            }
             Tok::Num(n) => Expr::Num(n),
+            // assignment pattern '{...}
+            Tok::Punct("'") if self.is_p("{") => self.pattern()?,
             Tok::Real(r) => Expr::Real(r),
             Tok::Str(s) => Expr::Str(s),
             Tok::Punct("(") => {
@@ -1859,6 +2007,15 @@ impl Parser {
                     Expr::Concat(v)
                 }
             }
+            Tok::SysIdent(name) if name == "$bits" && self.is_p("(") && matches!(self.peek_at(1), Tok::Ident(s) if self.types.contains_key(s) || s == "struct" || s == "enum") => {
+                self.bump();
+                let w = self.type_width_here()?;
+                self.expect_p(")")?;
+                match w {
+                    Some(w) => w,
+                    None => return self.err("expected a type"),
+                }
+            }
             Tok::SysIdent(name) => {
                 let mut args = Vec::new();
                 let mut type_bits = None;
@@ -1896,6 +2053,23 @@ impl Parser {
                     Some(w) => Expr::Num(dec(w)),
                     None => Expr::SysCall(name, args),
                 }
+            }
+            // casts: T'(e), int'(e), signed'(e)
+            Tok::Ident(name) if self.is_p("'") && matches!(self.peek_at(1), Tok::Punct("(")) && (self.types.contains_key(&name) || matches!(name.as_str(), "int" | "integer" | "shortint" | "byte" | "longint" | "bit" | "logic" | "reg" | "signed" | "unsigned")) => {
+                if name == "signed" || name == "unsigned" {
+                    self.bump();
+                    self.bump();
+                    let e = self.expr()?;
+                    self.expect_p(")")?;
+                    return Ok(Expr::SysCall(format!("${name}"), vec![e]));
+                }
+                self.pos -= 1;
+                let t = self.data_type()?.unwrap();
+                return self.cast_to(&t);
+            }
+            Tok::Ident(name) if self.vars.get(&name).is_some_and(|v| v.0.has_struct()) && !self.is_p("(") => {
+                let e = self.struct_access(name, false)?;
+                return self.selects(e);
             }
             Tok::Ident(name) if !is_keyword(&name) || (is_sv_only(&name) && !self.is_p("'")) => {
                 if self.is_p("(") {
@@ -1992,4 +2166,31 @@ pub fn hier_index_expr(n: usize) -> Option<Expr> {
 
 pub fn dec(v: u64) -> Number {
     Number { size: None, signed: true, base: 10, based: false, digits: v.to_string(), fill: false }
+}
+
+/// The name an item declares (for file-scope items a module may redeclare).
+fn item_name(it: &Item) -> Option<&str> {
+    match it {
+        Item::Param(p) => Some(&p.name),
+        Item::Subroutine(f) => Some(&f.name),
+        Item::Decl(d) if d.names.len() == 1 => Some(&d.names[0].name),
+        _ => None,
+    }
+}
+
+fn declared_names(items: &[Item]) -> std::collections::HashSet<String> {
+    let mut v = std::collections::HashSet::new();
+    for it in items {
+        match it {
+            Item::Decl(d) => v.extend(d.names.iter().map(|n| n.name.clone())),
+            Item::Param(p) => {
+                v.insert(p.name.clone());
+            }
+            Item::Subroutine(f) => {
+                v.insert(f.name.clone());
+            }
+            _ => {}
+        }
+    }
+    v
 }
