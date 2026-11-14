@@ -37,6 +37,8 @@ pub struct Parser {
     pub(crate) mod_pkgs: Vec<String>,
     /// the return type of the function being parsed (for `return '{...}`)
     ret_type: Option<Rc<SvType>>,
+    /// modports of the interface being parsed
+    modports: Vec<String>,
 }
 
 struct PType {
@@ -122,6 +124,7 @@ impl Parser {
             packages: HashMap::new(),
             mod_pkgs: Vec::new(),
             ret_type: None,
+            modports: Vec::new(),
         }
     }
 
@@ -326,7 +329,7 @@ impl Parser {
         loop {
             match self.peek() {
                 Tok::Eof => break,
-                Tok::Ident(s) if s == "module" || s == "macromodule" => mods.push(self.module()?),
+                Tok::Ident(s) if s == "module" || s == "macromodule" || s == "interface" => mods.push(self.module()?),
                 Tok::Ident(s) if s == "primitive" => mods.push(self.primitive()?),
                 // file-scope ($unit) declarations: visible in the modules that follow
                 Tok::Ident(s) if s == "package" => self.package()?,
@@ -380,8 +383,12 @@ impl Parser {
 
     fn module(&mut self) -> Result<Module> {
         let line = self.line();
+        let interface = self.is_kw("interface");
+        let end_kw = if interface { "endinterface" } else { "endmodule" };
         self.bump();
         let name = self.ident()?;
+        let mut iface_ports = Vec::new();
+        self.modports.clear();
         // typedefs of the module stay in it
         let saved_types = self.types.clone();
         self.vars.clear();
@@ -440,11 +447,26 @@ impl Parser {
         // port list
         if self.eat_p("(") {
             if !self.is_p(")") {
-                if matches!(self.peek(), Tok::Ident(s) if s == "input" || s == "output" || s == "inout") {
+                if matches!(self.peek(), Tok::Ident(s) if s == "input" || s == "output" || s == "inout") || self.is_iface_port() {
                     // ANSI style
                     let mut cur: Option<Decl> = None;
                     loop {
                         let pline = self.line();
+                        if self.is_iface_port() {
+                            // interface port: bus_if b / bus_if.master b
+                            let iface = self.ident()?;
+                            if self.eat_p(".") {
+                                self.ident()?;
+                            }
+                            let pname = self.ident()?;
+                            iface_ports.push((pname.clone(), iface));
+                            ports.push(pname);
+                            cur = None;
+                            if !self.eat_p(",") {
+                                break;
+                            }
+                            continue;
+                        }
                         if matches!(self.peek(), Tok::Ident(s) if s == "input" || s == "output" || s == "inout") {
                             let d = self.decl_head(true)?;
                             cur = Some(d);
@@ -490,9 +512,9 @@ impl Parser {
             self.expect_p(")")?;
         }
         self.expect_p(";")?;
-        while !self.is_kw("endmodule") {
+        while !self.is_kw(end_kw) {
             if matches!(self.peek(), Tok::Eof) {
-                return self.err("unexpected end of file in module");
+                return self.err(format!("unexpected end of file in {}", if interface { "interface" } else { "module" }));
             }
             self.module_item(&mut items)?;
         }
@@ -526,6 +548,9 @@ impl Parser {
             items,
             udp: None,
             keyword_names: std::mem::take(&mut self.kw_names),
+            interface,
+            iface_ports,
+            modports: std::mem::take(&mut self.modports),
         })
     }
 
@@ -633,6 +658,9 @@ impl Parser {
             items,
             udp: Some(UdpDef { sequential, rows, init }),
             keyword_names: std::mem::take(&mut self.kw_names),
+            interface: false,
+            iface_ports: vec![],
+            modports: vec![],
         })
     }
 
@@ -816,9 +844,28 @@ impl Parser {
         Ok(v)
     }
 
+    /// An interface port in an ANSI port list: `bus_if b` or `bus_if.master b` (a name that
+    /// is no keyword or type, followed by a port name).
+    fn is_iface_port(&self) -> bool {
+        let Tok::Ident(t) = self.peek() else { return false };
+        if is_keyword(t) || self.types.contains_key(t) || self.packages.contains_key(t) {
+            return false;
+        }
+        match (self.peek_at(1), self.peek_at(2), self.peek_at(3)) {
+            (Tok::Punct("."), Tok::Ident(_), Tok::Ident(_)) => true,
+            (Tok::Ident(n), Tok::Punct("," | ")"), _) => !is_keyword(n),
+            _ => false,
+        }
+    }
+
     /// The current token is a SystemVerilog keyword used as a Verilog-2005 identifier
     /// (`bit = 1;`, `x = int + 1`).
     fn sv_ident_here(&self) -> bool {
+        // `return -x;` / `return ^v;`: unary operators after return; only an assignment makes
+        // it a name
+        if matches!(self.peek(), Tok::Ident(s) if s == "return") {
+            return matches!(self.peek_at(1), Tok::Punct("=" | "<="));
+        }
         matches!(self.peek(), Tok::Ident(s) if is_sv_only(s))
             && matches!(self.peek_at(1), Tok::Punct("=" | "<=" | ")" | "," | ";" | "." | "+" | "-" | "*" | "/" | "&" | "|" | "^" | "==" | "!=" | "?" | ":" | "}" | "]"))
     }
@@ -888,6 +935,19 @@ impl Parser {
                 items.append(&mut self.pending);
             }
             "import" => self.import(false)?,
+            // modports only restrict access: their names are kept, the lists skipped
+            "modport" => {
+                self.bump();
+                loop {
+                    let n = self.ident()?;
+                    self.skip_parens()?;
+                    self.modports.push(n);
+                    if !self.eat_p(",") {
+                        break;
+                    }
+                }
+                self.expect_p(";")?;
+            }
             "assign" => {
                 self.bump();
                 let strength = self.strength()?;

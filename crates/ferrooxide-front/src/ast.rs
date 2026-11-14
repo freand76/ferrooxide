@@ -20,6 +20,12 @@ pub struct Module {
     pub udp: Option<UdpDef>,
     /// names that are SystemVerilog keywords (legal Verilog-2005 names; for the lint check)
     pub keyword_names: Vec<(String, Line)>,
+    /// an `interface ... endinterface`
+    pub interface: bool,
+    /// interface ports (`bus_if.master b`): (port name, interface name)
+    pub iface_ports: Vec<(String, String)>,
+    /// modport names of an interface
+    pub modports: Vec<String>,
 }
 
 /// A UDP table. Each row: input symbols ("0", "1", "x", "?", "b", "r", "f", "p", "n", "*" or an

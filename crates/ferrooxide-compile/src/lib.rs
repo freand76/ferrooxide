@@ -238,7 +238,7 @@ pub fn compile_dialect(
         for m in modules {
             scan(&m.items, &mut used);
         }
-        modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none()).collect()
+        modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none() && !m.interface).collect()
     } else {
         let mut v = Vec::new();
         for t in tops {
@@ -858,6 +858,27 @@ impl<'a> Compiler<'a> {
         }
         let parent_scope = conns.map(|c| c.1);
         let inst_line = self.line;
+        // interface ports: the port's name stands for the connected interface instance
+        for (pn, iface) in &m.iface_ports {
+            let target = match (port_conns.get(pn), parent_scope) {
+                (Some(Some(e)), Some(ps)) => {
+                    let parts: Vec<String> = match e {
+                        Expr::Ident(n) => vec![n.clone()],
+                        Expr::Hier(p) => p.clone(),
+                        _ => vec![],
+                    };
+                    // `bus.master`: a modport of the instance
+                    self.hier_scope(&parts, ps).or_else(|| {
+                        (parts.len() > 1).then(|| self.hier_scope(&parts[..parts.len() - 1], ps)).flatten()
+                    })
+                }
+                _ => None,
+            };
+            let Some(target) = target else {
+                return self.err(format!("interface port '{pn}' of '{}' must be connected to an instance of '{iface}'", m.name));
+            };
+            self.scopes[sid].children.insert(pn.clone(), target);
+        }
         self.elab_items(&m.items, sid, true, &port_conns, parent_scope)?;
         if let Some(ps) = parent_scope {
             // after the instance's own children, as Icarus orders them
@@ -1531,9 +1552,12 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        // 4. everything else
+        // 4. everything else; interface instances first, so that modules can be connected to
+        // interfaces declared after them
         let mut genblk = 0;
-        for it in items {
+        let is_iface = |it: &Item| matches!(it, Item::Instances { module, .. } if self.mods.get(module.as_str()).is_some_and(|m| m.interface));
+        let order: Vec<&'a Item> = items.iter().filter(|it| is_iface(it)).chain(items.iter().filter(|it| !is_iface(it))).collect();
+        for it in order {
             match it {
                 Item::Decl(_) | Item::Param(_) | Item::Subroutine(_) | Item::Defparam { .. } | Item::SpecPath { .. } => {}
                 Item::ContAssign { delay, lhs, rhs, strength, line } => {
