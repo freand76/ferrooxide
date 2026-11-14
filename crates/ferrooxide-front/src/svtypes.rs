@@ -30,6 +30,8 @@ pub struct SvType {
     /// unpacked dimensions of a typedef (`typedef logic [7:0] T [4];`): a declaration of the
     /// type is an array with these dimensions after its own
     pub unpacked: Vec<Range>,
+    /// a type parameter of this name (resolved per instance; `dims` are outer to it)
+    pub param: Option<String>,
 }
 
 /// A package: its items (with those of the packages it imports) and its typedefs.
@@ -44,7 +46,7 @@ pub struct Package {
     pub types: std::collections::HashMap<String, Rc<SvType>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Struct {
     pub union: bool,
     pub fields: Vec<(String, SvType)>,
@@ -127,11 +129,14 @@ fn descending(r: &Range) -> bool {
 
 impl SvType {
     pub fn vector(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
-        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![] }
+        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![], param: None }
     }
 
     /// Width of one element after the packed dimensions.
     pub fn leaf_width(&self) -> Expr {
+        if let Some(p) = &self.param {
+            return Expr::SysCall("$bits".into(), vec![Expr::Ident(p.clone())]);
+        }
         match &self.fields {
             None => num(1),
             Some(s) if s.union => s.fields.first().map_or(num(0), |f| f.1.width()),
@@ -182,6 +187,7 @@ fn builtin(s: &str) -> Option<(NetKind, bool, Option<u32>)> {
         "shortint" => (NetKind::Int(16), true, Some(16)),
         "longint" => (NetKind::Int(64), true, Some(64)),
         "time" => (NetKind::Time, false, Some(64)),
+        "real" | "realtime" => (NetKind::Real, true, Some(64)),
         _ => return None,
     })
 }
@@ -196,13 +202,20 @@ impl Parser {
         let saved_pkgs = std::mem::take(&mut self.mod_pkgs);
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_tu = std::mem::replace(&mut self.local_tu, (None, None));
+        let saved_scope = self.type_scope.replace((name.clone(), Default::default()));
         let mut own = Vec::new();
         while !self.eat_kw("endpackage") {
             if matches!(self.peek(), Tok::Eof) {
                 return self.err("unexpected end of file in package");
             }
+            let n = own.len();
             self.module_item(&mut own)?;
+            let new_params: Vec<String> = own[n..].iter().filter_map(|i| if let Item::Param(p) = i { Some(p.name.clone()) } else { None }).collect();
+            if let Some((_, names)) = &mut self.type_scope {
+                names.extend(new_params);
+            }
         }
+        self.type_scope = saved_scope;
         self.opt_block_label()?;
         // the package's typedefs: those added while parsing it
         let mut types = std::collections::HashMap::new();
@@ -315,19 +328,43 @@ impl Parser {
     }
 
     /// The items of packages, each name once (the first package wins).
+    /// The parameters are copies that refer to the package's own (their values are
+    /// evaluated in the package's scope).
     pub(crate) fn package_items(&self, pkgs: &[String]) -> Vec<Item> {
         let mut seen = std::collections::HashSet::new();
         let mut v = Vec::new();
-        for p in pkgs {
-            if let Some(p) = self.packages.get(p) {
+        for name in pkgs {
+            if let Some(p) = self.packages.get(name) {
                 for it in &p.items {
                     if item_name(it).is_none_or(|n| seen.insert(n.to_string())) {
-                        v.push(it.clone());
+                        v.push(scoped_copy(it, name));
                     }
                 }
             }
         }
         v
+    }
+
+    /// Identifiers in the dimensions of a type declared in a package or at file scope that
+    /// name parameters of that scope refer to them there (not to a module's names).
+    pub(crate) fn qualify_type(&self, t: &mut SvType) {
+        let Some((scope, names)) = &self.type_scope else { return };
+        if names.is_empty() {
+            return;
+        }
+        fn ty(t: &mut SvType, scope: &str, names: &std::collections::HashSet<String>) {
+            for d in t.dims.iter_mut().chain(t.unpacked.iter_mut()) {
+                qualify_expr(&mut d.0, scope, names);
+                qualify_expr(&mut d.1, scope, names);
+            }
+            if let Some(f) = &mut t.fields {
+                let f = Rc::make_mut(f);
+                for (_, ft) in &mut f.fields {
+                    ty(ft, scope, names);
+                }
+            }
+        }
+        ty(t, scope, names);
     }
 
     /// The current token is a typedef name (not a call or an instance name).
@@ -398,7 +435,7 @@ impl Parser {
                 dims.push(self.range()?);
             }
             let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-            return Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union, fields })), int_kind: false, enum_names: None, unpacked: vec![] }));
+            return Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union, fields })), int_kind: false, enum_names: None, unpacked: vec![], param: None }));
         }
         if s == "enum" {
             self.bump();
@@ -406,7 +443,7 @@ impl Parser {
                 Some(t) => t,
                 None => {
                     let signed = self.signing(true);
-                    SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![] }
+                    SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], param: None }
                 }
             };
             self.expect_p("{")?;
@@ -456,7 +493,7 @@ impl Parser {
             while self.is_p("[") {
                 dims.push(self.range()?);
             }
-            return Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![] }));
+            return Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![], param: None }));
         }
         if let Some(t) = self.types.get(&s).cloned() {
             self.bump();
@@ -490,11 +527,17 @@ impl Parser {
         };
         let name = self.ident()?;
         let mut t = t;
+        self.qualify_type(&mut t);
         while self.is_p("[") {
             if matches!(self.peek_at(1), Tok::Punct("]" | "$")) || matches!(self.peek_at(1), Tok::Ident(s) if s == "$") {
                 return self.err("dynamic arrays and queues in typedefs are not supported");
             }
-            t.unpacked.push(self.range()?);
+            let mut r = self.range()?;
+            if let Some((scope, names)) = &self.type_scope {
+                qualify_expr(&mut r.0, scope, names);
+                qualify_expr(&mut r.1, scope, names);
+            }
+            t.unpacked.push(r);
         }
         self.expect_p(";")?;
         self.types.insert(name, Rc::new(t));
@@ -506,6 +549,7 @@ impl Parser {
     pub(crate) fn typed_decl_head(&mut self, dir: Option<Dir>, line: Line) -> Result<Decl> {
         let t = self.data_type()?.expect("caller checked for a type");
         let (kind, signed, range, packed) = t.decl_parts();
+        let type_param = t.param.clone();
         self.decl_type = Some(Rc::new(t));
         Ok(Decl {
             dir,
@@ -518,6 +562,7 @@ impl Parser {
             signed,
             range,
             packed,
+            type_param,
             names: vec![],
             line,
         })
@@ -877,4 +922,45 @@ pub fn minus_one(w: Expr) -> Expr {
 /// `$__cast(width, sign, e)`: sign 0 unsigned, 1 signed, 2 the expression's.
 pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
     Expr::SysCall("$__cast".into(), vec![width, Expr::Num(dec(sign)), e])
+}
+
+/// A package (or file-scope) item copied into a module: a parameter becomes a local copy of
+/// the scope's own (`localparam X = P.X`).
+pub(crate) fn scoped_copy(it: &Item, scope: &str) -> Item {
+    match it {
+        Item::Param(p) if !p.real => {
+            let mut p = p.clone();
+            p.value = Expr::Hier(vec![scope.to_string(), p.name.clone()]);
+            p.local = true;
+            Item::Param(p)
+        }
+        _ => it.clone(),
+    }
+}
+
+/// `n` -> `scope.n` for the names in `names`.
+pub(crate) fn qualify_expr(e: &mut Expr, scope: &str, names: &std::collections::HashSet<String>) {
+    match e {
+        Expr::Ident(n) if names.contains(n.as_str()) => *e = Expr::Hier(vec![scope.to_string(), n.clone()]),
+        Expr::Index(a, b) => {
+            qualify_expr(a, scope, names);
+            qualify_expr(b, scope, names);
+        }
+        Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
+            qualify_expr(a, scope, names);
+            qualify_expr(b, scope, names);
+            qualify_expr(c, scope, names);
+        }
+        Expr::Unary(_, a) => qualify_expr(a, scope, names),
+        Expr::Binary(_, a, b) => {
+            qualify_expr(a, scope, names);
+            qualify_expr(b, scope, names);
+        }
+        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter_mut().for_each(|x| qualify_expr(x, scope, names)),
+        Expr::Repl(a, v) => {
+            qualify_expr(a, scope, names);
+            v.iter_mut().for_each(|x| qualify_expr(x, scope, names));
+        }
+        _ => {}
+    }
 }

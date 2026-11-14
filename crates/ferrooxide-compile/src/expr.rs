@@ -41,6 +41,7 @@ impl<'a> Compiler<'a> {
             Sym::Sig(s) => Base::Sig(s),
             Sym::Const(c) => Base::Const(c),
             Sym::Real(r) => Base::Real(r),
+            Sym::Type(_) => return self.err("a data type is not a value"),
         }))
     }
 
@@ -282,6 +283,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
         match e {
+            Expr::Type(_) => false,
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
             Expr::Ident(n) => matches!(self.lookup(n, sid), Some(Sym::Const(_))),
             Expr::Hier(_) => false,
@@ -362,6 +364,7 @@ impl<'a> Compiler<'a> {
             return Ok((64, true));
         }
         Ok(match e {
+            Expr::Type(_) => return self.err("a data type is not a value"),
             Expr::Num(n) => {
                 if n.fill {
                     (1, false)
@@ -553,6 +556,7 @@ impl<'a> Compiler<'a> {
             }
         }
         match e {
+            Expr::Type(_) => self.err("a data type is not a value"),
             Expr::Num(n) => {
                 if n.fill {
                     let c = Const::fill(n.digits.chars().next().unwrap(), w);
@@ -1066,6 +1070,13 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(d, 32, w, false))
             }
             "$bits" => {
+                // a type parameter
+                if let Some(Expr::Ident(n)) = args.first() {
+                    if let Some(Sym::Type(t)) = self.lookup(n, sid) {
+                        let bw = self.const_int(&t.bits(), sid)?;
+                        return Ok(self.const_slot(&Const::from_i64(bw, w, false)));
+                    }
+                }
                 let (bw, _) = self.ty(&args[0], sid)?;
                 Ok(self.const_slot(&Const::from_i64(bw as i64, w, false)))
             }
@@ -1438,6 +1449,7 @@ impl<'a> Compiler<'a> {
             return self.reads_expr(&n, sid, out);
         }
         match e {
+            Expr::Type(_) => {}
             Expr::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
                     out.push((s, NONE))

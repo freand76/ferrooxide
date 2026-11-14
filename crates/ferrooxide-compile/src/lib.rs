@@ -10,7 +10,9 @@ pub use konst::Const;
 use ferrooxide_front::ast::*;
 use ferrooxide_front::Error;
 use ferrooxide_rt::{self as rt, Instr, Program, ProcClass, ProcDef, SigKind, SignalInfo, NONE};
+use ferrooxide_front::svtypes::SvType;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 pub(crate) type R<T> = Result<T, Error>;
 
@@ -23,6 +25,8 @@ pub(crate) enum Sym {
     Const(Const),
     /// a real parameter
     Real(f64),
+    /// a type parameter's type, its dimensions evaluated (constants)
+    Type(Rc<SvType>),
 }
 
 /// A bidirectional connection between bits of two nets (`tran`, an inout port connected to a
@@ -43,6 +47,7 @@ pub(crate) struct Link {
 pub(crate) enum PVal {
     Int(Const),
     Real(f64),
+    Type(Rc<SvType>),
 }
 
 pub(crate) struct Scope<'a> {
@@ -1126,6 +1131,28 @@ impl<'a> Compiler<'a> {
     fn eval_params(&mut self, m: &'a Module, overrides: &[(Option<String>, PVal)], sid: usize) -> R<()> {
         let mut pos = 0usize;
         for it in &m.items {
+            if let Item::TypeParam { local, name, default, line } = it {
+                self.line = *line;
+                let mut ov = None;
+                if !local {
+                    ov = overrides.iter().find(|(n, _)| n.as_deref() == Some(name.as_str())).map(|x| x.1.clone());
+                    if ov.is_none() {
+                        let positional: Vec<&PVal> = overrides.iter().filter(|(n, _)| n.is_none()).map(|(_, c)| c).collect();
+                        if pos < positional.len() {
+                            ov = Some(positional[pos].clone());
+                        }
+                    }
+                    pos += 1;
+                }
+                let t = match (ov, default) {
+                    (Some(PVal::Type(t)), _) => t,
+                    (Some(_), _) => return self.err(format!("type parameter '{name}' needs a type")),
+                    (None, Some(d)) => Rc::new(self.resolve_type(d, sid)?),
+                    (None, None) => return self.err(format!("type parameter '{name}' has no type")),
+                };
+                self.scopes[sid].syms.insert(name.clone(), Sym::Type(t));
+                continue;
+            }
             if let Item::Param(p) = it {
                 self.line = p.line;
                 let mut ov = None;
@@ -1345,27 +1372,77 @@ impl<'a> Compiler<'a> {
                 }
             }
         };
+        if matches!(v, PVal::Type(_)) {
+            return self.err(format!("parameter '{}' needs a value, not a type", p.name));
+        }
         if p.real || (untyped && matches!(v, PVal::Real(_))) {
             let r = match v {
                 PVal::Real(r) => r,
                 PVal::Int(c) => c.to_i64().unwrap_or(0) as f64,
+                PVal::Type(_) => unreachable!(),
             };
             return Ok(Sym::Real(r));
         }
         let c = match v {
             PVal::Int(c) => c,
             PVal::Real(r) => Const::from_i64(r.round() as i64, 32, true),
+            PVal::Type(_) => unreachable!(),
         };
         Ok(Sym::Const(self.param_type(p, c, sid)?))
     }
 
     /// evaluate a parameter override in the instantiating scope
     fn pval(&mut self, e: &Expr, sid: usize) -> R<PVal> {
+        if let Expr::Type(t) = e {
+            return Ok(PVal::Type(Rc::new(self.resolve_type(t, sid)?)));
+        }
         if self.is_real(e, sid) {
             Ok(PVal::Real(self.const_real(e, sid)?))
         } else {
             Ok(PVal::Int(self.const_eval(e, sid)?))
         }
+    }
+
+    /// A data type with its dimensions evaluated in scope `sid` (type parameters replaced by
+    /// their types there).
+    pub(crate) fn resolve_type(&mut self, t: &SvType, sid: usize) -> R<SvType> {
+        let lit = |v: i64| -> Expr {
+            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            if v < 0 { Expr::Unary(UnOp::Neg, Box::new(n)) } else { n }
+        };
+        let mut dims = Vec::new();
+        for (a, b) in &t.dims {
+            dims.push((lit(self.const_int(a, sid)?), lit(self.const_int(b, sid)?)));
+        }
+        let mut unpacked = Vec::new();
+        for (a, b) in &t.unpacked {
+            unpacked.push((lit(self.const_int(a, sid)?), lit(self.const_int(b, sid)?)));
+        }
+        if let Some(p) = &t.param {
+            let Some(Sym::Type(base)) = self.lookup(p, sid) else {
+                return self.err(format!("'{p}' is not a type"));
+            };
+            let mut r = (*base).clone();
+            if !dims.is_empty() {
+                r.int_kind = false;
+                dims.extend(r.dims);
+                r.dims = dims;
+            }
+            unpacked.extend(r.unpacked);
+            r.unpacked = unpacked;
+            return Ok(r);
+        }
+        let mut r = t.clone();
+        r.dims = dims;
+        r.unpacked = unpacked;
+        if let Some(f) = &t.fields {
+            let mut f2 = (**f).clone();
+            for (_, ft) in &mut f2.fields {
+                *ft = self.resolve_type(ft, sid)?;
+            }
+            r.fields = Some(Rc::new(f2));
+        }
+        Ok(r)
     }
 
     fn param_type(&mut self, p: &ParamDecl, v: Const, sid: usize) -> R<Const> {
@@ -1399,6 +1476,11 @@ impl<'a> Compiler<'a> {
         }
         if !module_level {
             for it in items {
+                if let Item::TypeParam { name, default: Some(d), line, .. } = it {
+                    self.line = *line;
+                    let t = Rc::new(self.resolve_type(d, sid)?);
+                    self.scopes[sid].syms.insert(name.clone(), Sym::Type(t));
+                }
                 if let Item::Param(p) = it {
                     self.line = p.line;
                     let v = self.param_value(p, None, sid)?;
@@ -1424,6 +1506,8 @@ impl<'a> Compiler<'a> {
             packed: &'d [Range],
             dims: &'d [Range],
             init: Option<&'d Expr>,
+            /// declared with this type parameter
+            tparam: Option<&'d str>,
             line: u32,
         }
         let mut order: Vec<String> = Vec::new();
@@ -1463,6 +1547,9 @@ impl<'a> Compiler<'a> {
                             if dl.init.is_some() {
                                 mg.init = dl.init.as_ref();
                             }
+                            if d.type_param.is_some() {
+                                mg.tparam = d.type_param.as_deref();
+                            }
                         }
                         None => {
                             order.push(dl.name.clone());
@@ -1480,6 +1567,7 @@ impl<'a> Compiler<'a> {
                                     packed: &d.packed,
                                     dims: &dl.dims,
                                     init: dl.init.as_ref(),
+                                    tparam: d.type_param.as_deref(),
                                     line: dl.line,
                                 },
                             );
@@ -1490,22 +1578,42 @@ impl<'a> Compiler<'a> {
         }
         let mut port_dirs: HashMap<String, Dir> = HashMap::new();
         for name in order {
-            let mg = merged.remove(&name).unwrap();
+            let mut mg = merged.remove(&name).unwrap();
             self.line = mg.line;
             if let Some(d) = mg.dir {
                 port_dirs.insert(name.clone(), d);
             }
-            let (mut msb, mut lsb) = match mg.range {
-                Some((a, b)) => (self.const_int(a, sid)?, self.const_int(b, sid)?),
-                None => (0, 0),
-            };
+            // the range and further packed dimensions, evaluated
+            let mut range_v = None;
+            let mut packed_v = Vec::new();
+            if let Some(tp) = mg.tparam {
+                let Some(Sym::Type(t)) = self.lookup(tp, sid) else {
+                    return self.err(format!("'{tp}' is not a type"));
+                };
+                let (k, sg, r, p) = t.decl_parts();
+                // (an input port of a logic type is a net)
+                mg.kind = if k == NetKind::Reg && matches!(mg.dir, Some(Dir::Input | Dir::Inout)) { NetKind::Wire } else { k };
+                mg.signed = sg;
+                if let Some((a, b)) = r {
+                    range_v = Some((self.const_int(&a, sid)?, self.const_int(&b, sid)?));
+                }
+                for (a, b) in &p {
+                    packed_v.push((self.const_int(a, sid)?, self.const_int(b, sid)?));
+                }
+            } else {
+                if let Some((a, b)) = mg.range {
+                    range_v = Some((self.const_int(a, sid)?, self.const_int(b, sid)?));
+                }
+                for (a, b) in mg.packed {
+                    packed_v.push((self.const_int(a, sid)?, self.const_int(b, sid)?));
+                }
+            }
+            let (mut msb, mut lsb) = range_v.unwrap_or((0, 0));
             // packed dimensions: one flat vector [W-1:0], the dimensions kept for selects
             let mut pk: Option<Vec<(i64, i64)>> = None;
-            if !mg.packed.is_empty() {
+            if !packed_v.is_empty() {
                 let mut dims = vec![(msb, lsb)];
-                for (a, b) in mg.packed {
-                    dims.push((self.const_int(a, sid)?, self.const_int(b, sid)?));
-                }
+                dims.extend(packed_v.iter().copied());
                 let w: i64 = dims.iter().map(|(a, b)| (a - b).abs() + 1).product();
                 (msb, lsb) = (w - 1, 0);
                 pk = Some(dims);
@@ -1528,7 +1636,7 @@ impl<'a> Compiler<'a> {
                 }
                 NetKind::Event => SigKind::Reg,
                 NetKind::Int(n) => {
-                    if mg.range.is_none() {
+                    if range_v.is_none() {
                         (msb, lsb) = (n as i64 - 1, 0);
                     }
                     SigKind::Integer
@@ -1749,7 +1857,7 @@ impl<'a> Compiler<'a> {
         let order: Vec<&'a Item> = items.iter().filter(|it| is_iface(it)).chain(items.iter().filter(|it| !is_iface(it))).collect();
         for it in order {
             match it {
-                Item::Decl(_) | Item::Param(_) | Item::Subroutine(_) | Item::Defparam { .. } | Item::SpecPath { .. } => {}
+                Item::Decl(_) | Item::Param(_) | Item::TypeParam { .. } | Item::Subroutine(_) | Item::Defparam { .. } | Item::SpecPath { .. } => {}
                 Item::ContAssign { delay, lhs, rhs, strength, line } => {
                     self.cur_strength = *strength;
                     self.push_job(Job::Assign {

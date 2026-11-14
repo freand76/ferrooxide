@@ -108,6 +108,8 @@ pub struct Decl {
     pub range: Option<Range>,
     /// further packed dimensions (`reg [3:0][7:0] x`: range [3:0], packed [[7:0]])
     pub packed: Vec<Range>,
+    /// declared with a type parameter: its type (per instance) replaces kind, sign and ranges
+    pub type_param: Option<String>,
     pub names: Vec<Declarator>,
     pub line: Line,
 }
@@ -170,6 +172,8 @@ pub enum ProcKind {
 pub enum Item {
     Decl(Decl),
     Param(ParamDecl),
+    /// `parameter type T = logic [7:0];` (`default` None: no default type)
+    TypeParam { local: bool, name: String, default: Option<std::rc::Rc<crate::svtypes::SvType>>, line: Line },
     /// a `specify` path delay: `(a, b *> q) = (rise, fall);` (conditions and edges ignored)
     SpecPath { srcs: Vec<String>, dsts: Vec<String>, delay: Expr, line: Line },
     /// `defparam a.b.P = value;` (the target path includes the parameter name)
@@ -321,4 +325,6 @@ pub enum Expr {
     Repl(Box<Expr>, Vec<Expr>),
     Call(String, Vec<Expr>),
     SysCall(String, Vec<Expr>),
+    /// a data type where a value can be a type (a type parameter's value)
+    Type(std::rc::Rc<crate::svtypes::SvType>),
 }

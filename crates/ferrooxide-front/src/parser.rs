@@ -41,6 +41,9 @@ pub struct Parser {
     /// in the current module (powers of ten of seconds)
     pub file_tu: (Option<i32>, Option<i32>),
     pub(crate) local_tu: (Option<i32>, Option<i32>),
+    /// while parsing a package or file-scope items: the scope's name and its parameters (types
+    /// declared there refer to them, `qualify_type`)
+    pub(crate) type_scope: Option<(String, std::collections::HashSet<String>)>,
     /// modules made for packages with variables (added to the file's modules)
     pub(crate) pkg_modules: Vec<Module>,
     /// names read so far that are SystemVerilog keywords (lint)
@@ -141,6 +144,7 @@ impl Parser {
             file_tu: (None, None),
             local_tu: (None, None),
             pkg_modules: Vec::new(),
+            type_scope: None,
             kw_names: Vec::new(),
             packages: HashMap::new(),
             mod_pkgs: Vec::new(),
@@ -357,7 +361,11 @@ impl Parser {
                 Tok::Ident(s) if s == "import" => self.import(true)?,
                 Tok::Ident(s) if matches!(s.as_str(), "typedef" | "localparam" | "parameter" | "function" | "task") => {
                     let mut v = Vec::new();
-                    self.module_item(&mut v)?;
+                    let names = self.unit_items.iter().filter_map(|i| if let Item::Param(p) = i { Some(p.name.clone()) } else { None }).collect();
+                    self.type_scope = Some((self.unit_name.clone(), names));
+                    let r = self.module_item(&mut v);
+                    self.type_scope = None;
+                    r?;
                     for it in v {
                         // functions and tasks run in the `$unit` scope (its time unit, its names)
                         if matches!(it, Item::Subroutine(_)) {
@@ -437,7 +445,7 @@ impl Parser {
 
     /// After the last file: the `$unit` module holding the file-scope variables, if any.
     pub fn unit_module(&mut self) -> Option<Module> {
-        if self.unit_vars.is_empty() {
+        if self.unit_vars.is_empty() && !self.unit_items.iter().any(|i| matches!(i, Item::Param(_))) {
             return None;
         }
         let mut items = self.unit_items.clone();
@@ -534,13 +542,24 @@ impl Parser {
             self.expect_p("(")?;
             let mut local = false;
             let mut pt = PType { signed: false, integer: false, real: false, range: None, sv: None };
+            let mut is_type = false;
             loop {
                 if self.eat_kw("parameter") {
                     local = false;
-                    pt = self.param_type()?;
+                    is_type = self.eat_kw("type");
+                    if !is_type {
+                        pt = self.param_type()?;
+                    }
                 } else if self.eat_kw("localparam") {
                     local = true;
-                    pt = self.param_type()?;
+                    is_type = self.eat_kw("type");
+                    if !is_type {
+                        pt = self.param_type()?;
+                    }
+                } else if self.eat_kw("type") {
+                    is_type = true;
+                } else if is_type {
+                    // `parameter type A = int, B = bit`: still type parameters
                 } else if matches!(self.peek(), Tok::Ident(s) if s == "integer" || s == "signed" || s == "int" || s == "logic" || s == "bit" || s == "real")
                     || self.is_p("[")
                     || self.is_sv_type_start()
@@ -548,6 +567,13 @@ impl Parser {
                     pt = self.param_type()?;
                 }
                 let pline = self.line();
+                if is_type {
+                    items.push(self.type_param(local, pline)?);
+                    if !self.eat_p(",") {
+                        break;
+                    }
+                    continue;
+                }
                 let pname = self.ident()?;
                 self.expect_p("=")?;
                 let value = self.expr()?;
@@ -661,7 +687,7 @@ impl Parser {
         imports.extend(self.unit_pkgs.iter().cloned());
         imports.push(self.unit_name.clone());
         let mut outer = self.package_items(&pkgs);
-        outer.extend(self.unit_items.iter().cloned());
+        outer.extend(self.unit_items.iter().map(|i| crate::svtypes::scoped_copy(i, &self.unit_name)));
         if !outer.is_empty() {
             let mut own = declared_names(&items);
             let mut all: Vec<Item> = Vec::new();
@@ -804,6 +830,24 @@ impl Parser {
         })
     }
 
+    /// `name [= data_type]` of a type parameter; the name is a type from here on (its layout
+    /// is known per instance only: no struct members).
+    fn type_param(&mut self, local: bool, line: Line) -> Result<Item> {
+        let name = self.ident()?;
+        let default = if self.eat_p("=") {
+            match self.data_type()? {
+                Some(t) => Some(Rc::new(t)),
+                None => return self.err("expected a data type"),
+            }
+        } else {
+            None
+        };
+        let mut t = SvType::vector(NetKind::Reg, false, vec![]);
+        t.param = Some(name.clone());
+        self.types.insert(name.clone(), Rc::new(t));
+        Ok(Item::TypeParam { local, name, default, line })
+    }
+
     fn param_type(&mut self) -> Result<PType> {
         if self.is_sv_type_start() {
             let t = self.data_type()?.unwrap();
@@ -888,6 +932,7 @@ impl Parser {
                     signed,
                     range: None,
                     packed: vec![],
+                    type_param: None,
                     names: vec![],
                     line,
                 });
@@ -978,7 +1023,7 @@ impl Parser {
             kind = NetKind::Reg;
             explicit_kind = true;
         }
-        Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, packed, names: Vec::new(), line })
+        Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, packed, type_param: None, names: Vec::new(), line })
     }
 
     fn declarators(&mut self) -> Result<Vec<Declarator>> {
@@ -1094,6 +1139,19 @@ impl Parser {
             "timeunit" | "timeprecision" => {
                 let (u, p) = self.timeunit_decl()?;
                 self.local_tu = (u.or(self.local_tu.0), p.or(self.local_tu.1));
+            }
+            "parameter" | "localparam" if matches!(self.peek_at(1), Tok::Ident(t) if t == "type") => {
+                let local = kw == "localparam";
+                self.bump();
+                self.bump();
+                loop {
+                    let line = self.line();
+                    items.push(self.type_param(local, line)?);
+                    if !self.eat_p(",") {
+                        break;
+                    }
+                }
+                self.expect_p(";")?;
             }
             "parameter" | "localparam" | "specparam" => {
                 self.bump();
@@ -1274,7 +1332,7 @@ impl Parser {
                 let mut params = Vec::new();
                 if self.eat_p("#") {
                     if self.eat_p("(") {
-                        params = self.conn_list()?;
+                        params = self.conn_list(true)?;
                     } else {
                         // #8
                         params.push(Conn::Positional(Some(self.primary()?)));
@@ -1295,7 +1353,7 @@ impl Parser {
                         dims.push(self.range()?);
                     }
                     self.expect_p("(")?;
-                    let conns = self.conn_list()?;
+                    let conns = self.conn_list(false)?;
                     insts.push(Instance { name, dims, conns, line });
                     if !self.eat_p(",") {
                         break;
@@ -1310,7 +1368,8 @@ impl Parser {
     }
 
     /// After '(' — parses connections up to and including ')'.
-    fn conn_list(&mut self) -> Result<Vec<Conn>> {
+    /// `types`: a parameter list (a connection may be a data type).
+    fn conn_list(&mut self, types: bool) -> Result<Vec<Conn>> {
         let mut v = Vec::new();
         if self.eat_p(")") {
             return Ok(v);
@@ -1322,7 +1381,7 @@ impl Parser {
                 } else {
                     let name = self.ident()?;
                     if self.eat_p("(") {
-                        let e = if self.is_p(")") { None } else { Some(self.expr()?) };
+                        let e = if self.is_p(")") { None } else { Some(self.conn_expr(types)?) };
                         self.expect_p(")")?;
                         v.push(Conn::Named(name, e));
                     } else {
@@ -1333,7 +1392,7 @@ impl Parser {
             } else if self.is_p(",") || self.is_p(")") {
                 v.push(Conn::Positional(None));
             } else {
-                v.push(Conn::Positional(Some(self.expr()?)));
+                v.push(Conn::Positional(Some(self.conn_expr(types)?)));
             }
             if !self.eat_p(",") {
                 break;
@@ -1341,6 +1400,22 @@ impl Parser {
         }
         self.expect_p(")")?;
         Ok(v)
+    }
+
+    /// A connection: an expression, or a data type (the value of a type parameter).
+    fn conn_expr(&mut self, types: bool) -> Result<Expr> {
+        if !types {
+            return self.expr();
+        }
+        let builtin = matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
+            "logic" | "bit" | "reg" | "int" | "integer" | "byte" | "shortint" | "longint" | "real" | "realtime" | "time"));
+        let typedef = self.is_sv_type_start() && !matches!(self.peek_at(1), Tok::Punct("'"));
+        if builtin || typedef {
+            if let Some(t) = self.data_type()? {
+                return Ok(Expr::Type(Rc::new(t)));
+            }
+        }
+        self.expr()
     }
 
     fn gen_body(&mut self) -> Result<(Option<String>, Vec<Item>)> {
