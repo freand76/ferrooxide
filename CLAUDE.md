@@ -21,15 +21,19 @@ tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: test
 perf stat -e cycles target/release/ferrooxide bench/cpuish.v   # perf works on this machine
 ```
 Debug: `--dump-code`, `--stats`, `FX_TRACE=<time>` (activations), `FX_GENSTATS=1` (generic-path
-instructions, notifies), `FX_MAX_MEM_MB` (design memory limit, default 2048).
+instructions, notifies), `FX_MAX_MEM_MB` (design memory limit, default 2048), `FX_MEM_LIMIT_MB`
+(address-space cap of the process, default 4096, 0: none).
 
 ## Rules
 - Every new feature gets a small test in `tests/verilog/` that matches Icarus in all three modes
   (default, `--no-jit`, `--no-fuse`); `// args: +x=1` in a test passes plusargs to both.
 - Check benchmark cycles after scheduler/JIT changes; don't regress them.
-- Watch memory: this machine has 14 GB and an out-of-memory crash kills the session. Run long or
-  parallel jobs (ivtest, big designs) in the background with limits; ivtest.py limits each test to
-  2 GB and runs 4 at a time.
+- Memory: this machine has 14 GB and an out-of-memory crash kills the session (it has happened).
+  EVERY run of ferrooxide, iverilog/vvp or a test outside the scripts goes under a limit:
+  `(ulimit -v 2000000; timeout 60 target/release/ferrooxide ...)`. ferrooxide caps itself at
+  `FX_MEM_LIMIT_MB` (default 4096); difftest.sh and ivtest.py set limits (ivtest: 2 GB per test,
+  4 at a time). Long or parallel jobs run in the background. Never wait for a build with
+  `pgrep -f "cargo build"` loops (they match themselves); just run `cargo build`.
 - Commit finished, tested steps locally; push only when asked.
 
 ## Icarus quirks

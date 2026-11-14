@@ -4,6 +4,19 @@ use crate::*;
 use ferrooxide_front::ast::BinOp as B;
 use ferrooxide_rt::{BinOp as RB, CmpOp, Index, RedOp, ShOp, SysFn, Target, UnOp as RU};
 
+/// Whether an expression contains a (user) function call.
+pub(crate) fn has_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call(..) => true,
+        Expr::Index(a, b) | Expr::Binary(_, a, b) => has_call(a) || has_call(b),
+        Expr::Range(a, b, c) | Expr::Cond(a, b, c) | Expr::IndexedRange(a, b, c, _) => has_call(a) || has_call(b) || has_call(c),
+        Expr::Unary(_, a) => has_call(a),
+        Expr::Concat(v) | Expr::SysCall(_, v) => v.iter().any(has_call),
+        Expr::Repl(n, v) => has_call(n) || v.iter().any(has_call),
+        _ => false,
+    }
+}
+
 /// What an identifier-like base expression refers to.
 pub(crate) enum Base {
     Sig(u32),
@@ -660,6 +673,32 @@ impl<'a> Compiler<'a> {
             Expr::Binary(op, a, b) => self.binary(*op, a, b, sid, w, s),
             Expr::Cond(c, t, f) => {
                 let (cv, cw) = self.truth(c, sid)?;
+                if has_call(t) || has_call(f) {
+                    // branches with function calls (recursion!): only the selected side runs;
+                    // an unknown condition evaluates both and blends them
+                    let d = self.tmp(w);
+                    let not_true = self.emit(Instr::Jz { c: cv, w: cw, to: 0 });
+                    let tv = self.expr(t, sid, w, s)?;
+                    self.emit(Instr::Copy { d, s: tv, w });
+                    let end1 = self.emit(Instr::Jmp { to: 0 });
+                    let h = self.here();
+                    self.patch(not_true, h);
+                    let nc = self.tmp(1);
+                    self.emit(Instr::Red { op: RedOp::Nor, d: nc, s: cv, w: cw });
+                    let unknown = self.emit(Instr::Jz { c: nc, w: 1, to: 0 });
+                    let fv = self.expr(f, sid, w, s)?;
+                    self.emit(Instr::Copy { d, s: fv, w });
+                    let end2 = self.emit(Instr::Jmp { to: 0 });
+                    let h = self.here();
+                    self.patch(unknown, h);
+                    let tv = self.expr(t, sid, w, s)?;
+                    let fv = self.expr(f, sid, w, s)?;
+                    self.emit(Instr::Mux { d, c: cv, cw, t: tv, f: fv, w });
+                    let h = self.here();
+                    self.patch(end1, h);
+                    self.patch(end2, h);
+                    return Ok(d);
+                }
                 let tv = self.expr(t, sid, w, s)?;
                 let fv = self.expr(f, sid, w, s)?;
                 let d = self.tmp(w);
@@ -1069,6 +1108,7 @@ impl<'a> Compiler<'a> {
         if self.func_inst.contains_key(&key) {
             return Ok(());
         }
+        let mem_lo = self.prog.mem.len() as u32;
         let path = format!("{}.{}", self.scopes[def_scope].name, f.name);
         let file = self.file.clone();
         let fs = self.new_scope(path.clone(), Some(def_scope), file);
@@ -1128,7 +1168,8 @@ impl<'a> Compiler<'a> {
             // the static instance: reachable by hierarchical names (task.var)
             self.scopes[def_scope].children.entry(f.name.clone()).or_insert(fs);
         }
-        self.func_inst.insert(key, FuncInst { scope: fs, ret, ports });
+        let mem = (mem_lo, self.prog.mem.len() as u32);
+        self.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem });
         Ok(())
     }
 
@@ -1143,8 +1184,12 @@ impl<'a> Compiler<'a> {
         let Some((f, fs_def)) = self.lookup_func(name, sid) else {
             return self.err(format!("unknown {} '{name}'", if as_task { "task" } else { "function" }));
         };
+        // a call of a function that is being inlined: recursion, through a subroutine
+        if let Some(k) = self.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
+            return self.recursive_call(f, k, args, sid);
+        }
         if self.call_depth > 32 {
-            return self.err(format!("recursive call of '{name}' is not supported"));
+            return self.err(format!("calls nested too deeply in '{name}'"));
         }
         let kname = if f.automatic {
             self.auto_count += 1;
@@ -1172,6 +1217,7 @@ impl<'a> Compiler<'a> {
             }
         }
         self.call_depth += 1;
+        self.inline_stack.push((fs_def, f.name.clone(), key.clone()));
         self.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
         let saved_file = self.file.clone();
         // the body is a block `disable <task>` can end
@@ -1182,6 +1228,7 @@ impl<'a> Compiler<'a> {
         self.file = saved_file;
         let (_, patches) = self.pb.last_mut().unwrap().rets.pop().unwrap();
         self.call_depth -= 1;
+        self.inline_stack.pop();
         r?;
         let end = self.here();
         for p in patches {
@@ -1202,6 +1249,154 @@ impl<'a> Compiler<'a> {
             }
             None => (None, 0, false),
         })
+    }
+
+    /// A recursive call: save the function's variables (and temporaries), pass the arguments,
+    /// jump to the function's subroutine; results come back in fresh temporaries.
+    fn recursive_call(&mut self, f: &'a SubroutineDecl, key: (usize, String), args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
+        let (ret, ports) = {
+            let fi = &self.func_inst[&key];
+            (fi.ret, fi.ports.clone())
+        };
+        if args.len() > ports.len() {
+            return self.err(format!("too many arguments to '{}'", f.name));
+        }
+        // argument values first (they may read the current frame)
+        let mut vals = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let (dir, ps) = ports[i];
+            if dir == Dir::Input || dir == Dir::Inout {
+                let pw = self.sig(ps).width;
+                let real = self.sig(ps).real;
+                let v = self.value_for(a, sid, pw, real)?;
+                let k = self.tmp(pw);
+                self.emit(Instr::Copy { d: k, s: v, w: pw });
+                vals.push((ps, k));
+            }
+        }
+        let level = self.pb.len();
+        // recursion from another process (a fork branch inside the function) would need frames
+        // shared between processes
+        if self.subs.iter().any(|r| r.key == key && r.level != level) {
+            return self.err(format!("recursive call of '{}' from a fork branch is not supported", f.name));
+        }
+        let si = match self.subs.iter().position(|r| r.level == level && r.key == key) {
+            Some(i) => i,
+            None => {
+                self.subs.push(SubReq { level, f, key: key.clone(), calls: Vec::new(), saves: Vec::new(), entry: None, alloc: (0, 0) });
+                self.subs.len() - 1
+            }
+        };
+        let save = self.emit(Instr::SaveFrame { ranges: Box::new([]) });
+        for (ps, k) in vals {
+            self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: k, mode: rt::StoreMode::Blocking });
+        }
+        // results: the return value, then output ports
+        let mut outs: Vec<(u32, u32)> = Vec::new();
+        if let Some(r) = ret {
+            outs.push((r, self.sig(r).width));
+        }
+        for (i, a) in args.iter().enumerate() {
+            let (dir, ps) = ports[i];
+            if dir == Dir::Output || dir == Dir::Inout {
+                let _ = a;
+                outs.push((ps, self.sig(ps).width));
+            }
+        }
+        let dsts: Vec<u32> = outs.iter().map(|&(_, w)| self.tmp(w)).collect();
+        let call = self.emit(Instr::CallSub { entry: 0, dsts: dsts.clone().into_boxed_slice() });
+        self.subs[si].saves.push(save);
+        self.subs[si].calls.push(call);
+        // outputs to the caller's arguments
+        let mut k = if ret.is_some() { 1 } else { 0 };
+        for (i, a) in args.iter().enumerate() {
+            let (dir, ps) = ports[i];
+            if dir == Dir::Output || dir == Dir::Inout {
+                let w = self.sig(ps).width;
+                self.store_value(&stmt::Lhs::Expr(a, sid), dsts[k], w, rt::StoreMode::Blocking)?;
+                k += 1;
+            }
+        }
+        Ok(match ret {
+            Some(r) => {
+                let i = self.sig(r);
+                (Some(dsts[0]), i.width, i.signed)
+            }
+            None => (None, 0, false),
+        })
+    }
+
+    /// Compile the subroutines of recursive functions the current process calls (after its
+    /// code) and complete their calls and saved frames.
+    pub(crate) fn finish_subs(&mut self) -> R<()> {
+        let level = self.pb.len();
+        if !self.subs.iter().any(|r| r.level == level) {
+            return Ok(());
+        }
+        // the process's own code ends before the subroutines
+        self.emit(Instr::Halt);
+        while let Some(i) = self.subs.iter().position(|r| r.level == level && r.entry.is_none()) {
+            let (f, key) = (self.subs[i].f, self.subs[i].key.clone());
+            let (fscope, ret, ports, _) = {
+                let fi = &self.func_inst[&key];
+                (fi.scope, fi.ret, fi.ports.clone(), fi.mem)
+            };
+            let entry = self.here();
+            self.subs[i].entry = Some(entry as usize);
+            let a0 = self.prog.mem.len() as u32;
+            self.call_depth += 1;
+            self.inline_stack.push((key.0, f.name.clone(), key.clone()));
+            self.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
+            let bpath = format!("{}.{}", self.scopes[key.0].name, f.name);
+            let reg = self.open_block(bpath);
+            let r = self.stmt(&f.body, fscope);
+            // (on an error the compilation stops: the state is not cleaned up)
+            r?;
+            self.close_block(reg);
+            let (_, patches) = self.pb.last_mut().unwrap().rets.pop().unwrap();
+            self.inline_stack.pop();
+            self.call_depth -= 1;
+            let end = self.here();
+            for p in patches {
+                self.patch(p, end);
+            }
+            let mut srcs: Vec<(u32, u32)> = Vec::new();
+            if let Some(r) = ret {
+                let s = self.sig(r);
+                srcs.push((s.slot, 2 * rt::nw(s.width) as u32));
+            }
+            for &(dir, ps) in &ports {
+                if dir == Dir::Output || dir == Dir::Inout {
+                    let s = self.sig(ps);
+                    srcs.push((s.slot, 2 * rt::nw(s.width) as u32));
+                }
+            }
+            self.emit(Instr::RetSub { srcs: srcs.into_boxed_slice() });
+            self.subs[i].alloc = (a0, self.prog.mem.len() as u32);
+        }
+        // complete calls and frames: the function's variables, what its body allocated, and the
+        // process's temporaries
+        let hw = self.scratch_top;
+        let reqs: Vec<usize> = (0..self.subs.len()).filter(|&i| self.subs[i].level == level).collect();
+        for i in reqs.iter().rev() {
+            let r = self.subs.remove(*i);
+            let fm = self.func_inst[&r.key].mem;
+            let mut ranges = vec![(fm.0, fm.1 - fm.0), (r.alloc.0, r.alloc.1 - r.alloc.0)];
+            if hw > 0 {
+                ranges.push((0, hw));
+            }
+            ranges.retain(|x| x.1 > 0);
+            let code = &mut self.pb.last_mut().unwrap().code;
+            for &c in &r.calls {
+                if let Instr::CallSub { entry, .. } = &mut code[c] {
+                    *entry = r.entry.unwrap() as u32;
+                }
+            }
+            for &sv in &r.saves {
+                code[sv] = Instr::SaveFrame { ranges: ranges.clone().into_boxed_slice() };
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------ read sets

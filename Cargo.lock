@@ -231,6 +231,7 @@ dependencies = [
  "ferrooxide-compile",
  "ferrooxide-front",
  "ferrooxide-rt",
+ "libc",
  "regex",
  "serde_json",
 ]

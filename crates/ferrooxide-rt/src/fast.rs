@@ -241,7 +241,7 @@ fn lower_wide(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::Has
     use crate::Instr as I;
     let ok = |w: u32| w >= 1 && w <= MAX_WIDE;
     match *ins {
-        I::Jmp { .. } | I::Jz { .. } | I::Disable { .. } => Op::GenJ,
+        I::Jmp { .. } | I::Jz { .. } | I::Disable { .. } | I::CallSub { .. } | I::RetSub { .. } => Op::GenJ,
         I::Insert { d, dw, s, sw, off } if dw <= 64 && off + sw <= dw => Op::Ins1 { d, s, off: off as u8, w: sw as u8 },
         I::Insert { d, dw, s, sw, off } if ok(dw) && ok(sw) && off + sw <= dw => {
             Op::WIns { d, s, off, dw: dw as u16, sw: sw as u16 }

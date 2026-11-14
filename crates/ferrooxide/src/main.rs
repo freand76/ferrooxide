@@ -30,9 +30,32 @@ options:
                     on the command line are loaded at start, else with the load_design tool
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
-  -h, --help        show this help";
+  -h, --help        show this help
+environment: FX_MEM_LIMIT_MB (address-space cap, default 4096, 0: none), FX_MAX_MEM_MB (design
+memory, default 2048)";
+
+/// Cap the process's address space (default 4 GB, `FX_MEM_LIMIT_MB`, 0: no cap): a runaway
+/// design or bug then fails with an allocation error instead of exhausting the machine.
+fn limit_memory() {
+    let mb: u64 = std::env::var("FX_MEM_LIMIT_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+    if mb == 0 {
+        return;
+    }
+    let bytes = mb.saturating_mul(1 << 20) as libc::rlim_t;
+    unsafe {
+        let mut cur = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_AS, &mut cur) == 0 {
+            let soft = if cur.rlim_max == libc::RLIM_INFINITY { bytes } else { bytes.min(cur.rlim_max) };
+            if cur.rlim_cur == libc::RLIM_INFINITY || soft < cur.rlim_cur {
+                let lim = libc::rlimit { rlim_cur: soft, rlim_max: cur.rlim_max };
+                libc::setrlimit(libc::RLIMIT_AS, &lim);
+            }
+        }
+    }
+}
 
 fn main() -> ExitCode {
+    limit_memory();
     let mut files = Vec::new();
     let mut plusargs = Vec::new();
     let mut tops = Vec::new();

@@ -220,7 +220,9 @@ pub fn compile(
             }
         }
         let slots = &table[1..1 + shape.nslots as usize];
-        shape.promoted = slots.iter().map(|&s| s < scratch && !in_mem.contains(&s)).collect();
+        // recursion saves and restores scratch memory: nothing stays in registers
+        let recursive = orig[p].iter().any(|i| matches!(i, crate::Instr::SaveFrame { .. }));
+        shape.promoted = slots.iter().map(|&s| s < scratch && !in_mem.contains(&s) && !recursive).collect();
         table_off.push(tables.len());
         tables.extend_from_slice(&table);
         let key = (shape.ops.clone(), shape.promoted.clone());

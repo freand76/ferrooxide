@@ -63,6 +63,9 @@ fn body(code: &[Instr]) -> Option<(Vec<Instr>, bool)> {
             | Instr::Disable { .. }
             | Instr::Kick { .. }
             | Instr::Touch { .. }
+            | Instr::SaveFrame { .. }
+            | Instr::CallSub { .. }
+            | Instr::RetSub { .. }
             | Instr::Unforce { .. }
             | Instr::Udp { .. } => return None,
             // fused members must see each other's results at once: only blocking writes

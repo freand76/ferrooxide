@@ -65,8 +65,8 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M1 | Core Verilog: modules/ports (ANSI + non-ANSI), params/localparam + overrides, wire/reg/integer/time, vectors + memories, assign, initial/always, blocking/NBA (incl. `<= #d`), if/case/casez/casex/for/while/repeat/forever, `#`, `@`, `wait`, all operators w/ correct width & sign rules, functions/tasks (inlined), generate for/if/case, gate primitives, `$display/$write/$monitor/$strobe/$finish/$time/$random/$signed/$unsigned/$clog2/$readmemh/b/$fopen/$fdisplay` | ✅ initial version |
 | M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff` | ✅ basic (dumps everything; scope/level args ignored) |
 | M2 | `timescale`, reals, plusargs, hierarchical task calls, `$sformat`, `$fopen` modes | ✅ |
-| M2b | Testbench concurrency: fork/join (+ SV join_any/join_none, disable fork), named events, `disable` of blocks/tasks across processes, automatic tasks/functions (per-call storage), Icarus wake order | ✅ (recursion: see notes) |
-| M3 | Nets: multiple drivers with wire resolution, tri-state buses through inout ✅; wand/wor/tri0/tri1, strengths, `assign #d` inertial delays | partly |
+| M2b | Testbench concurrency: fork/join (+ SV join_any/join_none, disable fork), named events, `disable` of blocks/tasks across processes, automatic tasks/functions (per-call storage, recursion), Icarus wake order | ✅ |
+| M3 | Nets: multiple drivers, tri-state buses, wand/wor/tri0/tri1/supply, static drive strengths, tran islands, inertial delays (rise/fall/turn-off), specify path delays (-gspecify) | ✅ (strength values on nets / `%v`: pending) |
 | M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
@@ -89,14 +89,18 @@ code needs them.
    named-block code ranges (+ the branches forked inside them) and process generations to drop
    stale wake-ups, events are toggled variables, automatic subroutines get storage per call
    site. Waiters woken by one change run newest first (Icarus's LIFO waiting lists, also for
-   edge groups, which alternate their member order). Remaining: recursion needs real call
-   frames (a VM call stack and frame-relative slots in the JIT) instead of inlining; a fork
-   branch restarted while still running (fork/join_none in a loop) should become a new
-   process instance instead of restarting the old one.
-2. **Structural RTL gaps**: multi-dimensional arrays (`reg [7:0] m [0:3][0:15]`),
-   hierarchical references with genvar indices (`gen[i].u.sig`; constant indices work),
+   edge groups, which alternate their member order). Recursion (done): a call of a function
+   that is being inlined becomes a subroutine call — `SaveFrame` copies the function's
+   variables and the process's temporaries to a per-process frame stack, `CallSub`/`RetSub`
+   jump and return (processes with recursion keep no temporaries in JIT registers; depth
+   limit 100000 frames). `?:` with calls in its branches evaluates only the selected one.
+   Remaining: a fork branch restarted while still running (fork/join_none in a loop) should
+   become a new process instance instead of restarting the old one.
+2. **Structural RTL gaps**: multi-dimensional arrays as ports and whole-array assignments,
    real-valued function arguments in expressions everywhere. Done: arrays of instances,
-   `defparam`, `` `default_nettype ``, implicit nets.
+   `defparam`, `` `default_nettype ``, implicit nets, multi-dimensional unpacked arrays and
+   packed vectors (stored flat; index chains become one index/select), hierarchical names
+   with genvar indices.
 3. **Testbench I/O and system functions**: `$fread`, `$dist_*`, `%u`/`%z` in `$fscanf`;
    `$dumpvars` scope/level arguments and `$dumpall`/`$dumplimit`; force on array elements; real
    math (`$sqrt`, `$ln`, `$pow`, `$floor`, ...); `$countdrivers`, `$q_*` (rare). Done: file
@@ -259,7 +263,25 @@ Next performance steps: ports connected to part selects as aliases, fusing sibli
 with the same inputs, signal values cached in registers within an activation, timing wheel,
 `--threads` (partitioned same-edge/same-rank parallelism, see M8).
 
-## Known limitations of the current skeleton
-- Event expressions must be whole signals (`@(posedge clk)`, not `@(posedge v[3])`).
-- Wide (>64 bit) arithmetic uses a slow generic path.
-- No real numbers, fork/join runs branches sequentially.
+## Status and next steps (2026-11-14)
+
+Icarus regression suite (ivtest, normal tests): ~88% pass. Real-design benchmark: output
+identical to Icarus, 10-13x faster. Interactive mode, MCP server, `--vcd/--trace` work.
+
+Next, roughly in order:
+1. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
+   warnings Icarus prints (port coercion to inout, constant out-of-range selects, `@*` without
+   sensitivities), `%v` strength display (needs strength values on nets), `$countdrivers`,
+   `$fread`, `%u`/`%z` in `$scanf`, event-controlled nonblocking assignments updating at the
+   trigger (ICARUS_NOTES 3), specify paths on inout ports and conditional paths, force on array
+   elements, generate blocks referenced before their definition.
+2. **SystemVerilog for real designs** (M6): typedef, enum, packed struct/union, packages and
+   import, `logic` everywhere, interfaces (basic), `always_comb` rules, `unique/priority case`.
+3. **Debug server core** (M9/M10): simulation thread + command channel between time steps; then
+   MCP over HTTP (attach to a running simulation) and CDSP; a value-change history so agents can
+   query past values without a VCD.
+4. **Performance**: wide (>64-bit) ops in the JIT, a timing wheel, multi-threading (M8).
+5. **Outputs**: FST, VCD of arrays/reals/events, `$dumpvars` scope/level arguments.
+
+Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
+multi-dimensional arrays as ports or whole-array assignments are not supported.

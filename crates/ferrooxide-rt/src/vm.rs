@@ -106,6 +106,14 @@ enum Fut {
     Inertial { key: (u32, u32), gen: u32, sig: u32, res: Res, sw: u32, val: Box<[u64]> },
 }
 
+/// A subroutine call of a recursive function: the memory it saved, where to return to and
+/// where its results go.
+struct Frame {
+    saved: Vec<(u32, Vec<u64>)>,
+    ret: u32,
+    dsts: Box<[u32]>,
+}
+
 /// Why `advance` returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
@@ -139,6 +147,8 @@ pub struct Sim {
     writers: HashMap<u32, Vec<u32>>,
     /// forced bits per signal (value-plane words); stores keep these bits
     force_mask: HashMap<u32, Vec<u64>>,
+    /// recursion: per process, the saved frames of active subroutine calls
+    frames: HashMap<u32, Vec<Frame>>,
     /// pending inertial (continuous-assignment delay) updates: target -> current generation
     inertial: HashMap<(u32, u32), u32>,
     /// a $dumpvars block is due at the end of the current time step
@@ -385,6 +395,7 @@ impl Sim {
             group_rev: vec![true; groups.len()],
             force_mask: HashMap::new(),
             inertial: HashMap::new(),
+            frames: HashMap::new(),
             dump_pending: false,
             force_bypass: false,
             writers: {
@@ -1972,6 +1983,41 @@ impl Sim {
                     self.notify(*sig, cur);
                 }
                 Instr::Kick { sig } => self.kick(*sig),
+                Instr::SaveFrame { ranges } => {
+                    // a runaway recursion stops the simulation instead of exhausting memory
+                    let depth = self.frames.get(&p).map_or(0, |v| v.len());
+                    let words: usize = ranges.iter().map(|r| r.1 as usize).sum();
+                    if depth >= 100_000 || (depth + 1) * words > 64 << 20 {
+                        let _ = writeln!(self.out, "ERROR: recursion too deep ({depth} calls) in {}", self.prog.procs[p as usize].name);
+                        self.finished = true;
+                        self.flush();
+                        return true;
+                    }
+                    let saved: Vec<(u32, Vec<u64>)> =
+                        ranges.iter().map(|&(lo, n)| (lo, self.mem[lo as usize..(lo + n) as usize].to_vec())).collect();
+                    self.frames.entry(p).or_default().push(Frame { saved, ret: 0, dsts: Box::new([]) });
+                }
+                Instr::CallSub { entry, dsts } => {
+                    if let Some(f) = self.frames.get_mut(&p).and_then(|v| v.last_mut()) {
+                        f.ret = *pc as u32;
+                        f.dsts = dsts.clone();
+                    }
+                    *pc = *entry as usize;
+                }
+                Instr::RetSub { srcs } => {
+                    let Some(f) = self.frames.get_mut(&p).and_then(|v| v.pop()) else {
+                        return true;
+                    };
+                    let vals: Vec<Vec<u64>> =
+                        srcs.iter().map(|&(s, n)| self.mem[s as usize..(s + n) as usize].to_vec()).collect();
+                    for (lo, v) in &f.saved {
+                        self.mem[*lo as usize..*lo as usize + v.len()].copy_from_slice(v);
+                    }
+                    for (d, v) in f.dsts.iter().zip(&vals) {
+                        self.mem[*d as usize..*d as usize + v.len()].copy_from_slice(v);
+                    }
+                    *pc = f.ret as usize;
+                }
                 Instr::Disable { target } => {
                     let (np, stopped) = self.disable(p, *target, *pc);
                     if stopped {
@@ -2488,6 +2534,7 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
     };
     let mut pc = 0usize;
     let mut steps = 0u64;
+    let mut frames: Vec<Frame> = Vec::new();
     while pc < code.len() {
         steps += 1;
         if steps > 50_000_000 {
@@ -2538,6 +2585,32 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
                 if ops::truth(m, *c as usize, *w) != Some(true) {
                     pc = *to as usize;
                 }
+            }
+            Instr::SaveFrame { ranges } => {
+                let saved: Vec<(u32, Vec<u64>)> =
+                    ranges.iter().map(|&(lo, n)| (lo, m[lo as usize..(lo + n) as usize].to_vec())).collect();
+                frames.push(Frame { saved, ret: 0, dsts: Box::new([]) });
+                if frames.len() > 100_000 {
+                    return Err("constant function recursion too deep".into());
+                }
+            }
+            Instr::CallSub { entry, dsts } => {
+                if let Some(f) = frames.last_mut() {
+                    f.ret = pc as u32;
+                    f.dsts = dsts.clone();
+                }
+                pc = *entry as usize;
+            }
+            Instr::RetSub { srcs } => {
+                let Some(f) = frames.pop() else { break };
+                let vals: Vec<Vec<u64>> = srcs.iter().map(|&(s, n)| m[s as usize..(s + n) as usize].to_vec()).collect();
+                for (lo, v) in &f.saved {
+                    m[*lo as usize..*lo as usize + v.len()].copy_from_slice(v);
+                }
+                for (d, v) in f.dsts.iter().zip(&vals) {
+                    m[*d as usize..*d as usize + v.len()].copy_from_slice(v);
+                }
+                pc = f.ret as usize;
             }
             Instr::Halt => break,
             Instr::Store { t, s, mode: StoreMode::Blocking } => {

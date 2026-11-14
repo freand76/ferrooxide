@@ -89,6 +89,24 @@ pub(crate) struct FuncInst {
     pub ret: Option<u32>,
     /// (dir, signal) in declaration order
     pub ports: Vec<(Dir, u32)>,
+    /// the memory words of its variables (lo, hi)
+    pub mem: (u32, u32),
+}
+
+/// A recursive function compiled as a subroutine of a process: its body is placed after the
+/// process's code; calls jump to it with a saved frame.
+pub(crate) struct SubReq<'a> {
+    /// the process nesting level (pb.len()) it belongs to
+    pub level: usize,
+    pub f: &'a SubroutineDecl,
+    pub key: (usize, String),
+    /// CallSub instructions to point at the entry
+    pub calls: Vec<usize>,
+    /// SaveFrame instructions to complete with the ranges
+    pub saves: Vec<usize>,
+    pub entry: Option<usize>,
+    /// memory allocated while compiling the body (block variables, temporaries)
+    pub alloc: (u32, u32),
 }
 
 pub struct Compiler<'a> {
@@ -108,6 +126,10 @@ pub struct Compiler<'a> {
     lint_seen: HashSet<String>,
     pub lint_enabled: bool,
     pub(crate) call_depth: u32,
+    /// functions being inlined: (definition scope, name, instance key)
+    pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
+    /// recursive functions compiled as subroutines (of the process at `level`)
+    pub(crate) subs: Vec<SubReq<'a>>,
     warned: HashSet<String>,
     scratch_top: u32,
     scratch_saved: Vec<u32>,
@@ -302,6 +324,8 @@ impl<'a> Compiler<'a> {
             lint_seen: HashSet::new(),
             lint_enabled: false,
             call_depth: 0,
+            inline_stack: Vec::new(),
+            subs: Vec::new(),
             warned: HashSet::new(),
             scratch_top: 0,
             scratch_saved: Vec::new(),
@@ -493,6 +517,11 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn end_proc(&mut self) {
+        if let Err(e) = self.finish_subs() {
+            if self.mem_error.is_none() {
+                self.mem_error = Some(e);
+            }
+        }
         // nested processes ($monitor/$strobe bodies) restart at 0: the enclosing process's
         // temporaries are dead whenever the nested one runs (it runs in the postponed region)
         self.scratch_top = self.scratch_saved.pop().unwrap().max(self.scratch_top);
@@ -692,6 +721,7 @@ impl<'a> Compiler<'a> {
         }
         self.pb.push(PState { proc: NONE, ..Default::default() });
         let r = self.self_expr(e, sid);
+        let r = r.and_then(|x| self.finish_subs().map(|_| x));
         let st = self.pb.pop().unwrap();
         let (slot, w, s) = r?;
         if !st.code.is_empty() {

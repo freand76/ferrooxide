@@ -208,6 +208,9 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, f: SysFn::UrandomRange(a, b) } => vec![*d, *a, *b],
+        Instr::CallSub { dsts, .. } => dsts.to_vec(),
+        Instr::RetSub { srcs } => srcs.iter().map(|x| x.0).collect(),
+        Instr::SaveFrame { .. } => vec![],
         Instr::ResolveStr { d, drv, .. } => std::iter::once(*d).chain(drv.iter().map(|x| x.0)).collect(),
         Instr::SysF { d, .. } => vec![*d],
         Instr::Jmp { .. }
@@ -538,6 +541,13 @@ pub enum Instr {
     /// net resolution with drive strengths: per bit the strongest non-z drivers decide (x if
     /// they disagree); `drv`: (value slot, strength0, strength1), levels 0 (highz) .. 7 (supply)
     ResolveStr { d: u32, w: u32, drv: Box<[(u32, u8, u8)]> },
+    /// recursion: save memory ranges (lo, words) on the process's frame stack
+    SaveFrame { ranges: Box<[(u32, u32)]> },
+    /// recursion: call a subroutine at `entry`; its results go to `dsts` on return
+    CallSub { entry: u32, dsts: Box<[u32]> },
+    /// recursion: return; the values (slot, words) in `srcs` go to the caller's `dsts` after the
+    /// saved frame is restored
+    RetSub { srcs: Box<[(u32, u32)]> },
     /// a change event on `sig` without an edge (time-0 events of initial values, like Icarus)
     Touch { sig: u32 },
     /// release / deassign: the bits of the target are no longer forced

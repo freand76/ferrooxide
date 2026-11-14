@@ -3,6 +3,8 @@
 # usage: tests/difftest.sh [files...]   (default: tests/verilog/*.v)
 # FX_FLAGS="--no-jit" tests/difftest.sh   runs the interpreter instead of the JIT
 set -u
+# never let a test exhaust the machine's memory (each simulator run is capped)
+ulimit -v 3000000
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin="$root/target/release/ferrooxide"
 [ -x "$bin" ] || cargo build --release -q --manifest-path "$root/Cargo.toml"
