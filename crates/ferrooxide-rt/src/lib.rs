@@ -75,6 +75,8 @@ pub struct SignalInfo {
     pub real: bool,
     /// the target of a force or procedural assign: stores take the generic path (force mask)
     pub forced: bool,
+    /// a `string` variable: 64 bits holding a string handle (`Program::strings`)
+    pub string: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +120,8 @@ pub struct Program {
     pub names: Vec<(String, u32)>,
     /// the order in which the processes start at time 0 (empty: by index)
     pub start_order: Vec<u32>,
+    /// strings known at compile time; a handle is an index (0: the empty string)
+    pub strings: Vec<Vec<u8>>,
     /// packages with variables (not dumped; `$dumpvars` warns about them)
     pub packages: Vec<String>,
     /// memory words [0, scratch_words) are the shared scratch region for process temporaries
@@ -251,6 +255,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         | Instr::Kick { .. }
         | Instr::Touch { .. } => vec![],
         Instr::Udp { ins, prev, q, .. } => ins.iter().chain(prev.iter()).copied().chain(std::iter::once(*q)).collect(),
+        Instr::Str { d, a, b, c, .. } => [*d, *a, *b, *c].into_iter().filter(|&x| x != NONE).collect(),
         Instr::Unforce { t } => match t {
             Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
             Target::ElemDynPart { ix, bix, .. } => vec![ix.slot, bix.slot],
@@ -260,7 +265,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
                 args.iter()
                     .filter_map(|a| match a {
-                        FmtArg::Val { s, .. } | FmtArg::Str { s, .. } | FmtArg::Time { s } | FmtArg::Real { s } => Some(*s),
+                        FmtArg::Val { s, .. } | FmtArg::Str { s, .. } | FmtArg::Time { s } | FmtArg::Real { s } | FmtArg::SVar { s } => Some(*s),
                         _ => None,
                     })
                     .collect()
@@ -276,14 +281,14 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                 SysTask::MonitorPrint { args, .. } => fa(args),
                 SysTask::ReadMem { start, end, file, .. } | SysTask::WriteMem { start, end, file, .. } => {
                     let mut v: Vec<u32> = start.iter().chain(end.iter()).map(|x| x.0).collect();
-                    if let FileName::Val { s, .. } = file {
+                    if let FileName::Val { s, .. } | FileName::SVar { s } = file {
                         v.push(*s);
                     }
                     v
                 }
                 SysTask::FOpen { d, file, .. } => {
                     let mut v = vec![*d];
-                    if let FileName::Val { s, .. } = file {
+                    if let FileName::Val { s, .. } | FileName::SVar { s } = file {
                         v.push(*s);
                     }
                     v
@@ -455,6 +460,8 @@ pub enum FmtArg {
     Str { s: u32, w: u32 },
     /// value produced by $time
     Time { s: u32 },
+    /// a `string` value (a handle): printed, or used as a format, like a literal
+    SVar { s: u32 },
     /// a real value (f64 bits)
     Real { s: u32 },
     Empty,
@@ -465,6 +472,8 @@ pub enum FmtArg {
 pub enum FileName {
     Lit(String),
     Val { s: u32, w: u32 },
+    /// a string value (handle)
+    SVar { s: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -539,6 +548,48 @@ pub enum RealOp {
     Sqrt, Ln, Log10, Exp, Floor, Ceil, Sin, Cos, Tan, Asin, Acos, Atan, Sinh, Cosh, Tanh, Asinh, Acosh, Atanh, Atan2, Hypot,
 }
 
+/// Operations on strings (handles, `Program::strings`) in `Instr::Str`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrOp {
+    /// d = the string of the `w`-bit vector at a (its characters, NUL bytes dropped)
+    FromVec,
+    /// d (`w` bits) = the characters of a, the last one in the low byte
+    ToVec,
+    /// d = a b
+    Concat,
+    /// d = a repeated b (32-bit) times
+    Repl,
+    /// d (1 bit) = a op b, lexicographic
+    Cmp(CmpOp),
+    /// d (32 bits) = a.len()
+    Len,
+    /// d (8 bits) = a[b] (b: 32-bit signed), 0 outside
+    Getc,
+    /// d = a with character b (32-bit signed) set to c (8 bits); unchanged outside or for 0
+    Putc,
+    Upper,
+    Lower,
+    /// d = a.substr(b, c) (32-bit signed bounds)
+    Substr,
+    /// d (32 bits, signed) = a.compare(b) / a.icompare(b)
+    Compare,
+    Icompare,
+    /// d (`w` bits) = a.atoi() and co.
+    Atoi,
+    Atohex,
+    Atooct,
+    Atobin,
+    /// d (real) = a.atoreal()
+    Atoreal,
+    /// d = the digits of the `w`-bit value a (c = 1: signed)
+    Itoa,
+    Hextoa,
+    Octtoa,
+    Bintoa,
+    /// d = a (real) as text
+    Realtoa,
+}
+
 #[derive(Clone, Debug)]
 pub enum Instr {
     Copy { d: u32, s: u32, w: u32 },
@@ -602,4 +653,6 @@ pub enum Instr {
     /// round(v * 10^exp) (the module's precision) * 10^post
     RToTicks { d: u32, s: u32, exp: u8, post: u8 },
     Sys(Box<SysTask>),
+    /// a string operation; unused operands are NONE
+    Str { op: StrOp, d: u32, a: u32, b: u32, c: u32, w: u32 },
 }

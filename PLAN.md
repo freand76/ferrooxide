@@ -361,7 +361,7 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
 Icarus regression suite (ivtest, normal tests): main list 1341 of 1526 (88 %), SystemVerilog
-list 300 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+list 324 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
@@ -372,7 +372,8 @@ Next, roughly in order (see "Architecture changes ahead" below for why this orde
    `assign z = a;` alias, file-scope and package variables, `timeunit`, array typedefs.)
 2. **Types in elaboration** (A1 below): first part done (package scopes, `parameter type`);
    next a type per signal in the compiler, then struct layout and members out of the parser.
-3. **Heap objects** (A2): `string`, queues, dynamic and associative arrays.
+3. **Heap objects** (A2): `string` done (first version); queues, dynamic and associative
+   arrays next.
 4. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
    loop. Then classes and `program`; VPI (A4) on the same base.
 5. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
@@ -451,6 +452,15 @@ objects, referred to by handles stored in the flat memory (one value word; a nul
 0). Ops on them are generic-path instructions at first. No dynamic processes needed, so this
 can come right after A1.
 
+*A2 status (2026-11-14).* Strings done the simple way: a string value is the 64-bit handle of
+an interned text (`Program::strings` from the compiler, the table in `Sim`), so equal texts
+have equal handles and stores, change events and `==` need nothing new; the rest are
+`Instr::Str` operations on the generic path (`compile/src/strings.rs`, `Sim::exec_str`). The
+compiler knows a string signal by `SignalInfo::string` and types expressions with
+`is_string` next to `is_real` (`strings::VTy` for assignment targets). Interning never frees
+a text (listed under Unsupported). Queues and dynamic arrays need mutable objects: handles to
+a separate heap with copy on assignment.
+
 **A3. Dynamic processes, calls and waiters.** Today a process is a fixed `ProcDef` with one
 `ProcRt`, fork branches are fixed processes that get restarted (hence the open fork/join_none
 in a loop), automatic storage is per call site, functions are inlined (recursion copies
@@ -477,6 +487,40 @@ performance items.
 
 **Watch.** Elaboration and codegen run per instance (only the JIT shares code between
 instances); measure compile time and memory on a large netlist before assuming it scales.
+
+## Unsupported (known)
+
+Kept up to date as features stop short; regression-suite test names in brackets.
+
+SystemVerilog data types and testbench features:
+- queues `[$]`, dynamic arrays `[]`, associative arrays (also in typedefs) [sv_queue*,
+  sv_darray*]: need heap objects beyond strings (A2).
+- classes, `program` blocks, `export` in packages, forward typedefs (`typedef enum T;`)
+  [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd*].
+- struct members of variables whose type is a type parameter; unpacked structs (struct
+  layout is still resolved in the parser, A1).
+- arrays of interfaces; nested module declarations [sv_timeunit_prec3b].
+- `unique` / `priority` violation warnings; `$countones` / `$onehot` / `$onehot0` code
+  generation.
+- `string` (first version, 2026-11-14): no reclaiming of strings (every distinct text made at
+  run time stays in the table: a testbench building millions of different strings grows);
+  string parameters; strings as `case` expressions; implicit string -> vector assignment is
+  accepted (the reference rejects it); characters above 127 print as UTF-8; `%v` `%u` `%z`
+  in `$sformatf` [sformatf].
+
+Verilog / scheduling:
+- nets with several drivers, `wand`/`tri1`, strength drivers and `assign z = m[i]` update in
+  the combinational settle, the reference updates them immediately (see the known difference).
+- `~`/`buf` of a never-driven input gives x, the reference z (ICARUS_NOTES 8) [sv_unit1c].
+- strength values on nets (`%v`), `$countdrivers`, `$fread`, `%u`/`%z` in `$scanf`,
+  event-controlled NBAs updating at the trigger (ICARUS_NOTES 3), specify paths on inout
+  ports and conditional paths, force on array elements.
+- a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
+  `$dumpvars` scope/level arguments; FST; VCD of arrays, reals and events.
+- multi-dimensional arrays as ports, whole-array assignments; fork/join_none restarting a
+  running branch (A3); VPI (A4).
+- interactive/MCP `force` of a net made an alias of its source (`assign z = a`) forces the
+  source.
 
 ## SystemVerilog status (2026-11-14)
 
@@ -507,8 +551,8 @@ instance, shared), `P::x` / `P::f()` naming the package's own, `timeunit` / `tim
 (module and file scope), time literals, typedefs with unpacked dimensions (the type's
 dimensions first, ICARUS_NOTES 9), `parameter type`, constants of package / `$unit` types
 evaluated in their scope, `input var` / `input logic` port kinds, `-u` (separate
-compilation units). SystemVerilog list 300 of 700 (42.9 %, from 251), main list 1341 of 1526
-(from 1337).
+compilation units), `string` (first version, see A2 status and Unsupported).
+SystemVerilog list 324 of 700 (46.3 %, from 251), main list 1341 of 1526 (from 1337).
 
 Next, for real RTL: `unique`/`priority` case violation warnings, `$countones`/`$onehot`/
 `$onehot0` code generation, arrays of interfaces, struct-typed function arguments with

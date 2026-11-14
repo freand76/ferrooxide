@@ -208,6 +208,9 @@ pub struct Sim {
     history_pending: bool,
     dirty: Vec<u32>,
     is_dirty: Vec<bool>,
+    /// interned strings: a string value is the index of its text (0: "")
+    strs: Vec<Rc<[u8]>>,
+    str_ids: HashMap<Rc<[u8]>, u64>,
     /// open files
     files: HashMap<u32, FileH>,
     next_fd: u32,
@@ -470,6 +473,8 @@ impl Sim {
             history_pending: false,
             dirty: Vec::new(),
             is_dirty: vec![false; nsig],
+            strs: Vec::new(),
+            str_ids: HashMap::new(),
             files: HashMap::new(),
             next_fd: 3,
             scratch: Vec::new(),
@@ -1928,6 +1933,10 @@ impl Sim {
             };
             *st.entry(k).or_default() += 1;
         }
+        if let Instr::Str { op, d, a, b, c, w } = ins {
+            self.exec_str(*op, *d, *a, *b, *c, *w);
+            return false;
+        }
         {
             let m = &mut self.mem;
             match ins {
@@ -2174,6 +2183,7 @@ impl Sim {
                 | Instr::RToTicks { .. } => {
                     ops::exec_real(ins, m);
                 }
+                Instr::Str { .. } => unreachable!("handled before"),
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -2189,7 +2199,8 @@ impl Sim {
         match task {
             SysTask::Display { nl, args, scope, fd, prefix, texp, radix } => {
                 let mut s = String::from(*prefix);
-                s.push_str(&fmt::format_args(args, &self.mem, scope, *radix, *texp));
+                let args = self.str_args(args);
+                s.push_str(&fmt::format_args(&args, &self.mem, scope, *radix, *texp));
                 if *nl {
                     s.push('\n');
                 }
@@ -2223,7 +2234,8 @@ impl Sim {
             }
             SysTask::MonitorPrint { proc, args, scope, texp, radix } => {
                 if self.monitor == *proc && self.monitor_on {
-                    let mut s = fmt::format_args(args, &self.mem, scope, *radix, *texp);
+                    let args = self.str_args(args);
+                    let mut s = fmt::format_args(&args, &self.mem, scope, *radix, *texp);
                     s.push('\n');
                     let _ = self.out.write_all(s.as_bytes());
                 }
@@ -2303,8 +2315,16 @@ impl Sim {
                 }
             }
             SysTask::SFormat { d, w, args, scope, texp, radix } => {
-                let s = fmt::format_args(args, &self.mem, scope, *radix, *texp);
-                string_to_bits(&mut self.mem, *d as usize, *w, &s);
+                let args = self.str_args(args);
+                let s = fmt::format_args(&args, &self.mem, scope, *radix, *texp);
+                if *w == 0 {
+                    // into a string
+                    let h = self.intern(s.as_bytes());
+                    self.mem[*d as usize] = h;
+                    self.mem[*d as usize + 1] = 0;
+                } else {
+                    string_to_bits(&mut self.mem, *d as usize, *w, &s);
+                }
             }
             SysTask::FOpen { d, dw, file, mode } => {
                 let file = self.file_name(file);
@@ -2442,9 +2462,257 @@ impl Sim {
         }
     }
 
-    fn file_name(&self, f: &FileName) -> String {
+    /// The handle of a string (interned).
+    fn intern(&mut self, b: &[u8]) -> u64 {
+        if self.strs.is_empty() {
+            self.strs.push(Rc::from(&b""[..]));
+            self.str_ids.insert(Rc::from(&b""[..]), 0);
+            for t in &self.prog.strings[1.min(self.prog.strings.len())..] {
+                let h = self.strs.len() as u64;
+                let r: Rc<[u8]> = Rc::from(&t[..]);
+                self.strs.push(r.clone());
+                self.str_ids.insert(r, h);
+            }
+        }
+        if let Some(&h) = self.str_ids.get(b) {
+            return h;
+        }
+        let h = self.strs.len() as u64;
+        let r: Rc<[u8]> = Rc::from(b);
+        self.strs.push(r.clone());
+        self.str_ids.insert(r, h);
+        h
+    }
+
+    /// The text of the string at `slot`.
+    fn str_at(&mut self, slot: u32) -> Rc<[u8]> {
+        if self.strs.is_empty() {
+            self.intern(b"");
+        }
+        let h = self.mem[slot as usize];
+        if self.mem[slot as usize + 1] != 0 {
+            return self.strs[0].clone();
+        }
+        self.strs.get(h as usize).cloned().unwrap_or_else(|| self.strs[0].clone())
+    }
+
+    /// Display arguments with string values as literals.
+    fn str_args<'x>(&mut self, args: &'x [FmtArg]) -> std::borrow::Cow<'x, [FmtArg]> {
+        if !args.iter().any(|a| matches!(a, FmtArg::SVar { .. })) {
+            return std::borrow::Cow::Borrowed(args);
+        }
+        let v = args
+            .iter()
+            .map(|a| match a {
+                FmtArg::SVar { s } => {
+                    let t = self.str_at(*s);
+                    // (an empty string prints nothing, unlike the literal "")
+                    if t.is_empty() { FmtArg::Empty } else { FmtArg::Lit(String::from_utf8_lossy(&t).into_owned()) }
+                }
+                _ => a.clone(),
+            })
+            .collect();
+        std::borrow::Cow::Owned(v)
+    }
+
+    fn put_str(&mut self, d: u32, b: &[u8]) {
+        let h = self.intern(b);
+        self.mem[d as usize] = h;
+        self.mem[d as usize + 1] = 0;
+    }
+
+    fn put_int(&mut self, d: u32, w: u32, v: i64) {
+        let n = nw(w);
+        let d = d as usize;
+        for k in 0..n {
+            let word = if k == 0 { v as u64 } else if v < 0 { !0 } else { 0 };
+            self.mem[d + k] = if k == n - 1 { word & ops::mask(w - 64 * k as u32) } else { word };
+            self.mem[d + n + k] = 0;
+        }
+    }
+
+    fn exec_str(&mut self, op: StrOp, d: u32, a: u32, b: u32, c: u32, w: u32) {
+        let int = |m: &[u64], s: u32| -> Option<i64> { ops::read_index(m, s as usize, 32, true) };
+        match op {
+            StrOp::FromVec => {
+                let n = w.div_ceil(8);
+                let mut v = Vec::with_capacity(n as usize);
+                for k in (0..n).rev() {
+                    let len = 8.min(w - 8 * k);
+                    let ch = ops::get_bits(&self.mem, a as usize, 8 * k, len) as u8;
+                    if ch != 0 {
+                        v.push(ch);
+                    }
+                }
+                self.put_str(d, &v);
+            }
+            StrOp::ToVec => {
+                let t = self.str_at(a);
+                let n = nw(w);
+                for k in 0..2 * n {
+                    self.mem[d as usize + k] = 0;
+                }
+                for (k, &ch) in t.iter().rev().enumerate() {
+                    let bit = 8 * k as u32;
+                    if bit >= w {
+                        break;
+                    }
+                    ops::set_bits(&mut self.mem, d as usize, bit, 8.min(w - bit), ch as u64);
+                }
+            }
+            StrOp::Concat => {
+                let mut v = self.str_at(a).to_vec();
+                v.extend_from_slice(&self.str_at(b));
+                self.put_str(d, &v);
+            }
+            StrOp::Repl => {
+                let t = self.str_at(a);
+                let n = int(&self.mem, b).unwrap_or(0).max(0) as usize;
+                self.put_str(d, &t.repeat(n));
+            }
+            StrOp::Cmp(cop) => {
+                let (x, y) = (self.str_at(a), self.str_at(b));
+                let o = x.cmp(&y);
+                use std::cmp::Ordering::*;
+                let r = match cop {
+                    CmpOp::Eq | CmpOp::CaseEq => o == Equal,
+                    CmpOp::Ne | CmpOp::CaseNe => o != Equal,
+                    CmpOp::Lt => o == Less,
+                    CmpOp::Le => o != Greater,
+                    CmpOp::Gt => o == Greater,
+                    CmpOp::Ge => o != Less,
+                    _ => false,
+                };
+                self.put_int(d, 1, r as i64);
+            }
+            StrOp::Len => {
+                let n = self.str_at(a).len() as i64;
+                self.put_int(d, 32, n);
+            }
+            StrOp::Getc => {
+                let t = self.str_at(a);
+                let ch = match int(&self.mem, b) {
+                    Some(i) if i >= 0 && (i as usize) < t.len() => t[i as usize],
+                    _ => 0,
+                };
+                self.put_int(d, 8, ch as i64);
+            }
+            StrOp::Putc => {
+                let mut t = self.str_at(a).to_vec();
+                let ch = ops::read_u64(&self.mem, c as usize, 8).unwrap_or(0) as u8;
+                if let Some(i) = int(&self.mem, b) {
+                    if i >= 0 && (i as usize) < t.len() && ch != 0 {
+                        t[i as usize] = ch;
+                    }
+                }
+                self.put_str(d, &t);
+            }
+            StrOp::Upper | StrOp::Lower => {
+                let t = self.str_at(a);
+                let v: Vec<u8> = if op == StrOp::Upper { t.to_ascii_uppercase() } else { t.to_ascii_lowercase() };
+                self.put_str(d, &v);
+            }
+            StrOp::Substr => {
+                let t = self.str_at(a);
+                let v = match (int(&self.mem, b), int(&self.mem, c)) {
+                    (Some(i), Some(j)) if i >= 0 && j >= i && (j as usize) < t.len() => t[i as usize..=j as usize].to_vec(),
+                    _ => Vec::new(),
+                };
+                self.put_str(d, &v);
+            }
+            StrOp::Compare | StrOp::Icompare => {
+                let (mut x, mut y) = (self.str_at(a).to_vec(), self.str_at(b).to_vec());
+                if op == StrOp::Icompare {
+                    x.make_ascii_lowercase();
+                    y.make_ascii_lowercase();
+                }
+                // as C's strcmp: the difference of the first differing characters
+                let mut r = 0i64;
+                for k in 0..x.len().max(y.len()) {
+                    let (p, q) = (x.get(k).copied().unwrap_or(0) as i64, y.get(k).copied().unwrap_or(0) as i64);
+                    if p != q {
+                        r = p - q;
+                        break;
+                    }
+                }
+                self.put_int(d, 32, r);
+            }
+            StrOp::Atoi | StrOp::Atohex | StrOp::Atooct | StrOp::Atobin => {
+                let t = self.str_at(a);
+                let radix = match op {
+                    StrOp::Atoi => 10,
+                    StrOp::Atohex => 16,
+                    StrOp::Atooct => 8,
+                    _ => 2,
+                };
+                let mut k = 0;
+                let neg = op == StrOp::Atoi && t.first() == Some(&b'-');
+                if op == StrOp::Atoi && matches!(t.first(), Some(b'-' | b'+')) {
+                    k = 1;
+                }
+                let mut v: i64 = 0;
+                while k < t.len() {
+                    let ch = t[k] as char;
+                    if ch == '_' {
+                        k += 1;
+                        continue;
+                    }
+                    match ch.to_digit(radix) {
+                        Some(dg) => v = v.wrapping_mul(radix as i64).wrapping_add(dg as i64),
+                        None => break,
+                    }
+                    k += 1;
+                }
+                self.put_int(d, w.max(1), if neg { -v } else { v });
+            }
+            StrOp::Atoreal => {
+                let t = self.str_at(a);
+                let txt = String::from_utf8_lossy(&t);
+                // the longest leading part that is a number
+                let mut v = 0.0;
+                for end in (1..=txt.len()).rev() {
+                    if let Ok(x) = txt[..end].replace('_', "").parse::<f64>() {
+                        v = x;
+                        break;
+                    }
+                }
+                ops::wr_real(&mut self.mem, d as usize, v);
+            }
+            StrOp::Itoa | StrOp::Hextoa | StrOp::Octtoa | StrOp::Bintoa => {
+                let n = nw(w);
+                let view = fmt::Val { a: &self.mem[a as usize..a as usize + n], b: &self.mem[a as usize + n..a as usize + 2 * n], w, signed: c == 1 };
+                // a negative signed value: a minus sign and the digits of its magnitude
+                let neg = c == 1 && w <= 64 && view.b.iter().all(|&x| x == 0) && (view.a[0] >> (w - 1)) & 1 == 1;
+                let txt = if neg && op != StrOp::Itoa {
+                    let mag = (view.a[0] | !ops::mask(w)).wrapping_neg();
+                    let r = match op {
+                        StrOp::Hextoa => format!("{mag:x}"),
+                        StrOp::Octtoa => format!("{mag:o}"),
+                        _ => format!("{mag:b}"),
+                    };
+                    format!("-{r}")
+                } else {
+                    match op {
+                        StrOp::Itoa => fmt::fmt_dec(&view, false),
+                        StrOp::Hextoa => fmt::fmt_radix(&view, 4, false),
+                        StrOp::Octtoa => fmt::fmt_radix(&view, 3, false),
+                        _ => fmt::fmt_radix(&view, 1, false),
+                    }
+                };
+                self.put_str(d, txt.as_bytes());
+            }
+            StrOp::Realtoa => {
+                let v = ops::rd_real(&self.mem, a as usize);
+                let txt = fmt::fmt_real(v, 'g', 6);
+                self.put_str(d, txt.as_bytes());
+            }
+        }
+    }
+
+    fn file_name(&mut self, f: &FileName) -> String {
         match f {
             FileName::Lit(s) => s.clone(),
+            FileName::SVar { s } => String::from_utf8_lossy(&self.str_at(*s)).into_owned(),
             FileName::Val { s, w } => fmt::value_string(&self.mem, *s as usize, *w),
         }
     }

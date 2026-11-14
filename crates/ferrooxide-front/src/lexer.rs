@@ -139,6 +139,21 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
                     match s[i] {
                         b'n' => v.push('\n'),
                         b't' => v.push('\t'),
+                        b'v' => v.push('\u{0b}'),
+                        b'f' => v.push('\u{0c}'),
+                        b'a' => v.push('\u{07}'),
+                        b'x' if i + 1 < s.len() && s[i + 1].is_ascii_hexdigit() => {
+                            i += 1;
+                            let mut n = 0u32;
+                            let mut k = 0;
+                            while k < 2 && i < s.len() && s[i].is_ascii_hexdigit() {
+                                n = n * 16 + (s[i] as char).to_digit(16).unwrap();
+                                i += 1;
+                                k += 1;
+                            }
+                            v.push(char::from_u32(n).unwrap_or('?'));
+                            continue;
+                        }
                         b'\\' => v.push('\\'),
                         b'"' => v.push('"'),
                         // backslash-newline: the string continues on the next line

@@ -487,6 +487,8 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                 out.push(' ');
                 i += 1;
             }
+            // (turned into literals by the caller)
+            FmtArg::SVar { .. } => i += 1,
         }
     }
     out

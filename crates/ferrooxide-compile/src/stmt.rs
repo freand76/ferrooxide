@@ -239,8 +239,8 @@ impl<'a> Compiler<'a> {
         let v = match &rhs {
             Rhs::Expr(e, sid) => {
                 let real = match &lhs {
-                    Lhs::Expr(l, ls) => self.lvalue_is_real(l, *ls),
-                    Lhs::Sig(s) => self.sig(*s).real,
+                    Lhs::Expr(l, ls) => self.lvalue_ty(l, *ls),
+                    Lhs::Sig(s) => self.sig_vty(*s),
                 };
                 let v = self.value_for(e, *sid, lw, real)?;
                 self.reads_expr(e, *sid, &mut reads);
@@ -400,7 +400,7 @@ impl<'a> Compiler<'a> {
                                 }
                                 SigKind::Integer
                             }
-                            NetKind::Time | NetKind::Real => {
+                            NetKind::Time | NetKind::Real | NetKind::String => {
                                 (m, l) = (63, 0);
                                 SigKind::Reg
                             }
@@ -420,13 +420,21 @@ impl<'a> Compiler<'a> {
                             if is_real {
                                 self.mark_real(s);
                             }
+                            if d.kind == NetKind::String {
+                                self.mark_string(s);
+                            }
                             if d.kind == NetKind::Event {
                                 self.zero_init(s);
                             }
                             self.mark_two_state(s, d.kind);
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
                             if let Some(init) = &dl.init {
-                                let v = self.value_for(init, b, w, is_real)?;
+                                let ty = match d.kind {
+                                    NetKind::String => crate::strings::VTy::Str,
+                                    NetKind::Real => crate::strings::VTy::Real,
+                                    _ => crate::strings::VTy::Vec,
+                                };
+                                let v = self.value_for(init, b, w, ty)?;
                                 self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
                             }
                         }
@@ -478,8 +486,11 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
+                if !*nonblocking && timing.is_none() && !self.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
+                    return Ok(());
+                }
                 let lw = self.ty(lhs, sid)?.0;
-                let real = self.lvalue_is_real(lhs, sid);
+                let real = self.lvalue_ty(lhs, sid);
                 let v = self.value_for(rhs, sid, lw, real)?;
                 let lv = Lhs::Expr(lhs, sid);
                 match timing {
@@ -678,7 +689,9 @@ impl<'a> Compiler<'a> {
             }
             Stmt::TaskCall { name, args, line } => {
                 self.line = *line;
-                self.call(name, args, sid, true)?;
+                if self.str_ids.is_empty() || !self.str_task(name, args, sid)? {
+                    self.call(name, args, sid, true)?;
+                }
             }
             Stmt::Force { lhs, rhs, line } => {
                 // force / procedural assign: a spawned process keeps the target at the value of
@@ -711,7 +724,7 @@ impl<'a> Compiler<'a> {
                 if let Some(rhs) = rhs {
                     // the forced value applies at once ...
                     let lw = self.ty(lhs, sid)?.0;
-                    let real = self.lvalue_is_real(lhs, sid);
+                    let real = self.lvalue_ty(lhs, sid);
                     let v = self.value_for(rhs, sid, lw, real)?;
                     self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
                     let parent = self.pb.last().unwrap().proc;
@@ -779,7 +792,7 @@ impl<'a> Compiler<'a> {
                 };
                 if let (Some(v), Some(r)) = (value, ret) {
                     let w = self.sig(r).width;
-                    let real = self.sig(r).real;
+                    let real = self.sig_vty(r);
                     let val = self.value_for(v, sid, w, real)?;
                     self.emit(Instr::Store { t: Target::Whole { sig: r }, s: val, mode: StoreMode::Blocking });
                 }
@@ -822,12 +835,13 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn fmt_args(&mut self, args: &[Option<Expr>], sid: usize) -> R<Vec<FmtArg>> {
+    pub(crate) fn fmt_args(&mut self, args: &[Option<Expr>], sid: usize) -> R<Vec<FmtArg>> {
         let mut v = Vec::new();
         for a in args {
             v.push(match a {
                 None => FmtArg::Empty,
                 Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),
+                Some(e) if self.is_string(e, sid) => FmtArg::SVar { s: self.str_expr(e, sid)? },
                 Some(e) if self.is_real(e, sid) => FmtArg::Real { s: self.rexpr(e, sid)? },
                 // a string value (an enum's .name())
                 Some(Expr::SysCall(n, a)) if n == "$__str" => {

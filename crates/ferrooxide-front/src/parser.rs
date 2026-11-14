@@ -85,7 +85,7 @@ fn is_keyword(s: &str) -> bool {
 /// wherever an identifier is required.
 const SV_ONLY: &[&str] = &[
     "logic", "bit", "int", "byte", "shortint", "longint", "always_comb", "always_ff", "always_latch", "return", "do",
-    "final", "join_any", "join_none", "break", "continue", "unique", "priority", "var",
+    "final", "join_any", "join_none", "break", "continue", "unique", "priority", "var", "string",
 ];
 
 /// Keywords IEEE 1800 (SystemVerilog) reserves beyond those of Verilog-2005: legal names in
@@ -958,6 +958,7 @@ impl Parser {
                 "int" => Some(NetKind::Int(32)),
                 "real" | "realtime" => Some(NetKind::Real),
                 "event" => Some(NetKind::Event),
+                "string" => Some(NetKind::String),
                 "byte" => Some(NetKind::Int(8)),
                 "shortint" => Some(NetKind::Int(16)),
                 "longint" => Some(NetKind::Int(64)),
@@ -1087,7 +1088,7 @@ impl Parser {
             return false;
         }
         matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
-            "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"|"event"
+            "input"|"output"|"inout"|"wire"|"reg"|"logic"|"bit"|"integer"|"time"|"genvar"|"int"|"byte"|"shortint"|"longint"|"real"|"realtime"|"event"|"string"
             |"tri"|"wand"|"wor"|"triand"|"trior"|"trireg"|"supply0"|"supply1"|"tri0"|"tri1"|"uwire"|"var"))
             || self.is_sv_type_start()
     }
@@ -1569,6 +1570,8 @@ impl Parser {
                     signed = true;
                 } else if self.eat_kw("real") || self.eat_kw("realtime") {
                     ret_kind = NetKind::Real;
+                } else if self.eat_kw("string") {
+                    ret_kind = NetKind::String;
                 } else {
                     break;
                 }
@@ -2480,6 +2483,13 @@ impl Parser {
                 }
             }
             // casts: T'(e), int'(e), signed'(e)
+            Tok::Ident(name) if name == "string" && self.is_p("'") && matches!(self.peek_at(1), Tok::Punct("(")) => {
+                self.bump();
+                self.bump();
+                let e = self.expr()?;
+                self.expect_p(")")?;
+                return Ok(Expr::SysCall("$__tostring".into(), vec![e]));
+            }
             Tok::Ident(name) if self.is_p("'") && matches!(self.peek_at(1), Tok::Punct("(")) && (self.types.contains_key(&name) || matches!(name.as_str(), "int" | "integer" | "shortint" | "byte" | "longint" | "bit" | "logic" | "reg" | "signed" | "unsigned")) => {
                 if name == "signed" || name == "unsigned" {
                     self.bump();

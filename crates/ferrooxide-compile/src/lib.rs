@@ -4,6 +4,7 @@ mod expr;
 mod konst;
 mod lint;
 mod stmt;
+mod strings;
 
 pub use konst::Const;
 
@@ -153,6 +154,10 @@ pub struct Compiler<'a> {
     pub(crate) view_of: HashMap<u32, u32>,
     /// (view, driver signal) -> view of the driver (see `redir`)
     drv_views: HashMap<(u32, u32), u32>,
+    /// texts interned at compile time -> handle (`Program::strings`)
+    pub(crate) str_ids: HashMap<Vec<u8>, u64>,
+    /// compiling a string's handle (no conversion of string values to characters)
+    pub(crate) str_raw: bool,
     /// variables made aliases by `alias_assigns` (a procedural store to one is an error)
     alias_vars: HashSet<u32>,
     /// named blocks and task bodies for `disable`: (path, definition)
@@ -401,6 +406,8 @@ impl<'a> Compiler<'a> {
             elem_alias: HashMap::new(),
             view_of: HashMap::new(),
             drv_views: HashMap::new(),
+            str_ids: HashMap::new(),
+            str_raw: false,
             alias_vars: HashSet::new(),
             drivers: HashMap::new(),
             net_types: HashMap::new(),
@@ -560,6 +567,7 @@ impl<'a> Compiler<'a> {
             alias_of: None,
             real: false,
             forced: false,
+            string: false,
         });
         self.prog.names.push((name, id));
         id
@@ -859,6 +867,7 @@ impl<'a> Compiler<'a> {
             alias_of: Some((arr, e)),
             real: info.real,
             forced: false,
+            string: info.string,
         });
         self.elem_alias.insert((arr, e), id);
         Some(id)
@@ -1687,6 +1696,10 @@ impl<'a> Compiler<'a> {
                     SigKind::Reg
                 }
                 NetKind::Event => SigKind::Reg,
+                NetKind::String => {
+                    (msb, lsb) = (63, 0);
+                    SigKind::Reg
+                }
                 NetKind::Int(n) => {
                     if range_v.is_none() {
                         (msb, lsb) = (n as i64 - 1, 0);
@@ -1783,6 +1796,9 @@ impl<'a> Compiler<'a> {
                         if is_real {
                             self.mark_real(s);
                         }
+                        if mg.kind == NetKind::String {
+                            self.mark_string(s);
+                        }
                         self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
                         let line = self.line;
                         match dir {
@@ -1813,6 +1829,9 @@ impl<'a> Compiler<'a> {
             }
             if is_real {
                 self.mark_real(s);
+            }
+            if mg.kind == NetKind::String {
+                self.mark_string(s);
             }
             if is_event {
                 self.zero_init(s);
@@ -1847,6 +1866,27 @@ impl<'a> Compiler<'a> {
                         line: self.line,
                     });
                     self.cur_strength = None;
+                } else if mg.kind == NetKind::String {
+                    // the initial text
+                    let text = match init {
+                        Expr::Str(t) => t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect(),
+                        e => {
+                            let c = self.const_eval(e, sid)?;
+                            let mut v = Vec::new();
+                            for k in (0..c.w.div_ceil(8)).rev() {
+                                let ch = (c.a[(8 * k / 64) as usize] >> (8 * k % 64)) as u8;
+                                if ch != 0 {
+                                    v.push(ch);
+                                }
+                            }
+                            v
+                        }
+                    };
+                    let h = self.intern(&text);
+                    let slot = self.sig(s).slot as usize;
+                    self.prog.mem[slot] = h;
+                    self.prog.mem[slot + 1] = 0;
+                    self.init_touch.push(s);
                 } else if is_real {
                     let r = self.const_real(init, sid)?;
                     let slot = self.sig(s).slot as usize;

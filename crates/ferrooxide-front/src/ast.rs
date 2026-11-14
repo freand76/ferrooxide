@@ -77,6 +77,8 @@ pub enum NetKind {
     Real,
     /// named `event`
     Event,
+    /// SystemVerilog `string` (a handle of an interned string)
+    String,
     Bit,
 }
 

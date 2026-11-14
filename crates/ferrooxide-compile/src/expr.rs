@@ -359,6 +359,23 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.ty(&n, sid);
         }
+        if !self.str_ids.is_empty() || matches!(e, Expr::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
+            if let Expr::Index(a, _) = e {
+                if self.is_string_scalar(a, sid) {
+                    return Ok((8, false));
+                }
+            }
+            if let Expr::Call(name, _) = e {
+                if let Some((_, m)) = self.str_method(name, sid) {
+                    if let Some(t) = Self::str_method_width(m) {
+                        return Ok(t);
+                    }
+                }
+            }
+            if self.is_string(e, sid) {
+                return Ok((64, false));
+            }
+        }
         if self.is_real(e, sid) {
             // converted to a 64-bit integer where an integer is needed
             return Ok((64, true));
@@ -492,6 +509,9 @@ impl<'a> Compiler<'a> {
         if f.ret_kind == NetKind::Real {
             return Ok((64, true));
         }
+        if f.ret_kind == NetKind::String {
+            return Ok((64, false));
+        }
         let (m, l) = self.range_vals(&f.range, fs)?;
         Ok((((m - l).abs() + 1) as u32, f.signed))
     }
@@ -530,6 +550,29 @@ impl<'a> Compiler<'a> {
     pub(crate) fn expr(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.expr(&n, sid, w, s);
+        }
+        if !self.str_ids.is_empty() || matches!(e, Expr::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
+            // a string where a vector is needed: its characters
+            if !self.str_raw && self.is_string(e, sid) {
+                return self.str_to_vec(e, sid, w);
+            }
+            // s[i] of a string: its character; s.len() and co.
+            if let Expr::Index(a, i) = e {
+                if self.is_string_scalar(a, sid) {
+                    let h = self.str_expr(a, sid)?;
+                    let iv = self.expr(i, sid, 32, true)?;
+                    let d = self.str_op(ferrooxide_rt::StrOp::Getc, h, iv, NONE, 0);
+                    return Ok(self.resize(d, 8, w, false));
+                }
+            }
+            if let Expr::Call(name, args) = e {
+                if let Some((base, m)) = self.str_method(name, sid) {
+                    if let Some((mw, ms)) = Self::str_method_width(m) {
+                        let d = self.str_method_call(&base, m, args, sid)?;
+                        return Ok(self.resize(d, mw, w, s && ms));
+                    }
+                }
+            }
         }
         // a real expression where an integer is needed: round
         if self.is_real(e, sid) {
@@ -872,6 +915,18 @@ impl<'a> Compiler<'a> {
             }
             _ => {
                 // comparisons
+                if self.is_string(a, sid) || self.is_string(b, sid) {
+                    let cop = match op {
+                        B::Eq | B::CaseEq | B::WildEq => CmpOp::Eq,
+                        B::Ne | B::CaseNe | B::WildNe => CmpOp::Ne,
+                        B::Lt => CmpOp::Lt,
+                        B::Le => CmpOp::Le,
+                        B::Gt => CmpOp::Gt,
+                        _ => CmpOp::Ge,
+                    };
+                    let d = self.str_compare(cop, a, b, sid)?;
+                    return Ok(self.resize(d, 1, w, false));
+                }
                 if self.is_real(a, sid) || self.is_real(b, sid) {
                     let (ra, rb) = (self.rexpr(a, sid)?, self.rexpr(b, sid)?);
                     let cop = match op {
@@ -1161,12 +1216,15 @@ impl<'a> Compiler<'a> {
             let (w, s) = self.func_ret_type(f, def_scope)?;
             let (m, l) = match f.ret_kind {
                 NetKind::Integer => (31, 0),
-                NetKind::Real => (63, 0),
+                NetKind::Real | NetKind::String => (63, 0),
                 _ => self.range_vals(&f.range, def_scope)?,
             };
             let sg = self.new_signal(path.clone(), w, s, 0, m, l, 0, SigKind::Reg);
             if f.ret_kind == NetKind::Real {
                 self.mark_real(sg);
+            }
+            if f.ret_kind == NetKind::String {
+                self.mark_string(sg);
             }
             self.scopes[fs].syms.insert(f.name.clone(), Sym::Sig(sg));
             Some(sg)
@@ -1183,7 +1241,7 @@ impl<'a> Compiler<'a> {
                 NetKind::Int(n) if d.range.is_none() => {
                     (m, l) = (n as i64 - 1, 0);
                 }
-                NetKind::Time | NetKind::Real => (m, l) = (63, 0),
+                NetKind::Time | NetKind::Real | NetKind::String => (m, l) = (63, 0),
                 _ => {}
             }
             let w = ((m - l).abs() + 1) as u32;
@@ -1197,6 +1255,9 @@ impl<'a> Compiler<'a> {
                 let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
                 if d.kind == NetKind::Real {
                     self.mark_real(sg);
+                }
+                if d.kind == NetKind::String {
+                    self.mark_string(sg);
                 }
                 if d.kind == NetKind::Event {
                     self.zero_init(sg);
@@ -1255,7 +1316,7 @@ impl<'a> Compiler<'a> {
             let (dir, ps) = ports[i];
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
-                let real = self.sig(ps).real;
+                let real = self.sig_vty(ps);
                 let v = self.value_for(a, sid, pw, real)?;
                 self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
             }
@@ -1311,7 +1372,7 @@ impl<'a> Compiler<'a> {
             let (dir, ps) = ports[i];
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
-                let real = self.sig(ps).real;
+                let real = self.sig_vty(ps);
                 let v = self.value_for(a, sid, pw, real)?;
                 let k = self.tmp(pw);
                 self.emit(Instr::Copy { d: k, s: v, w: pw });
@@ -1579,7 +1640,10 @@ impl<'a> Compiler<'a> {
                 self.is_real(a, sid) || self.is_real(b, sid)
             }
             Expr::Cond(_, t, f) => self.is_real(t, sid) || self.is_real(f, sid),
-            Expr::Call(name, _) => self.lookup_func(name, sid).map(|(f, _)| f.ret_kind == NetKind::Real).unwrap_or(false),
+            Expr::Call(name, _) => match self.str_method(name, sid) {
+                Some((_, m)) => m == "atoreal",
+                None => self.lookup_func(name, sid).map(|(f, _)| f.ret_kind == NetKind::Real).unwrap_or(false),
+            },
             Expr::SysCall(name, _) => matches!(name.as_str(), "$realtime" | "$itor" | "$bitstoreal" | "$sqrt" | "$ln" | "$log10" | "$exp" | "$floor" | "$ceil" | "$sin" | "$cos" | "$tan" | "$asin" | "$acos" | "$atan" | "$sinh" | "$cosh" | "$tanh" | "$asinh" | "$acosh" | "$atanh" | "$atan2" | "$hypot" | "$pow"),
             _ => false,
         }
@@ -1608,6 +1672,11 @@ impl<'a> Compiler<'a> {
             return Ok(d);
         }
         let rconst = |c: &mut Self, r: f64| c.const_slot(&Const { w: 64, signed: false, a: vec![r.to_bits()], b: vec![0] });
+        if let Expr::Call(name, args) = e {
+            if let Some((base, m)) = self.str_method(name, sid) {
+                return self.str_method_call(&base, m, args, sid);
+            }
+        }
         match e {
             Expr::Real(r) => Ok(rconst(self, *r)),
             Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
@@ -1749,11 +1818,11 @@ impl<'a> Compiler<'a> {
     }
 
     /// The value for an assignment to a target that is real or `lw` bits wide.
-    pub(crate) fn value_for(&mut self, rhs: &Expr, sid: usize, lw: u32, real: bool) -> R<u32> {
-        if real {
-            self.rexpr(rhs, sid)
-        } else {
-            self.rhs_value(rhs, sid, lw)
+    pub(crate) fn value_for(&mut self, rhs: &Expr, sid: usize, lw: u32, ty: crate::strings::VTy) -> R<u32> {
+        match ty {
+            crate::strings::VTy::Real => self.rexpr(rhs, sid),
+            crate::strings::VTy::Str => self.str_expr(rhs, sid),
+            crate::strings::VTy::Vec => self.rhs_value(rhs, sid, lw),
         }
     }
 
@@ -1821,6 +1890,9 @@ impl<'a> Compiler<'a> {
     pub(crate) fn file_name(&mut self, e: &Expr, sid: usize) -> R<rt::FileName> {
         if let Expr::Str(s) = e {
             return Ok(rt::FileName::Lit(s.clone()));
+        }
+        if self.is_string(e, sid) {
+            return Ok(rt::FileName::SVar { s: self.str_expr(e, sid)? });
         }
         let (s, w, _) = self.self_expr(e, sid)?;
         Ok(rt::FileName::Val { s, w })
