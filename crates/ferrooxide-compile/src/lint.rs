@@ -3,6 +3,9 @@
 //! Incomplete sensitivity lists: a level-sensitive `always @(a or b ...)` block that reads a
 //! signal not in its list only re-evaluates when a listed signal changes, while synthesis builds
 //! combinational logic that follows every input. Simulation and hardware then disagree.
+//!
+//! Names that are SystemVerilog keywords (legal Verilog-2005, rejected by SystemVerilog tools)
+//! are recorded by the parser and reported in `compile_dialect`.
 
 use crate::*;
 

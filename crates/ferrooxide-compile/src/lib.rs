@@ -299,6 +299,33 @@ pub fn compile_dialect(
     }
     c.prog.scratch_words = SCRATCH_WORDS;
     c.prog.precision = c.gprec;
+    if lint {
+        // names that are SystemVerilog keywords: the code does not compile as SystemVerilog
+        for m in modules {
+            // once per name and module, where it first appears (usually its declaration)
+            let mut seen = HashSet::new();
+            for (n, l) in &m.keyword_names {
+                if !seen.insert(n) {
+                    continue;
+                }
+                let msg = format!(
+                    "{}:{l}: lint: '{n}' is a SystemVerilog keyword (IEEE 1800) used as a name; \
+                     SystemVerilog tools reject it, rename it",
+                    m.file
+                );
+                if c.lint_seen.insert(msg.clone()) {
+                    c.lint.push(msg);
+                }
+            }
+        }
+        // in source order
+        let key = |s: &String| -> (String, u64) {
+            let mut it = s.splitn(3, ':');
+            let f = it.next().unwrap_or("").to_string();
+            (f, it.next().and_then(|l| l.parse().ok()).unwrap_or(0))
+        };
+        c.lint.sort_by_key(key);
+    }
     Ok((c.prog, c.warnings, c.lint))
 }
 

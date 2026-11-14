@@ -190,6 +190,11 @@ Signals read inside called functions, memories and hierarchical references count
 block assigns itself (temporaries), loop variables, edge-triggered blocks and `@*`/`always_comb`
 are not reported.
 
+It also reports **names that are SystemVerilog keywords** (`logic`, `bit`, `var`, `string`,
+`interface`, ... : everything IEEE 1800 reserves beyond Verilog-2005). They are legal in
+Verilog-2005, but SystemVerilog tools reject the code. Each name is reported once per module,
+where it first appears.
+
 Debugging: `FX_TRACE=<time>` prints every process activation from that time on,
 `FX_GENSTATS=1` counts instructions that take the generic path.
 

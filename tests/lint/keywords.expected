@@ -1,0 +1,9 @@
+tests/lint/keywords.v:2: lint: 'interface' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+tests/lint/keywords.v:2: lint: 'string' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+tests/lint/keywords.v:2: lint: 'var' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+tests/lint/keywords.v:3: lint: 'logic' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+tests/lint/keywords.v:4: lint: 'class' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+tests/lint/keywords.v:5: lint: 'unique' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+tests/lint/keywords.v:9: lint: 'bit' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+tests/lint/keywords.v:17: lint: 'do' is a SystemVerilog keyword (IEEE 1800) used as a name; SystemVerilog tools reject it, rename it
+ferrooxide lint: 8 findings

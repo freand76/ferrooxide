@@ -40,7 +40,7 @@ fn tools() -> Value {
                     "plusargs": arr("plusargs without the leading + (name=value)"),
                     "verilog2005": {"type": "boolean", "description": "Verilog-2005 rules where SystemVerilog differs"},
                     "specify": {"type": "boolean", "description": "apply specify path delays"}}), &["files"]),
-        tool("lint", "Check files for incomplete sensitivity lists (simulation/synthesis mismatches) without simulating.",
+        tool("lint", "Check files without simulating: incomplete sensitivity lists (simulation/synthesis mismatches) and names that are SystemVerilog keywords.",
              json!({"files": arr("source files"), "defines": arr("macros: NAME or NAME=VALUE"), "include_dirs": arr("include directories")}), &["files"]),
         tool("run", "Run the simulation to a time (`100ns`, `5000` ticks, `+20us` relative) or, without `until`, until nothing is scheduled or $finish. Reports watched changes, breakpoint hits, the stop reason and the design's output.",
              json!({"until": s("time to stop at")}), &[]),

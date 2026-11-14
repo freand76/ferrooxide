@@ -29,6 +29,8 @@ pub struct Parser {
     pub(crate) pending: Vec<Item>,
     /// items at file scope ($unit): added to every module that follows
     pub unit_items: Vec<Item>,
+    /// names read so far that are SystemVerilog keywords (lint)
+    kw_names: Vec<(String, Line)>,
 }
 
 struct PType {
@@ -59,6 +61,24 @@ fn is_keyword(s: &str) -> bool {
 const SV_ONLY: &[&str] = &[
     "logic", "bit", "int", "byte", "shortint", "longint", "always_comb", "always_ff", "always_latch", "return", "do",
     "final", "join_any", "join_none", "break", "continue", "unique", "priority", "var",
+];
+
+/// Keywords IEEE 1800 (SystemVerilog) reserves beyond those of Verilog-2005: legal names in
+/// Verilog-2005 code, but such code does not compile as SystemVerilog (lint check).
+pub const SV_RESERVED: &[&str] = &[
+    "accept_on", "alias", "always_comb", "always_ff", "always_latch", "assert", "assume", "before", "bind", "bins",
+    "binsof", "bit", "break", "byte", "chandle", "checker", "class", "clocking", "const", "constraint", "context",
+    "continue", "cover", "covergroup", "coverpoint", "cross", "dist", "do", "endchecker", "endclass", "endclocking",
+    "endgroup", "endinterface", "endpackage", "endprogram", "endproperty", "endsequence", "enum", "eventually",
+    "expect", "export", "extends", "extern", "final", "first_match", "foreach", "forkjoin", "global", "iff",
+    "ignore_bins", "illegal_bins", "implements", "implies", "import", "inside", "int", "interconnect", "interface",
+    "intersect", "join_any", "join_none", "let", "local", "logic", "longint", "matches", "modport", "nettype", "new",
+    "nexttime", "null", "package", "packed", "priority", "program", "property", "protected", "pure", "rand", "randc",
+    "randcase", "randsequence", "ref", "reject_on", "restrict", "return", "s_always", "s_eventually", "s_nexttime",
+    "s_until", "s_until_with", "sequence", "shortint", "shortreal", "soft", "solve", "static", "string", "strong",
+    "struct", "super", "sync_accept_on", "sync_reject_on", "tagged", "this", "throughout", "timeprecision",
+    "timeunit", "type", "typedef", "union", "unique", "unique0", "until", "until_with", "untyped", "var", "virtual",
+    "void", "wait_order", "weak", "wildcard", "with", "within",
 ];
 
 fn is_sv_only(s: &str) -> bool {
@@ -92,6 +112,7 @@ impl Parser {
             last_type: None,
             pending: Vec::new(),
             unit_items: Vec::new(),
+            kw_names: Vec::new(),
         }
     }
 
@@ -165,6 +186,12 @@ impl Parser {
     pub(crate) fn ident(&mut self) -> Result<String> {
         match self.peek().clone() {
             Tok::Ident(s) if !is_keyword(&s) || is_sv_only(&s) => {
+                // (a name after '.' belongs to another scope: a port of an instance, a
+                // hierarchical reference)
+                let after_dot = self.pos > 0 && matches!(self.toks[self.pos - 1].tok, Tok::Punct("."));
+                if SV_RESERVED.contains(&s.as_str()) && !after_dot {
+                    self.kw_names.push((s.clone(), self.line()));
+                }
                 self.bump();
                 Ok(s)
             }
@@ -474,6 +501,7 @@ impl Parser {
             ports,
             items,
             udp: None,
+            keyword_names: std::mem::take(&mut self.kw_names),
         })
     }
 
@@ -580,6 +608,7 @@ impl Parser {
             ports,
             items,
             udp: Some(UdpDef { sequential, rows, init }),
+            keyword_names: std::mem::take(&mut self.kw_names),
         })
     }
 
@@ -706,8 +735,8 @@ impl Parser {
                 if matches!(k, NetKind::Integer | NetKind::Int(_)) {
                     signed = true;
                 }
-                // `wire logic` / `var logic`
-                if self.is_kw("logic") || self.is_kw("reg") {
+                // `wire logic` / `var logic` (`reg logic;`: logic is the name)
+                if (self.is_kw("logic") || self.is_kw("reg")) && !self.sv_ident_here() {
                     self.bump();
                 }
                 // `wire real`: a real-valued net
@@ -981,8 +1010,11 @@ impl Parser {
                 self.expect_p(";")?;
             }
             _ if !is_keyword(kw) => {
-                // module instantiation
+                // module instantiation (the module's name is reported where it is declared)
                 let module = self.ident()?;
+                if self.kw_names.last().is_some_and(|(n, _)| *n == module) {
+                    self.kw_names.pop();
+                }
                 let mut params = Vec::new();
                 if self.eat_p("#") {
                     if self.eat_p("(") {

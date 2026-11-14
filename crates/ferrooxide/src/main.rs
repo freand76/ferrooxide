@@ -34,7 +34,8 @@ options:
   --surfer          start the Surfer waveform viewer on a debug server and show the --trace
                     signals (else the top modules' signals); exits with Surfer (FX_SURFER:
                     the Surfer executable); with -i the console runs next to the viewer
-  --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
+  --lint            check the design (incomplete sensitivity lists, SystemVerilog keywords
+                    as names) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help
 environment: FX_MEM_LIMIT_MB (address-space cap, default 4096, 0: none), FX_MAX_MEM_MB (design

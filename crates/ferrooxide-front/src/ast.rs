@@ -18,6 +18,8 @@ pub struct Module {
     pub items: Vec<Item>,
     /// a user-defined primitive (`primitive ... endprimitive`): its table
     pub udp: Option<UdpDef>,
+    /// names that are SystemVerilog keywords (legal Verilog-2005 names; for the lint check)
+    pub keyword_names: Vec<(String, Line)>,
 }
 
 /// A UDP table. Each row: input symbols ("0", "1", "x", "?", "b", "r", "f", "p", "n", "*" or an

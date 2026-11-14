@@ -33,6 +33,22 @@ fn lint_sensitivity_lists() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// Lint: names that are SystemVerilog keywords, once per name and module.
+#[test]
+fn lint_sv_keywords() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
+    assert!(st.success());
+    let out = std::process::Command::new(root.join("target/release/ferrooxide"))
+        .args(["--lint", "-g2005", "tests/lint/keywords.v"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let expected = std::fs::read_to_string(root.join("tests/lint/keywords.expected")).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+    assert_eq!(out.status.code(), Some(1));
+}
+
 /// Interactive mode: a command script on stdin (run, step, print, force, release, set, list).
 #[test]
 fn interactive_commands() {
