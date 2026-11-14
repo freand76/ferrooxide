@@ -329,20 +329,28 @@ identical to Icarus, 10-13x faster. Interactive mode, MCP server, `--vcd/--trace
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
 
-Next, roughly in order:
-1. **SystemVerilog** (M6, in progress; see "SystemVerilog status" below).
-2. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
+Next, roughly in order (see "Architecture changes ahead" below for why this order):
+1. **SystemVerilog RTL items that fit the current design**: unpacked dimensions in typedefs,
+   `timeunit`/`timeprecision`, file-scope variables, `unique`/`priority` warnings,
+   `$countones`/`$onehot`/`$onehot0`, arrays of interfaces; the `assign z = a;` alias fix
+   (known difference below).
+2. **Types in elaboration** (A1 below), with `parameter type`.
+3. **Heap objects** (A2): `string`, queues, dynamic and associative arrays.
+4. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
+   loop. Then classes and `program`; VPI (A4) on the same base.
+5. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
    warnings Icarus prints (port coercion to inout, constant out-of-range selects, `@*` without
    sensitivities), `%v` strength display (needs strength values on nets), `$countdrivers`,
    `$fread`, `%u`/`%z` in `$scanf`, event-controlled nonblocking assignments updating at the
    trigger (ICARUS_NOTES 3), specify paths on inout ports and conditional paths, force on array
    elements, generate blocks referenced before their definition.
-3. **Debug server follow-ups** (M9/M10): try `--surfer` with Surfer itself; MCP over HTTP
+6. **Debug server follow-ups** (M9/M10): try `--surfer` with Surfer itself; MCP over HTTP
    (attach to a running simulation) and MCP history queries on the CDSP value history; arrays
    in CDSP (per-element items for small memories), `$display` as diagnostics, source
    locations (`goto_declaration`).
-4. **Performance**: wide (>64-bit) ops in the JIT, a timing wheel, multi-threading (M8).
-5. **Outputs**: FST, VCD of arrays/reals/events, `$dumpvars` scope/level arguments.
+7. **Performance** (in parallel with the above): wide (>64-bit) ops in the JIT, a timing
+   wheel; multi-threading (M8) last (A5).
+8. **Outputs**: FST, VCD of arrays/reals/events, `$dumpvars` scope/level arguments.
 
 Known difference (found 2026-11-14, not fixed yet): a plain `assign z = a;` (same width, no
 logic, no delay) updates `z` immediately in the reference, within the writing process
@@ -352,6 +360,62 @@ nets to their source (like port aliasing), unless the net is forced or has other
 
 Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
 multi-dimensional arrays as ports or whole-array assignments are not supported.
+
+## Architecture changes ahead (review 2026-11-14)
+
+What we know now that we did not at the start: RTL, performance and the debug front ends fit
+the current design; SystemVerilog testbench features and VPI do not. The design was built
+around two simplifications: types are resolved in the parser, and everything (processes,
+storage, fan-out) is static.
+
+**Fits as is.** Wide JIT ops, timing wheel (`future` is a `BTreeMap` behind a few calls),
+part-select port aliases, `assign z = a` aliasing (one more port-alias case), strength values
+(per-bit strength data next to the value, only on nets with resolve processes / tran
+islands; the value encoding stays), FST, `$dumpvars` arguments, CDSP/MCP history and
+breakpoints between time steps, the remaining Verilog-2005 gaps.
+
+**A1. Types in elaboration.** `svtypes.rs` lowers every type to a flat vector in the parser,
+and the compiler knows an expression only as (slot, width, signed) plus `is_real`. That cannot
+express `parameter type T` (known per instance), unpacked structs (or structs with reals /
+strings), `string`, queues, dynamic/associative arrays or class handles, which all have their
+own operator rules. Change: the parser keeps only *which* names are types (needed to parse
+`T x;`); a `Type` enum in the compiler (vector, real, string, queue(T), darray(T), assoc(K,T),
+class(id), unpacked struct, ...) carries the meaning; packed types are still lowered to flat
+vectors at the end, so runtime and JIT are unchanged for RTL. Prerequisite for most of the
+remaining SystemVerilog. Good moment to split elaboration (types, nets/drivers, hierarchy) out
+of `compile/lib.rs`.
+
+**A2. Heap objects.** Strings, queues, dynamic and associative arrays live in a heap of
+objects, referred to by handles stored in the flat memory (one value word; a null handle is
+0). Ops on them are generic-path instructions at first. No dynamic processes needed, so this
+can come right after A1.
+
+**A3. Dynamic processes, calls and waiters.** Today a process is a fixed `ProcDef` with one
+`ProcRt`, fork branches are fixed processes that get restarted (hence the open fork/join_none
+in a loop), automatic storage is per call site, functions are inlined (recursion copies
+frames), and fan-out is a fixed range of `(proc, ctl)` entries. Classes, fork in a loop, VPI
+callbacks and MCP conditional breakpoints all need the same three things:
+- process instances created at run time from a `ProcDef` template, with their own frame for
+  automatic storage. The JIT already gets slots/signals/controls through a per-process table
+  (`ProcFn(sim, mem, pc, table, hot)`), so an instance is a new table, no recompilation;
+- real subroutine calls (methods through a handle, virtual dispatch); also usable for large
+  functions called from many places instead of inlining them everywhere;
+- dynamic waiters: a per-signal list next to the static fan-out, for waits whose target is
+  only known at run time (`@(obj.ev)`, `vif.clk`, `cbValueChange`, breakpoint conditions).
+  The static path stays the fast path; a per-signal flag says the list is non-empty.
+
+**A4. VPI** (cocotb): handle tree from the hierarchy model (as for CDSP), get/put value
+through the force-mask path, value-change callbacks as dynamic waiters (A3), region hooks in
+the scheduler (ReadWriteSynch / ReadOnlySynch) and an `AfterDelay` entry in the future queue.
+
+**A5. Multi-threading costs more than M8 suggests.** Absolute shared scratch slots, one NBA
+queue in `Hot`, one wake buffer, and exact event order to match. Needs per-thread scratch (a
+base pointer in the JIT ABI), per-thread NBA queues merged in a fixed order, parallel work
+only for processes without system tasks. Pays off only on large designs: last of the
+performance items.
+
+**Watch.** Elaboration and codegen run per instance (only the JIT shares code between
+instances); measure compile time and memory on a large netlist before assuming it scales.
 
 ## SystemVerilog status (2026-11-14)
 
