@@ -390,13 +390,15 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 }
                             }
                         }
-                        Some(FmtArg::Val { .. }) | Some(FmtArg::Time { .. }) | Some(FmtArg::Empty) if lit_bits.is_some() || !matches!(arg, Some(FmtArg::Empty)) => {
+                        Some(FmtArg::Str { s, w }) if spec == 's' => str_value(&view(*s, *w, false)),
+                        Some(FmtArg::Val { .. }) | Some(FmtArg::Str { .. }) | Some(FmtArg::Time { .. }) | Some(FmtArg::Empty) if lit_bits.is_some() || !matches!(arg, Some(FmtArg::Empty)) => {
                             let (v, w, signed) = match (arg, &lit_bits) {
                                 (_, Some((words, w))) => {
                                     let n = nw(*w);
                                     (Val { a: &words[..n], b: &words[n..], w: *w, signed: false }, *w, false)
                                 }
                                 (Some(FmtArg::Val { s, w, signed }), _) => (view(*s, *w, *signed), *w, *signed),
+                                (Some(FmtArg::Str { s, w }), _) => (view(*s, *w, false), *w, false),
                                 (Some(FmtArg::Time { s }), _) => (view(*s, 64, false), 64, false),
                                 _ => unreachable!(),
                             };
@@ -466,6 +468,10 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                     _ => fmt_dec(&v, true),
                 };
                 out.push_str(&s);
+                i += 1;
+            }
+            FmtArg::Str { s, w } => {
+                out.push_str(&str_value(&view(*s, *w, false)));
                 i += 1;
             }
             FmtArg::Time { s } => {
@@ -541,4 +547,22 @@ pub fn value_string(mem: &[u64], s: usize, w: u32) -> String {
     let n = nw(w);
     let v = Val { a: &mem[s..s + n], b: &mem[s + n..s + 2 * n], w, signed: false };
     fmt_str(&v)
+}
+
+/// The characters of a string value (NUL bytes are padding, not characters).
+fn str_value(v: &Val) -> String {
+    let mut s = String::new();
+    for k in (0..v.w.div_ceil(8)).rev() {
+        let mut c = 0u8;
+        for j in 0..8 {
+            let i = k * 8 + j;
+            if i < v.w && v.bit(i).0 == 1 {
+                c |= 1 << j;
+            }
+        }
+        if c != 0 {
+            s.push(c as char);
+        }
+    }
+    s
 }

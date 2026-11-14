@@ -16,6 +16,8 @@ pub struct Preprocessor {
     macros: HashMap<String, Macro>,
     incdirs: Vec<PathBuf>,
     depth: usize,
+    /// while a macro body is expanded: the line of the (outermost) invocation, for `__LINE__
+    macro_line: Option<u32>,
 }
 
 struct Cond {
@@ -32,7 +34,7 @@ impl Preprocessor {
         for (k, v) in &opts.defines {
             macros.insert(k.clone(), Macro { params: None, body: v.clone() });
         }
-        Preprocessor { macros, incdirs: opts.incdirs.clone(), depth: 0 }
+        Preprocessor { macros, incdirs: opts.incdirs.clone(), depth: 0, macro_line: None }
     }
 
     pub fn process_file(&mut self, path: &Path) -> Result<String> {
@@ -236,7 +238,10 @@ impl Preprocessor {
                             }
                         }
                         let p = found.ok_or_else(|| err(format!("include file '{inc}' not found"), line))?;
-                        let t = self.process_file(&p)?;
+                        let saved = self.macro_line.take();
+                        let t = self.process_file(&p);
+                        self.macro_line = saved;
+                        let t = t?;
                         // keep it on one logical line position: replace newlines with spaces
                         // is wrong for `define bodies; just append (line numbers shift after includes)
                         out.push_str(&t);
@@ -289,7 +294,7 @@ impl Preprocessor {
                             i += 1;
                         }
                     }
-                    "__LINE__" => out.push_str(&line.to_string()),
+                    "__LINE__" => out.push_str(&self.macro_line.unwrap_or(line).to_string()),
                     "__FILE__" => out.push_str(&format!("\"{fname}\"")),
                     _ => {
                         let m = self
@@ -336,8 +341,15 @@ impl Preprocessor {
                         } else {
                             body = substitute_params(&body, &[], &[]);
                         }
-                        let expanded = self.process_text(&body, fname, dir)?;
-                        out.push_str(&expanded);
+                        let outer = self.macro_line.is_none();
+                        if outer {
+                            self.macro_line = Some(line);
+                        }
+                        let expanded = self.process_text(&body, fname, dir);
+                        if outer {
+                            self.macro_line = None;
+                        }
+                        out.push_str(&expanded?);
                     }
                 }
                 continue;

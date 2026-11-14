@@ -25,6 +25,8 @@ pub struct SvType {
     pub fields: Option<Rc<Struct>>,
     /// `int`, `integer`, `byte`, ...: declared without a range
     pub int_kind: bool,
+    /// an enum: its constants in order
+    pub enum_names: Option<Rc<Vec<String>>>,
 }
 
 /// A package: its items (with those of the packages it imports) and its typedefs.
@@ -117,7 +119,7 @@ fn descending(r: &Range) -> bool {
 
 impl SvType {
     pub fn vector(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
-        SvType { kind, signed, dims, fields: None, int_kind: false }
+        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None }
     }
 
     /// Width of one element after the packed dimensions.
@@ -338,7 +340,7 @@ impl Parser {
                 dims.push(self.range()?);
             }
             let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-            return Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union, fields })), int_kind: false }));
+            return Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union, fields })), int_kind: false, enum_names: None }));
         }
         if s == "enum" {
             self.bump();
@@ -346,11 +348,12 @@ impl Parser {
                 Some(t) => t,
                 None => {
                     let signed = self.signing(true);
-                    SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true }
+                    SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None }
                 }
             };
             self.expect_p("{")?;
             let mut prev: Option<String> = None;
+            let mut names = Vec::new();
             let (_, signed, range, _) = base.decl_parts();
             let range = range.or_else(|| base.int_kind.then(|| base.dims[0].clone()));
             loop {
@@ -374,13 +377,16 @@ impl Parser {
                     value,
                     line,
                 }));
+                names.push(name.clone());
                 prev = Some(name);
                 if !self.eat_p(",") {
                     break;
                 }
             }
             self.expect_p("}")?;
-            return Ok(Some(base));
+            let mut t = base;
+            t.enum_names = Some(Rc::new(names));
+            return Ok(Some(t));
         }
         if let Some((kind, signed, iw)) = builtin(&s) {
             self.bump();
@@ -392,7 +398,7 @@ impl Parser {
             while self.is_p("[") {
                 dims.push(self.range()?);
             }
-            return Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some() }));
+            return Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None }));
         }
         if let Some(t) = self.types.get(&s).cloned() {
             self.bump();
@@ -456,10 +462,10 @@ impl Parser {
     }
 
     /// Note the type of a declared name (struct members are resolved through it).
-    pub(crate) fn declare_var(&mut self, name: &str, unpacked: usize) {
+    pub(crate) fn declare_var(&mut self, name: &str, unpacked: &[Range]) {
         match &self.decl_type {
             Some(t) => {
-                self.vars.insert(name.to_string(), (t.clone(), unpacked));
+                self.vars.insert(name.to_string(), (t.clone(), unpacked.to_vec()));
             }
             None => {
                 self.vars.remove(name);
@@ -473,7 +479,7 @@ impl Parser {
     pub(crate) fn struct_access(&mut self, name: String, lvalue: bool) -> Result<Expr> {
         let (t, unpacked) = self.vars[&name].clone();
         let mut base = Expr::Ident(name);
-        for _ in 0..unpacked {
+        for _ in 0..unpacked.len() {
             if !self.is_p("[") {
                 self.last_type = None;
                 return Ok(base);
@@ -569,6 +575,109 @@ impl Parser {
             return Ok(Expr::SysCall("$signed".into(), vec![e]));
         }
         Ok(e)
+    }
+
+    /// `v.first()`, `.last()`, `.num()`, `.next(N)`, `.prev(N)`, `.name()` on a variable with an
+    /// enum type, at the cursor (after the name).
+    pub(crate) fn is_enum_method(&self, name: &str) -> bool {
+        self.vars.get(name).is_some_and(|v| v.0.enum_names.is_some())
+            && self.is_p(".")
+            && matches!(self.peek_at(1), Tok::Ident(m) if matches!(m.as_str(), "first" | "last" | "num" | "next" | "prev" | "name"))
+            && matches!(self.peek_at(2), Tok::Punct("("))
+    }
+
+    pub(crate) fn enum_method(&mut self, name: String) -> Result<Expr> {
+        let names = self.vars[&name].0.enum_names.clone().unwrap();
+        self.bump();
+        let Tok::Ident(m) = self.bump() else { unreachable!() };
+        self.expect_p("(")?;
+        let arg = if self.is_p(")") { None } else { Some(self.expr()?) };
+        self.expect_p(")")?;
+        let n = names.len();
+        let v = Expr::Ident(name);
+        // a mux over the constants; a value that is none of them (or has x bits) gives `dflt`
+        let chain = |val: &dyn Fn(usize) -> Expr, dflt: Expr| {
+            (0..n).rev().fold(dflt, |acc, i| {
+                let c = Expr::Binary(BinOp::CaseEq, Box::new(v.clone()), Box::new(Expr::Ident(names[i].clone())));
+                Expr::Cond(Box::new(c), Box::new(val(i)), Box::new(acc))
+            })
+        };
+        let x = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "x".into(), fill: true });
+        Ok(match m.as_str() {
+            "first" => Expr::Ident(names[0].clone()),
+            "last" => Expr::Ident(names[n - 1].clone()),
+            "num" => num(n as i64),
+            "next" | "prev" => {
+                let k = match &arg {
+                    None => 1,
+                    Some(e) => match lit(e) {
+                        Some(k) if k >= 0 => k as usize,
+                        _ => return self.err(format!(".{m}() needs a constant count")),
+                    },
+                };
+                let step = if m == "next" { k % n } else { n - k % n };
+                // the enum's width and signedness (the x default would make it unsigned)
+                let t = self.vars[match &v { Expr::Ident(n) => n, _ => unreachable!() }].0.clone();
+                cast(t.width(), chain(&|i| Expr::Ident(names[(i + step) % n].clone()), x), u64::from(t.signed))
+            }
+            _ => Expr::SysCall("$__str".into(), vec![chain(&|i| Expr::Str(names[i].clone()), Expr::Str(String::new()))]),
+        })
+    }
+
+    /// `$left(v)`, `$size(v, 2)`, ... of a declared name (after the function name).
+    pub(crate) fn is_array_query(&self, f: &str) -> bool {
+        matches!(f, "$left" | "$right" | "$low" | "$high" | "$size" | "$increment" | "$dimensions" | "$unpacked_dimensions")
+            && self.is_p("(")
+            && matches!(self.peek_at(1), Tok::Ident(n) if self.vars.contains_key(n))
+            && matches!(self.peek_at(2), Tok::Punct(")" | ","))
+    }
+
+    /// The value of an array query function: unpacked dimensions are numbered first, then the
+    /// packed ones; a missing dimension gives x.
+    pub(crate) fn array_query(&mut self, f: &str) -> Result<Expr> {
+        self.expect_p("(")?;
+        let name = self.ident()?;
+        let k = if self.eat_p(",") {
+            let e = self.expr()?;
+            match lit(&e) {
+                Some(k) => k,
+                None => return self.err(format!("{f}: the dimension must be a constant")),
+            }
+        } else {
+            1
+        };
+        self.expect_p(")")?;
+        let (t, unpacked) = self.vars[&name].clone();
+        let mut dims = unpacked.clone();
+        dims.extend(t.dims.iter().cloned());
+        if t.has_struct() {
+            dims.push((sub(t.leaf_width(), num(1)), num(0)));
+        }
+        let x = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "x".into(), fill: true });
+        match f {
+            "$dimensions" => return Ok(num(dims.len() as i64)),
+            "$unpacked_dimensions" => return Ok(num(unpacked.len() as i64)),
+            _ => {}
+        }
+        let Some((l, r)) = (k >= 1).then(|| dims.get(k as usize - 1)).flatten().cloned() else { return Ok(x) };
+        let cmp = |op: BinOp, a: &Expr, b: &Expr, t: Expr, e: Expr| match (lit(a), lit(b)) {
+            (Some(x), Some(y)) => {
+                let c = match op {
+                    BinOp::Ge => x >= y,
+                    _ => x <= y,
+                };
+                if c { t } else { e }
+            }
+            _ => Expr::Cond(Box::new(Expr::Binary(op, Box::new(a.clone()), Box::new(b.clone()))), Box::new(t), Box::new(e)),
+        };
+        Ok(match f {
+            "$left" => l,
+            "$right" => r,
+            "$low" => cmp(BinOp::Le, &l, &r, l.clone(), r.clone()),
+            "$high" => cmp(BinOp::Ge, &l, &r, l.clone(), r.clone()),
+            "$size" => dim_size(&(l, r)),
+            _ => cmp(BinOp::Ge, &l, &r, num(1), num(-1)),
+        })
     }
 
     /// `'{...}` after the `'`: positional values, `name: value`, `default: value`.

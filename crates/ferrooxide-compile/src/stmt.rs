@@ -828,6 +828,11 @@ impl<'a> Compiler<'a> {
                 None => FmtArg::Empty,
                 Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),
                 Some(e) if self.is_real(e, sid) => FmtArg::Real { s: self.rexpr(e, sid)? },
+                // a string value (an enum's .name())
+                Some(Expr::SysCall(n, a)) if n == "$__str" => {
+                    let (s, w, _) = self.self_expr(&a[0], sid)?;
+                    FmtArg::Str { s, w }
+                }
                 Some(e) => {
                     let (s, w, signed) = self.self_expr(e, sid)?;
                     FmtArg::Val { s, w, signed }

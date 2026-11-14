@@ -231,7 +231,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
                 args.iter()
                     .filter_map(|a| match a {
-                        FmtArg::Val { s, .. } | FmtArg::Time { s } | FmtArg::Real { s } => Some(*s),
+                        FmtArg::Val { s, .. } | FmtArg::Str { s, .. } | FmtArg::Time { s } | FmtArg::Real { s } => Some(*s),
                         _ => None,
                     })
                     .collect()
@@ -419,6 +419,9 @@ pub enum FmtArg {
     /// string literal: used as a format string if it appears where a format is expected
     Lit(String),
     Val { s: u32, w: u32, signed: bool },
+    /// a string value (characters, the first in the high byte; NUL bytes are not
+    /// characters): an enum's `.name()`
+    Str { s: u32, w: u32 },
     /// value produced by $time
     Time { s: u32 },
     /// a real value (f64 bits)

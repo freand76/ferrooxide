@@ -296,7 +296,7 @@ impl<'a> Compiler<'a> {
             Expr::Repl(n, v) => self.is_const(n, sid) && v.iter().all(|x| self.is_const(x, sid)),
             Expr::Call(..) => false,
             Expr::SysCall(n, args) => {
-                matches!(n.as_str(), "$clog2" | "$signed" | "$unsigned" | "$bits" | "$__cast")
+                matches!(n.as_str(), "$clog2" | "$signed" | "$unsigned" | "$bits" | "$__cast" | "$__str")
                     && args.iter().all(|x| self.is_const(x, sid))
             }
         }
@@ -463,6 +463,7 @@ impl<'a> Compiler<'a> {
                     (w as u32, sg)
                 }
                 "$__pattern" => return self.err("an assignment pattern needs a known target type here"),
+                "$__str" => self.ty(&args[0], sid)?,
                 "$fopen" => (32, false),
                 "$test$plusargs" | "$value$plusargs" => (32, true),
                 "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
@@ -1041,6 +1042,7 @@ impl<'a> Compiler<'a> {
                 let (v, vw, _) = self.self_expr(&args[0], sid)?;
                 Ok(self.resize(v, vw, w, s))
             }
+            "$__str" => self.expr(&args[0], sid, w, s),
             "$__cast" => {
                 // the operand is evaluated as if assigned to a variable of the cast's width
                 let (cw, _) = self.ty(&Expr::SysCall(name.into(), args.to_vec()), sid)?;

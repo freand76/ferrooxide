@@ -19,8 +19,8 @@ pub struct Parser {
     unnamed: u32,
     /// typedefs in scope (file scope and packages carry over to the next file)
     pub types: HashMap<String, Rc<SvType>>,
-    /// variables of the current module with a typedef'd or struct type: (type, unpacked dims)
-    pub(crate) vars: HashMap<String, (Rc<SvType>, usize)>,
+    /// declared names of the current module with their type and unpacked dimensions
+    pub(crate) vars: HashMap<String, (Rc<SvType>, Vec<Range>)>,
     /// the data type of the declaration being parsed
     pub(crate) decl_type: Option<Rc<SvType>>,
     /// the type selected by the last lvalue (for an assignment pattern on the right)
@@ -426,7 +426,7 @@ impl Parser {
                     None => value,
                 };
                 self.decl_type = pt.sv.clone().map(Rc::new);
-                self.declare_var(&pname, 0);
+                self.declare_var(&pname, &[]);
                 items.append(&mut self.pending);
                 items.push(Item::Param(ParamDecl {
                     local,
@@ -485,7 +485,7 @@ impl Parser {
                             dims.push(self.range()?);
                         }
                         let init = if self.eat_p("=") { Some(self.expr()?) } else { None };
-                        self.declare_var(&pname, dims.len());
+                        self.declare_var(&pname, &dims);
                         items.append(&mut self.pending);
                         let mut d = cur.clone().unwrap();
                         d.line = pline;
@@ -812,11 +812,22 @@ impl Parser {
         }
         // optional net delay: wire #5 w;
         let delay = if self.eat_p("#") { Some(self.delay_value()?) } else { None };
-        // the type of a vector, for assignment patterns
-        if let Some(r) = &range {
-            let mut dims = vec![r.clone()];
-            dims.extend(packed.iter().cloned());
-            self.decl_type = Some(Rc::new(SvType::vector(kind, signed, dims)));
+        // the type (assignment patterns, $left & co.)
+        if !matches!(kind, NetKind::Real | NetKind::Event | NetKind::Genvar) {
+            let iw = match kind {
+                NetKind::Integer => Some(32),
+                NetKind::Int(n) => Some(n),
+                NetKind::Time => Some(64),
+                _ => None,
+            };
+            let mut t = SvType::vector(kind, signed, vec![]);
+            if let Some(w) = iw.filter(|_| range.is_none()) {
+                t.dims.push((Expr::Num(dec(w as u64 - 1)), Expr::Num(dec(0))));
+                t.int_kind = true;
+            }
+            t.dims.extend(range.iter().cloned());
+            t.dims.extend(packed.iter().cloned());
+            self.decl_type = Some(Rc::new(t));
         }
         Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, packed, names: Vec::new(), line })
     }
@@ -834,7 +845,7 @@ impl Parser {
             if let (Some(e), Some(t)) = (&init, self.decl_type.clone()) {
                 init = Some(self.resolve_pattern(e.clone(), &t)?);
             }
-            self.declare_var(&name, dims.len());
+            self.declare_var(&name, &dims);
             v.push(Declarator { name, dims, init, line });
             if !self.eat_p(",") {
                 break;
@@ -893,7 +904,7 @@ impl Parser {
                 None => value,
             };
             self.decl_type = pt.sv.clone().map(Rc::new);
-            self.declare_var(&name, 0);
+            self.declare_var(&name, &[]);
             v.push(ParamDecl {
                 local,
                 signed: pt.signed,
@@ -1335,7 +1346,7 @@ impl Parser {
         // the function's own name is its result variable
         self.ret_type = ret_type.clone();
         self.decl_type = ret_type;
-        self.declare_var(&name, 0);
+        self.declare_var(&name, &[]);
         let mut decls = Vec::new();
         if self.eat_p("(") {
             if !self.is_p(")") {
@@ -1356,7 +1367,7 @@ impl Parser {
                     }
                     let dl = self.line();
                     let n = self.ident()?;
-                    self.declare_var(&n, 0);
+                    self.declare_var(&n, &[]);
                     let mut d = cur.clone().unwrap();
                     d.names = vec![Declarator { name: n, dims: vec![], init: None, line: dl }];
                     decls.push(d);
@@ -1900,7 +1911,7 @@ impl Parser {
                 let e = self.struct_access(name, true)?;
                 return self.selects(e);
             }
-            if unpacked == 0 && !self.is_p("[") {
+            if unpacked.is_empty() && !self.is_p("[") {
                 self.last_type = Some((*t).clone());
             }
         }
@@ -2140,6 +2151,7 @@ impl Parser {
                     None => return self.err("expected a type"),
                 }
             }
+            Tok::SysIdent(name) if self.is_array_query(&name) => self.array_query(&name)?,
             Tok::SysIdent(name) => {
                 let mut args = Vec::new();
                 let mut type_bits = None;
@@ -2191,6 +2203,7 @@ impl Parser {
                 let t = self.data_type()?.unwrap();
                 return self.cast_to(&t);
             }
+            Tok::Ident(name) if self.is_enum_method(&name) => return self.enum_method(name),
             Tok::Ident(name) if self.vars.get(&name).is_some_and(|v| v.0.has_struct()) && !self.is_p("(") => {
                 let e = self.struct_access(name, false)?;
                 return self.selects(e);
