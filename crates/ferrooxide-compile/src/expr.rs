@@ -132,6 +132,21 @@ impl<'a> Compiler<'a> {
                 n
             }
         };
+        // an array of packed vectors (`reg [1:0][3:0] pm [0:1]`): the first index is the
+        // element, the others select in its packed dimensions
+        let elem;
+        let (flat, idx): (&Expr, &[&Expr]) = if self.sig(s).depth > 0 {
+            if self.md_dims.contains_key(&s) || idx.is_empty() {
+                return None;
+            }
+            elem = Expr::Index(b(flat.clone()), b(idx[0].clone()));
+            if idx.len() == 1 {
+                return Some(elem);
+            }
+            (&elem, &idx[1..])
+        } else {
+            (flat, idx)
+        };
         let k = idx.len().min(dims.len());
         let width = |d: &(i64, i64)| (d.0 - d.1).abs() + 1;
         let mut off: Option<Expr> = None;
@@ -169,12 +184,29 @@ impl<'a> Compiler<'a> {
             Expr::Range(a, ..) | Expr::IndexedRange(a, ..) => &**a,
             _ => return None,
         };
+        // an element of an array of packed vectors: m[k][hi:lo] selects in its first packed
+        // dimension
+        let arr_elem = match base {
+            Expr::Index(a, k) => match &**a {
+                Expr::Ident(n) if !n.starts_with("$flat:") => match self.lookup(n, sid) {
+                    Some(Sym::Sig(s)) if self.sig(s).depth > 0 && !self.md_dims.contains_key(&s) && self.packed_dims.contains_key(&s) => {
+                        Some((Expr::Index(Box::new(Expr::Ident(format!("$flat:{n}"))), k.clone()), s))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
         // a part of an element of the last dimension: x[i][m:l], x[i][b +: w]
-        if let Expr::Index(..) = base {
-            return self.packed_elem_part(e, base, sid);
+        if arr_elem.is_none() {
+            if let Expr::Index(..) = base {
+                return self.packed_elem_part(e, base, sid);
+            }
         }
-        let (flat, s) = match base {
-            Expr::Ident(n) if !n.starts_with("$flat:") => match self.lookup(n, sid)? {
+        let (flat, s) = match (base, arr_elem) {
+            (_, Some(x)) => x,
+            (Expr::Ident(n), None) if !n.starts_with("$flat:") => match self.lookup(n, sid)? {
                 Sym::Sig(s) => (Expr::Ident(format!("$flat:{n}")), s),
                 _ => return None,
             },
@@ -231,7 +263,9 @@ impl<'a> Compiler<'a> {
         }
         let Sym::Sig(s) = self.lookup(n, sid)? else { return None };
         let dims = self.packed_dims.get(&s)?;
-        if idx.len() + 1 != dims.len() {
+        // (an array's first index selects the element)
+        let arr = usize::from(self.sig(s).depth > 0);
+        if idx.len() + 1 != dims.len() + arr {
             return None;
         }
         // the element's offset (as an expression), then the part inside it

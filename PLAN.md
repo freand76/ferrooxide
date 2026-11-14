@@ -303,9 +303,11 @@ how to present large memories.
   `expr` (widths, signedness, 4-state, selects, operators), `nets` (resolution, strengths,
   gates, switches), `systasks` (display formats, %t, file I/O, $readmem, $strobe/$monitor,
   plusargs and misc), `hier` (parameters, generate, ports, hierarchical names), `subr`
-  (functions, tasks), `real`, `vcd` (reads its own dump back). Next areas: UDPs, specify and
-  timing checks, force/release, `wait`/`disable` corner cases, multi-dimensional arrays,
-  `$display` of arrays/structs; ideas from the regression suite's coverage, tests written
+  (functions, tasks), `real`, `vcd` (reads its own dump back), `prims` (UDPs, force/release
+  and assign/deassign, specify paths), `arrays` (multi-dimensional, packed, arrays of packed
+  vectors). Next areas: `wait`/`disable` corner cases, named events with `@` and `wait`,
+  `$sformatf` corner cases, compiler directives (`define with arguments, `ifdef, `include,
+  `timescale inheritance); ideas from the regression suite's coverage, tests written
   fresh. Pitfall when writing checks: a task argument is context-determined
   by the task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
   self-determined expressions in `{...}` and route signed values through `integer`.
