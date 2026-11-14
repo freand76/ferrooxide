@@ -23,3 +23,11 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    x, although `int` is 2-state (1800-2017 6.11: 2-state types hold only 0 and 1; the
    conversion of inf/NaN is undefined, and a 2-state result should be 0 or 1). Gates fed by
    the same real give x too. ivtest `br_gh1223a`. Test: `tests/verilog/twostate.v`.
+8. **`~`, `not` and `buf` on an input that never changes stay z.** `wire b; wire w = ~b;
+   buf(a, b);` leaves `w` and `a` z (an undriven input is never evaluated), although `~z` and
+   `buf` of z are x (1364-2005 5.1, table 7-7); `b & b` and `and` gates give x. Not matched by
+   ferrooxide yet (it evaluates every continuous assignment at time 0). ivtest `sv_unit1c`.
+9. **Array typedef dimensions come first.** `typedef logic [7:0] T1[3]; T1 x[5];` gives `x`
+   the dimensions [3][5] (`$size(x, 1)` is 3, `x[4][2]` is out of bounds); 1800-2017 7.4.5
+   (`mem_type ar [0:7]`) makes the declaration's own dimension the outer one ([5][3]).
+   ivtest `sv_typedef_nested_array`. Test: `tests/verilog/typedef_unpacked.v`.

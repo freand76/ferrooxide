@@ -1009,7 +1009,8 @@ impl<'a> Compiler<'a> {
                     format!("{}{base}", ["1", "10", "100"][e.rem_euclid(3) as usize])
                 };
                 let sc = &self.scopes[target];
-                let name = item.unwrap_or_else(|| sc.name.clone());
+                let pkg = self.is_pkg_scope(target);
+                let name = item.unwrap_or_else(|| if pkg { format!("{}::", sc.name) } else { sc.name.clone() });
                 let msg = format!("Time scale of ({name}) is {} / {}", unit(sc.tunit), unit(sc.tprec));
                 self.emit(sys(SysTask::Display {
                     nl: true,

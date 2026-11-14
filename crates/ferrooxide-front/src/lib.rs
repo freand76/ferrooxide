@@ -50,6 +50,7 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
     let mut unit_vars = Vec::new();
     let mut unit_var_types = HashMap::new();
     let mut unit_pkgs = Vec::new();
+    let mut file_tu = (None, None);
     let mut packages = HashMap::new();
     let mut last: Option<parser::Parser> = None;
     for (k, f) in files.iter().enumerate() {
@@ -66,6 +67,7 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
                 modules.extend(p.unit_module());
             }
             unit_var_types = HashMap::new();
+            file_tu = (None, None);
         }
         let text = pp.process_file(f)?;
         let name = f.display().to_string();
@@ -79,6 +81,7 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
         p.unit_vars = std::mem::take(&mut unit_vars);
         p.unit_var_types = std::mem::take(&mut unit_var_types);
         p.unit_pkgs = std::mem::take(&mut unit_pkgs);
+        p.file_tu = file_tu;
         p.packages = std::mem::take(&mut packages);
         if opts.separate_units && k > 0 {
             p.unit_name = format!("$unit#{k}");
@@ -89,6 +92,7 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
         unit_vars = std::mem::take(&mut p.unit_vars);
         unit_var_types = std::mem::take(&mut p.unit_var_types);
         unit_pkgs = std::mem::take(&mut p.unit_pkgs);
+        file_tu = p.file_tu;
         packages = std::mem::take(&mut p.packages);
         timescale = p.timescale;
         nettype = p.default_nettype.clone();

@@ -27,6 +27,9 @@ pub struct SvType {
     pub int_kind: bool,
     /// an enum: its constants in order
     pub enum_names: Option<Rc<Vec<String>>>,
+    /// unpacked dimensions of a typedef (`typedef logic [7:0] T [4];`): a declaration of the
+    /// type is an array with these dimensions after its own
+    pub unpacked: Vec<Range>,
 }
 
 /// A package: its items (with those of the packages it imports) and its typedefs.
@@ -36,6 +39,8 @@ pub struct Package {
     pub items: Vec<Item>,
     /// its variables (in the package's own module) and their types
     pub vars: std::collections::HashMap<String, (Rc<SvType>, Vec<Range>)>,
+    /// its functions and tasks (in the package's own module)
+    pub funcs: std::collections::HashSet<String>,
     pub types: std::collections::HashMap<String, Rc<SvType>>,
 }
 
@@ -122,7 +127,7 @@ fn descending(r: &Range) -> bool {
 
 impl SvType {
     pub fn vector(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
-        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None }
+        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![] }
     }
 
     /// Width of one element after the packed dimensions.
@@ -141,6 +146,11 @@ impl SvType {
 
     pub fn width(&self) -> Expr {
         self.width_from(0)
+    }
+
+    /// `$bits` of the type: the packed width times the unpacked dimensions.
+    pub fn bits(&self) -> Expr {
+        self.unpacked.iter().fold(self.width(), |acc, d| mul(dim_size(d), acc))
     }
 
     pub fn has_struct(&self) -> bool {
@@ -185,6 +195,7 @@ impl Parser {
         let saved_types = self.types.clone();
         let saved_pkgs = std::mem::take(&mut self.mod_pkgs);
         let saved_vars = std::mem::take(&mut self.vars);
+        let saved_tu = std::mem::replace(&mut self.local_tu, (None, None));
         let mut own = Vec::new();
         while !self.eat_kw("endpackage") {
             if matches!(self.peek(), Tok::Eof) {
@@ -205,12 +216,14 @@ impl Parser {
         let mut items = self.package_items(&used);
         let mut var_items = Vec::new();
         for it in own {
-            if matches!(it, Item::Decl(_)) {
+            // variables, functions and tasks stay in the package's own scope
+            if matches!(it, Item::Decl(_) | Item::Subroutine(_)) {
                 var_items.push(it);
             } else {
                 items.push(it);
             }
         }
+        let funcs = var_items.iter().filter_map(|it| if let Item::Subroutine(f) = it { Some(f.name.clone()) } else { None }).collect();
         let mut vars = std::collections::HashMap::new();
         let declared = std::mem::replace(&mut self.vars, saved_vars);
         for it in &var_items {
@@ -229,8 +242,9 @@ impl Parser {
             let m = self.package_module(name.clone(), all, used);
             self.pkg_modules.push(m);
         }
+        self.local_tu = saved_tu;
         self.types = saved_types;
-        self.packages.insert(name, Rc::new(Package { items, types, vars }));
+        self.packages.insert(name, Rc::new(Package { items, types, vars, funcs }));
         Ok(())
     }
 
@@ -384,7 +398,7 @@ impl Parser {
                 dims.push(self.range()?);
             }
             let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-            return Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union, fields })), int_kind: false, enum_names: None }));
+            return Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union, fields })), int_kind: false, enum_names: None, unpacked: vec![] }));
         }
         if s == "enum" {
             self.bump();
@@ -392,7 +406,7 @@ impl Parser {
                 Some(t) => t,
                 None => {
                     let signed = self.signing(true);
-                    SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None }
+                    SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![] }
                 }
             };
             self.expect_p("{")?;
@@ -442,7 +456,7 @@ impl Parser {
             while self.is_p("[") {
                 dims.push(self.range()?);
             }
-            return Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None }));
+            return Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![] }));
         }
         if let Some(t) = self.types.get(&s).cloned() {
             self.bump();
@@ -475,8 +489,12 @@ impl Parser {
             return self.expect_p(";");
         };
         let name = self.ident()?;
-        if self.is_p("[") {
-            return self.err("unpacked dimensions in typedefs are not supported");
+        let mut t = t;
+        while self.is_p("[") {
+            if matches!(self.peek_at(1), Tok::Punct("]" | "$")) || matches!(self.peek_at(1), Tok::Ident(s) if s == "$") {
+                return self.err("dynamic arrays and queues in typedefs are not supported");
+            }
+            t.unpacked.push(self.range()?);
         }
         self.expect_p(";")?;
         self.types.insert(name, Rc::new(t));
@@ -838,7 +856,7 @@ impl Parser {
     /// The width of a type name or type keyword at the cursor (for `$bits(T)`), consuming it.
     pub(crate) fn type_width_here(&mut self) -> Result<Option<Expr>> {
         if self.is_pkg_type() {
-            return Ok(self.data_type()?.map(|t| t.width()));
+            return Ok(self.data_type()?.map(|t| t.bits()));
         }
         let is_type = match self.peek() {
             Tok::Ident(s) => self.types.contains_key(s) || builtin(s).is_some() || s == "struct" || s == "enum",
@@ -847,7 +865,7 @@ impl Parser {
         if !is_type || !matches!(self.peek_at(1), Tok::Punct(")" | "," | "[")) && !matches!(self.peek(), Tok::Ident(s) if s == "struct" || s == "enum") {
             return Ok(None);
         }
-        Ok(self.data_type()?.map(|t| t.width()))
+        Ok(self.data_type()?.map(|t| t.bits()))
     }
 }
 

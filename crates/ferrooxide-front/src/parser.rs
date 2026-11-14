@@ -29,14 +29,18 @@ pub struct Parser {
     pub(crate) pending: Vec<Item>,
     /// items at file scope ($unit): added to every module that follows
     pub unit_items: Vec<Item>,
-    /// variable declarations at file scope (elaborated once, in the `$unit` module) and
-    /// their types
+    /// variable declarations, functions and tasks at file scope (elaborated once, in the
+    /// `$unit` module) and the variables' types
     pub unit_vars: Vec<Item>,
     pub unit_var_types: HashMap<String, (Rc<SvType>, Vec<Range>)>,
     /// packages imported at file scope (their variables are visible in all modules)
     pub unit_pkgs: Vec<String>,
     /// the name of this file's `$unit` module
     pub unit_name: String,
+    /// `timeunit` / `timeprecision` at file scope (apply while no `timescale is given) and
+    /// in the current module (powers of ten of seconds)
+    pub file_tu: (Option<i32>, Option<i32>),
+    pub(crate) local_tu: (Option<i32>, Option<i32>),
     /// modules made for packages with variables (added to the file's modules)
     pub(crate) pkg_modules: Vec<Module>,
     /// names read so far that are SystemVerilog keywords (lint)
@@ -134,6 +138,8 @@ impl Parser {
             unit_var_types: HashMap::new(),
             unit_pkgs: Vec::new(),
             unit_name: "$unit".into(),
+            file_tu: (None, None),
+            local_tu: (None, None),
             pkg_modules: Vec::new(),
             kw_names: Vec::new(),
             packages: HashMap::new(),
@@ -204,7 +210,7 @@ impl Parser {
         match self.peek() {
             Tok::Ident(s) => format!("'{s}'"),
             Tok::SysIdent(s) => format!("'{s}'"),
-            Tok::Num(_) | Tok::Real(_) => "number".into(),
+            Tok::Num(_) | Tok::Real(_) | Tok::Time(..) => "number".into(),
             Tok::Str(_) => "string".into(),
             Tok::Punct(p) => format!("'{p}'"),
             Tok::Eof => "end of file".into(),
@@ -352,7 +358,14 @@ impl Parser {
                 Tok::Ident(s) if matches!(s.as_str(), "typedef" | "localparam" | "parameter" | "function" | "task") => {
                     let mut v = Vec::new();
                     self.module_item(&mut v)?;
-                    self.unit_items.extend(v);
+                    for it in v {
+                        // functions and tasks run in the `$unit` scope (its time unit, its names)
+                        if matches!(it, Item::Subroutine(_)) {
+                            self.unit_vars.push(it);
+                        } else {
+                            self.unit_items.push(it);
+                        }
+                    }
                 }
                 _ if self.is_decl_start() && !matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(), "input" | "output" | "inout" | "genvar")) => {
                     // a file-scope variable: one instance, shared by all modules
@@ -370,6 +383,13 @@ impl Parser {
                         } else {
                             self.unit_items.push(it);
                         }
+                    }
+                }
+                Tok::Ident(s) if s == "timeunit" || s == "timeprecision" => {
+                    let (u, p) = self.timeunit_decl()?;
+                    // (after a `timescale they are ignored, as in the reference)
+                    if self.timescale.is_none() {
+                        self.file_tu = (u.or(self.file_tu.0), p.or(self.file_tu.1));
                     }
                 }
                 Tok::Ident(s) if s == "__fx_uncdrive" => {
@@ -422,13 +442,57 @@ impl Parser {
         }
         let mut items = self.unit_items.clone();
         items.append(&mut self.unit_vars);
+        self.local_tu = (None, None);
         Some(self.package_module(self.unit_name.clone(), items, self.unit_pkgs.clone()))
+    }
+
+    /// `timeunit 10ns [/ 1ps];` or `timeprecision 1ps;`: (unit, precision) as powers of ten
+    fn timeunit_decl(&mut self) -> Result<(Option<i32>, Option<i32>)> {
+        let unit = self.is_kw("timeunit");
+        self.bump();
+        let one = |p: &mut Parser| -> Result<i32> {
+            match p.bump() {
+                Tok::Time(v, e) if v == 1.0 || v == 10.0 || v == 100.0 => Ok(e + v.log10().round() as i32),
+                _ => p.err("expected a time literal of 1, 10 or 100 units"),
+            }
+        };
+        let first = one(self)?;
+        let r = if unit {
+            let p = if self.eat_p("/") { Some(one(self)?) } else { None };
+            (Some(first), p)
+        } else {
+            (None, Some(first))
+        };
+        self.expect_p(";")?;
+        Ok(r)
+    }
+
+    /// The time unit and precision in effect: the module's own `timeunit` / `timeprecision`,
+    /// else a `timescale, else the file-scope ones.
+    pub(crate) fn eff_timescale(&self) -> Option<(i32, i32)> {
+        let base = self.timescale.or(match self.file_tu {
+            (None, None) => None,
+            (u, p) => Some((u.unwrap_or(0), p.unwrap_or(0))),
+        });
+        match self.local_tu {
+            (None, None) => base,
+            (u, p) => Some((u.or(base.map(|b| b.0)).unwrap_or(0), p.or(base.map(|b| b.1)).unwrap_or(0))),
+        }
+    }
+
+    /// A time literal in units of the current module, rounded to its precision, as a real.
+    fn time_literal(&self, v: f64, e: i32) -> Expr {
+        let (unit, prec) = self.eff_timescale().unwrap_or((0, 0));
+        let scale = |v: f64, k: i32| if k >= 0 { v * 10f64.powi(k) } else { v / 10f64.powi(-k) };
+        // in precision steps, rounded half away from zero
+        let steps = scale(v, e - prec).round();
+        Expr::Real(scale(steps, prec - unit))
     }
 
     pub(crate) fn package_module(&self, name: String, items: Vec<Item>, imports: Vec<String>) -> Module {
         Module {
             name,
-            timescale: self.timescale,
+            timescale: self.eff_timescale(),
             default_nettype: self.default_nettype.clone(),
             unconnected_drive: None,
             file: self.file.clone(),
@@ -455,6 +519,7 @@ impl Parser {
         self.modports.clear();
         // typedefs of the module stay in it
         let saved_types = self.types.clone();
+        self.local_tu = (None, None);
         self.vars.clear();
         self.vars.extend(self.unit_var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
         self.mod_pkgs.clear();
@@ -549,6 +614,9 @@ impl Parser {
                         while self.is_p("[") {
                             dims.push(self.range()?);
                         }
+                        if let Some(t) = &self.decl_type {
+                            dims.splice(0..0, t.unpacked.iter().cloned());
+                        }
                         let init = if self.eat_p("=") { Some(self.expr()?) } else { None };
                         self.declare_var(&pname, &dims);
                         items.append(&mut self.pending);
@@ -607,7 +675,7 @@ impl Parser {
         }
         Ok(Module {
             name,
-            timescale: self.timescale,
+            timescale: self.eff_timescale(),
             default_nettype: self.default_nettype.clone(),
             unconnected_drive: self.unconnected_drive,
             file: self.file.clone(),
@@ -719,7 +787,7 @@ impl Parser {
         let sequential = sequential || rows.iter().any(|r| r.1.is_some());
         Ok(Module {
             name,
-            timescale: self.timescale,
+            timescale: self.eff_timescale(),
             default_nettype: None,
             unconnected_drive: None,
             file: self.file.clone(),
@@ -922,9 +990,16 @@ impl Parser {
             while self.is_p("[") {
                 dims.push(self.range()?);
             }
+            // an array typedef: its dimensions come before the declaration's own (as in the
+            // reference; ICARUS_NOTES.md)
+            if let Some(t) = &self.decl_type {
+                dims.splice(0..0, t.unpacked.iter().cloned());
+            }
             let mut init = if self.eat_p("=") { Some(self.expr()?) } else { None };
             if let (Some(e), Some(t)) = (&init, self.decl_type.clone()) {
-                init = Some(self.resolve_pattern(e.clone(), &t)?);
+                if t.unpacked.is_empty() {
+                    init = Some(self.resolve_pattern(e.clone(), &t)?);
+                }
             }
             self.declare_var(&name, &dims);
             v.push(Declarator { name, dims, init, line });
@@ -1016,6 +1091,10 @@ impl Parser {
             _ => return self.err(format!("unexpected {} in module", self.describe())),
         };
         match kw {
+            "timeunit" | "timeprecision" => {
+                let (u, p) = self.timeunit_decl()?;
+                self.local_tu = (u.or(self.local_tu.0), p.or(self.local_tu.1));
+            }
             "parameter" | "localparam" | "specparam" => {
                 self.bump();
                 for p in self.param_items(kw != "parameter")? {
@@ -1553,6 +1632,7 @@ impl Parser {
             match self.bump() {
                 Tok::Num(n) => Ok(Expr::Num(n)),
                 Tok::Real(r) => Ok(Expr::Real(r)),
+                Tok::Time(v, e) => Ok(self.time_literal(v, e)),
                 Tok::Ident(s) => Ok(Expr::Ident(s)),
                 _ => self.err("bad delay value"),
             }
@@ -1853,8 +1933,28 @@ impl Parser {
                 }
                 _ if is_keyword(&kw) => self.err(format!("unexpected '{kw}' in statement")),
                 _ => {
-                    // pkg::task(...)
-                    if matches!(self.peek_at(1), Tok::Punct("::")) {
+                    // pkg::task(...): the package's task
+                    if let (Tok::Ident(p), Tok::Punct("::"), Tok::Ident(n)) = (self.peek().clone(), self.peek_at(1).clone(), self.peek_at(2).clone()) {
+                        if self.packages.get(&p).is_some_and(|pk| pk.funcs.contains(&n)) {
+                            self.pos += 3;
+                            if !self.mod_pkgs.contains(&p) {
+                                self.mod_pkgs.push(p.clone());
+                            }
+                            let mut args = Vec::new();
+                            if self.eat_p("(") {
+                                if !self.is_p(")") {
+                                    loop {
+                                        args.push(self.expr()?);
+                                        if !self.eat_p(",") {
+                                            break;
+                                        }
+                                    }
+                                }
+                                self.expect_p(")")?;
+                            }
+                            self.expect_p(";")?;
+                            return Ok(Stmt::TaskCall { name: format!("{p}.{n}"), args, line });
+                        }
                         self.pkg_scope()?;
                     }
                     // task call or assignment
@@ -2173,11 +2273,32 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr> {
-        // pkg::var: the package's variable (not a copy in the module)
+        // pkg::var, pkg::f(...): the package's variable or function (in the package's scope)
         if let (Tok::Ident(p), Tok::Punct("::"), Tok::Ident(n)) = (self.peek().clone(), self.peek_at(1).clone(), self.peek_at(2).clone()) {
-            if self.packages.get(&p).is_some_and(|pk| pk.vars.contains_key(&n)) && !matches!(self.peek_at(3), Tok::Punct("(")) {
-                self.pos += 3;
-                return self.selects(Expr::Hier(vec![p, n]));
+            if let Some(pk) = self.packages.get(&p).cloned() {
+                if pk.vars.contains_key(&n) && !matches!(self.peek_at(3), Tok::Punct("(")) {
+                    self.pos += 3;
+                    return self.selects(Expr::Hier(vec![p, n]));
+                }
+                if pk.funcs.contains(&n) {
+                    self.pos += 3;
+                    if !self.mod_pkgs.contains(&p) {
+                        self.mod_pkgs.push(p.clone());
+                    }
+                    let mut args = Vec::new();
+                    if self.eat_p("(") {
+                        if !self.is_p(")") {
+                            loop {
+                                args.push(self.expr()?);
+                                if !self.eat_p(",") {
+                                    break;
+                                }
+                            }
+                        }
+                        self.expect_p(")")?;
+                    }
+                    return Ok(Expr::Call(format!("{p}.{n}"), args));
+                }
             }
         }
         // pkg::name
@@ -2196,6 +2317,7 @@ impl Parser {
             // assignment pattern '{...}
             Tok::Punct("'") if self.is_p("{") => self.pattern()?,
             Tok::Real(r) => Expr::Real(r),
+            Tok::Time(v, e) => self.time_literal(v, e),
             Tok::Str(s) => Expr::Str(s),
             Tok::Punct("(") => {
                 let e = self.expr()?;

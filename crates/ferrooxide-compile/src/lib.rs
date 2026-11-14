@@ -174,7 +174,7 @@ pub struct Compiler<'a> {
     restarted: bool,
     top_names: HashSet<String>,
     /// package (and `$unit`) scopes by name
-    pkg_scopes: HashMap<String, usize>,
+    pub(crate) pkg_scopes: HashMap<String, usize>,
     /// UDP name -> index of its runtime table
     pub(crate) udp_index: HashMap<String, u32>,
     /// counter for per-call storage of automatic functions and tasks
@@ -748,6 +748,12 @@ impl<'a> Compiler<'a> {
             if let Some(f) = self.scopes[sid].funcs.get(name) {
                 return Some((f, sid));
             }
+            // functions and tasks of packages run in their package's scope
+            for &p in &self.scopes[sid].imports {
+                if let Some(f) = self.scopes[p].funcs.get(name) {
+                    return Some((f, p));
+                }
+            }
             sid = self.scopes[sid].parent?;
         }
     }
@@ -844,6 +850,11 @@ impl<'a> Compiler<'a> {
         });
         self.elem_alias.insert((arr, e), id);
         Some(id)
+    }
+
+    /// A package (or `$unit`) scope.
+    pub(crate) fn is_pkg_scope(&self, sid: usize) -> bool {
+        self.pkg_scopes.values().any(|&p| p == sid)
     }
 
     /// The signal a view stands for (the signal itself if it is not a view).

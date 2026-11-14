@@ -19,6 +19,8 @@ pub enum Tok {
     SysIdent(String),
     Num(Number),
     Real(f64),
+    /// a time literal (`10ns`, `2.5us`): the value and the unit as a power of ten of seconds
+    Time(f64, i32),
     Str(String),
     Punct(&'static str),
     Eof,
@@ -170,7 +172,25 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
         if c.is_ascii_digit() || (c == b'\'' && i + 1 < s.len() && is_base_start(&s[i + 1..])) {
             // after `#` a number is a delay: `#1 'h5` is the delay 1 and then 'h5
             let after_hash = matches!(toks.last(), Some(Token { tok: Tok::Punct("#"), .. }));
-            let (tok, ni) = lex_number(text, i, after_hash).map_err(|m| err(m, line))?;
+            let (mut tok, mut ni) = lex_number(text, i, after_hash).map_err(|m| err(m, line))?;
+            // a time literal: an unsized number directly followed by a time unit
+            let v = match &tok {
+                Tok::Real(r) => Some(*r),
+                Tok::Num(n) if !n.based && n.size.is_none() => n.digits.parse::<f64>().ok(),
+                _ => None,
+            };
+            if let Some(v) = v {
+                for (u, e) in [("ms", -3), ("us", -6), ("ns", -9), ("ps", -12), ("fs", -15), ("s", 0)] {
+                    let end = ni + u.len();
+                    if s[ni..].starts_with(u.as_bytes())
+                        && !(end < s.len() && (s[end].is_ascii_alphanumeric() || s[end] == b'_' || s[end] == b'$'))
+                    {
+                        tok = Tok::Time(v, e);
+                        ni = end;
+                        break;
+                    }
+                }
+            }
             i = ni;
             toks.push(Token { tok, line });
             continue;
