@@ -1,0 +1,7 @@
+WARNING: unique_case.v:13: value is unhandled for priority or unique case statement
+         Time: 500  Scope: t
+WARNING: unique_case.v:9: value is unhandled for priority or unique case statement
+         Time: 1500  Scope: t
+WARNING: unique_case.v:13: value is unhandled for priority or unique case statement
+         Time: 2500  Scope: t
+done y=6

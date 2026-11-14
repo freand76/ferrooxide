@@ -291,6 +291,17 @@ how to present large memories.
 ## Testing strategy
 - `tests/verilog/*.v`: self-contained testbenches. `tests/difftest.sh` runs each through `iverilog`+`vvp`
   and `ferrooxide` and diffs stdout. `cargo test` runs the same comparison (skipped if iverilog is absent).
+- `tests/suite/<area>/*.v` (`tests/suite.sh`, also in `cargo test`): our own suite, no other
+  simulator needed. Tests are self-checking (print `PASSED`, never a line starting `FAILED`) or
+  compared with a checked-in `<name>.expected` (`// expected`; `--bless` writes it: review
+  it). Every test runs in all three modes. Expected behaviour comes from IEEE 1364/1800 (cite
+  the section); where the reference agrees, it is a useful check of the test itself. Order
+  that IEEE leaves open (wakes of one change, races) does not belong here but in
+  `tests/verilog`. Areas so far: `sched` (NBA, always_comb at time 0, edges and events,
+  fork/join, delays), `sv` (bit functions, unique case, procedural statements, enums, packed
+  structs, patterns). Next areas: expressions (widths, signedness, x/z), nets (drivers,
+  strengths, tran), system tasks and formats, generate/parameters, VCD; ideas from the
+  regression suite's coverage, tests written fresh.
 - `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both simulators.
 
 ## Performance status (CPU cycles, `perf stat`, same machine)
@@ -381,7 +392,7 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
 Icarus regression suite (ivtest, normal tests): main list 1341 of 1526 (88 %), SystemVerilog
-list 328 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+list 331 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
@@ -390,10 +401,13 @@ Next, roughly in order (see "Architecture changes ahead" below for why this orde
 1. **SystemVerilog RTL items that fit the current design**: arrays of interfaces, forward
    typedefs. (Done: the `assign z = a;` alias, file-scope and package variables, `timeunit`,
    array typedefs, `unique`/`priority` case warnings for unmatched values,
-   `$countones`/`$onehot`/`$onehot0`.) Found on the way: `always_comb` is scheduled
-   differently there: its time-0 run comes after the `initial` blocks (it never sees the
-   initial x), and on a change an `always @(s)` elsewhere runs before it; here it runs first.
-   Wake order between an `always @*` in a sub-instance and one in the parent also differs.
+   `$countones`/`$onehot`/`$onehot0`, the time-0 run of `always_comb`/`always_latch` after
+   all other processes have started (IEEE 1800 9.2.2.2.2), `break;`/`continue;`.) Gaps the
+   new suite found: prefix `++a;`/`--a;` as statements, `inside`, `foreach`, enum methods
+   without parentheses (`c.first`), several loop variables in `for (int i = 0, j = 10; ...)`,
+   `unique if`/`priority if` warnings. Known difference left (order IEEE leaves open): on a
+   change, a ranked combinational process (`always_comb`, `always @*`) runs before the other
+   waiters of the signal; the reference wakes it among them (newest waiter first).
 2. **Types in elaboration** (A1 below): first part done (package scopes, `parameter type`);
    next a type per signal in the compiler, then struct layout and members out of the parser.
 3. **Heap objects** (A2): `string` done (first version); queues, dynamic and associative

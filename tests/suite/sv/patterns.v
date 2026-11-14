@@ -1,6 +1,6 @@
-// SystemVerilog features the reference simulator lacks (checked against tests/sv/*.expected):
-// named and default assignment patterns, struct members of array elements written at run-time
-// indexes, member access of struct parameters.
+// expected
+// SystemVerilog features the reference lacks: named and default assignment patterns, struct
+// members of array elements written at run-time indexes, member access of struct parameters.
 typedef struct packed {
   logic [3:0] tag;
   logic [7:0] data;

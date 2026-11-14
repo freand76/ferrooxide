@@ -1079,6 +1079,10 @@ impl Parser {
         if matches!(self.peek(), Tok::Ident(s) if s == "return") {
             return matches!(self.peek_at(1), Tok::Punct("=" | "<="));
         }
+        // `break;` / `continue;` are the statements, not calls of tasks with those names
+        if matches!(self.peek(), Tok::Ident(s) if s == "break" || s == "continue") && matches!(self.peek_at(1), Tok::Punct(";")) {
+            return false;
+        }
         matches!(self.peek(), Tok::Ident(s) if is_sv_only(s))
             && matches!(self.peek_at(1), Tok::Punct("=" | "<=" | ")" | "," | ";" | "." | "+" | "-" | "*" | "/" | "&" | "|" | "^" | "==" | "!=" | "?" | ":" | "}" | "]"))
     }

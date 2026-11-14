@@ -16,7 +16,8 @@ Goal: output identical to Icarus Verilog, ≥10x its speed. Plan and status: `PL
 ```sh
 cargo build --release
 tests/difftest.sh [files]            # vs iverilog/vvp; FX_FLAGS=--no-jit / --no-fuse for other modes
-cargo test --release                 # difftest + lint test
+tests/suite.sh [-v] [files|dirs]     # own suite (tests/suite/<area>), all three modes, no iverilog
+cargo test --release                 # difftest + own suite + lint test
 tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: tests write files)
 perf stat -e cycles target/release/ferrooxide bench/cpuish.v   # perf works on this machine
 ```
@@ -25,8 +26,10 @@ instructions, notifies), `FX_MAX_MEM_MB` (design memory limit, default 2048), `F
 (address-space cap of the process, default 4096, 0: none).
 
 ## Rules
-- Every new feature gets a small test in `tests/verilog/` that matches Icarus in all three modes
-  (default, `--no-jit`, `--no-fuse`); `// args: +x=1` in a test passes plusargs to both.
+- Every new feature gets a small test that passes in all three modes (default, `--no-jit`,
+  `--no-fuse`): in `tests/suite/<area>/` (self-checking, or `// expected` with a checked-in
+  `.expected`; behaviour from the standard) and/or in `tests/verilog/` when matching Icarus's
+  exact output matters (diffed against it; `// args: +x=1` passes plusargs to both).
 - Check benchmark cycles after scheduler/JIT changes; don't regress them.
 - Memory: this machine has 14 GB and an out-of-memory crash kills the session (it has happened).
   EVERY run of ferrooxide, iverilog/vvp or a test outside the scripts goes under a limit:
