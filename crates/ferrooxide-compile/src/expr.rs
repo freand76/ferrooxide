@@ -1294,6 +1294,22 @@ impl<'a> Compiler<'a> {
         let Some((f, fs_def)) = self.lookup_func(name, sid) else {
             return self.err(format!("unknown {} '{name}'", if as_task { "task" } else { "function" }));
         };
+        // missing trailing arguments take their default values (IEEE 1800 13.5.3)
+        let filled: Vec<Expr>;
+        let args: &[Expr] = {
+            let defaults: Vec<Option<&Expr>> =
+                f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|n| n.init.as_ref())).collect();
+            if args.len() < defaults.len() {
+                if let Some(k) = defaults[args.len()..].iter().position(|d| d.is_none()) {
+                    let missing = &f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter()).nth(args.len() + k).unwrap().name;
+                    return self.err(format!("argument '{missing}' of '{name}' has no default value"));
+                }
+                filled = args.iter().cloned().chain(defaults[args.len()..].iter().map(|d| d.unwrap().clone())).collect();
+                &filled
+            } else {
+                args
+            }
+        };
         // a call of a function that is being inlined: recursion, through a subroutine
         if let Some(k) = self.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
             return self.recursive_call(f, k, args, sid);
@@ -1556,6 +1572,22 @@ impl<'a> Compiler<'a> {
             Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => {
                 for x in v {
                     self.reads_expr(x, sid, out);
+                }
+                // default values of missing arguments are evaluated at the call
+                if let Expr::Call(name, args) = e {
+                    if let Some((f, _)) = self.lookup_func(name, sid) {
+                        let defaults: Vec<&Expr> = f
+                            .decls
+                            .iter()
+                            .filter(|d| d.dir.is_some())
+                            .flat_map(|d| d.names.iter())
+                            .skip(args.len())
+                            .filter_map(|n| n.init.as_ref())
+                            .collect();
+                        for d in defaults {
+                            self.reads_expr(d, sid, out);
+                        }
+                    }
                 }
                 // signals a function reads besides its arguments: they do not count for
                 // sensitivity (Icarus's continuous assignments and @* follow the arguments

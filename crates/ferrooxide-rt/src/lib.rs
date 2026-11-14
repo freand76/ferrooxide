@@ -77,6 +77,8 @@ pub struct SignalInfo {
     pub forced: bool,
     /// a `string` variable: 64 bits holding a string handle (`Program::strings`)
     pub string: bool,
+    /// a named event (a 1-bit signal toggled by each trigger)
+    pub event: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -495,6 +497,10 @@ pub enum SysTask {
     DumpFile(String),
     DumpVars,
     DumpOn(bool),
+    /// $dumpall: a block with every traced value
+    DumpAll,
+    /// $dumpflush: write out what the VCD buffer holds
+    DumpFlush,
     ReadMem { hex: bool, file: FileName, sig: u32, start: Option<(u32, u32)>, end: Option<(u32, u32)>, loc: String },
     /// $writememh / $writememb
     WriteMem { hex: bool, file: FileName, sig: u32, start: Option<(u32, u32)>, end: Option<(u32, u32)> },

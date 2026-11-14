@@ -125,6 +125,17 @@ const STRENGTHS: &[&str] = &[
 
 impl Parser {
     pub fn new(toks: Vec<Token>, file: String) -> Self {
+        // `$root.a.b`: a name from the top level (IEEE 1800 23.3.1); without the prefix, the
+        // upward search reaches the top-level module unless a local name hides it
+        let mut toks = toks;
+        let mut i = 0;
+        while i + 1 < toks.len() {
+            if matches!(&toks[i].tok, Tok::SysIdent(n) if n == "$root") && matches!(toks[i + 1].tok, Tok::Punct(".")) {
+                toks.drain(i..i + 2);
+            } else {
+                i += 1;
+            }
+        }
         Parser {
             toks,
             pos: 0,
@@ -1679,8 +1690,10 @@ impl Parser {
                     let dl = self.line();
                     let n = self.ident()?;
                     self.declare_var(&n, &[]);
+                    // a default value (IEEE 1800 13.5.3)
+                    let init = if self.eat_p("=") { Some(self.expr()?) } else { None };
                     let mut d = cur.clone().unwrap();
-                    d.names = vec![Declarator { name: n, dims: vec![], init: None, line: dl }];
+                    d.names = vec![Declarator { name: n, dims: vec![], init, line: dl }];
                     decls.push(d);
                     if !self.eat_p(",") {
                         break;

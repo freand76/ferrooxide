@@ -22,6 +22,8 @@ pub struct Vcd {
     time: u64,
     line: Vec<u8>,
     pub enabled: bool,
+    /// per signal: 0 vector, 1 real, 2 event
+    kinds: Vec<u8>,
 }
 
 fn ident(mut v: usize) -> String {
@@ -90,7 +92,11 @@ impl Vcd {
                     SigKind::Reg => "reg",
                     SigKind::Integer => "integer",
                 };
-                if info.width == 1 && info.msb == 0 && info.lsb == 0 && info.kind != SigKind::Integer {
+                if info.real {
+                    writeln!(out, "$var real 1 {code} {n} $end")?;
+                } else if info.event {
+                    writeln!(out, "$var event 1 {code} {n} $end")?;
+                } else if info.width == 1 && info.msb == 0 && info.lsb == 0 && info.kind != SigKind::Integer {
                     writeln!(out, "$var {kind} 1 {code} {n} $end")?;
                 } else {
                     writeln!(out, "$var {kind} {} {code} {n} [{}:{}] $end", info.width, info.msb, info.lsb)?;
@@ -116,7 +122,8 @@ impl Vcd {
             }
         }
         let written = vec![false; ids.len()];
-        Ok(Vcd { out, ids, last_off, last_buf, written, last_time: None, time: 0, line: Vec::new(), enabled: true })
+        let kinds = prog.signals.iter().map(|i| if i.real { 1 } else if i.event { 2 } else { 0 }).collect();
+        Ok(Vcd { out, ids, last_off, last_buf, written, last_time: None, time: 0, line: Vec::new(), enabled: true, kinds })
     }
 
     pub fn write_value(&mut self, sig: u32, mem: &[u64], slot: u32, w: u32) {
@@ -144,7 +151,14 @@ impl Vcd {
         let (va, vb) = (&cur[..n], &cur[n..]);
         let line = &mut self.line;
         line.clear();
-        if w == 1 {
+        if self.kinds[sig as usize] == 1 {
+            line.push(b'r');
+            line.extend_from_slice(real_text(f64::from_bits(va[0])).as_bytes());
+            line.push(b' ');
+        } else if self.kinds[sig as usize] == 2 {
+            // an event: every trigger (and every full dump) is a `1`
+            line.push(b'1');
+        } else if w == 1 {
             line.push(match (va[0] & 1, vb[0] & 1) {
                 (0, 0) => b'0',
                 (1, 0) => b'1',
@@ -184,11 +198,37 @@ impl Vcd {
     }
 
     pub fn begin_dumpvars(&mut self) {
+        self.begin_block("$dumpvars");
+    }
+
+    /// `$dumpvars`, `$dumpon`, `$dumpoff`: a block of values at the current time.
+    pub fn begin_block(&mut self, name: &str) {
         if self.last_time != Some(self.time) {
             let _ = writeln!(self.out, "#{}", self.time);
             self.last_time = Some(self.time);
         }
-        let _ = writeln!(self.out, "$dumpvars");
+        let _ = writeln!(self.out, "{name}");
+    }
+
+    /// The `$dumpoff` block: every traced signal is x (reals NaN, events left out); the next
+    /// values written are a full dump.
+    pub fn dump_off(&mut self, widths: &[u32]) {
+        self.begin_block("$dumpoff");
+        for (sig, codes) in self.ids.iter().enumerate() {
+            if codes.is_empty() || self.kinds[sig] == 2 {
+                continue;
+            }
+            let v = match (self.kinds[sig], widths[sig]) {
+                (1, _) => "rNaN ".to_string(),
+                (_, 1) => "x".to_string(),
+                _ => "bx ".to_string(),
+            };
+            for code in codes {
+                let _ = writeln!(self.out, "{v}{code}");
+            }
+        }
+        let _ = writeln!(self.out, "$end");
+        self.reset_values();
     }
     pub fn end_dumpvars(&mut self) {
         let _ = writeln!(self.out, "$end");
@@ -267,4 +307,15 @@ fn render_vector(line: &mut Vec<u8>, a: &[u64], b: &[u64], w: u32) {
         }
     }
     line.drain(start..k);
+}
+
+/// A real value as the reference writes it (C's %.16g).
+fn real_text(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".into();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 { "Inf".into() } else { "-Inf".into() };
+    }
+    crate::fmt::fmt_real(v, 'g', 16)
 }

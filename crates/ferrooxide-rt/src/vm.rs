@@ -2319,7 +2319,49 @@ impl Sim {
                     }
                 }
             }
+            SysTask::DumpAll => {
+                if let (Some(v), true) = (self.vcd.as_mut(), self.dumping) {
+                    v.time(self.time);
+                    v.begin_block("$dumpall");
+                    v.reset_values();
+                    for (i, r) in self.sigs.iter().enumerate() {
+                        if r.depth == 0 {
+                            v.write_value(i as u32, &self.mem, r.slot, r.width);
+                        }
+                    }
+                    v.end_dumpvars();
+                }
+            }
+            SysTask::DumpFlush => {
+                if let Some(v) = self.vcd.as_mut() {
+                    v.flush();
+                }
+            }
             SysTask::DumpOn(on) => {
+                if self.vcd.is_some() && self.dumping != *on {
+                    if *on {
+                        // $dumpon: all current values (IEEE 1800 21.7.1.3)
+                        let v = self.vcd.as_mut().unwrap();
+                        v.time(self.time);
+                        v.begin_block("$dumpon");
+                        v.reset_values();
+                        for (i, r) in self.sigs.iter().enumerate() {
+                            if r.depth == 0 {
+                                v.write_value(i as u32, &self.mem, r.slot, r.width);
+                            }
+                        }
+                        v.end_dumpvars();
+                    } else {
+                        // $dumpoff: earlier changes of this time step, then x for everything
+                        if !self.dirty.is_empty() {
+                            self.dump_dirty();
+                        }
+                        let widths: Vec<u32> = self.sigs.iter().map(|r| r.width).collect();
+                        let v = self.vcd.as_mut().unwrap();
+                        v.time(self.time);
+                        v.dump_off(&widths);
+                    }
+                }
                 if self.vcd.is_some() {
                     self.dumping = *on;
                     self.track = *on || self.history.is_some();

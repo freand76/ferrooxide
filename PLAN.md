@@ -302,9 +302,11 @@ how to present large memories.
   packed structs, patterns, inside, foreach, strings, forward typedefs, interface arrays),
   `expr` (widths, signedness, 4-state, selects, operators), `nets` (resolution, strengths,
   gates, switches), `systasks` (display formats, %t, file I/O, $readmem, $strobe/$monitor,
-  plusargs and misc). Next areas: generate/parameters/hierarchy, functions and tasks
-  (automatic, recursion), VCD, real numbers; ideas from the regression suite's coverage,
-  tests written fresh. Pitfall when writing checks: a task argument is context-determined
+  plusargs and misc), `hier` (parameters, generate, ports, hierarchical names), `subr`
+  (functions, tasks), `real`, `vcd` (reads its own dump back). Next areas: UDPs, specify and
+  timing checks, force/release, `wait`/`disable` corner cases, multi-dimensional arrays,
+  `$display` of arrays/structs; ideas from the regression suite's coverage, tests written
+  fresh. Pitfall when writing checks: a task argument is context-determined
   by the task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
   self-determined expressions in `{...}` and route signed values through `integer`.
 - `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both simulators.
@@ -396,8 +398,8 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
-Icarus regression suite (ivtest, normal tests): main list 1342 of 1526 (88 %), SystemVerilog
-list 359 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+Icarus regression suite (ivtest, normal tests): main list 1345 of 1526 (88 %), SystemVerilog
+list 360 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
@@ -435,7 +437,11 @@ Next, roughly in order (see "Architecture changes ahead" below for why this orde
    locations (`goto_declaration`).
 7. **Performance** (in parallel with the above): wide (>64-bit) ops in the JIT, a timing
    wheel; multi-threading (M8) last (A5).
-8. **Outputs**: FST, VCD of arrays/reals/events, `$dumpvars` scope/level arguments.
+8. **Outputs**: FST, VCD of arrays, `$dumpvars` scope/level arguments (done: reals and
+   events in the VCD, `$dumpoff`/`$dumpon`/`$dumpall` blocks, `$dumpflush`). The VCD is not
+   byte-identical to the reference's: it orders variables by kind (events, nets, regs,
+   integers, reals), gives a port and the net it is connected to separate codes and names
+   nets `wire` (here: one code, and an output port collapsed onto a variable is `reg`).
 
 Known difference (found 2026-11-14): the reference propagates some net updates immediately,
 inside the writing process (`a = 1; $display(z)` shows the new value). Done: a plain `assign
@@ -569,7 +575,7 @@ Verilog / scheduling:
   event-controlled NBAs updating at the trigger (ICARUS_NOTES 3), specify paths on inout
   ports and conditional paths, force on array elements.
 - a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
-  `$dumpvars` scope/level arguments; FST; VCD of arrays, reals and events.
+  `$dumpvars` scope/level arguments; FST; VCD of arrays.
 - multi-dimensional arrays as ports, whole-array assignments; fork/join_none restarting a
   running branch (A3); VPI (A4).
 - interactive/MCP `force` of a net made an alias of its source (`assign z = a`) forces the

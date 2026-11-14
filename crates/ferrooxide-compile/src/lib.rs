@@ -578,6 +578,7 @@ impl<'a> Compiler<'a> {
             real: false,
             forced: false,
             string: false,
+            event: false,
         });
         self.prog.names.push((name, id));
         id
@@ -878,6 +879,7 @@ impl<'a> Compiler<'a> {
             real: info.real,
             forced: false,
             string: info.string,
+            event: info.event,
         });
         self.elem_alias.insert((arr, e), id);
         Some(id)
@@ -1219,6 +1221,76 @@ impl<'a> Compiler<'a> {
         self.file = saved_file;
         self.line = inst_line;
         Ok(sid)
+    }
+
+    /// The initializer of a declaration: a continuous assignment for a net, the start value
+    /// for a variable.
+    #[allow(clippy::too_many_arguments)]
+    fn decl_init(
+        &mut self,
+        init: &Expr,
+        s: u32,
+        kind: SigKind,
+        nkind: NetKind,
+        is_real: bool,
+        depth: u32,
+        width: u32,
+        strength: Option<(u8, u8)>,
+        delay: Option<&Expr>,
+        name: &str,
+        sid: usize,
+    ) -> R<()> {
+        if kind == SigKind::Wire {
+            self.cur_strength = strength;
+            self.push_job(Job::Assign {
+                lhs: Expr::Ident(name.to_string()),
+                rhs: init.clone(),
+                delay: delay.cloned(),
+                scope: sid,
+                line: self.line,
+            });
+            self.cur_strength = None;
+        } else if nkind == NetKind::String {
+            // the initial text
+            let text = match init {
+                Expr::Str(t) => t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect(),
+                e => {
+                    let c = self.const_eval(e, sid)?;
+                    let mut v = Vec::new();
+                    for k in (0..c.w.div_ceil(8)).rev() {
+                        let ch = (c.a[(8 * k / 64) as usize] >> (8 * k % 64)) as u8;
+                        if ch != 0 {
+                            v.push(ch);
+                        }
+                    }
+                    v
+                }
+            };
+            let h = self.intern(&text);
+            let slot = self.sig(s).slot as usize;
+            self.prog.mem[slot] = h;
+            self.prog.mem[slot + 1] = 0;
+            self.init_touch.push(s);
+        } else if is_real {
+            let r = self.const_real(init, sid)?;
+            let slot = self.sig(s).slot as usize;
+            self.prog.mem[slot] = r.to_bits();
+            self.prog.mem[slot + 1] = 0;
+            self.init_touch.push(s);
+        } else {
+            if depth == 0 {
+                self.init_touch.push(s);
+            }
+            let c = self.const_eval(init, sid)?;
+            let c = c.resize(width, c.signed);
+            let slot = self.sig(s).slot as usize;
+            let n = rt::nw(width);
+            for i in 0..n {
+                self.prog.mem[slot + i] = c.a[i];
+                self.prog.mem[slot + n + i] = c.b[i];
+            }
+        }
+        Ok(())
     }
 
     fn push_job(&mut self, j: Job<'a>) {
@@ -1891,6 +1963,9 @@ impl<'a> Compiler<'a> {
                             }
                             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
                             self.prog.names.push((full, s));
+                            if let Some(init) = mg.init {
+                                self.decl_init(init, s, kind, mg.kind, is_real, depth, width, mg.strength, mg.delay, &name, sid)?;
+                            }
                             continue;
                         }
                         let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
@@ -1917,6 +1992,9 @@ impl<'a> Compiler<'a> {
                                 "inout port '{name}' connected to an expression: connection ignored"
                             )),
                         }
+                        if let Some(init) = mg.init {
+                            self.decl_init(init, s, kind, mg.kind, is_real, depth, width, mg.strength, mg.delay, &name, sid)?;
+                        }
                         continue;
                     }
                 }
@@ -1942,6 +2020,7 @@ impl<'a> Compiler<'a> {
             }
             if is_event {
                 self.zero_init(s);
+                self.prog.signals[s as usize].event = true;
             }
             self.mark_two_state(s, mg.kind);
             if mg.net != NetType::Wire {
@@ -1963,56 +2042,7 @@ impl<'a> Compiler<'a> {
                 }
             }
             if let Some(init) = mg.init {
-                if kind == SigKind::Wire {
-                    self.cur_strength = mg.strength;
-                    self.push_job(Job::Assign {
-                        lhs: Expr::Ident(name.clone()),
-                        rhs: init.clone(),
-                        delay: mg.delay.cloned(),
-                        scope: sid,
-                        line: self.line,
-                    });
-                    self.cur_strength = None;
-                } else if mg.kind == NetKind::String {
-                    // the initial text
-                    let text = match init {
-                        Expr::Str(t) => t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect(),
-                        e => {
-                            let c = self.const_eval(e, sid)?;
-                            let mut v = Vec::new();
-                            for k in (0..c.w.div_ceil(8)).rev() {
-                                let ch = (c.a[(8 * k / 64) as usize] >> (8 * k % 64)) as u8;
-                                if ch != 0 {
-                                    v.push(ch);
-                                }
-                            }
-                            v
-                        }
-                    };
-                    let h = self.intern(&text);
-                    let slot = self.sig(s).slot as usize;
-                    self.prog.mem[slot] = h;
-                    self.prog.mem[slot + 1] = 0;
-                    self.init_touch.push(s);
-                } else if is_real {
-                    let r = self.const_real(init, sid)?;
-                    let slot = self.sig(s).slot as usize;
-                    self.prog.mem[slot] = r.to_bits();
-                    self.prog.mem[slot + 1] = 0;
-                    self.init_touch.push(s);
-                } else {
-                    if depth == 0 {
-                        self.init_touch.push(s);
-                    }
-                    let c = self.const_eval(init, sid)?;
-                    let c = c.resize(width, c.signed);
-                    let slot = self.sig(s).slot as usize;
-                    let n = rt::nw(width);
-                    for i in 0..n {
-                        self.prog.mem[slot + i] = c.a[i];
-                        self.prog.mem[slot + n + i] = c.b[i];
-                    }
-                }
+                self.decl_init(init, s, kind, mg.kind, is_real, depth, width, mg.strength, mg.delay, &name, sid)?;
             }
         }
         // 3b. implicit nets: undeclared names on the left of continuous assignments and as gate
@@ -2199,9 +2229,26 @@ impl<'a> Compiler<'a> {
                 Item::GenIf { cond, then_items, then_name, else_items, else_name, line } => {
                     self.line = *line;
                     genblk += 1;
-                    let c = self.const_eval(cond, sid)?.is_true();
-                    let (its, nm) = if c { (then_items, then_name) } else { (else_items, else_name) };
-                    self.gen_scope(its, nm, genblk, sid)?;
+                    // an `else if` chain is one construct (IEEE 1800 27.5): the chosen branch is a
+                    // scope of this one, with the chain's genblk number
+                    let (mut cond, mut then_items, mut then_name, mut else_items, mut else_name) =
+                        (cond, then_items, then_name, else_items, else_name);
+                    loop {
+                        let c = self.const_eval(cond, sid)?.is_true();
+                        if c {
+                            self.gen_scope(then_items, then_name, genblk, sid)?;
+                            break;
+                        }
+                        if let ([Item::GenIf { cond: c2, then_items: t2, then_name: n2, else_items: e2, else_name: en2, line: l2 }], None) =
+                            (&else_items[..], else_name)
+                        {
+                            self.line = *l2;
+                            (cond, then_items, then_name, else_items, else_name) = (c2, t2, n2, e2, en2);
+                            continue;
+                        }
+                        self.gen_scope(else_items, else_name, genblk, sid)?;
+                        break;
+                    }
                 }
                 Item::GenCase { expr, arms, line } => {
                     self.line = *line;

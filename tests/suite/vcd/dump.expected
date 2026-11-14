@@ -1,0 +1,76 @@
+VCD info: dumpfile o.vcd opened for output.
+$timescale
+	1ps
+$end
+$scope module t $end
+$var reg 1 ! clk $end
+$var reg 4 " q [3:0] $end
+$var real 1 # r $end
+$var integer 32 $ i [31:0] $end
+$var reg 2 % x [1:0] $end
+$var event 1 & ev $end
+$var integer 32 ' fd [31:0] $end
+$var integer 32 ( n [31:0] $end
+$var reg 640 ) line [640:1] $end
+$scope module u $end
+$var reg 1 ! c $end
+$var reg 4 " q [3:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+$end
+#0
+$dumpvars
+0!
+b0 "
+r1.5 #
+b11 $
+bx %
+1&
+bx '
+bx (
+bx )
+$end
+#5000
+1!
+b1 "
+#10000
+0!
+#12000
+b1z %
+r2.25 #
+1&
+#15000
+1!
+b10 "
+#20000
+0!
+#22000
+$dumpoff
+x!
+bx "
+rNaN #
+bx $
+bx %
+bx '
+bx (
+bx )
+$end
+#32000
+$dumpon
+0!
+b11 "
+r2.25 #
+b11 $
+b1z %
+1&
+bx '
+bx (
+bx )
+$end
+#35000
+1!
+b100 "
+dump.v:35: $finish called at 39000 (1ps)

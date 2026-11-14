@@ -1074,7 +1074,13 @@ impl<'a> Compiler<'a> {
             "$dumpoff" => {
                 self.emit(sys(SysTask::DumpOn(false)));
             }
-            "$dumpall" | "$dumpflush" | "$dumplimit" => {}
+            "$dumpall" => {
+                self.emit(sys(SysTask::DumpAll));
+            }
+            "$dumpflush" => {
+                self.emit(sys(SysTask::DumpFlush));
+            }
+            "$dumplimit" => {}
             "$readmemh" | "$readmemb" | "$writememh" | "$writememb" => {
                 let file = match args.first() {
                     Some(Some(e)) => self.file_name(e, sid)?,
