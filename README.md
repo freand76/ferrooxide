@@ -35,12 +35,12 @@ Verilog-2005 plus common SystemVerilog:
 - modules, ANSI and non-ANSI ports, `parameter`/`localparam` with overrides, `generate`
   for/if/case, gate primitives, hierarchical names
 - `wire`/`reg`/`integer`/`time`, SV `logic`/`bit`/`int`/`byte`/`shortint`/`longint`,
-  vectors of any width, memories (one unpacked dimension)
+  vectors of any width, packed multi-dimensional vectors, multi-dimensional unpacked arrays
 - `assign`, `initial`, `always`, `always_comb`, `always_ff`, `always_latch`, `final`
 - blocking/non-blocking assignments (including `<= #d`), `if`, `case`/`casez`/`casex`,
   `for`/`while`/`do`/`repeat`/`forever`, `#` delays, `@` events, `wait`, named blocks + `disable`,
   `break`/`continue`, `++`/`+=`
-- functions and tasks (inlined), all operators with IEEE width/sign rules and x/z semantics
+- functions and tasks (inlined; recursive calls with saved frames), all operators with IEEE width/sign rules and x/z semantics
 - `` `timescale `` (per module, fractional delays), `$time`/`$stime`/`$realtime`, `%t`
 - `real`/`realtime` variables, arrays, parameters, task arguments and function results
 - nets with several drivers (tri-state buses through `inout` ports, also on parts of nets),
@@ -59,12 +59,15 @@ Verilog-2005 plus common SystemVerilog:
   `$rewind`), `$sformat`/`$swrite`, `$timeformat`/`$printtimescale`,
   `$test$plusargs`/`$value$plusargs` (`+name=value` on the command line), `$error`/`$fatal`,
   `%f`/`%e`/`%g`
-- VCD output: `$dumpfile`, `$dumpvars`, `$dumpon`, `$dumpoff`
+- gate, net and continuous-assignment delays (rise/fall/turn-off, inertial), `specify` path
+  delays with `-gspecify`
+- VCD output: `$dumpfile`, `$dumpvars`, `$dumpon`, `$dumpoff`; live waveforms over the CXXRTL
+  debug server protocol (`--cdsp`, `--surfer`)
 - preprocessor: `` `define `` (with arguments), `` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``, `` `include ``
 
-Not yet: recursive functions, multi-dimensional arrays, `%v` strength display, gate/net
-rise/fall delays, `specify` path delays and SDF. See "Road to full Verilog-2005" in
-[PLAN.md](PLAN.md). Icarus's regression suite (ivtest) passes at about 83%; places where
+Not yet: SystemVerilog data types (`typedef`, `enum`, `struct`, packages, interfaces; in
+progress), `%v` strength display, SDF, arrays as ports. See "Road to full Verilog-2005" in
+[PLAN.md](PLAN.md). Icarus's regression suite (ivtest) passes at about 88%; places where
 Icarus seems to deviate from the standard (ferrooxide matches Icarus) are listed in
 [ICARUS_NOTES.md](ICARUS_NOTES.md).
 

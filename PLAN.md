@@ -322,23 +322,27 @@ Next performance steps: ports connected to part selects as aliases, fusing sibli
 with the same inputs, signal values cached in registers within an activation, timing wheel,
 `--threads` (partitioned same-edge/same-rank parallelism, see M8).
 
-## Status and next steps (2026-11-14)
+## Status and next steps (2026-11-14, updated after the debug server)
 
 Icarus regression suite (ivtest, normal tests): ~88% pass. Real-design benchmark: output
-identical to Icarus, 10-13x faster. Interactive mode, MCP server, `--vcd/--trace` work.
+identical to Icarus, 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
+debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
+the viewer) work.
 
 Next, roughly in order:
-1. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
+1. **SystemVerilog for real designs** (M6, in progress): typedef, enum, packed struct/union,
+   packages and import, `logic` everywhere, interfaces (basic), `always_comb` rules,
+   `unique/priority case`.
+2. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
    warnings Icarus prints (port coercion to inout, constant out-of-range selects, `@*` without
    sensitivities), `%v` strength display (needs strength values on nets), `$countdrivers`,
    `$fread`, `%u`/`%z` in `$scanf`, event-controlled nonblocking assignments updating at the
    trigger (ICARUS_NOTES 3), specify paths on inout ports and conditional paths, force on array
    elements, generate blocks referenced before their definition.
-2. **SystemVerilog for real designs** (M6): typedef, enum, packed struct/union, packages and
-   import, `logic` everywhere, interfaces (basic), `always_comb` rules, `unique/priority case`.
-3. **Debug server core** (M9/M10): simulation thread + command channel between time steps; then
-   MCP over HTTP (attach to a running simulation) and CDSP; a value-change history so agents can
-   query past values without a VCD.
+3. **Debug server follow-ups** (M9/M10): try `--surfer` with Surfer itself; MCP over HTTP
+   (attach to a running simulation) and MCP history queries on the CDSP value history; arrays
+   in CDSP (per-element items for small memories), `$display` as diagnostics, source
+   locations (`goto_declaration`).
 4. **Performance**: wide (>64-bit) ops in the JIT, a timing wheel, multi-threading (M8).
 5. **Outputs**: FST, VCD of arrays/reals/events, `$dumpvars` scope/level arguments.
 
