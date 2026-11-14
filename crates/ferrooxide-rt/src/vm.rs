@@ -520,6 +520,13 @@ impl Sim {
 
     /// Run the current time step and the following ones up to and including `until`.
     pub fn advance(&mut self, until: Option<u64>) -> RunState {
+        self.advance_steps(until, u64::MAX)
+    }
+
+    /// `advance`, but stop (Paused) after `max_steps` time steps; the time is then that of the
+    /// last step run.
+    pub fn advance_steps(&mut self, until: Option<u64>, max_steps: u64) -> RunState {
+        let mut steps = 0;
         loop {
             self.stats.time_steps += 1;
             self.timestep();
@@ -527,6 +534,10 @@ impl Sim {
                 return RunState::Finished;
             }
             let Some(&t) = self.future.keys().next() else { return RunState::Idle };
+            steps += 1;
+            if steps >= max_steps {
+                return RunState::Paused;
+            }
             if let Some(mt) = until {
                 if t > mt {
                     self.time = mt.max(self.time);
@@ -827,13 +838,13 @@ impl Sim {
     /// Record the value history of every non-array signal from the end of the current time
     /// step on, using at most `budget` bytes.
     pub fn history_start(&mut self, budget: usize) {
-        let words = (0..self.prog.signals.len())
+        let widths: Vec<u32> = (0..self.prog.signals.len())
             .map(|s| {
                 let r = &self.sigs[s];
-                if r.depth == 0 && (s as u32) < self.nreal { 2 * nw(r.width) as u32 } else { 0 }
+                if r.depth == 0 && (s as u32) < self.nreal { r.width } else { 0 }
             })
             .collect();
-        self.history = Some(History::new(words, budget));
+        self.history = Some(History::new(&widths, budget));
         self.history_pending = true;
         self.track = true;
     }
@@ -841,6 +852,11 @@ impl Sim {
     /// The recorded value history.
     pub fn history(&self) -> Option<&History> {
         self.history.as_ref()
+    }
+
+    /// The recorded value history, to index it (`History::prepare`).
+    pub fn history_mut(&mut self) -> Option<&mut History> {
+        self.history.as_mut()
     }
 
     /// Declaration info of a signal.

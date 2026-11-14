@@ -162,8 +162,9 @@ marker at `$finish`. ferrooxide exits when Surfer is closed.
 
 The simulation starts paused after time 0. The value history of every signal is kept in
 memory (`FX_HISTORY_MB`, default 512; changes after that are not recorded). The protocol's
-value encoding is two-state, so x bits show as 1 and z bits as 0. Arrays and reals are not
-listed yet.
+value encoding is two-state, so x bits show as 1 and z bits as 0. Reals are 64-bit items
+holding the IEEE double (show them with Surfer's 64-bit float format). Arrays are not listed
+yet.
 
 ### Lint
 

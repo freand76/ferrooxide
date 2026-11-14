@@ -6,6 +6,7 @@ endmodule
 module tb;
   reg clk = 0;
   reg [3:0] x = 4'bx01z;
+  real r = 1.5;
   always #5 clk = ~clk;
   sub u(.clk(clk), .q());
   initial begin #22 x = 4'd9; #1000 $display("done at %t", $time); $finish; end

@@ -138,6 +138,10 @@ fn cdsp_session() {
     assert!(q.contains(r#"{"item_values":"CQAAAAIAAAACAAAA","time":"0.000000022000000"}"#), "{q}");
     assert!(q.contains(r#"{"item_values":"CQAAAAMAAAADAAAA","time":"0.000000025000000"}"#), "{q}");
     assert_eq!(q.matches(r#""time""#).count(), 3, "{q}");
+    // a real is a 64-bit item holding the IEEE double (1.5)
+    ask(r#"{"type":"command","command":"reference_items","reference":"re","items":[["tb r"]]}"#, 1);
+    let q = ask(r#"{"type":"command","command":"query_interval","interval":["0.000000000000000","0.000000000000000"],"collapse":true,"items":"re","item_values_encoding":"base64(u32)","diagnostics":false}"#, 1);
+    assert!(q.contains(r#""item_values":"AAAAAAAA+D8=""#), "{q}");
     let fin = ask(r#"{"type":"command","command":"run_simulation","until_time":null,"until_diagnostics":[],"sample_item_values":true}"#, 2);
     assert!(fin.contains(r#""event":"simulation_finished""#) && fin.contains(r#""time":"0.000001022000000""#), "{fin}");
     assert!(ask(r#"{"type":"command","command":"run_simulation","until_time":null,"until_diagnostics":[],"sample_item_values":true}"#, 1).contains(r#""error":"invalid_status""#));

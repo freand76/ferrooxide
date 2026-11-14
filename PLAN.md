@@ -162,11 +162,16 @@ and diagnostics for an inclusive time interval, optionally collapsed to one samp
 
 **Status (first version, `--cdsp`).** `cdsp.rs`: listener thread, one reader thread per
 connection, the simulation thread owns `Sim` and steps one time step at a time while running
-(checking the command channel between steps). History: `rt/history.rs`, per-signal change logs
-fed from the dirty list at the end of each time step (`Sim::history_start`; `track` replaces
-`dumping` as the dirty-list switch), budget `FX_HISTORY_MB`. Samples are sent at the interval
-start and at each change of a referenced item. Not yet: arrays (memory items, row ranges),
-reals, port directions (`input`/`output` are false; needs direction in `SignalInfo`), `src`,
+(checking the command channel between steps). History: `rt/history.rs`, one sequential log
+(signal id + planes packed to the width, 6 bytes per 1-bit change) fed from the dirty list at
+the end of each time step (`Sim::history_start`; `track` replaces `dumping` as the dirty-list
+switch), budget `FX_HISTORY_MB`; per-signal indexes are built on demand for the queried
+signals. Running: `advance_steps` chunks sized to 10-40 ms. Cost on `bench/cpuish.v` (all
+signals toggle): 0.64 s plain, 1.1-1.3 s with full history (290 MB); a query of 10 signals
+over the whole run (400k samples) about 0.85 s, the first one 0.45 s more (indexing). Samples are sent at the interval
+start and at each change of a referenced item. Reals are 64-bit items (IEEE double bits).
+Not yet: arrays (memory items, row ranges; Surfer designates every item as a node, so a memory
+would make its whole reference fail), port directions (`input`/`output` are false; needs direction in `SignalInfo`), `src`,
 diagnostics (`$display` → `print`, `until_diagnostics`), the WCP pairing below.
 
 **Surfer as client** (checked in its source, 2026-11-03 snapshot, `libsurfer/src/cxxrtl*`).

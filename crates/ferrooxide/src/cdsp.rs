@@ -10,7 +10,8 @@
 //!
 //! Messages are JSON objects terminated by NUL. One client at a time (a new connection replaces
 //! the old one); the simulation keeps its state across connections. Values are sent as
-//! `base64(u32)`, which is two-state: x is sent as 1, z as 0. Arrays and reals are not listed yet.
+//! `base64(u32)`, which is two-state: x is sent as 1, z as 0. Reals are 64-bit items holding the
+//! IEEE double. Arrays are not listed yet (Surfer designates every item as a plain node).
 
 use ferrooxide_rt::{RunState, Sim};
 use serde_json::{json, Map, Value};
@@ -80,6 +81,8 @@ struct Server {
     out: Option<(u32, TcpStream)>,
     warned_full: bool,
     wcp: Wcp,
+    /// time steps per `advance_steps` call while running
+    chunk: u64,
 }
 
 const COMMANDS: &[&str] = &[
@@ -92,9 +95,16 @@ const COMMANDS: &[&str] = &[
     "pause_simulation",
 ];
 
+#[cfg(test)]
 fn base64(bytes: &[u8]) -> String {
+    let mut s = String::new();
+    base64_into(bytes, &mut s);
+    s
+}
+
+fn base64_into(bytes: &[u8], s: &mut String) {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    s.reserve(bytes.len().div_ceil(3) * 4);
     for c in bytes.chunks(3) {
         let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
         s.push(T[(n >> 18) as usize & 63] as char);
@@ -102,7 +112,6 @@ fn base64(bytes: &[u8]) -> String {
         s.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
         s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
     }
-    s
 }
 
 fn parent(id: &str) -> &str {
@@ -117,7 +126,7 @@ impl Server {
         let mut items = BTreeMap::new();
         for (name, sig) in sim.signal_names() {
             let info = sim.signal_info(*sig);
-            if info.depth > 0 || info.real || name.contains(' ') {
+            if info.depth > 0 || name.contains(' ') {
                 continue;
             }
             let id = name.replace('.', " ");
@@ -128,7 +137,7 @@ impl Server {
             }
             items.insert(id, Item { sig: *sig, width: info.width, lsb: info.lsb.min(info.msb) });
         }
-        Server { sim, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default() }
+        Server { sim, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default(), chunk: 64 }
     }
 
     fn time_str(&self, ticks: u64) -> String {
@@ -148,10 +157,13 @@ impl Server {
     }
 
     fn send(&mut self, v: Value) {
+        self.send_text(serde_json::to_string(&v).unwrap());
+    }
+
+    fn send_text(&mut self, mut text: String) {
         if let Some((_, s)) = &mut self.out {
-            let mut b = serde_json::to_vec(&v).unwrap();
-            b.push(0);
-            if s.write_all(&b).is_err() {
+            text.push('\0');
+            if s.write_all(text.as_bytes()).is_err() {
                 self.out = None;
             }
         }
@@ -291,68 +303,83 @@ impl Server {
         if values && m["item_values_encoding"] != json!("base64(u32)") {
             return self.error("invalid_args", format!("unsupported encoding {}", m["item_values_encoding"]));
         }
-        let h = self.sim.history().unwrap();
         let sigs: Vec<(u32, u32)> =
             ids.into_iter().flatten().map(|id| (self.items[id].sig, self.items[id].width)).collect();
+        let only: Vec<u32> = sigs.iter().map(|&(s, _)| s).collect();
+        self.sim.history_mut().unwrap().prepare(&only);
+        let h = self.sim.history().unwrap();
         // sample times: the interval start, then every change of a referenced item
         let mut times = vec![b];
         for &(s, _) in &sigs {
-            let ts = &h.times[s as usize];
-            let lo = ts.partition_point(|&t| t <= b);
-            let hi = ts.partition_point(|&t| t <= e);
-            times.extend_from_slice(&ts[lo..hi]);
+            for i in h.count_upto(s, b)..h.count_upto(s, e) {
+                times.push(h.time(s, i));
+            }
         }
         times.sort_unstable();
         times.dedup();
         let mut cur: Vec<Option<usize>> = sigs.iter().map(|&(s, _)| h.index_at(s, b)).collect();
-        let mut samples = Vec::with_capacity(times.len());
+        // written as text: a long interval has hundreds of thousands of samples
+        let diags = m["diagnostics"].as_bool() == Some(true);
+        let mut out = String::with_capacity(64 + times.len() * (48 + if values { sigs.len() * 8 } else { 0 }));
+        out.push_str(r#"{"command":"query_interval","samples":["#);
         let mut bytes = Vec::new();
-        for &t in &times {
-            let mut sample = json!({"time": self.time_str(t)});
+        let mut plane = Vec::new();
+        for (n, &t) in times.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            out.push('{');
+            if diags {
+                out.push_str(r#""diagnostics":[],"#);
+            }
             if values {
                 bytes.clear();
                 for (k, &(s, w)) in sigs.iter().enumerate() {
-                    let ts = &h.times[s as usize];
                     let mut i = cur[k].map_or(0, |i| i + 1);
-                    while i < ts.len() && ts[i] <= t {
+                    while i < h.count(s) && h.time(s, i) <= t {
                         i += 1;
                     }
                     cur[k] = i.checked_sub(1);
-                    let n32 = w.div_ceil(32) as usize;
-                    let planes = cur[k].map(|i| h.value(s, i));
-                    for j in 0..n32 {
-                        let word = planes.map_or(0, |p| (p[j / 2] >> (32 * (j % 2))) as u32);
-                        bytes.extend_from_slice(&word.to_le_bytes());
+                    plane.clear();
+                    plane.resize(w.div_ceil(64) as usize, 0);
+                    if let Some(i) = cur[k] {
+                        h.value_plane(s, i, &mut plane);
+                    }
+                    for j in 0..w.div_ceil(32) as usize {
+                        bytes.extend_from_slice(&((plane[j / 2] >> (32 * (j % 2))) as u32).to_le_bytes());
                     }
                 }
-                sample["item_values"] = json!(base64(&bytes));
+                out.push_str(r#""item_values":""#);
+                base64_into(&bytes, &mut out);
+                out.push_str(r#"","#);
             }
-            if m["diagnostics"].as_bool() == Some(true) {
-                sample["diagnostics"] = json!([]);
-            }
-            samples.push(sample);
+            out.push_str(r#""time":""#);
+            out.push_str(&self.time_str(t));
+            out.push_str(r#""}"#);
         }
-        self.send(json!({"type": "response", "command": "query_interval", "samples": samples}));
+        out.push_str(r#"],"type":"response"}"#);
+        self.send_text(out);
     }
 
-    /// Run one time step of a running simulation; emits the event when it stops.
+    /// Run a chunk of time steps of a running simulation (sized to take 10-40 ms, so a pause
+    /// is handled quickly); emits the event when it stops.
     fn step(&mut self) {
         let Status::Running(until) = self.status else { return };
-        let st = match self.sim.next_event_time() {
-            Some(t) if until.is_none_or(|u| t <= u) => self.sim.advance(Some(t)),
-            Some(_) => {
-                let st = self.sim.advance(until);
-                if st == RunState::Paused {
-                    self.status = Status::Paused;
-                    self.sim.flush();
-                    let t = self.time_str(self.sim.now());
-                    self.send(json!({"type": "event", "event": "simulation_paused", "time": t, "cause": "until_time"}));
-                    return;
-                }
-                st
-            }
-            None => RunState::Idle,
-        };
+        let t0 = Instant::now();
+        let st = self.sim.advance_steps(until, self.chunk);
+        let dt = t0.elapsed();
+        if dt < Duration::from_millis(10) {
+            self.chunk = (self.chunk * 2).min(1 << 20);
+        } else if dt > Duration::from_millis(40) {
+            self.chunk = (self.chunk / 2).max(1);
+        }
+        if st == RunState::Paused && until.is_some_and(|u| self.sim.now() >= u) {
+            self.status = Status::Paused;
+            self.sim.flush();
+            let t = self.time_str(self.sim.now());
+            self.send(json!({"type": "event", "event": "simulation_paused", "time": t, "cause": "until_time"}));
+            return;
+        }
         if let Some(h) = self.sim.history() {
             if let (Some(t), false) = (h.full_at, self.warned_full) {
                 self.warned_full = true;
@@ -436,7 +463,7 @@ fn initial_items(sim: &Sim, traces: &[String]) -> Result<Vec<String>, String> {
         .iter()
         .filter(|(n, s)| {
             let info = sim.signal_info(*s);
-            info.depth == 0 && !info.real && !n.contains(' ')
+            info.depth == 0 && !n.contains(' ')
                 && if traces.is_empty() { n.matches('.').count() == 1 } else { set.is_match(n) }
         })
         .map(|(n, _)| n.clone())
