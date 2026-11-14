@@ -1,5 +1,5 @@
 // SystemVerilog procedural statements: ++/--/op= (IEEE 1800 11.4.1-2), do-while, break,
-// continue, loop variables declared in for (12.7)
+// continue, for loops with declared or several variables and steps (12.7)
 module t;
   integer errors = 0;
   int a, n;
@@ -29,6 +29,21 @@ module t;
       n += i;
     end
     check(`__LINE__, n, 20);      // 0+2+4+6+8
+    a = 5; ++a; --a; --a;
+    check(`__LINE__, a, 4);
+    n = 0;
+    for (int i = 0, j = 10; i < j; i++, j--) n++;
+    check(`__LINE__, n, 5);
+    n = 0;
+    for (int i = 0, byte j = 4; i < j; ++i) n += j;   // each variable may have its own type
+    check(`__LINE__, n, 16);
+    n = 0;
+    for (a = 0, b = 1; a < 4; a++, b *= 2) n += b;    // several assignments, no declarations
+    check(`__LINE__, n, 15);
+    check(`__LINE__, b, 16);
+    n = 0;
+    for (;;) begin n++; if (n == 3) break; end
+    check(`__LINE__, n, 3);
     a = 0;
     while (1) begin
       a++;

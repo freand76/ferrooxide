@@ -1834,6 +1834,7 @@ impl Parser {
                 Ok(Stmt::SysTask { name, args, line })
             }
             Tok::Punct("{") => self.assign_stmt(),
+            Tok::Punct("++" | "--") => self.assign_stmt(),
             Tok::Ident(_) if self.sv_ident_here() => self.assign_stmt(),
             Tok::Ident(kw) => match kw.as_str() {
                 "begin" | "fork" => {
@@ -1868,6 +1869,21 @@ impl Parser {
                             let line = *line;
                             *d = Some(Box::new(Stmt::SysTask { name: "$__unhandled_case".into(), args: Vec::new(), line }));
                         }
+                        // an if / else-if chain without a final else (IEEE 1800 12.4.2)
+                        if let Stmt::If { line, .. } = &st {
+                            fn last_else(s: &mut Stmt, line: Line) {
+                                if let Stmt::If { else_s, .. } = s {
+                                    match else_s {
+                                        None => {
+                                            *else_s = Some(Box::new(Stmt::SysTask { name: "$__unhandled_if".into(), args: Vec::new(), line }))
+                                        }
+                                        Some(e) => last_else(e, line),
+                                    }
+                                }
+                            }
+                            let line = *line;
+                            last_else(&mut st, line);
+                        }
                     }
                     Ok(st)
                 }
@@ -1879,8 +1895,16 @@ impl Parser {
                         _ => CaseKind::CaseX,
                     };
                     self.expect_p("(")?;
-                    let expr = self.expr()?;
+                    let mut expr = self.expr()?;
                     self.expect_p(")")?;
+                    // `case (e) inside`: an item matches when `e inside {item}` is true; as
+                    // `case (1'b1)` with the tests as labels
+                    let sel = if kind == CaseKind::Case && self.eat_kw("inside") {
+                        let e = std::mem::replace(&mut expr, Expr::Num(Number { size: Some(1), signed: false, base: 2, based: true, digits: "1".into(), fill: false }));
+                        Some(e)
+                    } else {
+                        None
+                    };
                     let mut arms = Vec::new();
                     let mut default = None;
                     while !self.eat_kw("endcase") {
@@ -1891,7 +1915,10 @@ impl Parser {
                         }
                         let mut labels = Vec::new();
                         loop {
-                            labels.push(self.expr()?);
+                            labels.push(match &sel {
+                                Some(e) => self.set_item(e)?,
+                                None => self.expr()?,
+                            });
                             if !self.eat_p(",") {
                                 break;
                             }
@@ -1905,44 +1932,133 @@ impl Parser {
                 "for" => {
                     self.bump();
                     self.expect_p("(")?;
-                    let init = if self.is_decl_start() {
-                        // SV: for (int i = 0; ...) -- declare as block-local variable
-                        let mut d = self.decl_head(false)?;
+                    // initialization: assignments, or declarations (SV: `for (int i = 0, j = 9;
+                    // ...)`, each may name its own type); the variables are block-local
+                    let mut decls: Vec<Decl> = Vec::new();
+                    let mut inits = Vec::new();
+                    if !self.is_p(";") {
+                        loop {
+                            if self.is_decl_start() || !decls.is_empty() {
+                                if self.is_decl_start() {
+                                    let mut d = self.decl_head(false)?;
+                                    d.names.clear();
+                                    decls.push(d);
+                                }
+                                let dl = self.line();
+                                let name = self.ident()?;
+                                self.expect_p("=")?;
+                                let v = self.expr()?;
+                                decls.last_mut().unwrap().names.push(Declarator { name: name.clone(), dims: vec![], init: None, line: dl });
+                                inits.push(Stmt::Assign { lhs: Expr::Ident(name), rhs: v, nonblocking: false, timing: None, line: dl });
+                            } else {
+                                inits.push(self.simple_assign_noterm()?);
+                            }
+                            if !self.eat_p(",") {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_p(";")?;
+                    let cond = if self.is_p(";") { Expr::Num(dec(1)) } else { self.expr()? };
+                    self.expect_p(";")?;
+                    let mut steps = Vec::new();
+                    if !self.is_p(")") {
+                        loop {
+                            steps.push(self.simple_assign_noterm()?);
+                            if !self.eat_p(",") {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_p(")")?;
+                    let body = self.stmt()?;
+                    let one = |mut v: Vec<Stmt>| -> Stmt {
+                        if v.len() == 1 {
+                            v.pop().unwrap()
+                        } else {
+                            Stmt::Block { name: None, decls: vec![], stmts: v, fork: None }
+                        }
+                    };
+                    let f = Stmt::For { init: Box::new(one(inits)), cond, step: Box::new(one(steps)), body: Box::new(body), line };
+                    if decls.is_empty() {
+                        Ok(f)
+                    } else {
+                        Ok(Stmt::Block { name: None, decls, stmts: vec![f], fork: None })
+                    }
+                }
+                "foreach" => {
+                    // foreach (a[i, , k]) body (IEEE 1800 12.7.3): nested loops from the left to
+                    // the right bound of each named dimension, with int loop variables
+                    self.bump();
+                    self.expect_p("(")?;
+                    let name = self.ident()?;
+                    if self.is_p(".") {
+                        return self.err("foreach over a hierarchical name is not supported");
+                    }
+                    let Some(dims) = self.var_dims(&name) else {
+                        return self.err(format!("foreach: '{name}' is not an array declared here"));
+                    };
+                    self.expect_p("[")?;
+                    let mut vars = Vec::new();
+                    loop {
                         let dl = self.line();
-                        let name = self.ident()?;
-                        self.expect_p("=")?;
-                        let v = self.expr()?;
-                        self.expect_p(";")?;
-                        d.names = vec![Declarator { name: name.clone(), dims: vec![], init: None, line: dl }];
-                        let cond = self.expr()?;
-                        self.expect_p(";")?;
-                        let step = self.simple_assign_noterm()?;
-                        self.expect_p(")")?;
-                        let body = self.stmt()?;
-                        let f = Stmt::For {
-                            init: Box::new(Stmt::Assign {
-                                lhs: Expr::Ident(name),
-                                rhs: v,
-                                nonblocking: false,
-                                timing: None,
-                                line: dl,
-                            }),
+                        vars.push(if let Tok::Ident(_) = self.peek() { Some((self.ident()?, dl)) } else { None });
+                        if !self.eat_p(",") {
+                            break;
+                        }
+                    }
+                    self.expect_p("]")?;
+                    self.expect_p(")")?;
+                    if vars.len() > dims.len() {
+                        return self.err(format!("foreach: '{name}' has only {} dimensions", dims.len()));
+                    }
+                    let mut body = self.stmt()?;
+                    if vars.iter().all(|v| v.is_none()) {
+                        // no loop variables: no iterations (as the reference)
+                        return Ok(Stmt::Null);
+                    }
+                    let mut names = Vec::new();
+                    for (d, v) in vars.iter().enumerate().rev() {
+                        let Some((v, dl)) = v else { continue };
+                        let (l, r) = dims[d].clone();
+                        let var = || Box::new(Expr::Ident(v.clone()));
+                        // left >= right: count down
+                        let down = Expr::Binary(BinOp::Ge, Box::new(l.clone()), Box::new(r.clone()));
+                        let cond = Expr::Cond(
+                            Box::new(down.clone()),
+                            Box::new(Expr::Binary(BinOp::Ge, var(), Box::new(r.clone()))),
+                            Box::new(Expr::Binary(BinOp::Le, var(), Box::new(r))),
+                        );
+                        let step = Expr::Cond(
+                            Box::new(down),
+                            Box::new(Expr::Binary(BinOp::Sub, var(), Box::new(Expr::Num(dec(1))))),
+                            Box::new(Expr::Binary(BinOp::Add, var(), Box::new(Expr::Num(dec(1))))),
+                        );
+                        body = Stmt::For {
+                            init: Box::new(Stmt::Assign { lhs: Expr::Ident(v.clone()), rhs: l, nonblocking: false, timing: None, line: *dl }),
                             cond,
-                            step: Box::new(step),
+                            step: Box::new(Stmt::Assign { lhs: Expr::Ident(v.clone()), rhs: step, nonblocking: false, timing: None, line: *dl }),
                             body: Box::new(body),
                             line,
                         };
-                        return Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![f], fork: None });
-                    } else {
-                        self.simple_assign_noterm()?
+                        names.push(Declarator { name: v.clone(), dims: vec![], init: None, line: *dl });
+                    }
+                    let d = Decl {
+                        dir: None,
+                        kind: NetKind::Int(32),
+                        net: NetType::Wire,
+                        explicit_kind: true,
+                        real_net: false,
+                        strength: None,
+                        delay: None,
+                        signed: true,
+                        range: None,
+                        packed: vec![],
+                        type_param: None,
+                        names,
+                        line,
                     };
-                    self.expect_p(";")?;
-                    let cond = self.expr()?;
-                    self.expect_p(";")?;
-                    let step = self.simple_assign_noterm()?;
-                    self.expect_p(")")?;
-                    let body = self.stmt()?;
-                    Ok(Stmt::For { init: Box::new(init), cond, step: Box::new(step), body: Box::new(body), line })
+                    Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![body], fork: None })
                 }
                 "while" => {
                     self.bump();
@@ -2106,6 +2222,14 @@ impl Parser {
     /// lvalue (= | <= | op=) [timing] expr, or lvalue++ / lvalue--
     fn simple_assign_noterm(&mut self) -> Result<Stmt> {
         let line = self.line();
+        // ++x / --x
+        if self.is_p("++") || self.is_p("--") {
+            let op = if self.eat_p("++") { BinOp::Add } else { self.bump(); BinOp::Sub };
+            let lhs = self.lvalue()?;
+            self.last_type = None;
+            let rhs = Expr::Binary(op, Box::new(lhs.clone()), Box::new(Expr::Num(dec(1))));
+            return Ok(Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line });
+        }
         let lhs = self.lvalue()?;
         let lt = self.last_type.take();
         let nonblocking = if self.eat_p("=") {
@@ -2325,9 +2449,49 @@ impl Parser {
         })
     }
 
+    /// One item of an `inside` set (IEEE 1800 11.4.13): `[lo:hi]` (a `$` bound is open) or a
+    /// value compared with `==?`; returns the test of `e` against it.
+    fn set_item(&mut self, e: &Expr) -> Result<Expr> {
+        let b = |x: &Expr| Box::new(x.clone());
+        if self.eat_p("[") {
+            let lo = if self.eat_p("$") { None } else { Some(self.expr()?) };
+            self.expect_p(":")?;
+            let hi = if self.eat_p("$") { None } else { Some(self.expr()?) };
+            self.expect_p("]")?;
+            let ge = lo.map(|lo| Expr::Binary(BinOp::Ge, b(e), Box::new(lo)));
+            let le = hi.map(|hi| Expr::Binary(BinOp::Le, b(e), Box::new(hi)));
+            return Ok(match (ge, le) {
+                (Some(g), Some(l)) => Expr::Binary(BinOp::LAnd, Box::new(g), Box::new(l)),
+                (Some(t), None) | (None, Some(t)) => t,
+                (None, None) => Expr::Num(dec(1)),
+            });
+        }
+        let v = self.expr()?;
+        Ok(Expr::Binary(BinOp::WildEq, b(e), Box::new(v)))
+    }
+
+    /// `{ item, ... }` after `inside`: the OR of the item tests
+    fn inside_set(&mut self, e: &Expr) -> Result<Expr> {
+        self.expect_p("{")?;
+        let mut acc = self.set_item(e)?;
+        while self.eat_p(",") {
+            let t = self.set_item(e)?;
+            acc = Expr::Binary(BinOp::LOr, Box::new(acc), Box::new(t));
+        }
+        self.expect_p("}")?;
+        Ok(acc)
+    }
+
     fn binary(&mut self, min_prec: u8) -> Result<Expr> {
         let mut lhs = self.unary()?;
-        while let Some((op, prec)) = self.binop() {
+        loop {
+            // `inside` binds like the relational operators
+            if min_prec <= 7 && self.is_kw("inside") {
+                self.bump();
+                lhs = self.inside_set(&lhs)?;
+                continue;
+            }
+            let Some((op, prec)) = self.binop() else { break };
             if prec < min_prec {
                 break;
             }

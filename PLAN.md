@@ -392,7 +392,7 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
 Icarus regression suite (ivtest, normal tests): main list 1341 of 1526 (88 %), SystemVerilog
-list 331 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+list 352 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
@@ -402,10 +402,11 @@ Next, roughly in order (see "Architecture changes ahead" below for why this orde
    typedefs. (Done: the `assign z = a;` alias, file-scope and package variables, `timeunit`,
    array typedefs, `unique`/`priority` case warnings for unmatched values,
    `$countones`/`$onehot`/`$onehot0`, the time-0 run of `always_comb`/`always_latch` after
-   all other processes have started (IEEE 1800 9.2.2.2.2), `break;`/`continue;`.) Gaps the
-   new suite found: prefix `++a;`/`--a;` as statements, `inside`, `foreach`, enum methods
-   without parentheses (`c.first`), several loop variables in `for (int i = 0, j = 10; ...)`,
-   `unique if`/`priority if` warnings. Known difference left (order IEEE leaves open): on a
+   all other processes have started (IEEE 1800 9.2.2.2.2), `break;`/`continue;`, prefix
+   `++a;`/`--a;`, `inside` and `case ... inside`, `foreach` (not over hierarchical names),
+   enum methods without parentheses, several variables and steps in a `for` header,
+   `unique if`/`priority if` warnings.) Not checked: overlapping items of a `unique`
+   case/if (the reference does not report them either). Known difference left (order IEEE leaves open): on a
    change, a ranked combinational process (`always_comb`, `always @*`) runs before the other
    waiters of the signal; the reference wakes it among them (newest waiter first).
 2. **Types in elaboration** (A1 below): first part done (package scopes, `parameter type`);
@@ -538,8 +539,9 @@ SystemVerilog data types and testbench features:
 - struct members of variables whose type is a type parameter; unpacked structs (struct
   layout is still resolved in the parser, A1).
 - arrays of interfaces; nested module declarations [sv_timeunit_prec3b].
-- `unique` / `priority` violation warnings; `$countones` / `$onehot` / `$onehot0` code
-  generation.
+- `unique` case/if: overlapping items are not reported (only "no item matches", as the
+  reference); `foreach` over hierarchical names or class/queue members; `inside` with
+  unpacked arrays as set items.
 - `string` (first version, 2026-11-14): no reclaiming of strings (every distinct text made at
   run time stays in the table: a testbench building millions of different strings grows);
   string parameters; strings as `case` expressions; implicit string -> vector assignment is

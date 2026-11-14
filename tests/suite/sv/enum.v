@@ -23,6 +23,11 @@ module t;
     check(`__LINE__, c.last(), BLUE);
     check(`__LINE__, c.num(), 3);
     if (c.name() != "BLUE") begin $display("FAILED line %0d", `__LINE__); errors++; end
+    c = c.first;                  // no parentheses without arguments (13.5.5)
+    c = c.next;
+    check(`__LINE__, c, GREEN);
+    check(`__LINE__, c.num, 3);
+    if (c.name != "GREEN") begin $display("FAILED line %0d", `__LINE__); errors++; end
     c = GREEN;
     $display("%s", c.name());
     if (errors == 0) $display("PASSED");

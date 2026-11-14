@@ -684,22 +684,26 @@ impl Parser {
         Ok(e)
     }
 
-    /// `v.first()`, `.last()`, `.num()`, `.next(N)`, `.prev(N)`, `.name()` on a variable with an
+    /// `v.first()`, `.last()`, `.num()`, `.next(N)`, `.prev(N)`, `.name()` (parentheses optional) on a variable with an
     /// enum type, at the cursor (after the name).
     pub(crate) fn is_enum_method(&self, name: &str) -> bool {
         self.vars.get(name).is_some_and(|v| v.0.enum_names.is_some())
             && self.is_p(".")
             && matches!(self.peek_at(1), Tok::Ident(m) if matches!(m.as_str(), "first" | "last" | "num" | "next" | "prev" | "name"))
-            && matches!(self.peek_at(2), Tok::Punct("("))
     }
 
     pub(crate) fn enum_method(&mut self, name: String) -> Result<Expr> {
         let names = self.vars[&name].0.enum_names.clone().unwrap();
         self.bump();
         let Tok::Ident(m) = self.bump() else { unreachable!() };
-        self.expect_p("(")?;
-        let arg = if self.is_p(")") { None } else { Some(self.expr()?) };
-        self.expect_p(")")?;
+        // the parentheses are optional without arguments (IEEE 1800 13.5.5)
+        let arg = if self.eat_p("(") {
+            let a = if self.is_p(")") { None } else { Some(self.expr()?) };
+            self.expect_p(")")?;
+            a
+        } else {
+            None
+        };
         let n = names.len();
         let v = Expr::Ident(name);
         // a mux over the constants; a value that is none of them (or has x bits) gives `dflt`
@@ -739,6 +743,18 @@ impl Parser {
             && matches!(self.peek_at(2), Tok::Punct(")" | ","))
     }
 
+    /// The (left, right) bounds of every dimension of a declared name: unpacked dimensions
+    /// first, then the packed ones (a struct counts as one vector).
+    pub(crate) fn var_dims(&self, name: &str) -> Option<Vec<(Expr, Expr)>> {
+        let (t, unpacked) = self.vars.get(name)?;
+        let mut dims = unpacked.clone();
+        dims.extend(t.dims.iter().cloned());
+        if t.has_struct() {
+            dims.push((sub(t.leaf_width(), num(1)), num(0)));
+        }
+        Some(dims)
+    }
+
     /// The value of an array query function: unpacked dimensions are numbered first, then the
     /// packed ones; a missing dimension gives x.
     pub(crate) fn array_query(&mut self, f: &str) -> Result<Expr> {
@@ -754,16 +770,16 @@ impl Parser {
             1
         };
         self.expect_p(")")?;
-        let (t, unpacked) = self.vars[&name].clone();
-        let mut dims = unpacked.clone();
-        dims.extend(t.dims.iter().cloned());
-        if t.has_struct() {
-            dims.push((sub(t.leaf_width(), num(1)), num(0)));
+        // a string: its length (as `.len()`)
+        if f == "$size" && self.vars[&name].0.kind == NetKind::String && self.vars[&name].1.is_empty() {
+            return Ok(Expr::Call(format!("{name}.len"), Vec::new()));
         }
+        let unpacked = self.vars[&name].1.len();
+        let dims = self.var_dims(&name).unwrap();
         let x = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "x".into(), fill: true });
         match f {
             "$dimensions" => return Ok(num(dims.len() as i64)),
-            "$unpacked_dimensions" => return Ok(num(unpacked.len() as i64)),
+            "$unpacked_dimensions" => return Ok(num(unpacked as i64)),
             _ => {}
         }
         let Some((l, r)) = (k >= 1).then(|| dims.get(k as usize - 1)).flatten().cloned() else { return Ok(x) };

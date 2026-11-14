@@ -1,0 +1,7 @@
+WARNING: unique_if.v:10: no condition is true in a priority or unique if statement
+         Time: 1  Scope: t
+WARNING: unique_if.v:8: no condition is true in a priority or unique if statement
+         Time: 2  Scope: t
+WARNING: unique_if.v:10: no condition is true in a priority or unique if statement
+         Time: 3  Scope: t
+done y=6

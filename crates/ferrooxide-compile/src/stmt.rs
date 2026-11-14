@@ -897,11 +897,13 @@ impl<'a> Compiler<'a> {
                     self.emit(sys(SysTask::Finish { loc: String::new(), stop: false }));
                 }
             }
-            "$__unhandled_case" => {
-                let msg = format!(
-                    "WARNING: {}:{}: value is unhandled for priority or unique case statement\n         Time: %0d  Scope: %m",
-                    self.file, self.line
-                );
+            "$__unhandled_case" | "$__unhandled_if" => {
+                let what = if name == "$__unhandled_if" {
+                    "no condition is true in a priority or unique if statement"
+                } else {
+                    "value is unhandled for priority or unique case statement"
+                };
+                let msg = format!("WARNING: {}:{}: {what}\n         Time: %0d  Scope: %m", self.file, self.line);
                 let a = [Some(Expr::Str(msg)), Some(Expr::SysCall("$__ticks".into(), Vec::new()))];
                 let args = self.fmt_args(&a, sid)?;
                 let texp = self.texp(sid);
