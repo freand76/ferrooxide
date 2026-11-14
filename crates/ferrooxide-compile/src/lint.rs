@@ -90,7 +90,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Signals written with blocking assignments anywhere in a statement.
-    fn blocking_writes(&self, st: &Stmt, sid: usize, out: &mut Vec<u32>) {
+    pub(crate) fn blocking_writes(&self, st: &Stmt, sid: usize, out: &mut Vec<u32>) {
         match st {
             Stmt::Assign { lhs, nonblocking: false, .. } => self.lvalue_bases(lhs, sid, out),
             Stmt::Block { stmts, .. } => {

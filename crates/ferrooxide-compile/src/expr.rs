@@ -1484,11 +1484,22 @@ impl<'a> Compiler<'a> {
                 // only), but the lint check (synthesis view) includes them
                 if let (Expr::Call(name, _), true) = (e, self.func_reads.get()) {
                     if let Some((f, fs)) = self.lookup_func(name, sid) {
-                        let mut inner = Vec::new();
-                        if let Some(fi) = self.func_inst.get(&(fs, f.name.clone())) {
-                            self.reads_stmt(&f.body, fi.scope, &mut inner);
-                            let own: Vec<u32> = fi.ports.iter().map(|p| p.1).chain(fi.ret).collect();
-                            out.extend(inner.into_iter().filter(|s| !own.contains(&s.0)));
+                        // (functions calling each other: each is followed once)
+                        let key = (fs, f.name.clone());
+                        if !self.func_reads_seen.borrow().contains(&key) {
+                            self.func_reads_seen.borrow_mut().push(key.clone());
+                            let mut inner = Vec::new();
+                            if let Some(fi) = self.func_inst.get(&key) {
+                                self.reads_stmt(&f.body, fi.scope, &mut inner);
+                                let own: Vec<u32> = fi.ports.iter().map(|p| p.1).chain(fi.ret).collect();
+                                out.extend(inner.into_iter().filter(|s| !own.contains(&s.0)));
+                            } else {
+                                // an automatic function: its own variables do not resolve in its
+                                // module, the module's signals it reads do
+                                self.reads_stmt(&f.body, fs, &mut inner);
+                                out.extend(inner);
+                            }
+                            self.func_reads_seen.borrow_mut().pop();
                         }
                     }
                 }

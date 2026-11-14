@@ -187,6 +187,8 @@ pub struct Compiler<'a> {
     job_strength: HashMap<usize, (u8, u8)>,
     /// read sets include signals read inside called functions (lint only)
     pub(crate) func_reads: std::cell::Cell<bool>,
+    /// functions being followed by `func_reads` (recursion guard)
+    pub(crate) func_reads_seen: std::cell::RefCell<Vec<(usize, String)>>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -391,6 +393,7 @@ impl<'a> Compiler<'a> {
             cur_delay: None,
             job_strength: HashMap::new(),
             func_reads: std::cell::Cell::new(false),
+            func_reads_seen: std::cell::RefCell::new(Vec::new()),
             top_names: HashSet::new(),
             redirect: HashMap::new(),
         }
@@ -2618,8 +2621,15 @@ impl<'a> Compiler<'a> {
                             self.prog.procs[p as usize].fusible = *kind == ProcKind::AlwaysComb;
                             let top = self.here();
                             self.stmt(body, *scope)?;
+                            // IEEE 1800 9.2.2.2.1: what the block and the functions it calls read,
+                            // except what the block writes itself
                             let mut reads = Vec::new();
+                            self.func_reads.set(true);
                             self.reads_stmt(body, *scope, &mut reads);
+                            self.func_reads.set(false);
+                            let mut written = Vec::new();
+                            self.blocking_writes(body, *scope, &mut written);
+                            reads.retain(|(s, _)| !written.contains(s));
                             let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect());
                             self.emit(Instr::Wait { ctl });
                             self.emit(Instr::Jmp { to: top });

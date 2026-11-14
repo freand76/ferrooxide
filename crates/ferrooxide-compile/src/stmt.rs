@@ -1170,7 +1170,12 @@ impl<'a> Compiler<'a> {
                     self.reads_expr(a, sid, out);
                 }
             }
-            Stmt::TaskCall { args, .. } => {
+            Stmt::TaskCall { name, args, .. } => {
+                // a void function called as a statement: like a call in an expression
+                if self.func_reads.get() && self.lookup_func(name, sid).is_some_and(|(f, _)| !f.is_task) {
+                    self.reads_expr(&Expr::Call(name.clone(), args.clone()), sid, out);
+                    return;
+                }
                 for a in args {
                     self.reads_expr(a, sid, out);
                 }

@@ -344,6 +344,12 @@ Next, roughly in order:
 4. **Performance**: wide (>64-bit) ops in the JIT, a timing wheel, multi-threading (M8).
 5. **Outputs**: FST, VCD of arrays/reals/events, `$dumpvars` scope/level arguments.
 
+Known difference (found 2026-11-14, not fixed yet): a plain `assign z = a;` (same width, no
+logic, no delay) updates `z` immediately in the reference, within the writing process
+(`a = 1; $display(z)` shows 1), because it treats `z` as another name for `a`; `assign w = a &
+b` is not immediate there. ferrooxide updates both in the combinational settle. Fix: alias such
+nets to their source (like port aliasing), unless the net is forced or has other drivers.
+
 Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
 multi-dimensional arrays as ports or whole-array assignments are not supported.
 
@@ -358,13 +364,20 @@ packages with `import p::*` / `import p::x` (module, header, file scope) and `pk
 Package items are copied into each module that uses the package (the module's own names win).
 Lint reports names that are SystemVerilog keywords.
 
-Regression suite, SystemVerilog list (`--list regress-sv.list`): 229 of 700 pass (32.7%). The
+Since then: interfaces and modports (interface ports alias the connected instance's scope),
+enum methods, array query functions, 2-state types (`bit`/`int`/...: start at 0, stores turn
+x/z into 0; `UnOp::To2`), `always_comb`/`always_latch` sensitivity through called functions,
+`` `__LINE__ `` in macros, `$isunknown`. SystemVerilog list now 251 of 700 (35.9%), main list
+unchanged at 1337 of 1526.
+
+Regression suite, SystemVerilog list (`--list regress-sv.list`), at the start: 229 of 700 pass (32.7%). The
 failures by construct (compile errors): `string` (~60), queues and dynamic arrays `[$]`/`[]`
 (~76), `program` blocks (49), file-scope variables (24), classes (19), unpacked dimensions in
 typedefs (16), `timeunit`/`timeprecision` (12), plus enum methods (`.name()`, `.next()`),
 `$left`/`$right`/`$size`/`$is_signed` and other query functions, `always_comb` rules (31 FAIL:
 no PASSED, e.g. always_comb checks).
 
-Next, for real RTL first: interfaces and modports, enum methods, array query functions,
-unpacked dimensions in typedefs, file-scope variables, `timeunit`, `always_comb` semantics;
-then testbench features: `string`, queues/dynamic arrays, `program`, classes (large).
+Next, for real RTL: unpacked dimensions in typedefs, `timeunit`/`timeprecision`, file-scope
+variables, `unique`/`priority` case violation warnings, `$countones`/`$onehot`/`$onehot0`
+code generation, arrays of interfaces, struct-typed function arguments with patterns; then
+testbench features: `string`, queues/dynamic arrays, `program`, classes (large).
