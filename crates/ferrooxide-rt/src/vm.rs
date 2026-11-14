@@ -509,11 +509,13 @@ impl Sim {
                 self.comb_wake();
             }
         }
-        for i in 0..self.nprocs as usize {
-            let p = &mut self.procs[i];
+        let order: Vec<u32> =
+            if self.prog.start_order.is_empty() { (0..self.nprocs).collect() } else { self.prog.start_order.clone() };
+        for i in order {
+            let p = &mut self.procs[i as usize];
             if p.class == ProcClass::Normal && p.rank == NONE {
                 p.started = true;
-                self.push_active(i as u32);
+                self.push_active(i);
             }
         }
     }
@@ -2455,8 +2457,10 @@ impl Sim {
     fn readmem(&mut self, hex: bool, file: &str, sig: u32, start: Option<u64>, end: Option<u64>, loc: &str) {
         let text = match std::fs::read_to_string(file) {
             Ok(t) => t,
-            Err(e) => {
-                eprintln!("warning: $readmem: cannot open '{file}': {e}");
+            Err(_) => {
+                // (as the reference prints it)
+                let name = if hex { "$readmemh" } else { "$readmemb" };
+                let _ = writeln!(self.out, "ERROR: {loc}: {name}: Unable to open {file} for reading.");
                 return;
             }
         };

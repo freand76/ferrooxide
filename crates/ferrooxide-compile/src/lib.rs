@@ -178,6 +178,9 @@ pub struct Compiler<'a> {
     late_defparam: bool,
     restarted: bool,
     top_names: HashSet<String>,
+    /// the scope of the job being compiled, and per process the scope it was created in
+    job_scope: usize,
+    proc_scope: Vec<usize>,
     /// package (and `$unit`) scopes by name
     pub(crate) pkg_scopes: HashMap<String, usize>,
     /// UDP name -> index of its runtime table
@@ -322,6 +325,7 @@ pub fn compile_dialect(
     c.init_events();
     c.resolve_disables();
     c.resolve_views();
+    c.start_order();
     // package variables are not dumped (as in the reference)
     if !c.pkg_scopes.is_empty() {
         let pre: Vec<String> = c.pkg_scopes.keys().map(|n| format!("{n}.")).collect();
@@ -431,6 +435,8 @@ impl<'a> Compiler<'a> {
             func_reads_seen: std::cell::RefCell::new(Vec::new()),
             top_names: HashSet::new(),
             pkg_scopes: HashMap::new(),
+            job_scope: usize::MAX,
+            proc_scope: Vec::new(),
             redirect: HashMap::new(),
         }
     }
@@ -638,6 +644,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
+        self.proc_scope.push(self.job_scope);
         self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false });
         self.pb.push(PState { proc: id, ..Default::default() });
         self.scratch_saved.push(self.scratch_top);
@@ -855,6 +862,51 @@ impl<'a> Compiler<'a> {
         });
         self.elem_alias.insert((arr, e), id);
         Some(id)
+    }
+
+    /// The order in which processes start at time 0, as in the reference: top-level modules
+    /// by name; in a scope first its generate scopes, then its instances (in source order,
+    /// each with everything below it), then its own processes in source order.
+    fn start_order(&mut self) {
+        let n = self.scopes.len();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (s, sc) in self.scopes.iter().enumerate() {
+            let mut v: Vec<usize> = sc.children.values().copied().filter(|&c| c != s).collect();
+            v.sort_unstable();
+            v.dedup();
+            // generate scopes (their parent is this scope) before instances
+            v.sort_by_key(|&c| (self.scopes[c].parent != Some(s), c));
+            children[s] = v;
+        }
+        let mut rank = vec![usize::MAX; n];
+        let mut next = 0;
+        let mut tops: Vec<(&String, &usize)> = self.tops.iter().collect();
+        tops.sort();
+        fn visit(s: usize, children: &[Vec<usize>], rank: &mut [usize], next: &mut usize) {
+            if rank[s] != usize::MAX {
+                return;
+            }
+            rank[s] = usize::MAX - 1;
+            for &c in &children[s] {
+                visit(c, children, rank, next);
+            }
+            rank[s] = *next;
+            *next += 1;
+        }
+        for (_, &t) in tops {
+            visit(t, &children, &mut rank, &mut next);
+        }
+        let key = |p: usize| -> usize {
+            match self.proc_scope.get(p) {
+                Some(&s) if s < n => rank[s].saturating_add(1),
+                // continuous assignments, port connections: first, in creation order
+                Some(&s) if s == usize::MAX - 1 => 0,
+                _ => usize::MAX,
+            }
+        };
+        let mut order: Vec<u32> = (0..self.prog.procs.len() as u32).collect();
+        order.sort_by_key(|&p| (key(p as usize), p));
+        self.prog.start_order = order;
     }
 
     /// A package (or `$unit`) scope.
@@ -2698,6 +2750,7 @@ impl<'a> Compiler<'a> {
         if v.is_empty() {
             return;
         }
+        self.job_scope = usize::MAX;
         self.begin_proc("$init".into(), ProcClass::Normal);
         for sig in v {
             self.emit(Instr::Touch { sig });
@@ -3026,6 +3079,12 @@ impl<'a> Compiler<'a> {
     }
 
     fn codegen_job(&mut self, job: &Job<'a>) -> R<()> {
+        // (only initial / always blocks start in scope order; continuous assignments and
+        // port connections keep theirs)
+        self.job_scope = match job {
+            Job::Proc { scope, .. } => *scope,
+            _ => usize::MAX - 1,
+        };
         {
             match job {
                 Job::Proc { kind, body, scope, line } => {

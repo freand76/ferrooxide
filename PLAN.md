@@ -322,19 +322,56 @@ Next performance steps: ports connected to part selects as aliases, fusing sibli
 with the same inputs, signal values cached in registers within an activation, timing wheel,
 `--threads` (partitioned same-edge/same-rank parallelism, see M8).
 
-## Status and next steps (2026-11-14, updated after the debug server)
+**Where to work when speed matters again** (profile 2026-11-14, `perf record -g`, commit
+after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 0.68 G /
+1.82 G):
 
-Icarus regression suite (ivtest, normal tests): ~88% pass. Real-design benchmark: output
-identical to Icarus, 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
+| function | cpuish | mixed |
+|----------|--------|-------|
+| `Sim::notify` (`rt/vm.rs`) | 36 % | 25 % |
+| JIT code (all shapes) | 39 % | 25 % |
+| `Sim::advance_steps` (scheduler loop) | 12 % | 19 % |
+| `Sim::exec` (generic instructions) | 10 % | 7 % |
+| future queue: `BTreeMap` entry + malloc/free/realloc of `Vec<Fut>` | 1.5 % | 7.5 % |
+
+1. `notify` is the largest single item. Per change it follows `parent` (array elements),
+   checks the dirty list, sets one comb bit per combinational reader with a `comb_wake` call
+   each, then scans the event fan-out (edge check from the value's LSB) and sorts `wake_buf`
+   when more than one waiter wakes. Ideas: per-signal flags precomputed at build time (no
+   event fan-out / only combinational readers / no parent) so the common case is one bit
+   loop; set the comb bits of small fan-outs directly in JIT code (as `Wait` and NBA appends
+   already are); skip the sort when the waiters are already in `wseq` order.
+2. Timing wheel for `future` (vm.rs `Sim::future`), and reuse the `Vec<Fut>` of a finished
+   time slot instead of allocating one per slot (`BTreeMap::entry().or_default()`).
+3. Wide (>64-bit) operations still leave the JIT for the generic path in places
+   (`FX_GENSTATS=1` counts them); mixed.v has a 128-bit datapath.
+4. Nets with several drivers are resolved by a process in the settle; resolving inline at the
+   driver's store (as the reference does, see the known difference) would also save
+   activations.
+5. `Sim::advance_steps`: per time step bookkeeping (dirty list, postponed, NBA swap); profile
+   it with `perf annotate` before changing it.
+6. Real design (TetrIC run target): about 25-32 s wall with the machine loaded; compare builds
+   with `perf stat -e instructions` (231 G at 69f7fb4).
+7. Measuring: cycles move by up to ±4 % between builds whose instruction counts are identical
+   (code layout of `notify` / `advance_steps` after unrelated changes: cpuish 2.86 G at
+   7d1ee50, 2.96 G after the SystemVerilog work, both 7.964 G instructions). Compare
+   `-e instructions,cycles`, several runs each; a layout-only swing is not a regression, and
+   pinning the hot functions' alignment (or PGO) may recover it.
+
+## Status and next steps (2026-11-14, updated after the SystemVerilog work)
+
+Icarus regression suite (ivtest, normal tests): main list 1341 of 1526 (88 %), SystemVerilog
+list 300 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
 
 Next, roughly in order (see "Architecture changes ahead" below for why this order):
-1. **SystemVerilog RTL items that fit the current design**: unpacked dimensions in typedefs,
-   `timeunit`/`timeprecision`, file-scope variables, `unique`/`priority` warnings,
-   `$countones`/`$onehot`/`$onehot0`, arrays of interfaces. (Done: the `assign z = a;`
-   alias, see the known difference below.)
-2. **Types in elaboration** (A1 below), with `parameter type`.
+1. **SystemVerilog RTL items that fit the current design**: `unique`/`priority` warnings,
+   `$countones`/`$onehot`/`$onehot0`, arrays of interfaces, forward typedefs. (Done: the
+   `assign z = a;` alias, file-scope and package variables, `timeunit`, array typedefs.)
+2. **Types in elaboration** (A1 below): first part done (package scopes, `parameter type`);
+   next a type per signal in the compiler, then struct layout and members out of the parser.
 3. **Heap objects** (A2): `string`, queues, dynamic and associative arrays.
 4. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
    loop. Then classes and `program`; VPI (A4) on the same base.
@@ -360,6 +397,12 @@ type, has a strength, a link or is forced. Not yet: nets with several drivers, `
 and strength drivers (resolved immediately there, in the settle here), and `assign z = m[i]`
 with a run-time index. Not immediate there either: logic (`a & b`), part selects, widening.
 Interactive/MCP `force` of an aliased net forces its source.
+
+Also found 2026-11-14: the reference starts time-0 processes by scope (instances before the
+instantiating module's own blocks; done, `start_order`), which the real design's first two
+output lines depend on. Not yet: `~` / `buf` of an undriven input stays z there (ICARUS_NOTES
+8); a second `$dumpvars` prints "ignoring signals in previously scanned scope"; nested module
+declarations.
 
 Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
 multi-dimensional arrays as ports or whole-array assignments are not supported.
@@ -387,6 +430,21 @@ class(id), unpacked struct, ...) carries the meaning; packed types are still low
 vectors at the end, so runtime and JIT are unchanged for RTL. Prerequisite for most of the
 remaining SystemVerilog. Good moment to split elaboration (types, nets/drivers, hierarchy) out
 of `compile/lib.rs`.
+
+*A1 status (2026-11-14).* First part done:
+- packages and `$unit` are scopes of their own, elaborated once (`Module::package`, the
+  package's module from the parser; `Scope::imports` for lookups after a module's own names).
+  Their variables are shared, their functions and tasks run in their scope (its names and time
+  unit); a module's copy of a package parameter is `localparam X = P.X`, and constants in
+  types declared there refer to that scope (`svtypes::qualify_type`, `scoped_copy`);
+- type values in the compiler: `Sym::Type` / `PVal::Type` hold an `SvType` with its
+  dimensions evaluated (`resolve_type`), `Expr::Type` carries a type in a parameter list.
+  `parameter type` works for declarations, ports, `$bits` and casts, per instance.
+Left: struct layout and member access are still resolved in the parser (`struct_access`),
+so variables of a type parameter have no members and unpacked structs are not possible; the
+compiler still types expressions as (width, signed, real). For A2 the next piece is a type per
+signal in the compiler (string, queue, ...) and expression typing that uses it; then member
+access moves to the compiler with the layout.
 
 **A2. Heap objects.** Strings, queues, dynamic and associative arrays live in a heap of
 objects, referred to by handles stored in the flat memory (one value word; a null handle is
@@ -444,7 +502,16 @@ typedefs (16), `timeunit`/`timeprecision` (12), plus enum methods (`.name()`, `.
 `$left`/`$right`/`$size`/`$is_signed` and other query functions, `always_comb` rules (31 FAIL:
 no PASSED, e.g. always_comb checks).
 
-Next, for real RTL: unpacked dimensions in typedefs, `timeunit`/`timeprecision`, file-scope
-variables, `unique`/`priority` case violation warnings, `$countones`/`$onehot`/`$onehot0`
-code generation, arrays of interfaces, struct-typed function arguments with patterns; then
-testbench features: `string`, queues/dynamic arrays, `program`, classes (large).
+Since then (2026-11-14, second part): file-scope variables and package variables (one
+instance, shared), `P::x` / `P::f()` naming the package's own, `timeunit` / `timeprecision`
+(module and file scope), time literals, typedefs with unpacked dimensions (the type's
+dimensions first, ICARUS_NOTES 9), `parameter type`, constants of package / `$unit` types
+evaluated in their scope, `input var` / `input logic` port kinds, `-u` (separate
+compilation units). SystemVerilog list 300 of 700 (42.9 %, from 251), main list 1341 of 1526
+(from 1337).
+
+Next, for real RTL: `unique`/`priority` case violation warnings, `$countones`/`$onehot`/
+`$onehot0` code generation, arrays of interfaces, struct-typed function arguments with
+patterns, nested module declarations (`sv_timeunit_prec3b`), forward typedefs (`typedef enum
+T;`, ~10 tests), `export` in packages; then testbench features: `string`, queues/dynamic
+arrays, `program`, classes (large).

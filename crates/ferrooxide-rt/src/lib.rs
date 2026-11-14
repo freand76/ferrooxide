@@ -116,6 +116,8 @@ pub struct Program {
     pub ctls: Vec<EventCtl>,
     /// all hierarchical names (including port aliases) for VCD: (name, signal)
     pub names: Vec<(String, u32)>,
+    /// the order in which the processes start at time 0 (empty: by index)
+    pub start_order: Vec<u32>,
     /// packages with variables (not dumped; `$dumpvars` warns about them)
     pub packages: Vec<String>,
     /// memory words [0, scratch_words) are the shared scratch region for process temporaries
