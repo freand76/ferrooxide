@@ -516,14 +516,71 @@ impl Parser {
 
     /// `typedef type name;` (also `typedef enum ... name;`, forward `typedef name;`).
     pub(crate) fn typedef(&mut self) -> Result<()> {
+        let start = self.tok_pos();
+        if let Some(&end) = self.early_typedefs.get(&start) {
+            // parsed already, for a forward declaration
+            self.set_tok_pos(end);
+            return Ok(());
+        }
         self.bump();
-        let Some(t) = self.data_type()? else {
-            // forward declaration: typedef [struct|enum] name;
-            self.eat_kw("struct");
-            self.eat_kw("union");
-            self.eat_kw("enum");
-            self.ident()?;
-            return self.expect_p(";");
+        // forward declaration (IEEE 1800 6.18): typedef [enum|struct|union|class|interface class] name;
+        let kind = match (self.peek(), self.peek_at(1), self.peek_at(2), self.peek_at(3)) {
+            (Tok::Ident(_), Tok::Punct(";"), _, _) => Some(""),
+            (Tok::Ident(k), Tok::Ident(_), Tok::Punct(";"), _) if matches!(k.as_str(), "enum" | "struct" | "union" | "class") => {
+                Some(match k.as_str() {
+                    "enum" => "enum",
+                    "struct" => "struct",
+                    "union" => "union",
+                    _ => "class",
+                })
+            }
+            (Tok::Ident(k), Tok::Ident(c), Tok::Ident(_), Tok::Punct(";")) if k == "interface" && c == "class" => Some("class"),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            while !matches!(self.peek_at(1), Tok::Punct(";")) {
+                self.bump();
+            }
+            let line = self.line();
+            let name = self.ident()?;
+            self.expect_p(";")?;
+            if !self.types.contains_key(&name) {
+                // the definition comes later in this scope: parse it now, so that uses before
+                // it know the type
+                if let Some(p) = self.find_typedef(&name) {
+                    let here = self.tok_pos();
+                    let pending = std::mem::take(&mut self.pending);
+                    self.set_tok_pos(p);
+                    let r = self.typedef();
+                    let end = self.tok_pos();
+                    self.set_tok_pos(here);
+                    let mut early = std::mem::replace(&mut self.pending, pending);
+                    r?;
+                    self.pending.append(&mut early);
+                    self.early_typedefs.insert(p, end);
+                }
+            }
+            if let Some(t) = self.types.get(&name) {
+                let ok = match kind {
+                    "enum" => t.enum_names.is_some(),
+                    "struct" => t.fields.as_ref().is_some_and(|f| !f.union),
+                    "union" => t.fields.as_ref().is_some_and(|f| f.union),
+                    "class" => false,
+                    _ => true,
+                };
+                if !ok {
+                    return self.err(format!("'{name}' is declared as {kind} (line {line}) but defined differently"));
+                }
+            }
+            return Ok(());
+        }
+        let t = if self.eat_kw("string") {
+            SvType { kind: NetKind::String, signed: false, dims: vec![], fields: None, int_kind: false, enum_names: None, unpacked: vec![], param: None }
+        } else {
+            match self.data_type()? {
+                Some(t) => t,
+                None => return self.err(format!("expected a type after typedef, found {}", self.describe())),
+            }
         };
         let name = self.ident()?;
         let mut t = t;

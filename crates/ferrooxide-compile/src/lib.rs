@@ -121,6 +121,11 @@ pub struct Compiler<'a> {
     mods: HashMap<&'a str, &'a Module>,
     pub prog: Program,
     pub(crate) scopes: Vec<Scope<'a>>,
+    /// arrays of instances and interface port arrays: (scope, name) -> (left, right); the
+    /// elements are the children `name[i]` of the scope
+    inst_arrays: HashMap<(usize, String), (i64, i64)>,
+    /// the module (or interface) of each instance scope
+    scope_module: HashMap<usize, &'a Module>,
     tops: HashMap<String, usize>,
     jobs: Vec<Job<'a>>,
     consts: HashMap<Const, u32>,
@@ -384,6 +389,8 @@ impl<'a> Compiler<'a> {
             mods,
             prog: Program { mem: vec![0; SCRATCH_WORDS as usize], ..Program::default() },
             scopes: Vec::new(),
+            inst_arrays: HashMap::new(),
+            scope_module: HashMap::new(),
             tops: HashMap::new(),
             jobs: Vec::new(),
             consts: HashMap::new(),
@@ -1057,6 +1064,7 @@ impl<'a> Compiler<'a> {
     ) -> R<usize> {
         let saved_file = std::mem::replace(&mut self.file, m.file.clone());
         let sid = self.new_scope(path.clone(), None, m.file.clone());
+        self.scope_module.insert(sid, m);
         self.scopes[sid].imports = m.imports.iter().filter_map(|n| self.pkg_scopes.get(n).copied()).collect();
         self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
         self.scopes[sid].tprec = m.timescale.map(|t| t.1).unwrap_or(0);
@@ -1099,12 +1107,92 @@ impl<'a> Compiler<'a> {
         let parent_scope = conns.map(|c| c.1);
         let inst_line = self.line;
         // interface ports: the port's name stands for the connected interface instance
-        for (pn, iface) in &m.iface_ports {
+        for (pn, iface, dims, modport) in &m.iface_ports {
+            if let (Some(mp), Some(im)) = (modport, self.mods.get(iface.as_str())) {
+                if im.interface && !im.modports.contains(mp) {
+                    return self.err(format!("interface '{iface}' has no modport '{mp}' (port '{pn}' of '{}')", m.name));
+                }
+            }
+            // the connected instance must be one of the port's interface
+            let check = |c: &Self, t: usize| -> R<()> {
+                match c.scope_module.get(&t) {
+                    Some(tm) if tm.interface && tm.name != *iface => {
+                        c.err(format!("interface port '{pn}' of '{}' is connected to an instance of '{}', not '{iface}'", m.name, tm.name))
+                    }
+                    _ => Ok(()),
+                }
+            };
+            if let Some((pl, pr)) = dims {
+                // an array port: the element k above the lowest index is element k above the
+                // lowest index of the connected array, as the reference does (ICARUS_NOTES 10)
+                let (pl, pr) = (self.const_int(pl, sid)?, self.const_int(pr, sid)?);
+                let actual = match (port_conns.get(pn), parent_scope) {
+                    (Some(Some(e)), Some(ps)) => {
+                        let parts: Vec<String> = match e {
+                            Expr::Ident(n) => vec![n.clone()],
+                            Expr::Hier(p) => p.clone(),
+                            _ => vec![],
+                        };
+                        match parts.split_last() {
+                            Some((last, pre)) if pre.is_empty() => {
+                                let mut x = Some(ps);
+                                let mut found = None;
+                                while let Some(s) = x {
+                                    if let Some(&lr) = self.inst_arrays.get(&(s, last.clone())) {
+                                        found = Some((s, last.clone(), lr));
+                                        break;
+                                    }
+                                    x = self.scopes[s].parent;
+                                }
+                                found
+                            }
+                            Some((last, pre)) => self
+                                .hier_scope(pre, ps)
+                                .and_then(|s| self.inst_arrays.get(&(s, last.clone())).map(|&lr| (s, last.clone(), lr))),
+                            None => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let Some((as_, an, (al, ar))) = actual else {
+                    return self.err(format!("interface port '{pn}' of '{}' must be connected to an array of '{iface}' instances", m.name));
+                };
+                let n = (pl - pr).abs() + 1;
+                if (al - ar).abs() + 1 != n {
+                    return self.err(format!(
+                        "interface port '{pn}' of '{}' has {n} elements, the connected '{an}' has {}",
+                        m.name,
+                        (al - ar).abs() + 1
+                    ));
+                }
+                for k in 0..n {
+                    let (pi, ai) = (pl.min(pr) + k, al.min(ar) + k);
+                    let Some(&t) = self.scopes[as_].children.get(&format!("{an}[{ai}]")) else {
+                        return self.err(format!("'{an}[{ai}]' is not an interface instance"));
+                    };
+                    check(self, t)?;
+                    self.scopes[sid].children.insert(format!("{pn}[{pi}]"), t);
+                }
+                self.inst_arrays.insert((sid, pn.clone()), (pl, pr));
+                continue;
+            }
             let target = match (port_conns.get(pn), parent_scope) {
                 (Some(Some(e)), Some(ps)) => {
                     let parts: Vec<String> = match e {
                         Expr::Ident(n) => vec![n.clone()],
                         Expr::Hier(p) => p.clone(),
+                        // an element of an array of interface instances: `ifs[2]` (constant)
+                        Expr::Index(b, i) if matches!(**b, Expr::Ident(_) | Expr::Hier(_)) => {
+                            let k = self.const_int(i, ps)?;
+                            let mut p = match &**b {
+                                Expr::Ident(n) => vec![n.clone()],
+                                Expr::Hier(p) => p.clone(),
+                                _ => unreachable!(),
+                            };
+                            let last = p.pop().unwrap();
+                            p.push(format!("{last}[{k}]"));
+                            p
+                        }
                         _ => vec![],
                     };
                     // `bus.master`: a modport of the instance
@@ -1117,6 +1205,7 @@ impl<'a> Compiler<'a> {
             let Some(target) = target else {
                 return self.err(format!("interface port '{pn}' of '{}' must be connected to an instance of '{iface}'", m.name));
             };
+            check(self, target)?;
             self.scopes[sid].children.insert(pn.clone(), target);
         }
         self.elab_items(&m.items, sid, true, &port_conns, parent_scope)?;
@@ -2012,6 +2101,7 @@ impl<'a> Compiler<'a> {
                             let (l, r) = (self.const_int(l, sid)?, self.const_int(r, sid)?);
                             let n = ((l - r).abs() + 1) as u32;
                             let pws = self.port_widths(m, &ovs)?;
+                            self.inst_arrays.insert((sid, inst.name.clone()), (l, r));
                             // elaborated lowest index first, like Icarus
                             for i in l.min(r)..=l.max(r) {
                                 let k = (i - l).unsigned_abs() as u32;

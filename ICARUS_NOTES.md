@@ -31,3 +31,8 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    the dimensions [3][5] (`$size(x, 1)` is 3, `x[4][2]` is out of bounds); 1800-2017 7.4.5
    (`mem_type ar [0:7]`) makes the declaration's own dimension the outer one ([5][3]).
    ivtest `sv_typedef_nested_array`. Test: `tests/verilog/typedef_unpacked.v`.
+10. **Interface port arrays connect lowest index to lowest index.** A port `I p[1:0]`
+   connected to `I y[2:3]()` gets `p[0]` = `y[2]` and `p[1]` = `y[3]`, whatever the
+   directions; 1800-2017 23.3.3 (connections of unpacked arrays, as unpacked array
+   assignment, 7.6) pairs the elements from the left (`p[1]` = `y[2]`). Same directions
+   give the same result. Test: `tests/verilog/sv_iface_array.v`.

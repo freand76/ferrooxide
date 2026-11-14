@@ -392,21 +392,24 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
 Icarus regression suite (ivtest, normal tests): main list 1341 of 1526 (88 %), SystemVerilog
-list 352 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+list 358 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
 
 Next, roughly in order (see "Architecture changes ahead" below for why this order):
-1. **SystemVerilog RTL items that fit the current design**: arrays of interfaces, forward
-   typedefs. (Done: the `assign z = a;` alias, file-scope and package variables, `timeunit`,
+1. **SystemVerilog RTL items that fit the current design**: struct-typed function arguments
+   with patterns, nested module declarations, `export` in packages. (Done: arrays of
+   interfaces and interface port arrays, forward typedefs, the `assign z = a;` alias, file-scope and package variables, `timeunit`,
    array typedefs, `unique`/`priority` case warnings for unmatched values,
    `$countones`/`$onehot`/`$onehot0`, the time-0 run of `always_comb`/`always_latch` after
    all other processes have started (IEEE 1800 9.2.2.2.2), `break;`/`continue;`, prefix
    `++a;`/`--a;`, `inside` and `case ... inside`, `foreach` (not over hierarchical names),
    enum methods without parentheses, several variables and steps in a `for` header,
    `unique if`/`priority if` warnings.) Not checked: overlapping items of a `unique`
-   case/if (the reference does not report them either). Known difference left (order IEEE leaves open): on a
+   case/if (the reference does not report them either). Found: the reference sizes a
+   genvar in a port expression differently (`8'd10 + g` to an 8-bit port: "given 5 bits,
+   padding" there, "given 32, pruning" here). Known difference left (order IEEE leaves open): on a
    change, a ranked combinational process (`always_comb`, `always @*`) runs before the other
    waiters of the signal; the reference wakes it among them (newest waiter first).
 2. **Types in elaboration** (A1 below): first part done (package scopes, `parameter type`);
@@ -534,11 +537,14 @@ Kept up to date as features stop short; regression-suite test names in brackets.
 SystemVerilog data types and testbench features:
 - queues `[$]`, dynamic arrays `[]`, associative arrays (also in typedefs) [sv_queue*,
   sv_darray*]: need heap objects beyond strings (A2).
-- classes, `program` blocks, `export` in packages, forward typedefs (`typedef enum T;`)
-  [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd*].
+- classes, `program` blocks, `export` in packages, forward `typedef class`
+  [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd_class*].
 - struct members of variables whose type is a type parameter; unpacked structs (struct
   layout is still resolved in the parser, A1).
-- arrays of interfaces; nested module declarations [sv_timeunit_prec3b].
+- nested module declarations [sv_timeunit_prec3b]; multi-dimensional interface port
+  arrays; modport directions are not enforced (writing an input of a modport, members not
+  listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
+  a forward typedef defined in another scope than its declaration.
 - `unique` case/if: overlapping items are not reported (only "no item matches", as the
   reference); `foreach` over hierarchical names or class/queue members; `inside` with
   unpacked arrays as set items.
@@ -594,7 +600,6 @@ evaluated in their scope, `input var` / `input logic` port kinds, `-u` (separate
 compilation units), `string` (first version, see A2 status and Unsupported).
 SystemVerilog list 324 of 700 (46.3 %, from 251), main list 1341 of 1526 (from 1337).
 
-Next, for real RTL: arrays of interfaces, struct-typed function arguments with
-patterns, nested module declarations (`sv_timeunit_prec3b`), forward typedefs (`typedef enum
-T;`, ~10 tests), `export` in packages; then testbench features: `string`, queues/dynamic
+Next, for real RTL: struct-typed function arguments with patterns, nested module
+declarations (`sv_timeunit_prec3b`), `export` in packages; then testbench features: `string`, queues/dynamic
 arrays, `program`, classes (large).

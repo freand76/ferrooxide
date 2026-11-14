@@ -4,7 +4,8 @@
 #
 # A test passes when
 #   - <name>.expected exists: stdout equals it exactly;
-#   - otherwise (self-checking): stdout has a line "PASSED" and no line starting with "FAILED".
+#   - otherwise (self-checking): stdout has a line "PASSED" and no line starting with "FAILED";
+#     a test with a nonzero `// exit:` (an error test) only needs that exit status.
 # Header lines in the test:
 #   // args: +a=1 +b      plusargs
 #   // flags: -g2005      extra ferrooxide options
@@ -70,7 +71,7 @@ for f in "${files[@]}"; do
         [ $verbose = 1 ] && diff -u "$exp" "$tmp/out" | head -30
         break
       fi
-    else
+    elif [ "$want_rc" = 0 ]; then
       if ! grep -qx 'PASSED' "$tmp/out" || grep -q '^FAILED' "$tmp/out"; then
         ok=0; why="no PASSED or a FAILED line ${mode:-default}"
         [ $verbose = 1 ] && head -30 "$tmp/out"

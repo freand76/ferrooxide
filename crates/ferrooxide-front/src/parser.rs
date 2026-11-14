@@ -27,6 +27,8 @@ pub struct Parser {
     pub(crate) last_type: Option<SvType>,
     /// items produced while parsing a declaration (enum constants)
     pub(crate) pending: Vec<Item>,
+    /// typedefs parsed ahead of their place for a forward declaration: start -> end position
+    pub(crate) early_typedefs: std::collections::HashMap<usize, usize>,
     /// items at file scope ($unit): added to every module that follows
     pub unit_items: Vec<Item>,
     /// variable declarations, functions and tasks at file scope (elaborated once, in the
@@ -136,6 +138,7 @@ impl Parser {
             decl_type: None,
             last_type: None,
             pending: Vec::new(),
+            early_typedefs: std::collections::HashMap::new(),
             unit_items: Vec::new(),
             unit_vars: Vec::new(),
             unit_var_types: HashMap::new(),
@@ -151,6 +154,58 @@ impl Parser {
             ret_type: None,
             modports: Vec::new(),
         }
+    }
+
+    /// The position of the `typedef` that defines `name` later in the current scope (up to
+    /// the end of the module / package / interface), skipping forward declarations.
+    pub(crate) fn find_typedef(&self, name: &str) -> Option<usize> {
+        let mut i = self.pos;
+        while i < self.toks.len() {
+            match &self.toks[i].tok {
+                Tok::Eof => return None,
+                Tok::Ident(k) if matches!(k.as_str(), "endmodule" | "endpackage" | "endinterface" | "endprogram" | "module" | "package" | "interface" | "program") => return None,
+                Tok::Ident(k) if k == "typedef" => {
+                    // its end: the `;` outside brackets; the defined name is the last identifier
+                    // outside brackets before it
+                    let (mut j, mut depth, mut last, mut n) = (i + 1, 0i32, None, 0);
+                    while j < self.toks.len() {
+                        match &self.toks[j].tok {
+                            Tok::Punct("(" | "[" | "{") => depth += 1,
+                            Tok::Punct(")" | "]" | "}") => depth -= 1,
+                            Tok::Punct(";") if depth == 0 => break,
+                            Tok::Ident(x) if depth == 0 => last = Some(x.as_str()),
+                            Tok::Eof => return None,
+                            _ => {}
+                        }
+                        n += 1;
+                        j += 1;
+                    }
+                    // a forward declaration has at most a keyword before the name
+                    let first = match &self.toks[i + 1].tok {
+                        Tok::Ident(k) => k.as_str(),
+                        _ => "",
+                    };
+                    let fwd = n == 1
+                        || (n == 2 && matches!(first, "enum" | "struct" | "union" | "class"))
+                        || (n == 3 && first == "interface");
+                    if last == Some(name) && !fwd {
+                        return Some(i);
+                    }
+                    i = j;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    pub(crate) fn tok_pos(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn set_tok_pos(&mut self, p: usize) {
+        self.pos = p;
     }
 
     // ---------- token helpers ----------
@@ -606,23 +661,37 @@ impl Parser {
                 if matches!(self.peek(), Tok::Ident(s) if s == "input" || s == "output" || s == "inout") || self.is_iface_port() {
                     // ANSI style
                     let mut cur: Option<Decl> = None;
+                    let mut cur_iface: Option<(String, Option<String>)> = None;
                     loop {
                         let pline = self.line();
-                        if self.is_iface_port() {
-                            // interface port: bus_if b / bus_if.master b
-                            let iface = self.ident()?;
-                            if self.eat_p(".") {
-                                self.ident()?;
-                            }
+                        // a further name after an interface port: the same interface type
+                        let more = cur_iface.is_some()
+                            && matches!(self.peek(), Tok::Ident(n) if !is_keyword(n) && !self.types.contains_key(n))
+                            && matches!(self.peek_at(1), Tok::Punct("," | ")" | "["));
+                        if more || self.is_iface_port() {
+                            // interface port: bus_if b / bus_if.master b / bus_if b[2]
+                            let (iface, modport) = if more {
+                                cur_iface.clone().unwrap()
+                            } else {
+                                let i = self.ident()?;
+                                let mp = if self.eat_p(".") { Some(self.ident()?) } else { None };
+                                (i, mp)
+                            };
                             let pname = self.ident()?;
-                            iface_ports.push((pname.clone(), iface));
+                            let dims = if self.is_p("[") { Some(self.range()?) } else { None };
+                            if self.is_p("[") {
+                                return self.err("multi-dimensional interface port arrays are not supported");
+                            }
+                            iface_ports.push((pname.clone(), iface.clone(), dims, modport.clone()));
                             ports.push(pname);
                             cur = None;
+                            cur_iface = Some((iface, modport));
                             if !self.eat_p(",") {
                                 break;
                             }
                             continue;
                         }
+                        cur_iface = None;
                         if matches!(self.peek(), Tok::Ident(s) if s == "input" || s == "output" || s == "inout") {
                             let d = self.decl_head(true)?;
                             cur = Some(d);
@@ -1066,7 +1135,7 @@ impl Parser {
         }
         match (self.peek_at(1), self.peek_at(2), self.peek_at(3)) {
             (Tok::Punct("."), Tok::Ident(_), Tok::Ident(_)) => true,
-            (Tok::Ident(n), Tok::Punct("," | ")"), _) => !is_keyword(n),
+            (Tok::Ident(n), Tok::Punct("," | ")" | "["), _) => !is_keyword(n),
             _ => false,
         }
     }
@@ -2659,7 +2728,11 @@ impl Parser {
                 }
             }
             // casts: T'(e), int'(e), signed'(e)
-            Tok::Ident(name) if name == "string" && self.is_p("'") && matches!(self.peek_at(1), Tok::Punct("(")) => {
+            Tok::Ident(name)
+                if (name == "string" || self.types.get(&name).is_some_and(|t| t.kind == NetKind::String && t.unpacked.is_empty()))
+                    && self.is_p("'")
+                    && matches!(self.peek_at(1), Tok::Punct("(")) =>
+            {
                 self.bump();
                 self.bump();
                 let e = self.expr()?;
