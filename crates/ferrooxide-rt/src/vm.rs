@@ -2262,6 +2262,9 @@ impl Sim {
                     let path = self.vcd_path.clone();
                     if self.trace_start(&path, &|_| true).is_ok() {
                         let _ = writeln!(self.out, "VCD info: dumpfile {path} opened for output.");
+                        for p in &self.prog.packages {
+                            let _ = writeln!(self.out, "VCD warning: $dumpvars: Package ({p}::) is not dumpable with VCD.");
+                        }
                     }
                 }
             }

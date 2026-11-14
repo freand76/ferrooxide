@@ -29,6 +29,16 @@ pub struct Parser {
     pub(crate) pending: Vec<Item>,
     /// items at file scope ($unit): added to every module that follows
     pub unit_items: Vec<Item>,
+    /// variable declarations at file scope (elaborated once, in the `$unit` module) and
+    /// their types
+    pub unit_vars: Vec<Item>,
+    pub unit_var_types: HashMap<String, (Rc<SvType>, Vec<Range>)>,
+    /// packages imported at file scope (their variables are visible in all modules)
+    pub unit_pkgs: Vec<String>,
+    /// the name of this file's `$unit` module
+    pub unit_name: String,
+    /// modules made for packages with variables (added to the file's modules)
+    pub(crate) pkg_modules: Vec<Module>,
     /// names read so far that are SystemVerilog keywords (lint)
     kw_names: Vec<(String, Line)>,
     /// packages (carried over to the next file)
@@ -120,6 +130,11 @@ impl Parser {
             last_type: None,
             pending: Vec::new(),
             unit_items: Vec::new(),
+            unit_vars: Vec::new(),
+            unit_var_types: HashMap::new(),
+            unit_pkgs: Vec::new(),
+            unit_name: "$unit".into(),
+            pkg_modules: Vec::new(),
             kw_names: Vec::new(),
             packages: HashMap::new(),
             mod_pkgs: Vec::new(),
@@ -339,6 +354,24 @@ impl Parser {
                     self.module_item(&mut v)?;
                     self.unit_items.extend(v);
                 }
+                _ if self.is_decl_start() && !matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(), "input" | "output" | "inout" | "genvar")) => {
+                    // a file-scope variable: one instance, shared by all modules
+                    let before: std::collections::HashSet<String> = self.vars.keys().cloned().collect();
+                    let mut v = Vec::new();
+                    self.module_item(&mut v)?;
+                    for (k, t) in &self.vars {
+                        if !before.contains(k) {
+                            self.unit_var_types.insert(k.clone(), t.clone());
+                        }
+                    }
+                    for it in v {
+                        if matches!(it, Item::Decl(_)) {
+                            self.unit_vars.push(it);
+                        } else {
+                            self.unit_items.push(it);
+                        }
+                    }
+                }
                 Tok::Ident(s) if s == "__fx_uncdrive" => {
                     self.bump();
                     let t = self.ident_or_kw()?;
@@ -378,7 +411,38 @@ impl Parser {
                 _ => return self.err(format!("expected 'module', found {}", self.describe())),
             }
         }
+        mods.append(&mut self.pkg_modules);
         Ok(mods)
+    }
+
+    /// After the last file: the `$unit` module holding the file-scope variables, if any.
+    pub fn unit_module(&mut self) -> Option<Module> {
+        if self.unit_vars.is_empty() {
+            return None;
+        }
+        let mut items = self.unit_items.clone();
+        items.append(&mut self.unit_vars);
+        Some(self.package_module(self.unit_name.clone(), items, self.unit_pkgs.clone()))
+    }
+
+    pub(crate) fn package_module(&self, name: String, items: Vec<Item>, imports: Vec<String>) -> Module {
+        Module {
+            name,
+            timescale: self.timescale,
+            default_nettype: self.default_nettype.clone(),
+            unconnected_drive: None,
+            file: self.file.clone(),
+            line: 0,
+            ports: vec![],
+            items,
+            udp: None,
+            keyword_names: vec![],
+            interface: false,
+            iface_ports: vec![],
+            modports: vec![],
+            package: true,
+            imports,
+        }
     }
 
     fn module(&mut self) -> Result<Module> {
@@ -392,6 +456,7 @@ impl Parser {
         // typedefs of the module stay in it
         let saved_types = self.types.clone();
         self.vars.clear();
+        self.vars.extend(self.unit_var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
         self.mod_pkgs.clear();
         let mut items = Vec::new();
         // imports in the module header
@@ -524,6 +589,9 @@ impl Parser {
         // items of the packages it uses, then file-scope items, unless the module declares
         // the name itself
         let pkgs = std::mem::take(&mut self.mod_pkgs);
+        let mut imports = pkgs.clone();
+        imports.extend(self.unit_pkgs.iter().cloned());
+        imports.push(self.unit_name.clone());
         let mut outer = self.package_items(&pkgs);
         outer.extend(self.unit_items.iter().cloned());
         if !outer.is_empty() {
@@ -551,6 +619,8 @@ impl Parser {
             interface,
             iface_ports,
             modports: std::mem::take(&mut self.modports),
+            package: false,
+            imports,
         })
     }
 
@@ -661,6 +731,8 @@ impl Parser {
             interface: false,
             iface_ports: vec![],
             modports: vec![],
+            package: false,
+            imports: vec![],
         })
     }
 
@@ -723,9 +795,7 @@ impl Parser {
             }
         }
         self.decl_type = None;
-        if !self.sv_ident_here() {
-            self.eat_kw("var");
-        }
+        let is_var = !self.sv_ident_here() && self.eat_kw("var");
         if self.is_sv_type_start() {
             return self.typed_decl_head(dir, line);
         }
@@ -782,6 +852,12 @@ impl Parser {
             };
             if let Some(k) = k {
                 self.bump();
+                // `input logic`: a net of type logic (only `input var logic` is a variable)
+                let k = if k == NetKind::Reg && s == "logic" && !is_var && matches!(dir, Some(Dir::Input | Dir::Inout)) {
+                    NetKind::Wire
+                } else {
+                    k
+                };
                 kind = k;
                 explicit_kind = true;
                 if matches!(k, NetKind::Integer | NetKind::Int(_)) {
@@ -828,6 +904,11 @@ impl Parser {
             t.dims.extend(range.iter().cloned());
             t.dims.extend(packed.iter().cloned());
             self.decl_type = Some(Rc::new(t));
+        }
+        // `var` without a type: a logic variable (not a net, also as a port)
+        if is_var && kind == NetKind::Wire {
+            kind = NetKind::Reg;
+            explicit_kind = true;
         }
         Ok(Decl { dir, kind, net, explicit_kind, real_net, strength, delay, signed, range, packed, names: Vec::new(), line })
     }
@@ -1772,6 +1853,10 @@ impl Parser {
                 }
                 _ if is_keyword(&kw) => self.err(format!("unexpected '{kw}' in statement")),
                 _ => {
+                    // pkg::task(...)
+                    if matches!(self.peek_at(1), Tok::Punct("::")) {
+                        self.pkg_scope()?;
+                    }
                     // task call or assignment
                     if matches!(self.peek_at(1), Tok::Punct("(")) || matches!(self.peek_at(1), Tok::Punct(";")) {
                         let name = self.ident()?;
@@ -2088,6 +2173,13 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr> {
+        // pkg::var: the package's variable (not a copy in the module)
+        if let (Tok::Ident(p), Tok::Punct("::"), Tok::Ident(n)) = (self.peek().clone(), self.peek_at(1).clone(), self.peek_at(2).clone()) {
+            if self.packages.get(&p).is_some_and(|pk| pk.vars.contains_key(&n)) && !matches!(self.peek_at(3), Tok::Punct("(")) {
+                self.pos += 3;
+                return self.selects(Expr::Hier(vec![p, n]));
+            }
+        }
         // pkg::name
         self.pkg_scope()?;
         let t = self.bump();

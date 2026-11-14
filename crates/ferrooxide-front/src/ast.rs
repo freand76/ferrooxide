@@ -26,6 +26,11 @@ pub struct Module {
     pub iface_ports: Vec<(String, String)>,
     /// modport names of an interface
     pub modports: Vec<String>,
+    /// a package (or the file scope, `$unit`) holding variables: elaborated once, not a
+    /// top-level module
+    pub package: bool,
+    /// packages (and `$unit`) whose variables the module sees after its own names
+    pub imports: Vec<String>,
 }
 
 /// A UDP table. Each row: input symbols ("0", "1", "x", "?", "b", "r", "f", "p", "n", "*" or an

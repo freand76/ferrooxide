@@ -116,6 +116,8 @@ pub struct Program {
     pub ctls: Vec<EventCtl>,
     /// all hierarchical names (including port aliases) for VCD: (name, signal)
     pub names: Vec<(String, u32)>,
+    /// packages with variables (not dumped; `$dumpvars` warns about them)
+    pub packages: Vec<String>,
     /// memory words [0, scratch_words) are the shared scratch region for process temporaries
     pub scratch_words: u32,
     /// disable fusion of combinational processes (debugging)
@@ -167,6 +169,31 @@ pub struct BlockDef {
     pub start: u32,
     pub end: u32,
     pub children: Vec<u32>,
+}
+
+/// Calls `f` on every signal id an instruction refers to.
+pub fn instr_sigs_mut(ins: &mut Instr, f: &mut impl FnMut(&mut u32)) {
+    fn target(t: &mut Target, f: &mut impl FnMut(&mut u32)) {
+        match t {
+            Target::Whole { sig }
+            | Target::Part { sig, .. }
+            | Target::DynPart { sig, .. }
+            | Target::Elem { sig, .. }
+            | Target::ElemK { sig, .. }
+            | Target::ElemPart { sig, .. }
+            | Target::ElemDynPart { sig, .. } => f(sig),
+        }
+    }
+    match ins {
+        Instr::Store { t, .. } | Instr::Unforce { t } => target(t, f),
+        Instr::ArrRead { sig, .. } | Instr::Kick { sig } | Instr::Touch { sig } => f(sig),
+        Instr::SysF { f: SysFn::RandomSeed(sig) | SysFn::UrandomSeed(sig), .. } => f(sig),
+        Instr::Sys(t) => match &mut **t {
+            SysTask::ReadMem { sig, .. } | SysTask::WriteMem { sig, .. } => f(sig),
+            _ => {}
+        },
+        _ => {}
+    }
 }
 
 /// Every memory slot an instruction reads or writes (value base slots).

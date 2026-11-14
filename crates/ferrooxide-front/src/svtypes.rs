@@ -32,7 +32,10 @@ pub struct SvType {
 /// A package: its items (with those of the packages it imports) and its typedefs.
 #[derive(Debug, Default)]
 pub struct Package {
+    /// items copied into the modules that use the package (no variables)
     pub items: Vec<Item>,
+    /// its variables (in the package's own module) and their types
+    pub vars: std::collections::HashMap<String, (Rc<SvType>, Vec<Range>)>,
     pub types: std::collections::HashMap<String, Rc<SvType>>,
 }
 
@@ -181,6 +184,7 @@ impl Parser {
         self.expect_p(";")?;
         let saved_types = self.types.clone();
         let saved_pkgs = std::mem::take(&mut self.mod_pkgs);
+        let saved_vars = std::mem::take(&mut self.vars);
         let mut own = Vec::new();
         while !self.eat_kw("endpackage") {
             if matches!(self.peek(), Tok::Eof) {
@@ -199,9 +203,34 @@ impl Parser {
         // items of the packages it imports come first
         let used = std::mem::replace(&mut self.mod_pkgs, saved_pkgs);
         let mut items = self.package_items(&used);
-        items.extend(own);
+        let mut var_items = Vec::new();
+        for it in own {
+            if matches!(it, Item::Decl(_)) {
+                var_items.push(it);
+            } else {
+                items.push(it);
+            }
+        }
+        let mut vars = std::collections::HashMap::new();
+        let declared = std::mem::replace(&mut self.vars, saved_vars);
+        for it in &var_items {
+            if let Item::Decl(d) = it {
+                for n in &d.names {
+                    if let Some(t) = declared.get(&n.name) {
+                        vars.insert(n.name.clone(), t.clone());
+                    }
+                }
+            }
+        }
+        {
+            // (also without variables: the package is a scope of the design)
+            let mut all = items.clone();
+            all.extend(var_items);
+            let m = self.package_module(name.clone(), all, used);
+            self.pkg_modules.push(m);
+        }
         self.types = saved_types;
-        self.packages.insert(name, Rc::new(Package { items, types }));
+        self.packages.insert(name, Rc::new(Package { items, types, vars }));
         Ok(())
     }
 
@@ -218,11 +247,26 @@ impl Parser {
                 for (k, v) in &p.types {
                     self.types.insert(k.clone(), v.clone());
                 }
+                for (k, v) in &p.vars {
+                    self.vars.entry(k.clone()).or_insert_with(|| v.clone());
+                    if file_scope {
+                        self.unit_var_types.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
             } else {
                 let n = self.ident()?;
                 if let Some(t) = p.types.get(&n) {
-                    self.types.insert(n, t.clone());
+                    self.types.insert(n.clone(), t.clone());
                 }
+                if let Some(v) = p.vars.get(&n) {
+                    self.vars.entry(n.clone()).or_insert_with(|| v.clone());
+                    if file_scope {
+                        self.unit_var_types.entry(n).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+            if file_scope && !self.unit_pkgs.contains(&pkg) {
+                self.unit_pkgs.push(pkg.clone());
             }
             if file_scope {
                 let items = self.package_items(&[pkg]);

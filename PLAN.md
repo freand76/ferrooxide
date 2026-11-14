@@ -332,8 +332,8 @@ the viewer) work.
 Next, roughly in order (see "Architecture changes ahead" below for why this order):
 1. **SystemVerilog RTL items that fit the current design**: unpacked dimensions in typedefs,
    `timeunit`/`timeprecision`, file-scope variables, `unique`/`priority` warnings,
-   `$countones`/`$onehot`/`$onehot0`, arrays of interfaces; the `assign z = a;` alias fix
-   (known difference below).
+   `$countones`/`$onehot`/`$onehot0`, arrays of interfaces. (Done: the `assign z = a;`
+   alias, see the known difference below.)
 2. **Types in elaboration** (A1 below), with `parameter type`.
 3. **Heap objects** (A2): `string`, queues, dynamic and associative arrays.
 4. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
@@ -352,11 +352,14 @@ Next, roughly in order (see "Architecture changes ahead" below for why this orde
    wheel; multi-threading (M8) last (A5).
 8. **Outputs**: FST, VCD of arrays/reals/events, `$dumpvars` scope/level arguments.
 
-Known difference (found 2026-11-14, not fixed yet): a plain `assign z = a;` (same width, no
-logic, no delay) updates `z` immediately in the reference, within the writing process
-(`a = 1; $display(z)` shows 1), because it treats `z` as another name for `a`; `assign w = a &
-b` is not immediate there. ferrooxide updates both in the combinational settle. Fix: alias such
-nets to their source (like port aliasing), unless the net is forced or has other drivers.
+Known difference (found 2026-11-14): the reference propagates some net updates immediately,
+inside the writing process (`a = 1; $display(z)` shows the new value). Done: a plain `assign
+z = a;` (also `{a}`, a constant-index element, `#0`, `wire z = a;`, chains, `logic` variables)
+makes `z` a view of `a` (`alias_assigns`), unless `z` has other drivers, is a special net
+type, has a strength, a link or is forced. Not yet: nets with several drivers, `wand`/`tri1`
+and strength drivers (resolved immediately there, in the settle here), and `assign z = m[i]`
+with a run-time index. Not immediate there either: logic (`a & b`), part selects, widening.
+Interactive/MCP `force` of an aliased net forces its source.
 
 Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
 multi-dimensional arrays as ports or whole-array assignments are not supported.

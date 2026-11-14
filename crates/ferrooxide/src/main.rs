@@ -22,6 +22,8 @@ options:
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
   -gspecify         apply specify path delays (ignored by default)
+  -u                every file is a compilation unit of its own (macros, `timescale,
+                    `default_nettype and file-scope declarations end with the file)
   --vcd <file>      write a VCD of the signals selected by --trace (all without --trace),
                     without $dumpvars in the testbench
   --trace <regex>   trace the signals whose hierarchical name matches (repeatable; implies
@@ -138,6 +140,7 @@ fn main() -> ExitCode {
             "-g2005" | "-g2001" | "-g1995" => dialect.v2005 = true,
             "-g2005-sv" | "-g2009" | "-g2012" | "-g2017" => dialect.v2005 = false,
             "-gspecify" => dialect.specify = true,
+            "-u" => opts.separate_units = true,
             _ if a.starts_with("-D") => {
                 let v = &a[2..];
                 let (k, v) = v.split_once('=').unwrap_or((v, "1"));

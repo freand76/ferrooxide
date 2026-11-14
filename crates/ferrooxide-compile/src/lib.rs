@@ -61,6 +61,8 @@ pub(crate) struct Scope<'a> {
     pub nettype: Option<String>,
     /// `unconnected_drive of the module
     pub uncdrive: Option<bool>,
+    /// package scopes whose names a module sees after its own (module scopes only)
+    pub imports: Vec<usize>,
 }
 
 enum Job<'a> {
@@ -139,6 +141,15 @@ pub struct Compiler<'a> {
     pub(crate) gprec: i32,
     /// (array, element) -> alias signal created for port connections
     elem_alias: HashMap<(u32, u32), u32>,
+    /// views: another name for a signal with its own declared range and sign (a port of a
+    /// different range or sign collapsed onto its connection, a net aliased to the source of
+    /// a plain `assign`) -> the signal it stands for. Instructions refer to the view while
+    /// compiling (selects and sign use its declaration) and to the signal afterwards.
+    pub(crate) view_of: HashMap<u32, u32>,
+    /// (view, driver signal) -> view of the driver (see `redir`)
+    drv_views: HashMap<(u32, u32), u32>,
+    /// variables made aliases by `alias_assigns` (a procedural store to one is an error)
+    alias_vars: HashSet<u32>,
     /// named blocks and task bodies for `disable`: (path, definition)
     pub(crate) block_reg: Vec<(String, rt::BlockDef)>,
     /// registry entries of the blocks being compiled (fork branches started inside them are
@@ -162,6 +173,8 @@ pub struct Compiler<'a> {
     late_defparam: bool,
     restarted: bool,
     top_names: HashSet<String>,
+    /// package (and `$unit`) scopes by name
+    pkg_scopes: HashMap<String, usize>,
     /// UDP name -> index of its runtime table
     pub(crate) udp_index: HashMap<String, u32>,
     /// counter for per-call storage of automatic functions and tasks
@@ -242,7 +255,7 @@ pub fn compile_dialect(
         for m in modules {
             scan(&m.items, &mut used);
         }
-        modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none() && !m.interface).collect()
+        modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none() && !m.interface && !m.package).collect()
     } else {
         let mut v = Vec::new();
         for t in tops {
@@ -282,6 +295,11 @@ pub fn compile_dialect(
             c.file = saved;
         }
     }
+    // packages with variables first: one instance each, seen by the modules that import them
+    for m in modules.iter().filter(|m| m.package) {
+        let sid = c.instantiate(m, m.name.clone(), &[], None)?;
+        c.pkg_scopes.insert(m.name.clone(), sid);
+    }
     for m in &top_mods {
         let sid = c.instantiate(m, m.name.clone(), &[], None)?;
         c.tops.insert(m.name.clone(), sid);
@@ -298,6 +316,15 @@ pub fn compile_dialect(
     c.codegen_jobs()?;
     c.init_events();
     c.resolve_disables();
+    c.resolve_views();
+    // package variables are not dumped (as in the reference)
+    if !c.pkg_scopes.is_empty() {
+        let pre: Vec<String> = c.pkg_scopes.keys().map(|n| format!("{n}.")).collect();
+        c.prog.names.retain(|(n, _)| !pre.iter().any(|p| n.starts_with(p.as_str())));
+        let mut pk: Vec<String> = c.pkg_scopes.keys().cloned().collect();
+        pk.sort();
+        c.prog.packages = pk;
+    }
     if let Some(e) = c.mem_error.take() {
         return Err(e);
     }
@@ -363,6 +390,9 @@ impl<'a> Compiler<'a> {
             scratch_saved: Vec::new(),
             gprec: 0,
             elem_alias: HashMap::new(),
+            view_of: HashMap::new(),
+            drv_views: HashMap::new(),
+            alias_vars: HashSet::new(),
             drivers: HashMap::new(),
             net_types: HashMap::new(),
             pulls: HashMap::new(),
@@ -395,6 +425,7 @@ impl<'a> Compiler<'a> {
             func_reads: std::cell::Cell::new(false),
             func_reads_seen: std::cell::RefCell::new(Vec::new()),
             top_names: HashSet::new(),
+            pkg_scopes: HashMap::new(),
             redirect: HashMap::new(),
         }
     }
@@ -536,6 +567,26 @@ impl<'a> Compiler<'a> {
                 | Target::ElemPart { sig, .. }
                 | Target::ElemDynPart { sig, .. } => sig,
             };
+            if !self.alias_vars.is_empty() {
+                let mut v = sig;
+                loop {
+                    if self.alias_vars.contains(&v) {
+                        if self.mem_error.is_none() {
+                            let name = self.sig(v).name.rsplit('.').next().unwrap_or("").to_string();
+                            self.mem_error = self
+                                .err::<()>(format!(
+                                    "Cannot perform procedural assignment to variable '{name}' because it is also continuously assigned."
+                                ))
+                                .err();
+                        }
+                        break;
+                    }
+                    match self.view_of.get(&v) {
+                        Some(&b) => v = b,
+                        None => break,
+                    }
+                }
+            }
             // (a value converted from a real keeps its x from inf/nan, as in the reference
             // simulator: ICARUS_NOTES.md)
             let from_real = {
@@ -554,7 +605,7 @@ impl<'a> Compiler<'a> {
                 }
                 found
             };
-            if self.two_state.contains(&sig) && !from_real {
+            if self.two_state.contains(&self.canon(sig)) && !from_real {
                 let w = match t {
                     Target::Part { w, .. } | Target::DynPart { w, .. } | Target::ElemPart { w, .. } | Target::ElemDynPart { w, .. } => w,
                     _ => self.sig(sig).width,
@@ -625,6 +676,7 @@ impl<'a> Compiler<'a> {
             tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
             nettype: parent.and_then(|p| self.scopes[p].nettype.clone()),
             uncdrive: parent.and_then(|p| self.scopes[p].uncdrive),
+            imports: Vec::new(),
         });
         self.scopes.len() - 1
     }
@@ -675,6 +727,11 @@ impl<'a> Compiler<'a> {
         loop {
             if let Some(s) = self.scopes[sid].syms.get(name) {
                 return Some(s.clone());
+            }
+            for &p in &self.scopes[sid].imports {
+                if let Some(s) = self.scopes[p].syms.get(name) {
+                    return Some(s.clone());
+                }
             }
             sid = self.scopes[sid].parent?;
         }
@@ -748,7 +805,7 @@ impl<'a> Compiler<'a> {
         }
         let mut cur = match start {
             Some(c) => c,
-            None => *self.tops.get(&parts[0])?,
+            None => *self.tops.get(&parts[0]).or_else(|| self.pkg_scopes.get(&parts[0]))?,
         };
         for p in &parts[1..] {
             cur = *self.scopes[cur].children.get(p)?;
@@ -787,6 +844,56 @@ impl<'a> Compiler<'a> {
         });
         self.elem_alias.insert((arr, e), id);
         Some(id)
+    }
+
+    /// The signal a view stands for (the signal itself if it is not a view).
+    pub(crate) fn canon(&self, mut s: u32) -> u32 {
+        while let Some(&b) = self.view_of.get(&s) {
+            s = b;
+        }
+        s
+    }
+
+    /// A new name for signal `base` with its own declared range and sign.
+    fn new_view(&mut self, base: u32, name: String, msb: i64, lsb: i64, signed: bool) -> u32 {
+        let base = self.canon(base);
+        let mut info = self.sig(base).clone();
+        info.name = name.clone();
+        info.msb = msb;
+        info.lsb = lsb;
+        info.signed = signed;
+        let id = self.prog.signals.len() as u32;
+        self.prog.signals.push(info);
+        self.prog.names.push((name, id));
+        self.view_of.insert(id, base);
+        id
+    }
+
+    /// After code generation: instructions, event controls and names refer to the signals the
+    /// views stand for.
+    fn resolve_views(&mut self) {
+        if self.view_of.is_empty() {
+            return;
+        }
+        let canon: Vec<u32> = (0..self.prog.signals.len() as u32).map(|s| self.canon(s)).collect();
+        for p in &mut self.prog.procs {
+            for ins in &mut p.code {
+                rt::instr_sigs_mut(ins, &mut |s| *s = canon[*s as usize]);
+            }
+        }
+        for c in &mut self.prog.ctls {
+            for t in &mut c.triggers {
+                t.0 = canon[t.0 as usize];
+            }
+        }
+        for n in &mut self.prog.names {
+            n.1 = canon[n.1 as usize];
+        }
+        for (&v, _) in &self.view_of {
+            if self.prog.signals[v as usize].forced {
+                self.prog.signals[canon[v as usize] as usize].forced = true;
+            }
+        }
     }
 
     pub(crate) fn sig(&self, id: u32) -> &SignalInfo {
@@ -873,6 +980,7 @@ impl<'a> Compiler<'a> {
     ) -> R<usize> {
         let saved_file = std::mem::replace(&mut self.file, m.file.clone());
         let sid = self.new_scope(path.clone(), None, m.file.clone());
+        self.scopes[sid].imports = m.imports.iter().filter_map(|n| self.pkg_scopes.get(n).copied()).collect();
         self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
         self.scopes[sid].tprec = m.timescale.map(|t| t.1).unwrap_or(0);
         self.scopes[sid].nettype = m.default_nettype.clone();
@@ -1472,13 +1580,28 @@ impl<'a> Compiler<'a> {
                             aliased = self.elem_port_alias(conn, ps, width, &full);
                         }
                         if let Some(s) = aliased {
-                            if kind != SigKind::Wire && self.sig(s).kind == SigKind::Wire {
+                            let si = self.sig(s);
+                            let s = if (si.msb, si.lsb, si.signed) != (msb, lsb, signed) || pk.is_some() {
+                                // own range / sign / packed dimensions: a view
+                                let v = self.new_view(s, full.clone(), msb, lsb, signed);
+                                self.prog.names.pop();
+                                if let Some(d) = pk.take() {
+                                    self.packed_dims.insert(v, d);
+                                    self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(v));
+                                }
+                                v
+                            } else {
+                                s
+                            };
+                            let s0 = self.canon(s);
+                            if kind != SigKind::Wire && self.sig(s0).kind == SigKind::Wire {
                                 // a variable output collapsed onto a net: starts as x, not z
-                                let (slot, w) = (self.sig(s).slot as usize, self.sig(s).width);
+                                let (slot, w) = (self.sig(s0).slot as usize, self.sig(s0).width);
                                 let n = rt::nw(w);
                                 for i in 0..n {
                                     self.prog.mem[slot + i] = self.prog.mem[slot + n + i];
                                 }
+                                self.prog.signals[s0 as usize].kind = SigKind::Reg;
                                 self.prog.signals[s as usize].kind = SigKind::Reg;
                             }
                             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
@@ -2052,8 +2175,21 @@ impl<'a> Compiler<'a> {
     }
 
     /// Assignment targets go to the job's driver signal when the net has several drivers.
-    pub(crate) fn redir(&self, s: u32) -> u32 {
-        self.redirect.get(&s).copied().unwrap_or(s)
+    /// A view of a redirected net becomes a view of the job's driver signal.
+    pub(crate) fn redir(&mut self, s: u32) -> u32 {
+        let c = self.canon(s);
+        let Some(&d) = self.redirect.get(&c) else { return s };
+        if c == s {
+            return d;
+        }
+        if let Some(&v) = self.drv_views.get(&(s, d)) {
+            return v;
+        }
+        let i = self.sig(s).clone();
+        let v = self.new_view(d, i.name, i.msb, i.lsb, i.signed);
+        self.prog.names.pop();
+        self.drv_views.insert((s, d), v);
+        v
     }
 
     /// Signals an lvalue writes (whole signals; part selects count as the signal).
@@ -2061,12 +2197,12 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
-                    out.push(s);
+                    out.push(self.canon(s));
                 }
             }
             Expr::Hier(p) => {
                 if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
-                    out.push(s);
+                    out.push(self.canon(s));
                 }
             }
             Expr::Index(a, _) | Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) => self.lvalue_bases(a, sid, out),
@@ -2092,8 +2228,190 @@ impl<'a> Compiler<'a> {
         v
     }
 
+    /// Names that some `force` / procedural `assign` targets (the last component of the
+    /// target's name), in all modules.
+    fn forced_names(&self) -> HashSet<String> {
+        fn expr_name(e: &Expr, out: &mut HashSet<String>) {
+            match e {
+                Expr::Ident(n) => {
+                    out.insert(n.clone());
+                }
+                Expr::Hier(p) => {
+                    if let Some(n) = p.last() {
+                        out.insert(n.clone());
+                    }
+                }
+                Expr::Index(a, _) | Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) => expr_name(a, out),
+                Expr::Concat(v) => v.iter().for_each(|x| expr_name(x, out)),
+                _ => {}
+            }
+        }
+        fn stmt(s: &Stmt, out: &mut HashSet<String>) {
+            match s {
+                Stmt::Force { lhs, .. } => expr_name(lhs, out),
+                Stmt::Block { stmts, .. } => stmts.iter().for_each(|x| stmt(x, out)),
+                Stmt::If { then_s, else_s, .. } => {
+                    stmt(then_s, out);
+                    if let Some(e) = else_s {
+                        stmt(e, out);
+                    }
+                }
+                Stmt::Case { arms, default, .. } => {
+                    arms.iter().for_each(|a| stmt(&a.1, out));
+                    if let Some(d) = default {
+                        stmt(d, out);
+                    }
+                }
+                Stmt::For { init, step, body, .. } => {
+                    stmt(init, out);
+                    stmt(step, out);
+                    stmt(body, out);
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. }
+                | Stmt::Repeat { body, .. }
+                | Stmt::Forever { body, .. }
+                | Stmt::Timed { body, .. }
+                | Stmt::Wait { body, .. } => stmt(body, out),
+                _ => {}
+            }
+        }
+        fn items(its: &[Item], out: &mut HashSet<String>) {
+            for it in its {
+                match it {
+                    Item::Process { body, .. } => stmt(body, out),
+                    Item::Subroutine(f) => stmt(&f.body, out),
+                    Item::GenFor { items: i, .. } | Item::GenBlock { items: i, .. } => items(i, out),
+                    Item::GenIf { then_items, else_items, .. } => {
+                        items(then_items, out);
+                        items(else_items, out);
+                    }
+                    Item::GenCase { arms, .. } => arms.iter().for_each(|a| items(&a.2, out)),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = HashSet::new();
+        for m in self.mods.values() {
+            items(&m.items, &mut out);
+        }
+        out
+    }
+
+    /// A plain continuous assignment of a whole signal to a net of the same width (`assign z =
+    /// a;`, `wire z = a;`, also `{a}`, a constant-index array element, a zero delay) makes the
+    /// net another name for the source, as in the reference: `z` changes together with `a`,
+    /// inside the process that writes `a`. Not for nets with other drivers, special net types,
+    /// strengths, links or forces (a forced alias would force its source).
+    fn alias_assigns(&mut self, jobs: Vec<Job<'a>>) -> Vec<Job<'a>> {
+        let mut count: HashMap<u32, u32> = HashMap::new();
+        for job in &jobs {
+            for s in self.job_targets(job) {
+                *count.entry(s).or_default() += 1;
+            }
+        }
+        let linked: HashSet<u32> = self.links.iter().flat_map(|l| [self.canon(l.a), self.canon(l.b)]).collect();
+        let fnames = self.forced_names();
+        let mut forced: HashSet<u32> = HashSet::new();
+        if !fnames.is_empty() {
+            for sc in &self.scopes {
+                for (n, sym) in &sc.syms {
+                    if let (true, Sym::Sig(s)) = (fnames.contains(n), sym) {
+                        forced.insert(self.canon(*s));
+                    }
+                }
+            }
+        }
+        let old_strength = std::mem::take(&mut self.job_strength);
+        let mut kept = Vec::with_capacity(jobs.len());
+        let mut changed = false;
+        for (k, job) in jobs.into_iter().enumerate() {
+            if !old_strength.contains_key(&k) {
+                if let Job::Assign { lhs, rhs, delay, scope, .. } = &job {
+                    if let Some((z, a)) = self.alias_pair(lhs, rhs, delay.as_ref(), *scope) {
+                        let i = self.sig(z);
+                        let ok = count.get(&z) == Some(&1)
+                            && i.kind != SigKind::Integer
+                            && i.depth == 0
+                            && i.alias_of.is_none()
+                            && !i.real
+                            && !self.net_types.contains_key(&z)
+                            && !self.pulls.contains_key(&z)
+                            && !self.two_state.contains(&z)
+                            && !linked.contains(&z)
+                            && !forced.contains(&z);
+                        if ok {
+                            if i.kind == SigKind::Reg {
+                                self.alias_vars.insert(z);
+                            }
+                            self.view_of.insert(z, a);
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+            if let Some(st) = old_strength.get(&k) {
+                self.job_strength.insert(kept.len(), *st);
+            }
+            kept.push(job);
+        }
+        if changed {
+            // views share the storage of the signal they stand for
+            let views: Vec<u32> = self.view_of.keys().copied().collect();
+            for v in views {
+                let b = self.canon(v);
+                self.prog.signals[v as usize].slot = self.prog.signals[b as usize].slot;
+            }
+        }
+        kept
+    }
+
+    /// For `assign z = a` with a whole-signal source of the same width: (net, source), both
+    /// as the signals they stand for.
+    fn alias_pair(&mut self, lhs: &Expr, rhs: &Expr, delay: Option<&Expr>, sid: usize) -> Option<(u32, u32)> {
+        if let Some(d) = delay {
+            if self.const_value(d, sid) != Some(0) {
+                return None;
+            }
+        }
+        if !matches!(lhs, Expr::Ident(_) | Expr::Hier(_)) {
+            return None;
+        }
+        let Ok(Some(expr::Base::Sig(z))) = self.resolve_base(lhs, sid) else { return None };
+        let z = self.canon(z);
+        let mut rhs = rhs;
+        while let Expr::Concat(v) = rhs {
+            if v.len() != 1 {
+                return None;
+            }
+            rhs = &v[0];
+        }
+        let width = self.sig(z).width;
+        let a = match rhs {
+            Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(rhs, sid) {
+                Ok(Some(expr::Base::Sig(a))) if self.sig(a).depth == 0 => a,
+                _ => return None,
+            },
+            Expr::Index(..) => {
+                let name = format!("{}$alias", self.sig(z).name);
+                let a = self.elem_port_alias(rhs, sid, width, &name)?;
+                self.prog.names.retain(|n| n.1 != a);
+                a
+            }
+            _ => return None,
+        };
+        let a = self.canon(a);
+        let ai = self.sig(a);
+        if a == z || ai.width != width || ai.real {
+            return None;
+        }
+        Some((z, a))
+    }
+
     fn codegen_jobs(&mut self) -> R<()> {
         let jobs = std::mem::take(&mut self.jobs);
+        let jobs = self.alias_assigns(jobs);
         // nets with more than one continuous driver are resolved from per-driver signals
         let mut count: HashMap<u32, u32> = HashMap::new();
         for job in &jobs {

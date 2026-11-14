@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run Icarus Verilog's ivtest regression suite (regress-*.list) with ferrooxide.
 
-usage: tests/ivtest.py IVTEST_DIR [--list regress-vlg.list] [--filter SUBSTR] [-j N] [--show N]
+usage: tests/ivtest.py IVTEST_DIR [--list regress-vlg.list] [--filter REGEX] [-j N] [--show N]
 
 Run it on a copy of the ivtest directory: tests read and write files relative to it.
 Pass criteria follow ivtest's vvp_reg.pl: with a gold file the output must match it line by line
@@ -25,7 +25,8 @@ FX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "r
 def parse_list(path):
     tests = {}
     order = []
-    text = open(path).read().replace("\\\n", " ")
+    # a continued line goes on in the same field (an option list can continue with a file)
+    text = re.sub(r"\\\n\s*", "", open(path).read())
     for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
@@ -65,7 +66,10 @@ def run(t, root, timeout):
             plargs.append(o)
         elif o.startswith("-D") or o.startswith("-I"):
             args.append(o)
-        elif o == "-gspecify":
+        elif o == "-gspecify" or o == "-u":
+            args.append(o)
+        elif o.endswith(".v") or o.endswith(".sv"):
+            # another source file, before the test's own
             args.append(o)
         elif o.startswith("-s"):
             args += ["-s", o[2:]]
@@ -124,7 +128,7 @@ def main():
     tmpdir = tempfile.mkdtemp(prefix="fx-ivtest-")
     shutil.copy2(FX, os.path.join(tmpdir, "ferrooxide"))
     FX = os.path.join(tmpdir, "ferrooxide")
-    tests = [t for t in parse_list(os.path.join(a.ivtest, a.list)) if t["kind"] == "normal" and a.filter in t["name"]]
+    tests = [t for t in parse_list(os.path.join(a.ivtest, a.list)) if t["kind"] == "normal" and re.search(a.filter, t["name"])]
     res = {}
     with cf.ThreadPoolExecutor(a.j) as ex:
         futs = {ex.submit(run, t, a.ivtest, a.timeout): t["name"] for t in tests}
