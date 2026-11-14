@@ -71,7 +71,7 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
 | M7 | FST output, VPI-lite, better diagnostics | |
-| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | planned (see notes) |
+| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | ✅ first version (`--cdsp`): hierarchy, references, history queries, run/pause; next: arrays, reals, port directions, diagnostics, WCP pairing |
 | M10 | MCP server: the simulator as a tool for AI agents (load, run, inspect, force, waveforms, lint) | ✅ first version over stdio (`--mcp`); next: value history queries, resources, HTTP transport |
 | M11 | Interactive mode (`-i`): run/step/print/list/set/force/release commands on stdin | ✅ first version (next: watch, breakpoints on conditions, waveform history, scopes) |
 | M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
@@ -159,6 +159,15 @@ and diagnostics for an inclusive time interval, optionally collapsed to one samp
 7. *Later.* Setting values (when the spec adds it: force-like writes through the force mask),
    breakpoints on signal conditions, scope/item attributes (`(* ... *)` are currently dropped by
    the lexer and would need keeping), a VCD/FST import mode as a read-only server.
+
+**Status (first version, `--cdsp`).** `cdsp.rs`: listener thread, one reader thread per
+connection, the simulation thread owns `Sim` and steps one time step at a time while running
+(checking the command channel between steps). History: `rt/history.rs`, per-signal change logs
+fed from the dirty list at the end of each time step (`Sim::history_start`; `track` replaces
+`dumping` as the dirty-list switch), budget `FX_HISTORY_MB`. Samples are sent at the interval
+start and at each change of a referenced item. Not yet: arrays (memory items, row ranges),
+reals, port directions (`input`/`output` are false; needs direction in `SignalInfo`), `src`,
+diagnostics (`$display` → `print`, `until_diagnostics`), the WCP pairing below.
 
 **Surfer as client** (checked in its source, 2026-11-03 snapshot, `libsurfer/src/cxxrtl*`).
 Connect with `surfer cxxrtl+tcp://HOST:PORT` (TCP only in native builds). What it sends, and so

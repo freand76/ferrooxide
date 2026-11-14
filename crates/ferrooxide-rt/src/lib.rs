@@ -7,6 +7,7 @@
 pub mod fast;
 pub mod fmt;
 pub mod fuse;
+pub mod history;
 #[cfg(feature = "jit")]
 pub mod jit;
 pub mod ops;

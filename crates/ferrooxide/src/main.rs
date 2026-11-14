@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
+mod cdsp;
 mod mcp;
 mod repl;
 mod session;
@@ -28,11 +29,13 @@ options:
   -i, --interactive commands on stdin: run, step, print, list, set, force, release (help)
   --mcp             serve the simulator as MCP tools (JSON-RPC on stdio) for AI agents; files
                     on the command line are loaded at start, else with the load_design tool
+  --cdsp [host:]port  serve the simulation over the CXXRTL debug server protocol (waveform
+                    viewers attach live: surfer cxxrtl+tcp://127.0.0.1:port); starts paused
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help
 environment: FX_MEM_LIMIT_MB (address-space cap, default 4096, 0: none), FX_MAX_MEM_MB (design
-memory, default 2048)";
+memory, default 2048), FX_HISTORY_MB (value history of --cdsp, default 512)";
 
 /// Cap the process's address space (default 4 GB, `FX_MEM_LIMIT_MB`, 0: no cap): a runaway
 /// design or bug then fails with an allocation error instead of exhausting the machine.
@@ -68,6 +71,7 @@ fn main() -> ExitCode {
     let mut lint = false;
     let mut interactive = false;
     let mut mcp_mode = false;
+    let mut cdsp_addr: Option<String> = None;
     let mut vcd: Option<String> = None;
     let mut traces: Vec<String> = Vec::new();
     let mut dialect = ferrooxide_compile::Dialect::default();
@@ -121,6 +125,10 @@ fn main() -> ExitCode {
             "--lint" => lint = true,
             "-i" | "--interactive" => interactive = true,
             "--mcp" => mcp_mode = true,
+            "--cdsp" => match val("--cdsp") {
+                Some(v) => cdsp_addr = Some(v),
+                None => return ExitCode::from(2),
+            },
             "-g2005" | "-g2001" | "-g1995" => dialect.v2005 = true,
             "-g2005-sv" | "-g2009" | "-g2012" | "-g2017" => dialect.v2005 = false,
             "-gspecify" => dialect.specify = true,
@@ -244,6 +252,13 @@ fn main() -> ExitCode {
             if jit { "native code compiled" } else { "interpreted, prepared" },
             ms(t2b - t2),
         );
+    }
+    if let Some(addr) = &cdsp_addr {
+        if let Err(e) = cdsp::serve(sim, addr) {
+            eprintln!("ferrooxide: {e}");
+            return ExitCode::from(1);
+        }
+        return ExitCode::SUCCESS;
     }
     if interactive {
         let mut ses = session::Session::from_sim(sim, precision, String::new());

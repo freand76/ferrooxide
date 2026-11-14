@@ -2,6 +2,7 @@
 
 use crate::fast::{self, Op};
 use crate::ops;
+use crate::history::History;
 use crate::vcd::Vcd;
 use crate::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -199,6 +200,12 @@ pub struct Sim {
     vcd_path: String,
     vcd: Option<Vcd>,
     dumping: bool,
+    /// signal changes are collected in `dirty` (dumping or recording history)
+    track: bool,
+    /// value history for the debug server
+    history: Option<History>,
+    /// all values are recorded at the end of the current time step
+    history_pending: bool,
     dirty: Vec<u32>,
     is_dirty: Vec<bool>,
     /// open files
@@ -458,6 +465,9 @@ impl Sim {
             vcd_path: "dump.vcd".into(),
             vcd: None,
             dumping: false,
+            track: false,
+            history: None,
+            history_pending: false,
             dirty: Vec::new(),
             is_dirty: vec![false; nsig],
             files: HashMap::new(),
@@ -626,6 +636,7 @@ impl Sim {
         // the initial values are written at the end of the current time step
         self.vcd = Some(v);
         self.dumping = true;
+        self.track = true;
         self.dump_pending = true;
         Ok(())
     }
@@ -646,6 +657,7 @@ impl Sim {
             }
         }
         self.dumping = on;
+        self.track = on || self.history.is_some();
     }
 
     /// The number of traced signals (0: no trace).
@@ -763,6 +775,9 @@ impl Sim {
                 self.exec(p);
             }
         }
+        if self.history.is_some() {
+            self.record_history();
+        }
         if self.dump_pending {
             // $dumpvars / a trace started in this time step: the values at its end
             self.dump_pending = false;
@@ -781,7 +796,61 @@ impl Sim {
             self.dirty.clear();
         } else if self.dumping && !self.dirty.is_empty() {
             self.dump_dirty();
+        } else if !self.dirty.is_empty() {
+            for &s in &self.dirty {
+                self.is_dirty[s as usize] = false;
+            }
+            self.dirty.clear();
         }
+    }
+
+    /// Append this time step's changes (all values after `history_start`) to the history.
+    fn record_history(&mut self) {
+        let h = self.history.as_mut().unwrap();
+        let t = self.time;
+        let mut rec = |s: u32, r: &SigRt| {
+            let n = 2 * nw(r.width);
+            h.record(s, t, &self.mem[r.slot as usize..r.slot as usize + n]);
+        };
+        if self.history_pending {
+            self.history_pending = false;
+            for s in 0..self.nreal {
+                rec(s, &self.sigs[s as usize]);
+            }
+        } else {
+            for &s in &self.dirty {
+                rec(s, &self.sigs[s as usize]);
+            }
+        }
+    }
+
+    /// Record the value history of every non-array signal from the end of the current time
+    /// step on, using at most `budget` bytes.
+    pub fn history_start(&mut self, budget: usize) {
+        let words = (0..self.prog.signals.len())
+            .map(|s| {
+                let r = &self.sigs[s];
+                if r.depth == 0 && (s as u32) < self.nreal { 2 * nw(r.width) as u32 } else { 0 }
+            })
+            .collect();
+        self.history = Some(History::new(words, budget));
+        self.history_pending = true;
+        self.track = true;
+    }
+
+    /// The recorded value history.
+    pub fn history(&self) -> Option<&History> {
+        self.history.as_ref()
+    }
+
+    /// Declaration info of a signal.
+    pub fn signal_info(&self, sig: u32) -> &crate::SignalInfo {
+        &self.prog.signals[sig as usize]
+    }
+
+    /// The time precision (power of ten of a tick in seconds).
+    pub fn precision(&self) -> i32 {
+        self.prog.precision
     }
 
     #[inline]
@@ -1021,7 +1090,7 @@ impl Sim {
         if r.parent != NONE {
             self.notify(r.parent, 0);
         }
-        if self.dumping && sig < self.nreal && !self.is_dirty[sig as usize] {
+        if self.track && sig < self.nreal && !self.is_dirty[sig as usize] {
             self.is_dirty[sig as usize] = true;
             self.dirty.push(sig);
         }
@@ -2178,6 +2247,7 @@ impl Sim {
             SysTask::DumpOn(on) => {
                 if self.vcd.is_some() {
                     self.dumping = *on;
+                    self.track = *on || self.history.is_some();
                 }
             }
             SysTask::ReadMem { hex, file, sig, start, end, loc } => {

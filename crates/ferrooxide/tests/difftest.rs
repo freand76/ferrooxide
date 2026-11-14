@@ -85,3 +85,63 @@ fn mcp_session() {
     assert!(by_id(13).contains("incomplete sensitivity list"));
     assert!(by_id(14).contains("-32601"));
 }
+
+/// Debug server (CDSP): greeting, hierarchy, references, run to a time, history query with
+/// x/z and a multi-word value, run to $finish, errors.
+#[test]
+fn cdsp_session() {
+    use std::io::{BufRead, Read, Write};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
+    assert!(st.success());
+    let mut child = std::process::Command::new(root.join("target/release/ferrooxide"))
+        .args(["-q", "--cdsp", "0", "tests/cdsp/counter.v"])
+        .current_dir(&root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let addr = line.split_whitespace().find(|w| w.starts_with("127.0.0.1:")).unwrap().trim_end_matches(';').to_string();
+    let mut s = std::net::TcpStream::connect(&addr).unwrap();
+    let mut buf = Vec::new();
+    let mut ask = |m: &str, answers: usize| -> String {
+        s.write_all(m.as_bytes()).unwrap();
+        s.write_all(b"\0").unwrap();
+        let mut got = Vec::new();
+        while got.len() < answers {
+            if let Some(i) = buf.iter().position(|&c| c == 0) {
+                got.push(String::from_utf8(buf[..i].to_vec()).unwrap());
+                buf.drain(..=i);
+                continue;
+            }
+            let mut chunk = [0u8; 4096];
+            let n = s.read(&mut chunk).unwrap();
+            assert!(n > 0, "connection closed");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        got.join("\n")
+    };
+    assert!(ask(r#"{"type":"greeting","version":0}"#, 1).contains(r#""item_values_encoding":["base64(u32)"]"#));
+    assert!(ask(r#"{"type":"command","command":"list_scopes","scope":null}"#, 1).contains(r#""tb u":{"#));
+    let items = ask(r#"{"type":"command","command":"list_items","scope":"tb u"}"#, 1);
+    assert!(items.contains(r#""tb u q":{"#) && items.contains(r#""width":40"#) && !items.contains(r#""tb x""#));
+    ask(r#"{"type":"command","command":"reference_items","reference":"r","items":[["tb x"],["tb u q"]]}"#, 1);
+    let run = ask(r#"{"type":"command","command":"run_simulation","until_time":"0.000000030000000","until_diagnostics":[],"sample_item_values":true}"#, 2);
+    assert!(run.contains(r#""event":"simulation_paused""#) && run.contains(r#""time":"0.000000030000000""#), "{run}");
+    let q = ask(r#"{"type":"command","command":"query_interval","interval":["0.000000020000000","0.000000030000000"],"collapse":true,"items":"r","item_values_encoding":"base64(u32)","diagnostics":false}"#, 1);
+    // x = 4'bx01z (x -> 1, z -> 0) and q = 2 * 40'h1_0000_0001 at 20 ns; x = 9 at 22 ns; q
+    // incremented at 25 ns
+    assert!(q.contains(r#"{"item_values":"CgAAAAIAAAACAAAA","time":"0.000000020000000"}"#), "{q}");
+    assert!(q.contains(r#"{"item_values":"CQAAAAIAAAACAAAA","time":"0.000000022000000"}"#), "{q}");
+    assert!(q.contains(r#"{"item_values":"CQAAAAMAAAADAAAA","time":"0.000000025000000"}"#), "{q}");
+    assert_eq!(q.matches(r#""time""#).count(), 3, "{q}");
+    let fin = ask(r#"{"type":"command","command":"run_simulation","until_time":null,"until_diagnostics":[],"sample_item_values":true}"#, 2);
+    assert!(fin.contains(r#""event":"simulation_finished""#) && fin.contains(r#""time":"0.000001022000000""#), "{fin}");
+    assert!(ask(r#"{"type":"command","command":"run_simulation","until_time":null,"until_diagnostics":[],"sample_item_values":true}"#, 1).contains(r#""error":"invalid_status""#));
+    assert!(ask(r#"{"type":"command","command":"nope"}"#, 1).contains(r#""error":"invalid_command""#));
+    child.kill().unwrap();
+    child.wait().unwrap();
+}

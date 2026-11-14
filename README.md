@@ -88,6 +88,7 @@ ferrooxide [options] <files...>
   --trace <regex>   trace only signals whose hierarchical name matches (repeatable)
   -i, --interactive interactive mode, see below
   --mcp             MCP server for AI agents (JSON-RPC on stdio), see below
+  --cdsp [host:]port  live waveforms in a viewer (CXXRTL debug server protocol), see below
   --lint            check the design and exit (status 1 on findings), see below
   +<arg>            plusarg for $test$plusargs / $value$plusargs
 ```
@@ -140,6 +141,23 @@ output is returned with each result (at most 200 lines). Register it with an MCP
 ```
 claude mcp add ferrooxide -- /path/to/ferrooxide --mcp
 ```
+
+### Live waveforms (debug server)
+
+`ferrooxide --cdsp 6618 <files>` serves the simulation over the
+[CXXRTL Debug Server Protocol](https://cxxrtl.org/protocol.html). A waveform viewer attaches
+to it, runs and pauses the simulation and shows the history of any signal, with no VCD file and
+no `$dumpvars`. With [Surfer](https://surfer-project.org):
+
+```
+ferrooxide --cdsp 6618 tb.v &
+surfer cxxrtl+tcp://127.0.0.1:6618
+```
+
+The simulation starts paused after time 0. The value history of every signal is kept in
+memory (`FX_HISTORY_MB`, default 512; changes after that are not recorded). The protocol's
+value encoding is two-state, so x bits show as 1 and z bits as 0. Arrays and reals are not
+listed yet.
 
 ### Lint
 
