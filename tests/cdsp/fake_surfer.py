@@ -52,7 +52,11 @@ if os.environ.get("FAKE_SURFER_MODE") == "watch":
                 log.write(f"cdsp {m.get('event', m.get('command'))} {m.get('time', '')}\n")
             else:
                 log.write(f"wcp {m['command']} {m.get('timestamp', m.get('markers', ''))}\n")
-                wcp.send({"type": "response", "command": "ack"})
+                try:
+                    wcp.send({"type": "response", "command": "ack"})
+                except OSError:  # the server closed the connection meanwhile
+                    log.write("closed\n")
+                    raise SystemExit
             log.flush()
 
 m = wcp.recv()

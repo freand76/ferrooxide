@@ -70,6 +70,28 @@ fn interactive_commands() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
 
+/// `restart` in the interactive mode: the design starts over at time 0, watches are kept.
+#[test]
+fn interactive_restart() {
+    use std::io::Write;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
+    assert!(st.success());
+    let mut child = std::process::Command::new(root.join("target/release/ferrooxide"))
+        .args(["-q", "-i", "tests/cdsp/counter.v"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"watch tb.x\nrun 30ns\nrestart\ntime\nrun 30ns\nquit\n").unwrap();
+    let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines.iter().filter(|l| **l == "22000: tb.x = 9").count() == 2, "{out}");
+    assert!(lines.iter().any(|l| l.starts_with("restarted: loaded 1 files")), "{out}");
+    assert!(lines.contains(&"time 0"), "{out}");
+}
+
 /// MCP server: a scripted JSON-RPC session (initialize, tools/list, load, watch, break, run,
 /// force, values, lint, errors).
 #[test]

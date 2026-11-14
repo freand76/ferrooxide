@@ -8,6 +8,7 @@ mod cdsp;
 mod mcp;
 mod repl;
 mod session;
+mod console;
 
 const USAGE: &str = "usage: ferrooxide [options] <files...> [+plusarg...]
 options:
@@ -28,13 +29,15 @@ options:
                     without $dumpvars in the testbench
   --trace <regex>   trace the signals whose hierarchical name matches (repeatable; implies
                     --vcd dump.vcd)
+  --trace-all       trace every signal (as --trace '.*')
   -i, --interactive commands on stdin: run, step, print, list, set, force, release (help)
   --mcp             serve the simulator as MCP tools (JSON-RPC on stdio) for AI agents; files
                     on the command line are loaded at start, else with the load_design tool
   --cdsp [host:]port  serve the simulation over the CXXRTL debug server protocol (waveform
                     viewers attach live: surfer cxxrtl+tcp://127.0.0.1:port); starts paused
   --surfer          start the Surfer waveform viewer on a debug server and show the --trace
-                    signals (else all signals); the simulation runs at once (pausing after
+                    signals (else the top modules' signals; --trace-all: all, at most 2000);
+                    the simulation runs at once (pausing after
                     2 s if it has not ended); exits with Surfer (FX_SURFER: the Surfer
                     executable); with -i the console runs next to the viewer and controls it
   --lint            check the design (incomplete sensitivity lists, SystemVerilog keywords
@@ -123,6 +126,8 @@ fn main() -> ExitCode {
                 Some(v) => vcd = Some(v),
                 None => return ExitCode::from(2),
             },
+            // every signal: as --trace '.*'
+            "--trace-all" => traces.push(".*".into()),
             "--trace" => match val("--trace") {
                 Some(v) => traces.push(v),
                 None => return ExitCode::from(2),
@@ -228,7 +233,7 @@ fn main() -> ExitCode {
         }
     }
     let mut sim = ferrooxide_rt::Sim::new(prog);
-    sim.set_plusargs(plusargs);
+    sim.set_plusargs(plusargs.clone());
     if jit {
         if let Err(e) = sim.enable_jit() {
             eprintln!("ferrooxide: JIT compilation failed ({e}), interpreting");
@@ -263,21 +268,61 @@ fn main() -> ExitCode {
             ms(t2b - t2),
         );
     }
+    // how to load the design again (`restart` in the console)
+    let reload = session::LoadOptions {
+        files: files.clone(),
+        defines: opts.defines.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        incdirs: opts.incdirs.clone(),
+        tops: tops.clone(),
+        plusargs: plusargs.clone(),
+        dialect,
+        jit,
+        fuse,
+    };
     if cdsp_addr.is_some() || surfer {
         let addr = cdsp_addr.clone().unwrap_or_else(|| "0".into());
         let viewer = surfer.then(|| cdsp::Viewer {
             bin: std::env::var("FX_SURFER").unwrap_or_else(|_| "surfer".into()),
             traces: traces.clone(),
         });
-        if let Err(e) = cdsp::serve(sim, &addr, viewer, interactive) {
-            eprintln!("ferrooxide: {e}");
-            return ExitCode::from(1);
+        let mut sim = sim;
+        loop {
+            let r = cdsp::serve(sim, &addr, viewer.as_ref(), interactive);
+            if !matches!(r, Ok(true)) {
+                console::restore_terminal();
+            }
+            match r {
+                Err(e) => {
+                    eprintln!("ferrooxide: {e}");
+                    return ExitCode::from(1);
+                }
+                Ok(false) => return ExitCode::SUCCESS,
+                // restart: the design as it is now, a new viewer (after an error in the design:
+                // fix it and restart again)
+                Ok(true) => loop {
+                    match session::load(&reload) {
+                        Ok(ses) => {
+                            println!("restarted: {}", ses.load_report);
+                            sim = ses.sim;
+                            break;
+                        }
+                        Err(e) => {
+                            println!("restart failed: {e}\nfix the design and type restart again (or quit)");
+                            if !cdsp::wait_for_restart() {
+                                console::restore_terminal();
+                                return ExitCode::SUCCESS;
+                            }
+                        }
+                    }
+                },
+            }
         }
-        return ExitCode::SUCCESS;
     }
     if interactive {
         let mut ses = session::Session::from_sim(sim, precision, String::new());
+        ses.reload = Some(reload);
         repl::run(&mut ses);
+        console::restore_terminal();
         sim = ses.sim;
     } else {
         sim.run(max_time);

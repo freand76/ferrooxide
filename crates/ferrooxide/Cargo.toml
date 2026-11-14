@@ -12,3 +12,4 @@ ferrooxide-compile = { path = "../ferrooxide-compile" }
 regex = "1"
 serde_json = "1"
 libc = "0.2"
+rustyline = "19.0.0"

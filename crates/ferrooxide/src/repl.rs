@@ -1,7 +1,7 @@
 //! Interactive mode (`-i`): commands on stdin to run, inspect, force and release.
 
 use crate::session::Session;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::Write;
 
 const HELP: &str = "commands:
   run [T | +T]        run to time T (or T more); without T until nothing is scheduled
@@ -17,26 +17,24 @@ const HELP: &str = "commands:
   info                list watches and breakpoints
   trace FILE [RE...]  write a VCD of the signals whose name matches a regular expression
                       (all without one), from now on; trace off / trace on pause and resume
+  restart             load the design again (changed sources and data files) and start over
+                      at time 0; with --surfer the viewer is restarted too
   help                (h) this text
   quit                (q) run final blocks and exit
 NAME is a hierarchical name or a unique suffix of one (`top.u1.q`, `u1.q`, `q`).
 VALUE is a Verilog number: 5, 8'hff, 4'b10x1, 'z. T is in simulation ticks or has a unit:
 10ns, 2.5us.";
 
-/// Print the prompt when stdin is a terminal.
+/// The report of a command is printed (with a server: the console may prompt again).
 pub fn prompt() {
-    if std::io::stdin().is_terminal() {
-        print!("fx> ");
-        let _ = std::io::stdout().flush();
-    }
+    let _ = std::io::stdout().flush();
+    crate::console::ready();
 }
 
 pub fn run(ses: &mut Session) {
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
+    let mut con = crate::console::Console::new();
     loop {
-        prompt();
-        let Some(Ok(line)) = lines.next() else { break };
+        let Some(line) = con.read() else { break };
         match execute(ses, &line) {
             Some(out) if out.is_empty() => {}
             Some(out) => println!("{out}"),
@@ -58,6 +56,7 @@ pub fn execute(ses: &mut Session, line: &str) -> Option<String> {
             "help" | "h" | "?" => Ok(HELP.into()),
             "quit" | "q" | "exit" => return None,
             "time" => Ok(format!("time {}", ses.time())),
+            "restart" => ses.restart(),
             "run" | "r" | "continue" | "c" => match arg(1) {
                 None => Ok(ses.run(None)),
                 Some(t) => ses.parse_until(t).map(|u| ses.run(Some(u))),

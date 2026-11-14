@@ -30,6 +30,8 @@ pub struct Session {
     breaks: Vec<(String, u32, Option<Vec<u64>>, String)>,
     /// what loading said: the summary line and warnings
     pub load_report: String,
+    /// how the design was loaded (for `restart`)
+    pub reload: Option<LoadOptions>,
 }
 
 /// Parse, elaborate and prepare a design. Every signal can be forced (interactive use).
@@ -83,6 +85,7 @@ pub fn load(o: &LoadOptions) -> Result<Session, String> {
         watches: Vec::new(),
         breaks: Vec::new(),
         load_report: report,
+        reload: Some(o.clone()),
     })
 }
 
@@ -112,7 +115,37 @@ fn unit_name(p: i32) -> String {
 impl Session {
     /// A session for a simulator prepared elsewhere (signals made forceable by the caller).
     pub fn from_sim(sim: Sim, precision: i32, load_report: String) -> Session {
-        Session { sim, precision, started: false, finished: false, watches: Vec::new(), breaks: Vec::new(), load_report }
+        Session { sim, precision, started: false, finished: false, watches: Vec::new(), breaks: Vec::new(), load_report, reload: None }
+    }
+
+    /// Load the design again (sources and data files as they are now) and start over at time
+    /// 0; watches and breakpoints on any change are kept by name.
+    pub fn restart(&mut self) -> Result<String, String> {
+        let Some(o) = self.reload.clone() else {
+            return Err("restart: the design's files are not known here".into());
+        };
+        let mut new = load(&o)?;
+        let mut notes = Vec::new();
+        for (name, _, radix, _) in &self.watches {
+            if let Err(e) = new.watch(name, *radix) {
+                notes.push(format!("watch {name}: {e}"));
+            }
+        }
+        for (name, _, value, _) in &self.breaks {
+            if value.is_some() {
+                notes.push(format!("break {name}: set it again (only breakpoints on any change are kept)"));
+            } else if let Err(e) = new.add_break(name, None) {
+                notes.push(format!("break {name}: {e}"));
+            }
+        }
+        let report = std::mem::take(&mut new.load_report);
+        *self = new;
+        let mut out = format!("restarted: {report}");
+        for n in notes {
+            out.push('\n');
+            out.push_str(&n);
+        }
+        Ok(out)
     }
 
     /// The simulator was started by the caller (`Sim::start`).
