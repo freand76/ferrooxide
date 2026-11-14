@@ -216,7 +216,9 @@ status changes), so `--surfer` without `-i` now runs at once and pauses after 2 
 time if the simulation has not ended; without `--trace` the top modules' signals are shown
 (`--trace-all`: all, at most 2000); the first values after time 0 get one WCP `zoom_to_fit`.
 `restart` in the console (`-i`) loads the design again (sources and data files as they are
-now), closes the viewer and starts a new one; `quit` closes the viewer. The console has line
+now) and starts over at time 0 on the same connections (the viewer gets `simulation_paused`
+at 0); a running VCD trace (`--vcd`, `--trace`, console `trace`) is written anew from time 0.
+`quit` closes the viewer. The console has line
 editing and a history (`~/.ferrooxide_history`, rustyline).
 
 Surfer 0.7.0 (11bb2e3) shows no live waves because of two bugs in its CXXRTL path (found with
@@ -226,8 +228,9 @@ upstream): (1) `WaveData::cached_time_range` is computed when the source loads (
 grows: refresh it on `Message::InvalidateDrawCommands`; (2) `variable_draw_commands` skips
 every variable whose `signal_id` fails, and `WaveContainer::signal_id` is not implemented for
 CXXRTL: skip the check for CXXRTL (its values come from the query cache). With both fixes the
-waves show. Surfer's value cache never forgets samples, so a restarted simulation needs a new
-viewer (hence `restart` restarts Surfer). Still to do; it then pushes views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
+waves show. Surfer's value cache never forgets samples: after a `restart` it can show samples of the
+previous run until a new run overwrites them (feature request to report: clear the cache
+when the latest time goes backwards). Still to do; it then pushes views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
 `$display`/assertions as markers. It answers `goto_declaration` from declaration locations and
 `add_drivers`/`add_loads` from the elaborated netlist (something a VCD-only viewer cannot do).
 Without a server Surfer also reads `--vcd` files directly. Both protocols still change.

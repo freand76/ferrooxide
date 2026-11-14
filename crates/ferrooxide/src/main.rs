@@ -239,6 +239,8 @@ fn main() -> ExitCode {
             eprintln!("ferrooxide: JIT compilation failed ({e}), interpreting");
         }
     }
+    // (VCD traces started here: `restart` starts them again)
+    let mut started_traces: Vec<(String, Vec<String>)> = Vec::new();
     if vcd.is_some() || (!traces.is_empty() && !surfer) {
         let path = vcd.clone().unwrap_or_else(|| "dump.vcd".into());
         let set = match regex::RegexSet::new(&traces) {
@@ -252,6 +254,7 @@ fn main() -> ExitCode {
         if sim.trace_start(&path, &|n| all || set.is_match(n)).is_err() {
             return ExitCode::from(1);
         }
+        started_traces.push((path.clone(), traces.clone()));
         if stats {
             eprintln!("ferrooxide: tracing {} signals to {path}", sim.traced_signals());
         }
@@ -285,42 +288,18 @@ fn main() -> ExitCode {
             bin: std::env::var("FX_SURFER").unwrap_or_else(|_| "surfer".into()),
             traces: traces.clone(),
         });
-        let mut sim = sim;
-        loop {
-            let r = cdsp::serve(sim, &addr, viewer.as_ref(), interactive);
-            if !matches!(r, Ok(true)) {
-                console::restore_terminal();
-            }
-            match r {
-                Err(e) => {
-                    eprintln!("ferrooxide: {e}");
-                    return ExitCode::from(1);
-                }
-                Ok(false) => return ExitCode::SUCCESS,
-                // restart: the design as it is now, a new viewer (after an error in the design:
-                // fix it and restart again)
-                Ok(true) => loop {
-                    match session::load(&reload) {
-                        Ok(ses) => {
-                            println!("restarted: {}", ses.load_report);
-                            sim = ses.sim;
-                            break;
-                        }
-                        Err(e) => {
-                            println!("restart failed: {e}\nfix the design and type restart again (or quit)");
-                            if !cdsp::wait_for_restart() {
-                                console::restore_terminal();
-                                return ExitCode::SUCCESS;
-                            }
-                        }
-                    }
-                },
-            }
+        let r = cdsp::serve(sim, &addr, viewer.as_ref(), interactive, Some(&reload), &started_traces);
+        console::restore_terminal();
+        if let Err(e) = r {
+            eprintln!("ferrooxide: {e}");
+            return ExitCode::from(1);
         }
+        return ExitCode::SUCCESS;
     }
     if interactive {
         let mut ses = session::Session::from_sim(sim, precision, String::new());
         ses.reload = Some(reload);
+        ses.traces = started_traces;
         repl::run(&mut ses);
         console::restore_terminal();
         sim = ses.sim;

@@ -134,6 +134,53 @@ fn parent(id: &str) -> &str {
 }
 
 impl Server {
+    /// A server for `sim` (not started yet): started, with the value history recording, at
+    /// time 0.
+    fn prepare(mut sim: Sim) -> Server {
+        let mb: usize = std::env::var("FX_HISTORY_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
+        sim.history_start(mb << 20);
+        sim.start();
+        let st = sim.advance(Some(0));
+        let precision = sim.precision();
+        let mut ses = Session::from_sim(sim, precision, String::new());
+        ses.mark_started();
+        let mut srv = Server::new(ses);
+        if st != RunState::Paused {
+            srv.status = Status::Finished;
+            srv.ses.sim.finish();
+            srv.ses.mark_finished();
+        }
+        srv.ses.sim.flush();
+        srv
+    }
+
+    /// `restart`: the design loaded again replaces the simulation; the connections stay, the
+    /// viewer is told that the time is 0 again.
+    fn restart(&mut self, sim: Sim) {
+        let traces = std::mem::take(&mut self.ses.traces);
+        let mut fresh = Server::prepare(sim);
+        fresh.out = self.out.take();
+        fresh.wcp = std::mem::take(&mut self.wcp);
+        fresh.wcp.zoomed = false;
+        // references to items that still exist
+        for (name, ids) in std::mem::take(&mut self.refs) {
+            let ids: Vec<String> = ids.into_iter().filter(|i| fresh.items.contains_key(i)).collect();
+            fresh.refs.insert(name, ids);
+        }
+        // (the old simulation is dropped here: its VCD files are complete before they are
+        // written anew)
+        *self = fresh;
+        let report = self.ses.trace_again(traces);
+        if !report.is_empty() {
+            println!("{}", report.trim_start());
+        }
+        let t = self.time_str(0);
+        self.send(json!({"type": "event", "event": "simulation_paused", "time": t, "cause": "until_time"}));
+        if self.wcp.ready {
+            self.wcp_send("set_cursor", json!({"type": "command", "command": "set_cursor", "timestamp": 0}));
+        }
+    }
+
     fn new(ses: Session) -> Server {
         let sim = &ses.sim;
         let fs_per_tick = 10u128.pow((15 + sim.precision()).clamp(0, 30) as u32);
@@ -590,22 +637,6 @@ fn close_viewer(srv: &mut Server, child: Option<&Arc<Mutex<std::process::Child>>
     let _ = c.lock().unwrap().kill();
 }
 
-/// After a failed restart: wait for `restart` (true) or `quit` / end of input (false) on the
-/// console.
-pub fn wait_for_restart() -> bool {
-    let (tx, rx) = mpsc::channel();
-    console_input(tx);
-    loop {
-        crate::repl::prompt();
-        match rx.recv() {
-            Ok(In::Console(l)) if l.trim() == "restart" => return true,
-            Ok(In::Console(l)) if matches!(l.trim(), "quit" | "q" | "exit") => return false,
-            Ok(In::Console(_)) => println!("type restart (or quit)"),
-            _ => return false,
-        }
-    }
-}
-
 fn console_input(tx: mpsc::Sender<In>) {
     *CONSOLE.lock().unwrap() = Some(tx);
     CONSOLE_READER.call_once(|| {
@@ -630,33 +661,27 @@ fn console_input(tx: mpsc::Sender<In>) {
 }
 
 /// Serve `sim` (not started yet) on `addr` until the process is stopped, the viewer started
-/// with `viewer` exits, or (with `console`: commands on stdin) the console quits. Returns true
-/// when the console asked for a restart (the viewer has been closed; load the design again and
-/// serve it anew).
-pub fn serve(mut sim: Sim, addr: &str, viewer: Option<&Viewer>, console: bool) -> Result<bool, String> {
+/// with `viewer` exits, or (with `console`: commands on stdin) the console quits. `restart` in
+/// the console loads the design again with `reload`.
+pub fn serve(
+    sim: Sim,
+    addr: &str,
+    viewer: Option<&Viewer>,
+    console: bool,
+    reload: Option<&crate::session::LoadOptions>,
+    traces: &[(String, Vec<String>)],
+) -> Result<(), String> {
     let addr = if addr.contains(':') { addr.to_string() } else { format!("127.0.0.1:{addr}") };
     let listener = TcpListener::bind(&addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
     // (port 0: the system picks one; report the real address)
     let addr = listener.local_addr().map_or(addr, |a| a.to_string());
-    let mb: usize = std::env::var("FX_HISTORY_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
-    sim.history_start(mb << 20);
-    sim.start();
-    let st = sim.advance(Some(0));
     let pending = match viewer {
         Some(v) => Some(initial_items(&sim, &v.traces)?),
         None => None,
     };
-    let precision = sim.precision();
-    let mut ses = Session::from_sim(sim, precision, String::new());
-    ses.mark_started();
-    let mut srv = Server::new(ses);
+    let mut srv = Server::prepare(sim);
     srv.wcp.pending = pending;
-    if st != RunState::Paused {
-        srv.status = Status::Finished;
-        srv.ses.sim.finish();
-        srv.ses.mark_finished();
-    }
-    srv.ses.sim.flush();
+    srv.ses.traces = traces.to_vec();
     // with a viewer and no console: run at once (the viewer shows the waves at the end, or
     // after AUTO_RUN when the simulation goes on)
     // (it starts when the viewer has referenced its signals: Surfer fetches values only
@@ -724,18 +749,18 @@ pub fn serve(mut sim: Sim, addr: &str, viewer: Option<&Viewer>, console: bool) -
             match rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
             }
         } else if let Some(t) = srv.wcp.retry_at {
             match rx.recv_timeout(t.saturating_duration_since(Instant::now())) {
                 Ok(m) => Some(m),
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => return Ok(false),
+                Err(_) => return Ok(()),
             }
         } else {
             match rx.recv() {
                 Ok(m) => Some(m),
-                Err(_) => return Ok(false),
+                Err(_) => return Ok(()),
             }
         };
         match msg {
@@ -757,17 +782,19 @@ pub fn serve(mut sim: Sim, addr: &str, viewer: Option<&Viewer>, console: bool) -
                 if srv.status != Status::Finished {
                     srv.ses.finish();
                 }
-                return Ok(false);
+                return Ok(());
             }
             Some(In::Console(line)) if line.trim() == "restart" => {
-                if viewer_child.is_none() {
-                    // (an external client would have to reconnect to a new server)
-                    println!("restart: only with --surfer here; restart ferrooxide and reconnect");
-                    crate::repl::prompt();
-                    continue;
+                // the design as it is now, at time 0, on the same connections
+                match reload.map(crate::session::load) {
+                    None => println!("restart: the design's files are not known here"),
+                    Some(Err(e)) => println!("restart failed: {e}"),
+                    Some(Ok(ses)) => {
+                        println!("restarted: {}", ses.load_report);
+                        srv.restart(ses.sim);
+                    }
                 }
-                close_viewer(&mut srv, viewer_child.as_ref());
-                return Ok(true);
+                crate::repl::prompt();
             }
             Some(In::Console(line)) => {
                 if !srv.console(&line) {
@@ -776,7 +803,7 @@ pub fn serve(mut sim: Sim, addr: &str, viewer: Option<&Viewer>, console: bool) -
                     }
                     // quit: the viewer goes too
                     close_viewer(&mut srv, viewer_child.as_ref());
-                    return Ok(false);
+                    return Ok(());
                 }
             }
             Some(_) => {}

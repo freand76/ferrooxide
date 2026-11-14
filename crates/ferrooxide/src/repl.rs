@@ -18,7 +18,7 @@ const HELP: &str = "commands:
   trace FILE [RE...]  write a VCD of the signals whose name matches a regular expression
                       (all without one), from now on; trace off / trace on pause and resume
   restart             load the design again (changed sources and data files) and start over
-                      at time 0; with --surfer the viewer is restarted too
+                      at time 0 (a viewer stays connected)
   help                (h) this text
   quit                (q) run final blocks and exit
 NAME is a hierarchical name or a unique suffix of one (`top.u1.q`, `u1.q`, `q`).

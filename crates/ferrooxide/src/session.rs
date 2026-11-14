@@ -32,6 +32,9 @@ pub struct Session {
     pub load_report: String,
     /// how the design was loaded (for `restart`)
     pub reload: Option<LoadOptions>,
+    /// the VCD trace running (from the command line or `trace`; at most one): (file,
+    /// patterns); `restart` starts it again
+    pub traces: Vec<(String, Vec<String>)>,
 }
 
 /// Parse, elaborate and prepare a design. Every signal can be forced (interactive use).
@@ -86,6 +89,7 @@ pub fn load(o: &LoadOptions) -> Result<Session, String> {
         breaks: Vec::new(),
         load_report: report,
         reload: Some(o.clone()),
+        traces: Vec::new(),
     })
 }
 
@@ -115,7 +119,7 @@ fn unit_name(p: i32) -> String {
 impl Session {
     /// A session for a simulator prepared elsewhere (signals made forceable by the caller).
     pub fn from_sim(sim: Sim, precision: i32, load_report: String) -> Session {
-        Session { sim, precision, started: false, finished: false, watches: Vec::new(), breaks: Vec::new(), load_report, reload: None }
+        Session { sim, precision, started: false, finished: false, watches: Vec::new(), breaks: Vec::new(), load_report, reload: None, traces: Vec::new() }
     }
 
     /// Load the design again (sources and data files as they are now) and start over at time
@@ -126,6 +130,9 @@ impl Session {
         };
         let mut new = load(&o)?;
         let mut notes = Vec::new();
+        // (the old simulation goes first: its VCD files are complete before they are written
+        // anew)
+        let traces = std::mem::take(&mut self.traces);
         for (name, _, radix, _) in &self.watches {
             if let Err(e) = new.watch(name, *radix) {
                 notes.push(format!("watch {name}: {e}"));
@@ -141,6 +148,7 @@ impl Session {
         let report = std::mem::take(&mut new.load_report);
         *self = new;
         let mut out = format!("restarted: {report}");
+        out.push_str(&self.trace_again(traces));
         for n in notes {
             out.push('\n');
             out.push_str(&n);
@@ -394,7 +402,22 @@ impl Session {
         let set = regex::RegexSet::new(patterns).map_err(|e| format!("bad pattern: {e}"))?;
         let all = patterns.is_empty();
         self.sim.trace_start(file, &|n| all || set.is_match(n)).map_err(|e| format!("cannot write {file}: {e}"))?;
+        // (one VCD at a time: this one replaces the previous)
+        self.traces = vec![(file.to_string(), patterns.iter().map(|p| p.to_string()).collect())];
         Ok(format!("tracing {} signals to {file} from time {}", self.sim.traced_signals(), self.sim.now()))
+    }
+
+    /// Start `traces` again (after a restart); the report lines.
+    pub fn trace_again(&mut self, traces: Vec<(String, Vec<String>)>) -> String {
+        let mut out = String::new();
+        for (file, pats) in traces {
+            let p: Vec<&str> = pats.iter().map(String::as_str).collect();
+            match self.trace(&file, &p) {
+                Ok(r) => out.push_str(&format!("\n{r}")),
+                Err(e) => out.push_str(&format!("\ntrace {file}: {e}")),
+            }
+        }
+        out
     }
 
     pub fn trace_enable(&mut self, on: bool) -> String {
