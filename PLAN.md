@@ -69,7 +69,7 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M3 | Nets: multiple drivers, tri-state buses, wand/wor/tri0/tri1/supply, static drive strengths, tran islands, inertial delays (rise/fall/turn-off), specify path delays (-gspecify) | ✅ (strength values on nets / `%v`: pending) |
 | M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
-| M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
+| M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | typedef, enum, packed struct/union, casts, assignment patterns, packages/import, `$unit` done (parser-level, `svtypes.rs`); next: see "SystemVerilog status" |
 | M7 | FST output, VPI-lite, better diagnostics | |
 | M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | ✅ first version (`--cdsp`): hierarchy, references, history queries, run/pause; `--surfer` (starts Surfer, adds signals over WCP); reals; `-i` console next to the viewer (cursor follows run/step/breakpoints); next: arrays, port directions, diagnostics, goto_declaration |
 | M10 | MCP server: the simulator as a tool for AI agents (load, run, inspect, force, waveforms, lint) | ✅ first version over stdio (`--mcp`); next: value history queries, resources, HTTP transport |
@@ -330,9 +330,7 @@ debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-
 the viewer) work.
 
 Next, roughly in order:
-1. **SystemVerilog for real designs** (M6, in progress): typedef, enum, packed struct/union,
-   packages and import, `logic` everywhere, interfaces (basic), `always_comb` rules,
-   `unique/priority case`.
+1. **SystemVerilog** (M6, in progress; see "SystemVerilog status" below).
 2. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
    warnings Icarus prints (port coercion to inout, constant out-of-range selects, `@*` without
    sensitivities), `%v` strength display (needs strength values on nets), `$countdrivers`,
@@ -348,3 +346,25 @@ Next, roughly in order:
 
 Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
 multi-dimensional arrays as ports or whole-array assignments are not supported.
+
+## SystemVerilog status (2026-11-14)
+
+Done (resolved in the parser, `crates/ferrooxide-front/src/svtypes.rs`): `typedef` (module and
+file scope), `enum` (constants as localparams of the base type), packed `struct`/`union`
+(struct-typed values are flat vectors; member/index/select chains become one `[off +: w]`
+select, also at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`,
+`$bits(T)`, assignment patterns (positional, and beyond the reference: named and `default:`),
+packages with `import p::*` / `import p::x` (module, header, file scope) and `pkg::name`.
+Package items are copied into each module that uses the package (the module's own names win).
+Lint reports names that are SystemVerilog keywords.
+
+Regression suite, SystemVerilog list (`--list regress-sv.list`): 229 of 700 pass (32.7%). The
+failures by construct (compile errors): `string` (~60), queues and dynamic arrays `[$]`/`[]`
+(~76), `program` blocks (49), file-scope variables (24), classes (19), unpacked dimensions in
+typedefs (16), `timeunit`/`timeprecision` (12), plus enum methods (`.name()`, `.next()`),
+`$left`/`$right`/`$size`/`$is_signed` and other query functions, `always_comb` rules (31 FAIL:
+no PASSED, e.g. always_comb checks).
+
+Next, for real RTL first: interfaces and modports, enum methods, array query functions,
+unpacked dimensions in typedefs, file-scope variables, `timeunit`, `always_comb` semantics;
+then testbench features: `string`, queues/dynamic arrays, `program`, classes (large).

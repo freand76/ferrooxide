@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
-use crate::svtypes::SvType;
+use crate::svtypes::{Package, SvType};
 use crate::{Error, Result};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -31,6 +31,12 @@ pub struct Parser {
     pub unit_items: Vec<Item>,
     /// names read so far that are SystemVerilog keywords (lint)
     kw_names: Vec<(String, Line)>,
+    /// packages (carried over to the next file)
+    pub packages: HashMap<String, Rc<Package>>,
+    /// packages the current module (or package) imports or refers to
+    pub(crate) mod_pkgs: Vec<String>,
+    /// the return type of the function being parsed (for `return '{...}`)
+    ret_type: Option<Rc<SvType>>,
 }
 
 struct PType {
@@ -113,6 +119,9 @@ impl Parser {
             pending: Vec::new(),
             unit_items: Vec::new(),
             kw_names: Vec::new(),
+            packages: HashMap::new(),
+            mod_pkgs: Vec::new(),
+            ret_type: None,
         }
     }
 
@@ -303,7 +312,7 @@ impl Parser {
         Ok(n)
     }
 
-    fn opt_block_label(&mut self) -> Result<Option<String>> {
+    pub(crate) fn opt_block_label(&mut self) -> Result<Option<String>> {
         if self.eat_p(":") {
             Ok(Some(self.ident()?))
         } else {
@@ -320,6 +329,8 @@ impl Parser {
                 Tok::Ident(s) if s == "module" || s == "macromodule" => mods.push(self.module()?),
                 Tok::Ident(s) if s == "primitive" => mods.push(self.primitive()?),
                 // file-scope ($unit) declarations: visible in the modules that follow
+                Tok::Ident(s) if s == "package" => self.package()?,
+                Tok::Ident(s) if s == "import" => self.import(true)?,
                 Tok::Ident(s) if matches!(s.as_str(), "typedef" | "localparam" | "parameter" | "function" | "task") => {
                     let mut v = Vec::new();
                     self.module_item(&mut v)?;
@@ -374,7 +385,12 @@ impl Parser {
         // typedefs of the module stay in it
         let saved_types = self.types.clone();
         self.vars.clear();
+        self.mod_pkgs.clear();
         let mut items = Vec::new();
+        // imports in the module header
+        while self.is_kw("import") {
+            self.import(false)?;
+        }
         let mut ports = Vec::new();
         // parameter port list
         if self.eat_p("#") {
@@ -483,11 +499,19 @@ impl Parser {
         self.bump();
         self.opt_block_label()?;
         self.types = saved_types;
-        // file-scope items first, unless the module declares the name itself
-        if !self.unit_items.is_empty() {
-            let own = declared_names(&items);
-            let mut all: Vec<Item> =
-                self.unit_items.iter().filter(|it| item_name(it).is_none_or(|n| !own.contains(n))).cloned().collect();
+        // items of the packages it uses, then file-scope items, unless the module declares
+        // the name itself
+        let pkgs = std::mem::take(&mut self.mod_pkgs);
+        let mut outer = self.package_items(&pkgs);
+        outer.extend(self.unit_items.iter().cloned());
+        if !outer.is_empty() {
+            let mut own = declared_names(&items);
+            let mut all: Vec<Item> = Vec::new();
+            for it in outer {
+                if item_name(&it).is_none_or(|n| own.insert(n.to_string())) {
+                    all.push(it);
+                }
+            }
             all.extend(items);
             items = all;
         }
@@ -841,7 +865,7 @@ impl Parser {
         Ok(v)
     }
 
-    fn module_item(&mut self, items: &mut Vec<Item>) -> Result<()> {
+    pub(crate) fn module_item(&mut self, items: &mut Vec<Item>) -> Result<()> {
         let line = self.line();
         let t = self.peek().clone();
         let kw = match &t {
@@ -863,6 +887,7 @@ impl Parser {
                 self.typedef()?;
                 items.append(&mut self.pending);
             }
+            "import" => self.import(false)?,
             "assign" => {
                 self.bump();
                 let strength = self.strength()?;
@@ -1248,6 +1273,7 @@ impl Parser {
         }
         let name = self.ident()?;
         // the function's own name is its result variable
+        self.ret_type = ret_type.clone();
         self.decl_type = ret_type;
         self.declare_var(&name, 0);
         let mut decls = Vec::new();
@@ -1308,6 +1334,7 @@ impl Parser {
             Stmt::Block { name: None, decls: vec![], stmts, fork: None }
         };
         let decls = merge_port_types(decls);
+        self.ret_type = None;
         Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, decls, body, line })
     }
 
@@ -1655,7 +1682,10 @@ impl Parser {
                 }
                 "return" => {
                     self.bump();
-                    let value = if self.is_p(";") { None } else { Some(self.expr()?) };
+                    let mut value = if self.is_p(";") { None } else { Some(self.expr()?) };
+                    if let (Some(v), Some(t)) = (&value, self.ret_type.clone()) {
+                        value = Some(self.resolve_pattern(v.clone(), &t)?);
+                    }
                     self.expect_p(";")?;
                     Ok(Stmt::Return { value, line })
                 }
@@ -1987,6 +2017,8 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr> {
+        // pkg::name
+        self.pkg_scope()?;
         let t = self.bump();
         let e = match t {
             // size cast: 8'(e)
@@ -2039,7 +2071,7 @@ impl Parser {
                     Expr::Concat(v)
                 }
             }
-            Tok::SysIdent(name) if name == "$bits" && self.is_p("(") && matches!(self.peek_at(1), Tok::Ident(s) if self.types.contains_key(s) || s == "struct" || s == "enum") => {
+            Tok::SysIdent(name) if name == "$bits" && self.is_p("(") && (matches!(self.peek_at(1), Tok::Ident(s) if self.types.contains_key(s) || s == "struct" || s == "enum") || self.is_pkg_type_at(1)) => {
                 self.bump();
                 let w = self.type_width_here()?;
                 self.expect_p(")")?;
@@ -2201,7 +2233,7 @@ pub fn dec(v: u64) -> Number {
 }
 
 /// The name an item declares (for file-scope items a module may redeclare).
-fn item_name(it: &Item) -> Option<&str> {
+pub(crate) fn item_name(it: &Item) -> Option<&str> {
     match it {
         Item::Param(p) => Some(&p.name),
         Item::Subroutine(f) => Some(&f.name),

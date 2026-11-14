@@ -44,6 +44,7 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
     // file-scope typedefs and items ($unit) stay visible in later files
     let mut types = HashMap::new();
     let mut unit = Vec::new();
+    let mut packages = HashMap::new();
     for f in files {
         let text = pp.process_file(f)?;
         let name = f.display().to_string();
@@ -54,9 +55,11 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>
         p.unconnected_drive = uncdrive;
         p.types = std::mem::take(&mut types);
         p.unit_items = std::mem::take(&mut unit);
+        p.packages = std::mem::take(&mut packages);
         modules.extend(p.parse_source()?);
         types = std::mem::take(&mut p.types);
         unit = std::mem::take(&mut p.unit_items);
+        packages = std::mem::take(&mut p.packages);
         timescale = p.timescale;
         nettype = p.default_nettype.clone();
         uncdrive = p.unconnected_drive;

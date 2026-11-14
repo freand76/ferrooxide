@@ -11,7 +11,7 @@
 
 use crate::ast::*;
 use crate::lexer::Tok;
-use crate::parser::{dec, Parser};
+use crate::parser::{dec, item_name, Parser};
 use crate::Result;
 use std::rc::Rc;
 
@@ -25,6 +25,13 @@ pub struct SvType {
     pub fields: Option<Rc<Struct>>,
     /// `int`, `integer`, `byte`, ...: declared without a range
     pub int_kind: bool,
+}
+
+/// A package: its items (with those of the packages it imports) and its typedefs.
+#[derive(Debug, Default)]
+pub struct Package {
+    pub items: Vec<Item>,
+    pub types: std::collections::HashMap<String, Rc<SvType>>,
 }
 
 #[derive(Debug)]
@@ -165,6 +172,104 @@ fn builtin(s: &str) -> Option<(NetKind, bool, Option<u32>)> {
 }
 
 impl Parser {
+    /// `package name; items endpackage`
+    pub(crate) fn package(&mut self) -> Result<()> {
+        self.bump();
+        let name = self.ident()?;
+        self.expect_p(";")?;
+        let saved_types = self.types.clone();
+        let saved_pkgs = std::mem::take(&mut self.mod_pkgs);
+        let mut own = Vec::new();
+        while !self.eat_kw("endpackage") {
+            if matches!(self.peek(), Tok::Eof) {
+                return self.err("unexpected end of file in package");
+            }
+            self.module_item(&mut own)?;
+        }
+        self.opt_block_label()?;
+        // the package's typedefs: those added while parsing it
+        let mut types = std::collections::HashMap::new();
+        for (k, v) in &self.types {
+            if saved_types.get(k).is_none_or(|o| !Rc::ptr_eq(o, v)) {
+                types.insert(k.clone(), v.clone());
+            }
+        }
+        // items of the packages it imports come first
+        let used = std::mem::replace(&mut self.mod_pkgs, saved_pkgs);
+        let mut items = self.package_items(&used);
+        items.extend(own);
+        self.types = saved_types;
+        self.packages.insert(name, Rc::new(Package { items, types }));
+        Ok(())
+    }
+
+    /// `import p::*, q::name;` (in a module, a package, or at file scope).
+    pub(crate) fn import(&mut self, file_scope: bool) -> Result<()> {
+        self.bump();
+        loop {
+            let pkg = self.ident()?;
+            self.expect_p("::")?;
+            let Some(p) = self.packages.get(&pkg).cloned() else {
+                return self.err(format!("unknown package '{pkg}'"));
+            };
+            if self.eat_p("*") {
+                for (k, v) in &p.types {
+                    self.types.insert(k.clone(), v.clone());
+                }
+            } else {
+                let n = self.ident()?;
+                if let Some(t) = p.types.get(&n) {
+                    self.types.insert(n, t.clone());
+                }
+            }
+            if file_scope {
+                let items = self.package_items(&[pkg]);
+                let have: std::collections::HashSet<String> = self.unit_items.iter().filter_map(|i| item_name(i).map(str::to_string)).collect();
+                self.unit_items.extend(items.into_iter().filter(|i| item_name(i).is_none_or(|n| !have.contains(n))));
+            } else if !self.mod_pkgs.contains(&pkg) {
+                self.mod_pkgs.push(pkg);
+            }
+            if !self.eat_p(",") {
+                break;
+            }
+        }
+        self.expect_p(";")
+    }
+
+    /// `pkg::` at the cursor (a package-qualified name): consumes it, makes the package's
+    /// items part of the current module and the name visible as a type if it is one.
+    pub(crate) fn pkg_scope(&mut self) -> Result<bool> {
+        let (Tok::Ident(pkg), Tok::Punct("::"), Tok::Ident(n)) = (self.peek().clone(), self.peek_at(1).clone(), self.peek_at(2).clone()) else {
+            return Ok(false);
+        };
+        let Some(p) = self.packages.get(&pkg).cloned() else { return Ok(false) };
+        self.bump();
+        self.bump();
+        if let Some(t) = p.types.get(&n) {
+            self.types.insert(n, t.clone());
+        }
+        if !self.mod_pkgs.contains(&pkg) {
+            self.mod_pkgs.push(pkg);
+        }
+        Ok(true)
+    }
+
+    /// The items of packages, each name once (the first package wins).
+    pub(crate) fn package_items(&self, pkgs: &[String]) -> Vec<Item> {
+        let mut seen = std::collections::HashSet::new();
+        let mut v = Vec::new();
+        for p in pkgs {
+            if let Some(p) = self.packages.get(p) {
+                for it in &p.items {
+                    if item_name(it).is_none_or(|n| seen.insert(n.to_string())) {
+                        v.push(it.clone());
+                    }
+                }
+            }
+        }
+        v
+    }
+
     /// The current token is a typedef name (not a call or an instance name).
     pub(crate) fn is_type_name(&self) -> bool {
         matches!(self.peek(), Tok::Ident(s) if self.types.contains_key(s))
@@ -173,7 +278,20 @@ impl Parser {
 
     /// A data type with a struct, union or enum, or a typedef name, starts here.
     pub(crate) fn is_sv_type_start(&self) -> bool {
-        self.is_kw("struct") || self.is_kw("union") || self.is_kw("enum") || self.is_type_name()
+        self.is_kw("struct") || self.is_kw("union") || self.is_kw("enum") || self.is_type_name() || self.is_pkg_type()
+    }
+
+    /// `pkg::type_name` at the cursor.
+    fn is_pkg_type(&self) -> bool {
+        self.is_pkg_type_at(0)
+    }
+
+    /// `pkg::type_name` `k` tokens ahead.
+    pub(crate) fn is_pkg_type_at(&self, k: usize) -> bool {
+        match (self.peek_at(k), self.peek_at(k + 1), self.peek_at(k + 2)) {
+            (Tok::Ident(p), Tok::Punct("::"), Tok::Ident(n)) => self.packages.get(p).is_some_and(|p| p.types.contains_key(n)),
+            _ => false,
+        }
     }
 
     /// `[signed|unsigned]` after a type.
@@ -190,6 +308,9 @@ impl Parser {
     /// A data type: builtin vector/integer types, struct/union, enum, or a typedef name, each
     /// with optional packed dimensions. None if no type starts here.
     pub(crate) fn data_type(&mut self) -> Result<Option<SvType>> {
+        if self.is_pkg_type() {
+            self.pkg_scope()?;
+        }
         let Tok::Ident(s) = self.peek().clone() else { return Ok(None) };
         if s == "struct" || s == "union" {
             self.bump();
@@ -563,6 +684,9 @@ impl Parser {
 
     /// The width of a type name or type keyword at the cursor (for `$bits(T)`), consuming it.
     pub(crate) fn type_width_here(&mut self) -> Result<Option<Expr>> {
+        if self.is_pkg_type() {
+            return Ok(self.data_type()?.map(|t| t.width()));
+        }
         let is_type = match self.peek() {
             Tok::Ident(s) => self.types.contains_key(s) || builtin(s).is_some() || s == "struct" || s == "enum",
             _ => false,

@@ -36,6 +36,9 @@ Verilog-2005 plus common SystemVerilog:
   for/if/case, gate primitives, hierarchical names
 - `wire`/`reg`/`integer`/`time`, SV `logic`/`bit`/`int`/`byte`/`shortint`/`longint`,
   vectors of any width, packed multi-dimensional vectors, multi-dimensional unpacked arrays
+- SystemVerilog `typedef`, `enum`, packed `struct`/`union` (member access at any depth, also
+  at run-time indexes), casts (`T'(e)`, `8'(e)`, `signed'(e)`), `$bits(T)`, assignment
+  patterns (positional, named, `default:`), packages, `import`, `pkg::name`, `$unit`
 - `assign`, `initial`, `always`, `always_comb`, `always_ff`, `always_latch`, `final`
 - blocking/non-blocking assignments (including `<= #d`), `if`, `case`/`casez`/`casex`,
   `for`/`while`/`do`/`repeat`/`forever`, `#` delays, `@` events, `wait`, named blocks + `disable`,
@@ -65,8 +68,8 @@ Verilog-2005 plus common SystemVerilog:
   debug server protocol (`--cdsp`, `--surfer`)
 - preprocessor: `` `define `` (with arguments), `` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``, `` `include ``
 
-Not yet: SystemVerilog data types (`typedef`, `enum`, `struct`, packages, interfaces; in
-progress), `%v` strength display, SDF, arrays as ports. See "Road to full Verilog-2005" in
+Not yet: SystemVerilog interfaces, classes, `string`, queues and dynamic arrays, `%v`
+strength display, SDF, arrays as ports. See "Road to full Verilog-2005" in
 [PLAN.md](PLAN.md). Icarus's regression suite (ivtest) passes at about 88%; places where
 Icarus seems to deviate from the standard (ferrooxide matches Icarus) are listed in
 [ICARUS_NOTES.md](ICARUS_NOTES.md).
