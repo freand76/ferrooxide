@@ -31,6 +31,9 @@ options:
                     on the command line are loaded at start, else with the load_design tool
   --cdsp [host:]port  serve the simulation over the CXXRTL debug server protocol (waveform
                     viewers attach live: surfer cxxrtl+tcp://127.0.0.1:port); starts paused
+  --surfer          start the Surfer waveform viewer on a debug server and show the --trace
+                    signals (else the top modules' signals); exits with Surfer (FX_SURFER:
+                    the Surfer executable)
   --lint            check the design (incomplete sensitivity lists) and exit; status 1 on findings
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help
@@ -72,6 +75,7 @@ fn main() -> ExitCode {
     let mut interactive = false;
     let mut mcp_mode = false;
     let mut cdsp_addr: Option<String> = None;
+    let mut surfer = false;
     let mut vcd: Option<String> = None;
     let mut traces: Vec<String> = Vec::new();
     let mut dialect = ferrooxide_compile::Dialect::default();
@@ -125,6 +129,7 @@ fn main() -> ExitCode {
             "--lint" => lint = true,
             "-i" | "--interactive" => interactive = true,
             "--mcp" => mcp_mode = true,
+            "--surfer" => surfer = true,
             "--cdsp" => match val("--cdsp") {
                 Some(v) => cdsp_addr = Some(v),
                 None => return ExitCode::from(2),
@@ -224,7 +229,7 @@ fn main() -> ExitCode {
             eprintln!("ferrooxide: JIT compilation failed ({e}), interpreting");
         }
     }
-    if vcd.is_some() || !traces.is_empty() {
+    if vcd.is_some() || (!traces.is_empty() && !surfer) {
         let path = vcd.clone().unwrap_or_else(|| "dump.vcd".into());
         let set = match regex::RegexSet::new(&traces) {
             Ok(s) => s,
@@ -253,8 +258,13 @@ fn main() -> ExitCode {
             ms(t2b - t2),
         );
     }
-    if let Some(addr) = &cdsp_addr {
-        if let Err(e) = cdsp::serve(sim, addr) {
+    if cdsp_addr.is_some() || surfer {
+        let addr = cdsp_addr.clone().unwrap_or_else(|| "0".into());
+        let viewer = surfer.then(|| cdsp::Viewer {
+            bin: std::env::var("FX_SURFER").unwrap_or_else(|_| "surfer".into()),
+            traces: traces.clone(),
+        });
+        if let Err(e) = cdsp::serve(sim, &addr, viewer) {
             eprintln!("ferrooxide: {e}");
             return ExitCode::from(1);
         }

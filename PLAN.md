@@ -71,7 +71,7 @@ bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no sep
 | M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
 | M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | partly (lexing/simple types) |
 | M7 | FST output, VPI-lite, better diagnostics | |
-| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | ✅ first version (`--cdsp`): hierarchy, references, history queries, run/pause; next: arrays, reals, port directions, diagnostics, WCP pairing |
+| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | ✅ first version (`--cdsp`): hierarchy, references, history queries, run/pause; `--surfer` (starts Surfer, adds signals over WCP); next: arrays, reals, port directions, diagnostics, cursor at breakpoints, goto_declaration |
 | M10 | MCP server: the simulator as a tool for AI agents (load, run, inspect, force, waveforms, lint) | ✅ first version over stdio (`--mcp`); next: value history queries, resources, HTTP transport |
 | M11 | Interactive mode (`-i`): run/step/print/list/set/force/release commands on stdin | ✅ first version (next: watch, breakpoints on conditions, waveform history, scopes) |
 | M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
@@ -197,11 +197,15 @@ recursive), `set_cursor`, `set_viewport_to/range`, `add_markers`, `load`, `reloa
 `zoom_to_fit`, `set_item_color`, `get_item_list/info`, `remove_items`, `focus_item`. Events from
 Surfer: `waveforms_loaded`, and, if the tool lists them in its greeting, `goto_declaration`,
 `add_drivers`, `add_loads` (requests to the tool). `surfer --wcp-initiate PORT` makes Surfer
-connect to a listening tool; WCP `load` accepts a `cxxrtl+tcp://` source.
+connect to a listening tool (always 127.0.0.1). WCP `load` accepts only files and URLs, not a
+`cxxrtl+tcp://` source, and `waveforms_loaded` is only sent for file sources.
 
-**Pairing plan (`--surfer`).** ferrooxide opens a CDSP and a WCP listener, starts
-`surfer --wcp-initiate <port>` and sends `load cxxrtl+tcp://127.0.0.1:<cdsp>`. It then pushes
-views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
+**Pairing (`--surfer`, first version done).** ferrooxide opens a CDSP and a WCP listener and
+starts `surfer cxxrtl+tcp://127.0.0.1:<cdsp> --wcp-initiate <wcp>`. After Surfer's WCP greeting
+it sends `add_items` (dotted names), retried every 250 ms while Surfer answers "No waveform
+loaded"; `$finish` gets a marker (WCP times are femtoseconds for a CXXRTL source); ferrooxide
+exits with Surfer. Tested with a stand-in (`tests/cdsp/fake_surfer.py`), not yet with Surfer
+itself. Still to do; it then pushes views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
 `$display`/assertions as markers. It answers `goto_declaration` from declaration locations and
 `add_drivers`/`add_loads` from the elaborated netlist (something a VCD-only viewer cannot do).
 Without a server Surfer also reads `--vcd` files directly. Both protocols still change.

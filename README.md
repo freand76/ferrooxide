@@ -89,6 +89,7 @@ ferrooxide [options] <files...>
   -i, --interactive interactive mode, see below
   --mcp             MCP server for AI agents (JSON-RPC on stdio), see below
   --cdsp [host:]port  live waveforms in a viewer (CXXRTL debug server protocol), see below
+  --surfer          start Surfer on the debug server and show the --trace signals, see below
   --lint            check the design and exit (status 1 on findings), see below
   +<arg>            plusarg for $test$plusargs / $value$plusargs
 ```
@@ -153,6 +154,11 @@ no `$dumpvars`. With [Surfer](https://surfer-project.org):
 ferrooxide --cdsp 6618 tb.v &
 surfer cxxrtl+tcp://127.0.0.1:6618
 ```
+
+`ferrooxide --surfer [--trace REGEX...] <files>` does both: it starts Surfer
+(`FX_SURFER` selects the executable) and, over Surfer's control protocol (WCP), adds the
+signals matching `--trace` (or, without it, the top modules' signals) to the view and puts a
+marker at `$finish`. ferrooxide exits when Surfer is closed.
 
 The simulation starts paused after time 0. The value history of every signal is kept in
 memory (`FX_HISTORY_MB`, default 512; changes after that are not recorded). The protocol's

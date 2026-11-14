@@ -145,3 +145,35 @@ fn cdsp_session() {
     child.kill().unwrap();
     child.wait().unwrap();
 }
+
+/// --surfer: a stand-in viewer (tests/cdsp/fake_surfer.py) connects over WCP and CDSP; the
+/// initial signals are added after a "no waveform" retry, $finish gets a marker, and
+/// ferrooxide exits with the viewer.
+#[test]
+fn surfer_pairing() {
+    if std::process::Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("python3 not found, skipping");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
+    assert!(st.success());
+    let log = std::env::temp_dir().join(format!("fx_fake_surfer_{}.log", std::process::id()));
+    let out = std::process::Command::new(root.join("target/release/ferrooxide"))
+        .args(["-q", "--surfer", "--trace", r"u\.q$", "--trace", "x$", "tests/cdsp/counter.v"])
+        .env("FX_SURFER", "tests/cdsp/fake_surfer.py")
+        .env("FAKE_SURFER_LOG", &log)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let got = std::fs::read_to_string(&log).unwrap();
+    let _ = std::fs::remove_file(&log);
+    assert_eq!(
+        got,
+        "wcp add_items ['tb.u.q', 'tb.x'] (no waveform yet)\n\
+         wcp add_items ['tb.u.q', 'tb.x']\n\
+         cdsp simulation_finished\n\
+         wcp add_markers [{'move_focus': False, 'name': '$finish', 'time': 1022000000}]\n"
+    );
+}

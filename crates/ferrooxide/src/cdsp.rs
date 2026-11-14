@@ -2,6 +2,12 @@
 //! (`surfer cxxrtl+tcp://HOST:PORT`) attach to the running simulation, run and pause it and query
 //! the value history of any signal. Spec: https://cxxrtl.org/protocol.html (protocol version 0).
 //!
+//! With `--surfer`, ferrooxide also starts Surfer and drives it over Surfer's Waveform Control
+//! Protocol (WCP, same framing): Surfer connects back (`--wcp-initiate`), and the initial
+//! signals (`--trace` patterns, else the top modules' signals) are added to its view; `$finish`
+//! gets a marker. Surfer reports no `waveforms_loaded` for a CXXRTL source, so `add_items` is
+//! retried while Surfer answers that no waveform is loaded.
+//!
 //! Messages are JSON objects terminated by NUL. One client at a time (a new connection replaces
 //! the old one); the simulation keeps its state across connections. Values are sent as
 //! `base64(u32)`, which is two-state: x is sent as 1, z as 0. Arrays and reals are not listed yet.
@@ -9,14 +15,42 @@
 use ferrooxide_rt::{RunState, Sim};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 enum In {
     Connected(u32, TcpStream),
     Msg(u32, String),
     Closed(u32),
+    WcpConnected(TcpStream),
+    WcpMsg(String),
+    WcpClosed,
+    ViewerExited,
+}
+
+/// Start a viewer (Surfer) that attaches to the server and is driven over WCP.
+pub struct Viewer {
+    /// the Surfer executable
+    pub bin: String,
+    /// regular expressions selecting the signals shown first (empty: the top modules' signals)
+    pub traces: Vec<String>,
+}
+
+/// The WCP side: the connection to the viewer and what is still to be sent.
+#[derive(Default)]
+struct Wcp {
+    out: Option<TcpStream>,
+    /// the viewer's greeting arrived
+    ready: bool,
+    /// signals (dotted names) to add once a waveform is loaded in the viewer
+    pending: Option<Vec<String>>,
+    /// when to try `add_items` again
+    retry_at: Option<Instant>,
+    /// commands sent and not answered yet (WCP answers in order)
+    inflight: VecDeque<&'static str>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -45,6 +79,7 @@ struct Server {
     refs: HashMap<String, Vec<String>>,
     out: Option<(u32, TcpStream)>,
     warned_full: bool,
+    wcp: Wcp,
 }
 
 const COMMANDS: &[&str] = &[
@@ -93,7 +128,7 @@ impl Server {
             }
             items.insert(id, Item { sig: *sig, width: info.width, lsb: info.lsb.min(info.msb) });
         }
-        Server { sim, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false }
+        Server { sim, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default() }
     }
 
     fn time_str(&self, ticks: u64) -> String {
@@ -329,11 +364,90 @@ impl Server {
             self.sim.finish();
             let t = self.time_str(self.sim.now());
             self.send(json!({"type": "event", "event": "simulation_finished", "time": t}));
+            self.mark_finish(if st == RunState::Finished { "$finish" } else { "end" });
+        }
+    }
+
+    // ------------------------------------------------------------ WCP (viewer control)
+
+    fn wcp_send(&mut self, kind: &'static str, v: Value) {
+        if let Some(s) = &mut self.wcp.out {
+            let mut b = serde_json::to_vec(&v).unwrap();
+            b.push(0);
+            if s.write_all(&b).is_err() {
+                self.wcp.out = None;
+                return;
+            }
+            if !kind.is_empty() {
+                self.wcp.inflight.push_back(kind);
+            }
+        }
+    }
+
+    /// Send `add_items` when the viewer is ready and the retry time has come.
+    fn wcp_poll(&mut self) {
+        let due = self.wcp.retry_at.is_none_or(|t| Instant::now() >= t);
+        if !self.wcp.ready || !due || self.wcp.inflight.contains(&"add_items") {
+            return;
+        }
+        if let Some(items) = self.wcp.pending.clone() {
+            self.wcp.retry_at = None;
+            self.wcp_send("add_items", json!({"type": "command", "command": "add_items", "items": items, "recursive": false}));
+        }
+    }
+
+    fn wcp_handle(&mut self, text: &str) {
+        let Ok(m) = serde_json::from_str::<Value>(text) else { return };
+        match m["type"].as_str() {
+            Some("greeting") => {
+                self.wcp.ready = true;
+                self.wcp_poll();
+            }
+            Some("response") => {
+                if self.wcp.inflight.pop_front() == Some("add_items") {
+                    self.wcp.pending = None;
+                }
+            }
+            Some("error") => {
+                if self.wcp.inflight.pop_front() == Some("add_items") {
+                    // most likely the CXXRTL source is not connected yet
+                    self.wcp.retry_at = Some(Instant::now() + Duration::from_millis(250));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A marker at the time of $finish (or the end of the events) in the viewer.
+    fn mark_finish(&mut self, name: &str) {
+        if self.wcp.ready {
+            let fs = self.sim.now() as u128 * self.fs_per_tick;
+            self.wcp_send("add_markers", json!({"type": "command", "command": "add_markers",
+                "markers": [{"time": fs as u64, "name": name, "move_focus": false}]}));
         }
     }
 }
 
-fn reader(id: u32, mut s: TcpStream, tx: mpsc::Sender<In>) {
+/// The signals shown first: those matching `traces`, else the signals of the top modules.
+fn initial_items(sim: &Sim, traces: &[String]) -> Result<Vec<String>, String> {
+    let set = regex::RegexSet::new(traces).map_err(|e| format!("bad --trace pattern: {e}"))?;
+    let mut v: Vec<String> = sim
+        .signal_names()
+        .iter()
+        .filter(|(n, s)| {
+            let info = sim.signal_info(*s);
+            info.depth == 0 && !info.real && !n.contains(' ')
+                && if traces.is_empty() { n.matches('.').count() == 1 } else { set.is_match(n) }
+        })
+        .map(|(n, _)| n.clone())
+        .collect();
+    v.sort();
+    v.dedup();
+    v.truncate(500);
+    Ok(v)
+}
+
+fn reader(mut s: TcpStream, tx: mpsc::Sender<In>, msg: impl Fn(String) -> In, closed: In) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1 << 16];
     loop {
@@ -343,18 +457,19 @@ fn reader(id: u32, mut s: TcpStream, tx: mpsc::Sender<In>) {
         };
         buf.extend_from_slice(&chunk[..n]);
         while let Some(i) = buf.iter().position(|&c| c == 0) {
-            let msg = String::from_utf8_lossy(&buf[..i]).into_owned();
+            let text = String::from_utf8_lossy(&buf[..i]).into_owned();
             buf.drain(..=i);
-            if tx.send(In::Msg(id, msg)).is_err() {
+            if tx.send(msg(text)).is_err() {
                 return;
             }
         }
     }
-    let _ = tx.send(In::Closed(id));
+    let _ = tx.send(closed);
 }
 
-/// Serve `sim` (not started yet) on `addr` until the process is stopped.
-pub fn serve(mut sim: Sim, addr: &str) -> Result<(), String> {
+/// Serve `sim` (not started yet) on `addr` until the process is stopped (or the viewer started
+/// with `viewer` exits).
+pub fn serve(mut sim: Sim, addr: &str, viewer: Option<Viewer>) -> Result<(), String> {
     let addr = if addr.contains(':') { addr.to_string() } else { format!("127.0.0.1:{addr}") };
     let listener = TcpListener::bind(&addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
     // (port 0: the system picks one; report the real address)
@@ -363,14 +478,48 @@ pub fn serve(mut sim: Sim, addr: &str) -> Result<(), String> {
     sim.history_start(mb << 20);
     sim.start();
     let st = sim.advance(Some(0));
+    let pending = match &viewer {
+        Some(v) => Some(initial_items(&sim, &v.traces)?),
+        None => None,
+    };
     let mut srv = Server::new(sim);
+    srv.wcp.pending = pending;
     if st != RunState::Paused {
         srv.status = Status::Finished;
         srv.sim.finish();
     }
     srv.sim.flush();
-    eprintln!("ferrooxide: debug server on {addr}; connect with: surfer cxxrtl+tcp://{addr}");
     let (tx, rx) = mpsc::channel();
+    if let Some(v) = &viewer {
+        let wl = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot listen for the viewer: {e}"))?;
+        let port = wl.local_addr().map_err(|e| e.to_string())?.port();
+        let mut child = std::process::Command::new(&v.bin)
+            .arg(format!("cxxrtl+tcp://{addr}"))
+            .args(["--wcp-initiate", &port.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("cannot start '{}' ({e}); FX_SURFER selects the Surfer executable", v.bin))?;
+        eprintln!("ferrooxide: debug server on {addr}, started {}", v.bin);
+        let t = tx.clone();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let _ = t.send(In::ViewerExited);
+        });
+        let t = tx.clone();
+        std::thread::spawn(move || {
+            // one viewer connection
+            if let Some(Ok(s)) = wl.incoming().next() {
+                let _ = s.set_nodelay(true);
+                let Ok(r) = s.try_clone() else { return };
+                if t.send(In::WcpConnected(s)).is_ok() {
+                    reader(r, t, In::WcpMsg, In::WcpClosed);
+                }
+            }
+        });
+    } else {
+        eprintln!("ferrooxide: debug server on {addr}; connect with: surfer cxxrtl+tcp://{addr}");
+    }
     std::thread::spawn(move || {
         for (id, s) in listener.incoming().flatten().enumerate() {
             let id = id as u32;
@@ -380,15 +529,24 @@ pub fn serve(mut sim: Sim, addr: &str) -> Result<(), String> {
                 return;
             }
             let tx = tx.clone();
-            std::thread::spawn(move || reader(id, r, tx));
+            std::thread::spawn(move || reader(r, tx, move |m| In::Msg(id, m), In::Closed(id)));
         }
     });
     loop {
+        if srv.wcp.retry_at.is_some() {
+            srv.wcp_poll();
+        }
         let msg = if let Status::Running(_) = srv.status {
             match rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+            }
+        } else if let Some(t) = srv.wcp.retry_at {
+            match rx.recv_timeout(t.saturating_duration_since(Instant::now())) {
+                Ok(m) => Some(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => return Ok(()),
             }
         } else {
             match rx.recv() {
@@ -405,6 +563,18 @@ pub fn serve(mut sim: Sim, addr: &str) -> Result<(), String> {
             }
             Some(In::Msg(id, text)) if srv.out.as_ref().is_some_and(|o| o.0 == id) => srv.handle(&text),
             Some(In::Closed(id)) if srv.out.as_ref().is_some_and(|o| o.0 == id) => srv.out = None,
+            Some(In::WcpConnected(s)) => {
+                srv.wcp.out = Some(s);
+                srv.wcp_send("", json!({"type": "greeting", "version": "0", "commands": []}));
+            }
+            Some(In::WcpMsg(text)) => srv.wcp_handle(&text),
+            Some(In::WcpClosed) => srv.wcp = Wcp::default(),
+            Some(In::ViewerExited) => {
+                if srv.status != Status::Finished {
+                    srv.sim.finish();
+                }
+                return Ok(());
+            }
             Some(_) => {}
             None => srv.step(),
         }
