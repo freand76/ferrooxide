@@ -213,6 +213,8 @@ pub struct Compiler<'a> {
     pub(crate) md_dims: HashMap<u32, Vec<(i64, u32)>>,
     /// vectors with several packed dimensions (stored [W-1:0]): per dimension (left, right)
     pub(crate) packed_dims: HashMap<u32, Vec<(i64, i64)>>,
+    /// arrays declared with a descending range (`mem [N:0]`), for the $readmem warning
+    pub(crate) desc_arrays: std::collections::HashSet<u32>,
     /// delay of the gate being instantiated
     cur_delay: Option<Expr>,
     job_strength: HashMap<usize, (u8, u8)>,
@@ -443,6 +445,7 @@ impl<'a> Compiler<'a> {
             cur_strength: None,
             md_dims: HashMap::new(),
             packed_dims: HashMap::new(),
+            desc_arrays: Default::default(),
             cur_delay: None,
             job_strength: HashMap::new(),
             func_reads: std::cell::Cell::new(false),
@@ -1512,6 +1515,13 @@ impl<'a> Compiler<'a> {
     /// The value of a parameter (from its override if any): integer or real.
     fn param_value(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
         let untyped = !p.integer && p.range.is_none() && !p.signed;
+        // a number given for a ranged parameter: widened like in an expression (`'bx` fills)
+        if let (None, Expr::Num(n), Some(_), false) = (&ov, &p.value, &p.range, p.real) {
+            let (a, b) = self.range_vals(&p.range, sid)?;
+            let w = ((a - b).abs() + 1) as u32;
+            let c = Const::number_in(n, w, n.signed).or_else(|m| self.err(m))?;
+            return Ok(Sym::Const(c.with_sign(p.signed)));
+        }
         let v = match ov {
             Some(v) => v,
             None => {
@@ -1802,10 +1812,12 @@ impl<'a> Compiler<'a> {
             let width = ((msb - lsb).abs() + 1) as u32;
             // a multi-dimensional array is stored flat (row-major); `md` keeps its dimensions
             let mut md: Option<Vec<(i64, u32)>> = None;
+            let mut desc = false;
             let (depth, arr_lo) = match mg.dims.len() {
                 0 => (0, 0),
                 1 => {
                     let (a, b) = (self.const_int(&mg.dims[0].0, sid)?, self.const_int(&mg.dims[0].1, sid)?);
+                    desc = a > b;
                     (((a - b).abs() + 1) as u32, a.min(b))
                 }
                 _ => {
@@ -1882,6 +1894,9 @@ impl<'a> Compiler<'a> {
                             continue;
                         }
                         let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
+                        if desc {
+                            self.desc_arrays.insert(s);
+                        }
                         if is_real {
                             self.mark_real(s);
                         }
@@ -1907,6 +1922,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
+            if desc {
+                self.desc_arrays.insert(s);
+            }
             if let Some(d) = pk.take() {
                 self.packed_dims.insert(s, d);
                 self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));

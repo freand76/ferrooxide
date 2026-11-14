@@ -1,0 +1,6 @@
+// memory image
+@0 0a 0b
+0c
+@6
+ff // comment
+/* block */ 1x

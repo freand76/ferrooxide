@@ -298,10 +298,15 @@ how to present large memories.
   the section); where the reference agrees, it is a useful check of the test itself. Order
   that IEEE leaves open (wakes of one change, races) does not belong here but in
   `tests/verilog`. Areas so far: `sched` (NBA, always_comb at time 0, edges and events,
-  fork/join, delays), `sv` (bit functions, unique case, procedural statements, enums, packed
-  structs, patterns). Next areas: expressions (widths, signedness, x/z), nets (drivers,
-  strengths, tran), system tasks and formats, generate/parameters, VCD; ideas from the
-  regression suite's coverage, tests written fresh.
+  fork/join, delays), `sv` (bit functions, unique case/if, procedural statements, enums,
+  packed structs, patterns, inside, foreach, strings, forward typedefs, interface arrays),
+  `expr` (widths, signedness, 4-state, selects, operators), `nets` (resolution, strengths,
+  gates, switches), `systasks` (display formats, %t, file I/O, $readmem, $strobe/$monitor,
+  plusargs and misc). Next areas: generate/parameters/hierarchy, functions and tasks
+  (automatic, recursion), VCD, real numbers; ideas from the regression suite's coverage,
+  tests written fresh. Pitfall when writing checks: a task argument is context-determined
+  by the task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
+  self-determined expressions in `{...}` and route signed values through `integer`.
 - `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both simulators.
 
 ## Performance status (CPU cycles, `perf stat`, same machine)
@@ -391,8 +396,8 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
-Icarus regression suite (ivtest, normal tests): main list 1341 of 1526 (88 %), SystemVerilog
-list 358 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+Icarus regression suite (ivtest, normal tests): main list 1342 of 1526 (88 %), SystemVerilog
+list 359 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
@@ -545,6 +550,8 @@ SystemVerilog data types and testbench features:
   arrays; modport directions are not enforced (writing an input of a modport, members not
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
   a forward typedef defined in another scope than its declaration.
+- unsized constants inside concatenations (`{a - 1}`) are accepted; the standard forbids
+  them and the reference reports an error.
 - `unique` case/if: overlapping items are not reported (only "no item matches", as the
   reference); `foreach` over hierarchical names or class/queue members; `inside` with
   unpacked arrays as set items.

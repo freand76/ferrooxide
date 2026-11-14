@@ -1103,6 +1103,17 @@ impl<'a> Compiler<'a> {
                 if name.starts_with("$write") {
                     self.emit(sys(SysTask::WriteMem { hex, file, sig, start, end }));
                 } else {
+                    if start.is_none() && self.desc_arrays.contains(&sig) {
+                        // the 1364-2005 change of the default start address (as the reference
+                        // reports it)
+                        let msg = format!(
+                            "WARNING: {loc}: {name}: The behaviour for reg[...] mem[N:0]; {name}(\"...\", mem); changed in the 1364-2005 standard. To avoid ambiguity, use mem[0:N] or explicit range parameters {name}(\"...\", mem, start, stop);. Defaulting to 1364-2005 behavior."
+                        );
+                        let a = [Some(Expr::Str(msg.replace('%', "%%")))];
+                        let args = self.fmt_args(&a, sid)?;
+                        let texp = self.texp(sid);
+                        self.emit(sys(SysTask::Display { nl: true, args, scope: scope.clone(), fd: None, prefix: "", texp, radix: 'd' }));
+                    }
                     self.emit(sys(SysTask::ReadMem { hex, file, sig, start, end, loc }));
                 }
             }

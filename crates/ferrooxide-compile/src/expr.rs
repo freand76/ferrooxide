@@ -601,12 +601,7 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Type(_) => self.err("a data type is not a value"),
             Expr::Num(n) => {
-                if n.fill {
-                    let c = Const::fill(n.digits.chars().next().unwrap(), w);
-                    return Ok(self.const_slot(&c));
-                }
-                let c = Const::from_number(n).or_else(|m| self.err(m))?;
-                let c = c.resize(w, s);
+                let c = Const::number_in(n, w, s).or_else(|m| self.err(m))?;
                 Ok(self.const_slot(&c))
             }
             Expr::Real(_) => self.err("real numbers are not supported"),
@@ -1152,7 +1147,8 @@ impl<'a> Compiler<'a> {
                 let mode = match args.get(1) {
                     Some(Expr::Str(m)) => m.clone(),
                     Some(_) => return self.err("$fopen mode must be a string literal"),
-                    None => "w".to_string(),
+                    // no mode: a multichannel descriptor
+                    None => String::new(),
                 };
                 let d = self.tmp(32);
                 self.emit(Instr::Sys(Box::new(rt::SysTask::FOpen { d, dw: 32, file, mode })));

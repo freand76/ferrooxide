@@ -2226,13 +2226,23 @@ impl Sim {
                     Some((slot, w)) => {
                         let v = ops::read_u64(&self.mem, *slot as usize, *w).unwrap_or(0) as u32;
                         if v & 0x8000_0000 == 0 {
-                            // multichannel descriptor: bit0 = stdout
+                            // multichannel descriptor (IEEE 1800 21.3.1): bit 0 = stdout, the
+                            // other bits are files opened without a mode
                             if v & 1 != 0 {
                                 let _ = self.out.write_all(s.as_bytes());
                             }
-                            if v & 2 != 0 {
-                                eprint!("{s}");
+                            for k in 1..31 {
+                                if v & (1 << k) != 0 {
+                                    if let Some(FileH::W(f)) = self.files.get_mut(&(1 << k)) {
+                                        let _ = f.write_all(s.as_bytes());
+                                    }
+                                }
                             }
+                        } else if v == 0x8000_0001 {
+                            let _ = self.out.write_all(s.as_bytes());
+                        } else if v == 0x8000_0002 {
+                            let _ = self.out.flush();
+                            eprint!("{s}");
                         } else if let Some(FileH::W(f)) = self.files.get_mut(&v) {
                             let _ = f.write_all(s.as_bytes());
                         }
@@ -2255,7 +2265,19 @@ impl Sim {
                     let _ = self.out.write_all(s.as_bytes());
                 }
             }
-            SysTask::MonitorOn(on) => self.monitor_on = *on,
+            SysTask::MonitorOn(on) => {
+                // turning it on prints the current values (at the end of the time step), even
+                // without a change (IEEE 1800 21.2.3)
+                if *on && !self.monitor_on && self.monitor != NONE {
+                    let m = self.monitor;
+                    let pr = &mut self.procs[m as usize];
+                    if pr.wait != NONE {
+                        pr.wait = NONE;
+                        self.postponed.push(m);
+                    }
+                }
+                self.monitor_on = *on;
+            }
             SysTask::TimeFormat(f) => fmt::set_time_format(f.clone()),
             SysTask::Strobe { proc } => {
                 self.procs[*proc as usize].pc = 0;
@@ -2355,6 +2377,14 @@ impl Sim {
                     o.open(&file).ok().map(|f| FileH::W(BufWriter::new(f)))
                 };
                 let fd = match opened {
+                    // multichannel: the lowest free channel bit (1..30), 0 when all are used
+                    Some(h) if mode.is_empty() => match (1..31).map(|k| 1u32 << k).find(|b| !self.files.contains_key(b)) {
+                        Some(b) => {
+                            self.files.insert(b, h);
+                            b
+                        }
+                        None => 0,
+                    },
                     Some(h) => {
                         let fd = 0x8000_0000 | self.next_fd;
                         self.next_fd += 1;
@@ -2373,8 +2403,12 @@ impl Sim {
                 if v == 1 {
                     let _ = writeln!(self.out, "WARNING: {loc}: could not close MCD STDOUT (0x1) in $fclose().");
                 }
-                if let Some(FileH::W(mut f)) = self.files.remove(&v) {
-                    let _ = f.flush();
+                // a multichannel descriptor closes every channel in it
+                let fds: Vec<u32> = if v & 0x8000_0000 == 0 { (1..31).map(|k| 1u32 << k).filter(|b| v & b != 0).collect() } else { vec![v] };
+                for fd in fds {
+                    if let Some(FileH::W(mut f)) = self.files.remove(&fd) {
+                        let _ = f.flush();
+                    }
                 }
             }
             SysTask::FileRead { kind, d, src, scope } => {
@@ -2779,6 +2813,9 @@ impl Sim {
         }
         let n = nw(r.width);
         let first = addr;
+        // a start above the end loads downwards (IEEE 1800 21.4)
+        let step: i64 = if first > last { -1 } else { 1 };
+        let past = |a: i64| if step > 0 { a > last } else { a < last };
         let mut addressed = false;
         for tok in clean.split_whitespace() {
             if let Some(a) = tok.strip_prefix('@') {
@@ -2786,7 +2823,7 @@ impl Sim {
                 addressed = true;
                 continue;
             }
-            if addr > last {
+            if past(addr) {
                 break;
             }
             let e = addr - lo;
@@ -2816,9 +2853,9 @@ impl Sim {
                 a.extend_from_slice(&b);
                 self.apply(sig, Res::Elem(e as u32), &a, r.width);
             }
-            addr += 1;
+            addr += step;
         }
-        if !addressed && addr <= last {
+        if !addressed && !past(addr) {
             let name = if hex { "$readmemh" } else { "$readmemb" };
             let _ = writeln!(
                 self.out,

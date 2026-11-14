@@ -109,6 +109,23 @@ impl Const {
         c
     }
 
+    /// A number widened to `w` bits in an expression: an unsized based number whose leftmost
+    /// digit is x or z extends that digit to the full width (1364-2001 and later, 3.5.1).
+    pub fn number_in(n: &Number, w: u32, sign: bool) -> Result<Const, String> {
+        if n.fill {
+            return Ok(Const::fill(n.digits.chars().next().unwrap(), w));
+        }
+        let c = Self::from_number(n)?;
+        let lead = n.digits.chars().next().map(|d| d.to_ascii_lowercase());
+        if n.size.is_none() && n.based && w > c.w && matches!(lead, Some('x' | 'z' | '?')) {
+            // as a sign extension of the leading x/z bit
+            let mut r = c.resize(w, true);
+            r.signed = c.signed;
+            return Ok(r);
+        }
+        Ok(c.resize(w, sign))
+    }
+
     pub fn from_number(n: &Number) -> Result<Const, String> {
         if n.fill {
             return Ok(Const::fill(n.digits.chars().next().unwrap(), 1));

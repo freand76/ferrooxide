@@ -1,0 +1,8 @@
+0 monitor a=0 b=0
+1 display a=0
+1 strobe a=1
+1 monitor a=1 b=0
+2 monitor a=3 b=1
+4 monitor a=4 b=1
+5 monitor a=4 b=2
+strobe_monitor.v:17: $finish called at 6 (1s)
