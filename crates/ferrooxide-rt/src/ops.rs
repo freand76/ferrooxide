@@ -948,6 +948,18 @@ pub fn insert(m: &mut [u64], d: usize, dw: u32, s: usize, sw: u32, off: u32) {
     }
 }
 
+/// `$countones` (mode 0), `$onehot` (1), `$onehot0` (2): only bits that are 1 count
+pub fn ones(m: &mut [u64], d: usize, s: usize, w: u32, mode: u8) {
+    let n = nw(w);
+    let c: u64 = (0..n).map(|i| (m[s + i] & !m[s + n + i]).count_ones() as u64).sum();
+    m[d] = match mode {
+        0 => c,
+        1 => (c == 1) as u64,
+        _ => (c <= 1) as u64,
+    };
+    m[d + 1] = 0;
+}
+
 pub fn clog2(m: &mut [u64], d: usize, s: usize, w: u32) {
     if !is_known(m, s, w) {
         m[d] = 0xffff_ffff;

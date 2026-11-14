@@ -209,7 +209,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Copy { d, s, .. } | Instr::Resize { d, s, .. } | Instr::Un { d, s, .. } | Instr::Red { d, s, .. } => {
             vec![*d, *s]
         }
-        Instr::Clog2 { d, s, .. } => vec![*d, *s],
+        Instr::Clog2 { d, s, .. } | Instr::Ones { d, s, .. } => vec![*d, *s],
         Instr::IToR { d, s, .. } | Instr::RToI { d, s, .. } | Instr::RNeg { d, s } | Instr::RToTicks { d, s, .. } => {
             vec![*d, *s]
         }
@@ -617,6 +617,9 @@ pub enum Instr {
     Halt,
     SysF { f: SysFn, d: u32 },
     Clog2 { d: u32, s: u32, w: u32 },
+    /// number of 1 bits (x/z bits do not count): `$countones` (32 bits), `$onehot` (mode 1:
+    /// exactly one), `$onehot0` (mode 2: at most one)
+    Ones { d: u32, s: u32, w: u32, mode: u8 },
     /// start the fork branches; join: 0 = join (all), 1 = join_any, 2 = join_none
     Fork { children: Box<[u32]>, join: u8 },
     /// disable the named blocks / tasks of `Program::disables[target]`

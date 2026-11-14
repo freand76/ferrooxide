@@ -490,7 +490,7 @@ impl<'a> Compiler<'a> {
                     (32, true)
                 }
                 "$rtoi" => (32, true),
-                "$realtobits" => (64, false),
+                "$realtobits" | "$__ticks" => (64, false),
                 "$countones" => (32, false),
                 "$onehot" | "$onehot0" | "$isunknown" => (1, false),
                 _ => return self.err(format!("unsupported system function '{name}'")),
@@ -1053,9 +1053,10 @@ impl<'a> Compiler<'a> {
 
     fn sys_func(&mut self, name: &str, args: &[Expr], sid: usize, w: u32, s: bool) -> R<u32> {
         match name {
-            "$time" | "$stime" => {
+            "$time" | "$stime" | "$__ticks" => {
                 let d = self.tmp(64);
-                let e = self.texp(sid);
+                // $__ticks: the simulation time in ticks of the precision
+                let e = if name == "$__ticks" { 0 } else { self.texp(sid) };
                 self.emit(Instr::SysF { f: SysFn::Time(e), d });
                 let own = if name == "$stime" { 32 } else { 64 };
                 let d = self.resize(d, 64, own, false);
@@ -1117,6 +1118,14 @@ impl<'a> Compiler<'a> {
                 let v = self.expr(&args[2], sid, ctx, es)?;
                 let v = self.resize(v, ctx, cw, false);
                 Ok(self.resize(v, cw, w, s))
+            }
+            "$countones" | "$onehot" | "$onehot0" => {
+                let Some(a) = args.first() else { return self.err(format!("{name} needs an argument")) };
+                let (v, vw, _) = self.self_expr(a, sid)?;
+                let (mode, ow) = match name { "$countones" => (0, 32), "$onehot" => (1, 1), _ => (2, 1) };
+                let d = self.tmp(ow);
+                self.emit(Instr::Ones { d, s: v, w: vw, mode });
+                Ok(self.resize(d, ow, w, false))
             }
             "$clog2" => {
                 let (v, vw, _) = self.self_expr(&args[0], sid)?;

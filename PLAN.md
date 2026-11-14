@@ -381,15 +381,19 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
 Icarus regression suite (ivtest, normal tests): main list 1341 of 1526 (88 %), SystemVerilog
-list 324 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+list 328 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
 
 Next, roughly in order (see "Architecture changes ahead" below for why this order):
-1. **SystemVerilog RTL items that fit the current design**: `unique`/`priority` warnings,
-   `$countones`/`$onehot`/`$onehot0`, arrays of interfaces, forward typedefs. (Done: the
-   `assign z = a;` alias, file-scope and package variables, `timeunit`, array typedefs.)
+1. **SystemVerilog RTL items that fit the current design**: arrays of interfaces, forward
+   typedefs. (Done: the `assign z = a;` alias, file-scope and package variables, `timeunit`,
+   array typedefs, `unique`/`priority` case warnings for unmatched values,
+   `$countones`/`$onehot`/`$onehot0`.) Found on the way: `always_comb` is scheduled
+   differently there: its time-0 run comes after the `initial` blocks (it never sees the
+   initial x), and on a change an `always @(s)` elsewhere runs before it; here it runs first.
+   Wake order between an `always @*` in a sub-instance and one in the parent also differs.
 2. **Types in elaboration** (A1 below): first part done (package scopes, `parameter type`);
    next a type per signal in the compiler, then struct layout and members out of the parser.
 3. **Heap objects** (A2): `string` done (first version); queues, dynamic and associative
@@ -574,8 +578,7 @@ evaluated in their scope, `input var` / `input logic` port kinds, `-u` (separate
 compilation units), `string` (first version, see A2 status and Unsupported).
 SystemVerilog list 324 of 700 (46.3 %, from 251), main list 1341 of 1526 (from 1337).
 
-Next, for real RTL: `unique`/`priority` case violation warnings, `$countones`/`$onehot`/
-`$onehot0` code generation, arrays of interfaces, struct-typed function arguments with
+Next, for real RTL: arrays of interfaces, struct-typed function arguments with
 patterns, nested module declarations (`sv_timeunit_prec3b`), forward typedefs (`typedef enum
 T;`, ~10 tests), `export` in packages; then testbench features: `string`, queues/dynamic
 arrays, `program`, classes (large).

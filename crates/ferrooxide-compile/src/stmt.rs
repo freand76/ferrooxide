@@ -897,6 +897,16 @@ impl<'a> Compiler<'a> {
                     self.emit(sys(SysTask::Finish { loc: String::new(), stop: false }));
                 }
             }
+            "$__unhandled_case" => {
+                let msg = format!(
+                    "WARNING: {}:{}: value is unhandled for priority or unique case statement\n         Time: %0d  Scope: %m",
+                    self.file, self.line
+                );
+                let a = [Some(Expr::Str(msg)), Some(Expr::SysCall("$__ticks".into(), Vec::new()))];
+                let args = self.fmt_args(&a, sid)?;
+                let texp = self.texp(sid);
+                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix: "", texp, radix: 'd' }));
+            }
             "$fdisplay" | "$fwrite" => {
                 let Some(Some(fd)) = args.first() else { return self.err(format!("{name} needs a file descriptor")) };
                 let (fs, fw, _) = self.self_expr(fd, sid)?;

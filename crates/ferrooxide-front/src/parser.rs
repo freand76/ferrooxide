@@ -1857,7 +1857,15 @@ impl Parser {
                 }
                 "unique" | "priority" | "unique0" => {
                     self.bump();
-                    self.stmt()
+                    let mut st = self.stmt()?;
+                    // a value no item matches is reported at run time (not for unique0)
+                    if kw != "unique0" {
+                        if let Stmt::Case { default: d @ None, line, .. } = &mut st {
+                            let line = *line;
+                            *d = Some(Box::new(Stmt::SysTask { name: "$__unhandled_case".into(), args: Vec::new(), line }));
+                        }
+                    }
+                    Ok(st)
                 }
                 "case" | "casez" | "casex" => {
                     self.bump();
