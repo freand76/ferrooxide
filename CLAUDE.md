@@ -35,6 +35,10 @@ instructions, notifies), `FX_MAX_MEM_MB` (design memory limit, default 2048), `F
   4 at a time). Long or parallel jobs run in the background. Never wait for a build with
   `pgrep -f "cargo build"` loops (they match themselves); just run `cargo build`.
 - Commit finished, tested steps locally; push only when asked.
+- Commit messages: title of about 50 characters (imperative, no period), blank line, body
+  wrapped at 70 columns. The body says clearly what was done and mostly why, not how; no
+  reasoning or narrative. Don't name the reference simulator, its test suite or private
+  designs; say "the reference" / "the regression suite".
 
 ## Icarus quirks
 `ICARUS_NOTES.md` lists places where Icarus seems to deviate from the standard (we match it);
