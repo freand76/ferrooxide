@@ -40,6 +40,13 @@ memory limit, default 2048), `FX_MEM_LIMIT_MB` (address-space cap of the process
   exact output matters (diffed against it; `// args: +x=1` passes plusargs to both).
   New syntax also gets a parser snapshot in `crates/ferrooxide-front/tests/parse/` (a file,
   or a directory for a multi-file unit, with its `.ast`); review the `.ast` diff when blessing.
+- Front end: the parser (`syntax/`) builds what the source says and resolves no names except
+  type names (needed to parse `T x;`, `T'(e)`, `$bits(T)`); everything else (types, members,
+  packages, expansions) belongs in the lowering (`lower/`) or the compiler. New syntax gets
+  its own tree node (`syntax/tree.rs`), never a `$__` pseudo call or a reuse of an unrelated
+  node. The lowering reports what it cannot handle as "X is not supported" at its line; it
+  never drops or approximates a construct silently. `--parse-only` / `tests/parsecheck.py`
+  check the parser on its own.
 - Check benchmark cycles after scheduler/JIT changes; don't regress them.
 - Memory: this machine has 14 GB and an out-of-memory crash kills the session (it has happened).
   EVERY run of ferrooxide, iverilog/vvp or a test outside the scripts goes under a limit:

@@ -449,6 +449,7 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   - *F6.* CLAUDE.md rules: the parser resolves no names other than type names; new syntax gets
     a tree node and a parser snapshot, never a `$__` pseudo call; the lowering reports what it
     cannot do.
+  - *F6 status (2026-11-15)*: done (CLAUDE.md, "Front end").
 - **R3. Compilation units.** (F4 replaces the field shuffle in `parse_files`.) Package items
   are no longer copied into modules (package scopes resolve them).
 - **R4. Types in the compiler** (rest of A1): a `Type` per signal, one
