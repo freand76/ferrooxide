@@ -20,6 +20,7 @@ tests/suite.sh [-v] [files|dirs]     # own suite (tests/suite/<area>), all three
 cargo test --release                 # difftest + own suite + lint test + parser snapshots
 FX_BLESS=1 cargo test --release -p ferrooxide-front --test parse   # rewrite parser snapshots
 tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: tests write files)
+tests/regress.sh [--baseline]        # both regression lists, per-test changes vs the baseline
 perf stat -e cycles target/release/ferrooxide bench/cpuish.v   # perf works on this machine
 ```
 Debug: `--dump-ast` (parsed tree, Verilog-like), `--dump-code`, `--stats`, `FX_TRACE=<time>`
