@@ -29,9 +29,9 @@ impl<'a> Compiler<'a> {
             listed.extend(v);
         }
         let mut reads = Vec::new();
-        self.func_reads.set(true);
+        self.subr.func_reads.set(true);
         self.reads_stmt(body, sid, &mut reads);
-        self.func_reads.set(false);
+        self.subr.func_reads.set(false);
         // variables the block computes itself (temporaries) are not inputs
         let mut written = Vec::new();
         self.blocking_writes(body, sid, &mut written);
@@ -55,8 +55,8 @@ impl<'a> Compiler<'a> {
             list,
             if missing.len() == 1 { "is" } else { "are" }
         );
-        if self.lint_seen.insert(msg.clone()) {
-            self.lint.push(msg);
+        if self.diag.lint_seen.insert(msg.clone()) {
+            self.diag.lint.push(msg);
         }
     }
 

@@ -123,53 +123,66 @@ pub(crate) struct SubReq<'a> {
 }
 
 pub struct Compiler<'a> {
-    mods: HashMap<&'a str, &'a Module>,
     pub prog: Program,
     pub(crate) scopes: Vec<Scope<'a>>,
-    /// arrays of instances and interface port arrays: (scope, name) -> (left, right); the
-    /// elements are the children `name[i]` of the scope
-    inst_arrays: HashMap<(usize, String), (i64, i64)>,
-    /// the module (or interface) of each instance scope
-    scope_module: HashMap<usize, &'a Module>,
-    tops: HashMap<String, usize>,
-    jobs: Vec<Job<'a>>,
-    consts: HashMap<Const, u32>,
-    pub(crate) pb: Vec<PState>,
-    pub(crate) func_inst: HashMap<(usize, String), FuncInst>,
     pub(crate) file: String,
     pub(crate) line: u32,
-    pub warnings: Vec<String>,
-    /// lint findings (only collected with `lint_enabled`)
-    pub lint: Vec<String>,
-    lint_seen: HashSet<String>,
-    pub lint_enabled: bool,
-    /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
-    pub(crate) two_state: HashSet<u32>,
-    pub(crate) call_depth: u32,
-    /// functions being inlined: (definition scope, name, instance key)
-    pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
-    /// recursive functions compiled as subroutines (of the process at `level`)
-    pub(crate) subs: Vec<SubReq<'a>>,
-    warned: HashSet<String>,
-    scratch_top: u32,
-    scratch_saved: Vec<u32>,
     /// simulation precision (power of ten of seconds): the smallest of all modules
     pub(crate) gprec: i32,
-    /// (array, element) -> alias signal created for port connections
-    elem_alias: HashMap<(u32, u32), u32>,
-    /// views: another name for a signal with its own declared range and sign (a port of a
-    /// different range or sign collapsed onto its connection, a net aliased to the source of
-    /// a plain `assign`) -> the signal it stands for. Instructions refer to the view while
-    /// compiling (selects and sign use its declaration) and to the signal afterwards.
-    pub(crate) view_of: HashMap<u32, u32>,
-    /// (view, driver signal) -> view of the driver (see `redir`)
-    drv_views: HashMap<(u32, u32), u32>,
+    dialect: Dialect,
+    pub(crate) hier: Hier<'a>,
+    pub(crate) diag: Diag,
+    pub(crate) code: Code<'a>,
+    pub(crate) subr: Subr<'a>,
+    pub(crate) nets: Nets,
+    pub(crate) sigs: Sigs,
+}
+
+/// The module hierarchy: modules, instance scopes, packages, defparams.
+#[derive(Default)]
+pub(crate) struct Hier<'a> {
+    pub(crate) mods: HashMap<&'a str, &'a Module>,
+    /// arrays of instances and interface port arrays: (scope, name) -> (left, right); the
+    /// elements are the children `name[i]` of the scope
+    pub(crate) inst_arrays: HashMap<(usize, String), (i64, i64)>,
+    /// the module (or interface) of each instance scope
+    pub(crate) scope_module: HashMap<usize, &'a Module>,
+    pub(crate) tops: HashMap<String, usize>,
+    /// defparam overrides by full parameter path
+    pub(crate) defparams: HashMap<String, PVal>,
+    /// parameters already evaluated (full paths), a defparam for one of them came too late,
+    /// and whether this is the second elaboration
+    pub(crate) params_done: HashSet<String>,
+    pub(crate) late_defparam: bool,
+    pub(crate) restarted: bool,
+    pub(crate) top_names: HashSet<String>,
+    /// package (and `$unit`) scopes by name
+    pub(crate) pkg_scopes: HashMap<String, usize>,
+}
+
+/// Warnings and lint findings.
+#[derive(Default)]
+pub(crate) struct Diag {
+    pub(crate) warnings: Vec<String>,
+    /// lint findings (only collected with `lint_enabled`)
+    pub(crate) lint: Vec<String>,
+    pub(crate) lint_seen: HashSet<String>,
+    pub(crate) lint_enabled: bool,
+    pub(crate) warned: HashSet<String>,
+}
+
+/// Code generation: jobs, processes, temporaries, constants, blocks, time-0 events.
+#[derive(Default)]
+pub(crate) struct Code<'a> {
+    pub(crate) jobs: Vec<Job<'a>>,
+    pub(crate) consts: HashMap<Const, u32>,
+    pub(crate) pb: Vec<PState>,
+    pub(crate) scratch_top: u32,
+    pub(crate) scratch_saved: Vec<u32>,
     /// texts interned at compile time -> handle (`Program::strings`)
     pub(crate) str_ids: HashMap<Vec<u8>, u64>,
     /// compiling a string's handle (no conversion of string values to characters)
     pub(crate) str_raw: bool,
-    /// variables made aliases by `alias_assigns` (a procedural store to one is an error)
-    alias_vars: HashSet<u32>,
     /// named blocks and task bodies for `disable`: (path, definition)
     pub(crate) block_reg: Vec<(String, rt::BlockDef)>,
     /// registry entries of the blocks being compiled (fork branches started inside them are
@@ -177,43 +190,74 @@ pub struct Compiler<'a> {
     pub(crate) open_blocks: Vec<usize>,
     /// disable targets to resolve after code generation: (target, candidate paths, file, line)
     pub(crate) pending_disables: Vec<(u32, Vec<String>, String, u32)>,
-    /// memory limit (words) and the error raised when a declaration exceeds it
-    pub(crate) mem_limit_words: u64,
-    pub(crate) mem_error: Option<Error>,
     /// signals given an initial value before time 0 (declaration initializers, constant
     /// continuous assignments): they get a change event at time 0, as with Icarus
-    init_touch: Vec<u32>,
+    pub(crate) init_touch: Vec<u32>,
     /// the same for nets with constant drivers (their events come first)
-    init_touch_net: Vec<u32>,
-    /// defparam overrides by full parameter path
-    defparams: HashMap<String, PVal>,
-    /// parameters already evaluated (full paths), a defparam for one of them came too late,
-    /// and whether this is the second elaboration
-    params_done: HashSet<String>,
-    late_defparam: bool,
-    restarted: bool,
-    top_names: HashSet<String>,
+    pub(crate) init_touch_net: Vec<u32>,
     /// the scope of the job being compiled, and per process the scope it was created in
-    job_scope: usize,
-    proc_scope: Vec<usize>,
-    /// package (and `$unit`) scopes by name
-    pub(crate) pkg_scopes: HashMap<String, usize>,
+    pub(crate) job_scope: usize,
+    pub(crate) proc_scope: Vec<usize>,
     /// UDP name -> index of its runtime table
     pub(crate) udp_index: HashMap<String, u32>,
+    /// drive strength of the continuous assignment of each job (by index)
+    pub(crate) job_strength: HashMap<usize, (u8, u8)>,
+}
+
+/// Functions and tasks: instances, inlining, recursion.
+#[derive(Default)]
+pub(crate) struct Subr<'a> {
+    pub(crate) func_inst: HashMap<(usize, String), FuncInst>,
+    pub(crate) call_depth: u32,
+    /// functions being inlined: (definition scope, name, instance key)
+    pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
+    /// recursive functions compiled as subroutines (of the process at `level`)
+    pub(crate) subs: Vec<SubReq<'a>>,
     /// counter for per-call storage of automatic functions and tasks
     pub(crate) auto_count: u32,
+    /// read sets include signals read inside called functions (lint only)
+    pub(crate) func_reads: std::cell::Cell<bool>,
+    /// functions being followed by `func_reads` (recursion guard)
+    pub(crate) func_reads_seen: std::cell::RefCell<Vec<(usize, String)>>,
+}
+
+/// Nets: aliases and views, several drivers, pulls, bidirectional links, strengths.
+#[derive(Default)]
+pub(crate) struct Nets {
+    /// (array, element) -> alias signal created for port connections
+    pub(crate) elem_alias: HashMap<(u32, u32), u32>,
+    /// views: another name for a signal with its own declared range and sign (a port of a
+    /// different range or sign collapsed onto its connection, a net aliased to the source of
+    /// a plain `assign`) -> the signal it stands for. Instructions refer to the view while
+    /// compiling (selects and sign use its declaration) and to the signal afterwards.
+    pub(crate) view_of: HashMap<u32, u32>,
+    /// (view, driver signal) -> view of the driver (see `redir`)
+    pub(crate) drv_views: HashMap<(u32, u32), u32>,
+    /// variables made aliases by `alias_assigns` (a procedural store to one is an error)
+    pub(crate) alias_vars: HashSet<u32>,
     /// nets of a special type (tri0, wand, ...): resolved even with one or no driver
     pub(crate) net_types: HashMap<u32, NetType>,
     /// nets with a pullup (true) or pulldown (false) gate
     pub(crate) pulls: HashMap<u32, Vec<(u32, u32, bool)>>,
     /// nets with several continuous drivers -> their driver signals
-    drivers: HashMap<u32, Vec<u32>>,
+    pub(crate) drivers: HashMap<u32, Vec<u32>>,
     /// while compiling a driver of a multi-driven net: net -> this driver's signal
-    redirect: HashMap<u32, u32>,
-    dialect: Dialect,
-    links: Vec<Link>,
-    /// drive strength of the continuous assignments being created, and per job index
-    cur_strength: Option<(u8, u8)>,
+    pub(crate) redirect: HashMap<u32, u32>,
+    pub(crate) links: Vec<Link>,
+    /// drive strength of the continuous assignments being created
+    pub(crate) cur_strength: Option<(u8, u8)>,
+    /// delay of the gate being instantiated
+    pub(crate) cur_delay: Option<Expr>,
+}
+
+/// Facts about signals beyond `SignalInfo`, and the memory limit.
+#[derive(Default)]
+pub(crate) struct Sigs {
+    /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
+    pub(crate) two_state: HashSet<u32>,
+    /// memory limit (words) and the error raised when a declaration exceeds it
+    pub(crate) mem_limit_words: u64,
+    pub(crate) mem_error: Option<Error>,
     /// multi-dimensional arrays (stored flat): per dimension (lowest index, size)
     pub(crate) md_dims: HashMap<u32, Vec<(i64, u32)>>,
     /// vectors with several packed dimensions (stored [W-1:0]): per dimension (left, right)
@@ -222,13 +266,6 @@ pub struct Compiler<'a> {
     pub(crate) desc_arrays: std::collections::HashSet<u32>,
     /// some named event exists (`.triggered` needs the rewrite in `md_norm`)
     pub(crate) has_events: bool,
-    /// delay of the gate being instantiated
-    cur_delay: Option<Expr>,
-    job_strength: HashMap<usize, (u8, u8)>,
-    /// read sets include signals read inside called functions (lint only)
-    pub(crate) func_reads: std::cell::Cell<bool>,
-    /// functions being followed by `func_reads` (recursion guard)
-    pub(crate) func_reads_seen: std::cell::RefCell<Vec<(usize, String)>>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -303,14 +340,14 @@ pub fn compile_dialect(
     let mut seed: Option<HashMap<String, PVal>> = None;
     let mut c = loop {
     let mut c = Compiler::new(modules);
-    c.lint_enabled = lint;
+    c.diag.lint_enabled = lint;
     c.dialect = dialect;
     c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
     if let Some(sd) = &seed {
-        c.defparams = sd.clone();
-        c.restarted = true;
+        c.hier.defparams = sd.clone();
+        c.hier.restarted = true;
     }
-    c.top_names = top_mods.iter().map(|m| m.name.clone()).collect();
+    c.hier.top_names = top_mods.iter().map(|m| m.name.clone()).collect();
     // defparams in top modules that reach into other top modules must be known before those
     // are elaborated: evaluate them in a scratch copy of their module's parameters
     for m in &top_mods {
@@ -325,19 +362,19 @@ pub fn compile_dialect(
     // packages with variables first: one instance each, seen by the modules that import them
     for m in modules.iter().filter(|m| m.package) {
         let sid = c.instantiate(m, m.name.clone(), &[], None)?;
-        c.pkg_scopes.insert(m.name.clone(), sid);
+        c.hier.pkg_scopes.insert(m.name.clone(), sid);
     }
     for m in &top_mods {
         let sid = c.instantiate(m, m.name.clone(), &[], None)?;
-        c.tops.insert(m.name.clone(), sid);
+        c.hier.tops.insert(m.name.clone(), sid);
     }
-    if c.late_defparam && seed.is_none() {
-        seed = Some(c.defparams.clone());
+    if c.hier.late_defparam && seed.is_none() {
+        seed = Some(c.hier.defparams.clone());
         continue;
     }
     break c;
     };
-    if let Some(e) = c.mem_error.take() {
+    if let Some(e) = c.sigs.mem_error.take() {
         return Err(e);
     }
     c.codegen_jobs()?;
@@ -346,14 +383,14 @@ pub fn compile_dialect(
     c.resolve_views();
     c.start_order();
     // package variables are not dumped (as in the reference)
-    if !c.pkg_scopes.is_empty() {
-        let pre: Vec<String> = c.pkg_scopes.keys().map(|n| format!("{n}.")).collect();
+    if !c.hier.pkg_scopes.is_empty() {
+        let pre: Vec<String> = c.hier.pkg_scopes.keys().map(|n| format!("{n}.")).collect();
         c.prog.names.retain(|(n, _)| !pre.iter().any(|p| n.starts_with(p.as_str())));
-        let mut pk: Vec<String> = c.pkg_scopes.keys().cloned().collect();
+        let mut pk: Vec<String> = c.hier.pkg_scopes.keys().cloned().collect();
         pk.sort();
         c.prog.packages = pk;
     }
-    if let Some(e) = c.mem_error.take() {
+    if let Some(e) = c.sigs.mem_error.take() {
         return Err(e);
     }
     c.prog.scratch_words = SCRATCH_WORDS;
@@ -372,8 +409,8 @@ pub fn compile_dialect(
                      SystemVerilog tools reject it, rename it",
                     m.file
                 );
-                if c.lint_seen.insert(msg.clone()) {
-                    c.lint.push(msg);
+                if c.diag.lint_seen.insert(msg.clone()) {
+                    c.diag.lint.push(msg);
                 }
             }
         }
@@ -383,9 +420,9 @@ pub fn compile_dialect(
             let f = it.next().unwrap_or("").to_string();
             (f, it.next().and_then(|l| l.parse().ok()).unwrap_or(0))
         };
-        c.lint.sort_by_key(key);
+        c.diag.lint.sort_by_key(key);
     }
-    Ok((c.prog, c.warnings, c.lint))
+    Ok((c.prog, c.diag.warnings, c.diag.lint))
 }
 
 impl<'a> Compiler<'a> {
@@ -395,74 +432,33 @@ impl<'a> Compiler<'a> {
             mods.insert(m.name.as_str(), m);
         }
         Compiler {
-            mods,
             prog: Program { mem: vec![0; SCRATCH_WORDS as usize], ..Program::default() },
             scopes: Vec::new(),
-            inst_arrays: HashMap::new(),
-            scope_module: HashMap::new(),
-            tops: HashMap::new(),
-            jobs: Vec::new(),
-            consts: HashMap::new(),
-            pb: Vec::new(),
-            func_inst: HashMap::new(),
             file: String::new(),
             line: 0,
-            warnings: Vec::new(),
-            lint: Vec::new(),
-            lint_seen: HashSet::new(),
-            lint_enabled: false,
-            two_state: HashSet::new(),
-            call_depth: 0,
-            inline_stack: Vec::new(),
-            subs: Vec::new(),
-            warned: HashSet::new(),
-            scratch_top: 0,
-            scratch_saved: Vec::new(),
             gprec: 0,
-            elem_alias: HashMap::new(),
-            view_of: HashMap::new(),
-            drv_views: HashMap::new(),
-            str_ids: HashMap::new(),
-            str_raw: false,
-            alias_vars: HashSet::new(),
-            drivers: HashMap::new(),
-            net_types: HashMap::new(),
-            pulls: HashMap::new(),
-            block_reg: Vec::new(),
-            open_blocks: Vec::new(),
-            pending_disables: Vec::new(),
-            auto_count: 0,
-            udp_index: HashMap::new(),
-            mem_limit_words: std::env::var("FX_MAX_MEM_MB")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(2048)
-                .min(32 * 1024)
-                * (1 << 20)
-                / 8,
-            mem_error: None,
-            defparams: HashMap::new(),
-            params_done: HashSet::new(),
-            late_defparam: false,
-            restarted: false,
-            init_touch: Vec::new(),
-            init_touch_net: Vec::new(),
             dialect: Dialect::default(),
-            links: Vec::new(),
-            cur_strength: None,
-            md_dims: HashMap::new(),
-            packed_dims: HashMap::new(),
-            desc_arrays: Default::default(),
-            has_events: false,
-            cur_delay: None,
-            job_strength: HashMap::new(),
-            func_reads: std::cell::Cell::new(false),
-            func_reads_seen: std::cell::RefCell::new(Vec::new()),
-            top_names: HashSet::new(),
-            pkg_scopes: HashMap::new(),
-            job_scope: usize::MAX,
-            proc_scope: Vec::new(),
-            redirect: HashMap::new(),
+            hier: Hier {
+                mods,
+                ..Default::default()
+            },
+            diag: Diag::default(),
+            code: Code {
+                job_scope: usize::MAX,
+                ..Default::default()
+            },
+            subr: Subr::default(),
+            nets: Nets::default(),
+            sigs: Sigs {
+                mem_limit_words: std::env::var("FX_MAX_MEM_MB")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(2048)
+                    .min(32 * 1024)
+                    * (1 << 20)
+                    / 8,
+                ..Default::default()
+            },
         }
     }
 
@@ -473,8 +469,8 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn warn(&mut self, msg: impl Into<String>) {
         let m = format!("{}:{}: warning: {}", self.file, self.line, msg.into());
-        if self.warned.insert(m.clone()) {
-            self.warnings.push(m);
+        if self.diag.warned.insert(m.clone()) {
+            self.diag.warnings.push(m);
         }
     }
 
@@ -488,11 +484,11 @@ impl<'a> Compiler<'a> {
     /// A temporary that is dead at every suspension point. Process temporaries share one
     /// scratch region (only one process runs at a time), which keeps them hot in the cache.
     pub(crate) fn tmp(&mut self, w: u32) -> u32 {
-        let in_proc = self.pb.last().map(|p| p.proc != NONE).unwrap_or(false);
+        let in_proc = self.code.pb.last().map(|p| p.proc != NONE).unwrap_or(false);
         let n = rt::words(w);
-        if in_proc && self.scratch_top + n <= SCRATCH_WORDS {
-            let s = self.scratch_top;
-            self.scratch_top += n;
+        if in_proc && self.code.scratch_top + n <= SCRATCH_WORDS {
+            let s = self.code.scratch_top;
+            self.code.scratch_top += n;
             return s;
         }
         self.alloc(w)
@@ -505,7 +501,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn const_slot(&mut self, c: &Const) -> u32 {
         let key = Const { signed: false, ..c.clone() };
-        if let Some(&s) = self.consts.get(&key) {
+        if let Some(&s) = self.code.consts.get(&key) {
             return s;
         }
         let s = self.alloc(c.w);
@@ -514,7 +510,7 @@ impl<'a> Compiler<'a> {
             self.prog.mem[s as usize + i] = c.a[i];
             self.prog.mem[s as usize + n + i] = c.b[i];
         }
-        self.consts.insert(key, s);
+        self.code.consts.insert(key, s);
         s
     }
 
@@ -540,14 +536,14 @@ impl<'a> Compiler<'a> {
         let mut elems = depth.max(1);
         // refuse designs that would not fit (instead of running the machine out of memory)
         let need = elems as u64 * 2 * rt::nw(total_w) as u64 + self.prog.mem.len() as u64;
-        if need > self.mem_limit_words {
-            if self.mem_error.is_none() {
-                self.mem_error = Some(Error {
+        if need > self.sigs.mem_limit_words {
+            if self.sigs.mem_error.is_none() {
+                self.sigs.mem_error = Some(Error {
                     msg: format!(
                         "'{}' needs {} MB of simulation memory, more than the limit of {} MB (set FX_MAX_MEM_MB to raise it)",
                         name,
                         need * 8 >> 20,
-                        self.mem_limit_words * 8 >> 20
+                        self.sigs.mem_limit_words * 8 >> 20
                     ),
                     file: self.file.clone(),
                     line: self.line,
@@ -628,7 +624,7 @@ impl<'a> Compiler<'a> {
     /// turn x/z into 0.
     pub(crate) fn mark_two_state(&mut self, s: u32, kind: NetKind) {
         if matches!(kind, NetKind::Bit) || matches!(kind, NetKind::Int(n) if n > 0) {
-            self.two_state.insert(s);
+            self.sigs.two_state.insert(s);
             self.zero_init(s);
         }
     }
@@ -745,7 +741,7 @@ impl<'a> Compiler<'a> {
         }
         let mut cur = match start {
             Some(c) => c,
-            None => *self.tops.get(&parts[0]).or_else(|| self.pkg_scopes.get(&parts[0]))?,
+            None => *self.hier.tops.get(&parts[0]).or_else(|| self.hier.pkg_scopes.get(&parts[0]))?,
         };
         for p in &parts[1..] {
             cur = *self.scopes[cur].children.get(p)?;
@@ -755,12 +751,12 @@ impl<'a> Compiler<'a> {
 
     /// A package (or `$unit`) scope.
     pub(crate) fn is_pkg_scope(&self, sid: usize) -> bool {
-        self.pkg_scopes.values().any(|&p| p == sid)
+        self.hier.pkg_scopes.values().any(|&p| p == sid)
     }
 
     /// The signal a view stands for (the signal itself if it is not a view).
     pub(crate) fn canon(&self, mut s: u32) -> u32 {
-        while let Some(&b) = self.view_of.get(&s) {
+        while let Some(&b) = self.nets.view_of.get(&s) {
             s = b;
         }
         s
@@ -778,10 +774,10 @@ impl<'a> Compiler<'a> {
         if let Expr::Real(r) = e {
             return Ok(Const::from_i64(r.round() as i64, 64, false));
         }
-        self.pb.push(PState { proc: NONE, ..Default::default() });
+        self.code.pb.push(PState { proc: NONE, ..Default::default() });
         let r = self.self_expr(e, sid);
         let r = r.and_then(|x| self.finish_subs().map(|_| x));
-        let st = self.pb.pop().unwrap();
+        let st = self.code.pb.pop().unwrap();
         let (slot, w, s) = r?;
         if !st.code.is_empty() {
             if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {

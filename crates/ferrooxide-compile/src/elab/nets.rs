@@ -78,7 +78,7 @@ impl<'a> Compiler<'a> {
         let (mut xc, mut yc) = (xi.next(), yi.next());
         while let (Some((xsig, xl, xw)), Some((ysig, yl, yw))) = (xc, yc) {
             let w = xw.min(yw);
-            self.links.push(Link { a: xsig, a_lsb: xl, b: ysig, b_lsb: yl, w, ctl: ctl.clone() });
+            self.nets.links.push(Link { a: xsig, a_lsb: xl, b: ysig, b_lsb: yl, w, ctl: ctl.clone() });
             xc = if xw > w { Some((xsig, xl + w, xw - w)) } else { xi.next() };
             yc = if yw > w { Some((ysig, yl + w, yw - w)) } else { yi.next() };
         }
@@ -110,7 +110,7 @@ impl<'a> Compiler<'a> {
                     match self.net_segs(t, sid) {
                         Some(segs) => {
                             for (s, lsb, w) in segs {
-                                self.pulls.entry(s).or_default().push((lsb, w, kind == "pullup"));
+                                self.nets.pulls.entry(s).or_default().push((lsb, w, kind == "pullup"));
                             }
                         }
                         None => {
@@ -118,7 +118,7 @@ impl<'a> Compiler<'a> {
                             self.lvalue_bases(t, sid, &mut v);
                             for s in v {
                                 let w = self.sig(s).width;
-                                self.pulls.entry(s).or_default().push((0, w, kind == "pullup"));
+                                self.nets.pulls.entry(s).or_default().push((0, w, kind == "pullup"));
                             }
                         }
                     }
@@ -143,7 +143,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     Expr::Cond(b(&terms[2]), Box::new(z()), Box::new(data))
                 };
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.cur_delay.clone(), scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.nets.cur_delay.clone(), scope: sid, line });
             }
             "cmos" | "rcmos" => {
                 // (out, in, ncontrol, pcontrol)
@@ -152,7 +152,7 @@ impl<'a> Compiler<'a> {
                 }
                 let p_side = Expr::Cond(b(&terms[3]), Box::new(z()), b(&terms[1]));
                 let rhs = Expr::Cond(b(&terms[2]), b(&terms[1]), Box::new(p_side));
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.cur_delay.clone(), scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.nets.cur_delay.clone(), scope: sid, line });
             }
             "not" | "buf" => {
                 let input = terms.last().unwrap();
@@ -163,7 +163,7 @@ impl<'a> Compiler<'a> {
                     } else {
                         Expr::Binary(BinOp::And, b(input), b(input))
                     };
-                    self.push_job(Job::Assign { lhs: out.clone(), rhs, delay: self.cur_delay.clone(), scope: sid, line });
+                    self.push_job(Job::Assign { lhs: out.clone(), rhs, delay: self.nets.cur_delay.clone(), scope: sid, line });
                 }
             }
             _ => {
@@ -182,7 +182,7 @@ impl<'a> Compiler<'a> {
                 if inv {
                     e = Expr::Unary(UnOp::Not, Box::new(e));
                 }
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: e, delay: self.cur_delay.clone(), scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: e, delay: self.nets.cur_delay.clone(), scope: sid, line });
             }
         }
         Ok(())
@@ -252,7 +252,7 @@ impl<'a> Compiler<'a> {
             }
         }
         let mut out = HashSet::new();
-        for m in self.mods.values() {
+        for m in self.hier.mods.values() {
             items(&m.items, &mut out);
         }
         out
@@ -270,7 +270,7 @@ impl<'a> Compiler<'a> {
                 *count.entry(s).or_default() += 1;
             }
         }
-        let linked: HashSet<u32> = self.links.iter().flat_map(|l| [self.canon(l.a), self.canon(l.b)]).collect();
+        let linked: HashSet<u32> = self.nets.links.iter().flat_map(|l| [self.canon(l.a), self.canon(l.b)]).collect();
         let fnames = self.forced_names();
         let mut forced: HashSet<u32> = HashSet::new();
         if !fnames.is_empty() {
@@ -282,7 +282,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let old_strength = std::mem::take(&mut self.job_strength);
+        let old_strength = std::mem::take(&mut self.code.job_strength);
         let mut kept = Vec::with_capacity(jobs.len());
         let mut changed = false;
         for (k, job) in jobs.into_iter().enumerate() {
@@ -295,16 +295,16 @@ impl<'a> Compiler<'a> {
                             && i.depth == 0
                             && i.alias_of.is_none()
                             && !i.real
-                            && !self.net_types.contains_key(&z)
-                            && !self.pulls.contains_key(&z)
-                            && !self.two_state.contains(&z)
+                            && !self.nets.net_types.contains_key(&z)
+                            && !self.nets.pulls.contains_key(&z)
+                            && !self.sigs.two_state.contains(&z)
                             && !linked.contains(&z)
                             && !forced.contains(&z);
                         if ok {
                             if i.kind == SigKind::Reg {
-                                self.alias_vars.insert(z);
+                                self.nets.alias_vars.insert(z);
                             }
-                            self.view_of.insert(z, a);
+                            self.nets.view_of.insert(z, a);
                             changed = true;
                             continue;
                         }
@@ -312,13 +312,13 @@ impl<'a> Compiler<'a> {
                 }
             }
             if let Some(st) = old_strength.get(&k) {
-                self.job_strength.insert(kept.len(), *st);
+                self.code.job_strength.insert(kept.len(), *st);
             }
             kept.push(job);
         }
         if changed {
             // views share the storage of the signal they stand for
-            let views: Vec<u32> = self.view_of.keys().copied().collect();
+            let views: Vec<u32> = self.nets.view_of.keys().copied().collect();
             for v in views {
                 let b = self.canon(v);
                 self.prog.signals[v as usize].slot = self.prog.signals[b as usize].slot;
@@ -372,13 +372,13 @@ impl<'a> Compiler<'a> {
     /// What undriven (z) bits of a net read as: 1 (pullup, tri1), 0 (pulldown, tri0) or z.
     pub(crate) fn pull_const(&self, s: u32) -> Option<Const> {
         let w = self.sig(s).width;
-        let mut c = match self.net_types.get(&s) {
+        let mut c = match self.nets.net_types.get(&s) {
             Some(NetType::Tri0) => Const::fill('0', w),
             Some(NetType::Tri1) => Const::fill('1', w),
-            _ if self.pulls.contains_key(&s) => Const::fill('z', w),
+            _ if self.nets.pulls.contains_key(&s) => Const::fill('z', w),
             _ => return None,
         };
-        for &(lsb, pw, up) in self.pulls.get(&s).map(|v| v.as_slice()).unwrap_or(&[]) {
+        for &(lsb, pw, up) in self.nets.pulls.get(&s).map(|v| v.as_slice()).unwrap_or(&[]) {
             for b in lsb..(lsb + pw).min(w) {
                 let (i, m) = ((b / 64) as usize, 1u64 << (b % 64));
                 c.b[i] &= !m;
@@ -398,7 +398,7 @@ impl<'a> Compiler<'a> {
     /// covered. Solving the island in one activation (as Icarus does) avoids the oscillation of
     /// separate per-link processes in loops. Returns the island nets (they get no resolver).
     pub(crate) fn link_islands(&mut self) -> R<HashSet<u32>> {
-        let links = std::mem::take(&mut self.links);
+        let links = std::mem::take(&mut self.nets.links);
         let mut nets_done = HashSet::new();
         if links.is_empty() {
             return Ok(nets_done);
@@ -480,7 +480,7 @@ impl<'a> Compiler<'a> {
             let mut cur: HashMap<u32, u32> = HashMap::new();
             for &n in &nets {
                 let w = self.sig(n).width;
-                let drv = self.drivers.get(&n).cloned().unwrap_or_default();
+                let drv = self.nets.drivers.get(&n).cloned().unwrap_or_default();
                 let v = self.tmp(w);
                 if drv.is_empty() {
                     let z = self.const_slot(&Const::fill('z', w));

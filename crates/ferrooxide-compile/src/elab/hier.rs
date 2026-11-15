@@ -14,7 +14,7 @@ impl<'a> Compiler<'a> {
             return None;
         }
         let e = e as u32;
-        if let Some(&s) = self.elem_alias.get(&(arr, e)) {
+        if let Some(&s) = self.nets.elem_alias.get(&(arr, e)) {
             return Some(s);
         }
         let id = self.prog.signals.len() as u32;
@@ -34,7 +34,7 @@ impl<'a> Compiler<'a> {
             string: info.string,
             event: info.event,
         });
-        self.elem_alias.insert((arr, e), id);
+        self.nets.elem_alias.insert((arr, e), id);
         Some(id)
     }
 
@@ -54,7 +54,7 @@ impl<'a> Compiler<'a> {
         }
         let mut rank = vec![usize::MAX; n];
         let mut next = 0;
-        let mut tops: Vec<(&String, &usize)> = self.tops.iter().collect();
+        let mut tops: Vec<(&String, &usize)> = self.hier.tops.iter().collect();
         tops.sort();
         fn visit(s: usize, children: &[Vec<usize>], rank: &mut [usize], next: &mut usize) {
             if rank[s] != usize::MAX {
@@ -71,7 +71,7 @@ impl<'a> Compiler<'a> {
             visit(t, &children, &mut rank, &mut next);
         }
         let key = |p: usize| -> usize {
-            match self.proc_scope.get(p) {
+            match self.code.proc_scope.get(p) {
                 Some(&s) if s < n => rank[s].saturating_add(1),
                 // continuous assignments, port connections: first, in creation order
                 Some(&s) if s == usize::MAX - 1 => 0,
@@ -92,8 +92,8 @@ impl<'a> Compiler<'a> {
     ) -> R<usize> {
         let saved_file = std::mem::replace(&mut self.file, m.file.clone());
         let sid = self.new_scope(path.clone(), None, m.file.clone());
-        self.scope_module.insert(sid, m);
-        self.scopes[sid].imports = m.imports.iter().filter_map(|n| self.pkg_scopes.get(n).copied()).collect();
+        self.hier.scope_module.insert(sid, m);
+        self.scopes[sid].imports = m.imports.iter().filter_map(|n| self.hier.pkg_scopes.get(n).copied()).collect();
         self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
         self.scopes[sid].tprec = m.timescale.map(|t| t.1).unwrap_or(0);
         self.scopes[sid].nettype = m.default_nettype.clone();
@@ -136,14 +136,14 @@ impl<'a> Compiler<'a> {
         let inst_line = self.line;
         // interface ports: the port's name stands for the connected interface instance
         for (pn, iface, dims, modport) in &m.iface_ports {
-            if let (Some(mp), Some(im)) = (modport, self.mods.get(iface.as_str())) {
+            if let (Some(mp), Some(im)) = (modport, self.hier.mods.get(iface.as_str())) {
                 if im.interface && !im.modports.contains(mp) {
                     return self.err(format!("interface '{iface}' has no modport '{mp}' (port '{pn}' of '{}')", m.name));
                 }
             }
             // the connected instance must be one of the port's interface
             let check = |c: &Self, t: usize| -> R<()> {
-                match c.scope_module.get(&t) {
+                match c.hier.scope_module.get(&t) {
                     Some(tm) if tm.interface && tm.name != *iface => {
                         c.err(format!("interface port '{pn}' of '{}' is connected to an instance of '{}', not '{iface}'", m.name, tm.name))
                     }
@@ -166,7 +166,7 @@ impl<'a> Compiler<'a> {
                                 let mut x = Some(ps);
                                 let mut found = None;
                                 while let Some(s) = x {
-                                    if let Some(&lr) = self.inst_arrays.get(&(s, last.clone())) {
+                                    if let Some(&lr) = self.hier.inst_arrays.get(&(s, last.clone())) {
                                         found = Some((s, last.clone(), lr));
                                         break;
                                     }
@@ -176,7 +176,7 @@ impl<'a> Compiler<'a> {
                             }
                             Some((last, pre)) => self
                                 .hier_scope(pre, ps)
-                                .and_then(|s| self.inst_arrays.get(&(s, last.clone())).map(|&lr| (s, last.clone(), lr))),
+                                .and_then(|s| self.hier.inst_arrays.get(&(s, last.clone())).map(|&lr| (s, last.clone(), lr))),
                             None => None,
                         }
                     }
@@ -201,7 +201,7 @@ impl<'a> Compiler<'a> {
                     check(self, t)?;
                     self.scopes[sid].children.insert(format!("{pn}[{pi}]"), t);
                 }
-                self.inst_arrays.insert((sid, pn.clone()), (pl, pr));
+                self.hier.inst_arrays.insert((sid, pn.clone()), (pl, pr));
                 continue;
             }
             let target = match (port_conns.get(pn), parent_scope) {
@@ -247,10 +247,10 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn push_job(&mut self, j: Job<'a>) {
-        if let (Some(st), Job::Assign { .. }) = (self.cur_strength, &j) {
-            self.job_strength.insert(self.jobs.len(), st);
+        if let (Some(st), Job::Assign { .. }) = (self.nets.cur_strength, &j) {
+            self.code.job_strength.insert(self.code.jobs.len(), st);
         }
-        self.jobs.push(j);
+        self.code.jobs.push(j);
     }
 
     /// Icarus's warnings for port connections whose width differs from the port's.
@@ -298,8 +298,8 @@ impl<'a> Compiler<'a> {
                 k + 1,
                 m.name
             );
-            if self.warned.insert(w.clone()) {
-                self.warnings.push(w);
+            if self.diag.warned.insert(w.clone()) {
+                self.diag.warnings.push(w);
             }
         }
         Ok(())

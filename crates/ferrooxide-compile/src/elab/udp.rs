@@ -5,7 +5,7 @@ use crate::*;
 impl<'a> Compiler<'a> {
     /// The runtime table of a UDP (converted once per primitive).
     pub(crate) fn udp_table(&mut self, m: &Module) -> R<u32> {
-        if let Some(&i) = self.udp_index.get(&m.name) {
+        if let Some(&i) = self.code.udp_index.get(&m.name) {
             return Ok(i);
         }
         let def = m.udp.as_ref().unwrap();
@@ -64,7 +64,7 @@ impl<'a> Compiler<'a> {
         }
         let i = self.prog.udps.len() as u32;
         self.prog.udps.push(rt::UdpTable { sequential: def.sequential, rows });
-        self.udp_index.insert(m.name.clone(), i);
+        self.code.udp_index.insert(m.name.clone(), i);
         Ok(i)
     }
 

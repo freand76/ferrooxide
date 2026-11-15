@@ -24,12 +24,12 @@ impl<'a> Compiler<'a> {
         if self.prog.strings.is_empty() {
             self.prog.strings.push(Vec::new());
         }
-        if let Some(&h) = self.str_ids.get(b) {
+        if let Some(&h) = self.code.str_ids.get(b) {
             return h;
         }
         let h = self.prog.strings.len() as u64;
         self.prog.strings.push(b.to_vec());
-        self.str_ids.insert(b.to_vec(), h);
+        self.code.str_ids.insert(b.to_vec(), h);
         h
     }
 
@@ -100,7 +100,7 @@ impl<'a> Compiler<'a> {
         if let Expr::SysCall(n, _) = e {
             return n == "$sformatf" || n == "$psprintf" || n == "$__tostring";
         }
-        if self.str_ids.is_empty() {
+        if self.code.str_ids.is_empty() {
             return false;
         }
         match e {
@@ -134,9 +134,9 @@ impl<'a> Compiler<'a> {
             }
             Expr::Index(a, _) if self.array_of(a, sid).is_some_and(|s| self.sig(s).string) => {
                 // an element of a string array: its handle
-                self.str_raw = true;
+                self.code.str_raw = true;
                 let r = self.expr(e, sid, 64, false);
-                self.str_raw = false;
+                self.code.str_raw = false;
                 return r;
             }
             Expr::Concat(v) => {
@@ -199,9 +199,9 @@ impl<'a> Compiler<'a> {
                 }
                 if self.is_string(e, sid) {
                     // a function returning a string: its result variable holds the handle
-                    self.str_raw = true;
+                    self.code.str_raw = true;
                     let r = self.expr(e, sid, 64, false);
-                    self.str_raw = false;
+                    self.code.str_raw = false;
                     return r;
                 }
             }

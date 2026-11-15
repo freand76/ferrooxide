@@ -296,7 +296,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn disable_target(&mut self, cands: Vec<String>) -> u32 {
         let target = self.prog.disables.len() as u32;
         self.prog.disables.push(Vec::new());
-        self.pending_disables.push((target, cands, self.file.clone(), self.line));
+        self.code.pending_disables.push((target, cands, self.file.clone(), self.line));
         target
     }
 
@@ -429,7 +429,7 @@ impl<'a> Compiler<'a> {
                             let s =
                                 self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, kind);
                             if let Some(d) = &pk {
-                                self.packed_dims.insert(s, d.clone());
+                                self.sigs.packed_dims.insert(s, d.clone());
                                 self.scopes[b].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(s));
                             }
                             if is_real {
@@ -473,14 +473,14 @@ impl<'a> Compiler<'a> {
                     }
                     Some(join) => {
                         // each statement runs as its own process; the parent starts them all
-                        let parent = self.pb.last().unwrap().proc;
+                        let parent = self.code.pb.last().unwrap().proc;
                         let mut children = Vec::new();
                         for s in stmts {
                             let pname = self.scopes[bsid].name.clone();
                             let c = self.begin_proc(pname, ProcClass::Spawned);
                             self.prog.procs[c as usize].parent = parent;
-                            for &ob in &self.open_blocks {
-                                self.block_reg[ob].1.children.push(c);
+                            for &ob in &self.code.open_blocks {
+                                self.code.block_reg[ob].1.children.push(c);
                             }
                             self.stmt(s, bsid)?;
                             self.emit(Instr::Halt);
@@ -501,7 +501,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
-                if !*nonblocking && timing.is_none() && !self.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
+                if !*nonblocking && timing.is_none() && !self.code.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
                 let lw = self.ty(lhs, sid)?.0;
@@ -605,9 +605,9 @@ impl<'a> Compiler<'a> {
                 let top = self.here();
                 let (c, cw) = self.truth(cond, sid)?;
                 let jz = self.emit(Instr::Jz { c, w: cw, to: 0 });
-                self.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
+                self.code.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
                 self.stmt(body, sid)?;
-                let (brk, cont) = self.pb.last_mut().unwrap().loops.pop().unwrap();
+                let (brk, cont) = self.code.pb.last_mut().unwrap().loops.pop().unwrap();
                 let h = self.here();
                 for j in cont {
                     self.patch(j, h);
@@ -634,7 +634,7 @@ impl<'a> Compiler<'a> {
             Stmt::DoWhile { cond, body, line } => {
                 self.line = *line;
                 let top = self.here();
-                self.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
+                self.code.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
                 self.stmt(body, sid)?;
                 let ctop = self.here();
                 let (c, cw) = self.truth(cond, sid)?;
@@ -642,7 +642,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Jmp { to: top });
                 let h = self.here();
                 self.patch(jz, h);
-                let (brk, cont) = self.pb.last_mut().unwrap().loops.pop().unwrap();
+                let (brk, cont) = self.code.pb.last_mut().unwrap().loops.pop().unwrap();
                 for j in cont {
                     self.patch(j, ctop);
                 }
@@ -704,7 +704,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::TaskCall { name, args, line } => {
                 self.line = *line;
-                if self.str_ids.is_empty() || !self.str_task(name, args, sid)? {
+                if self.code.str_ids.is_empty() || !self.str_task(name, args, sid)? {
                     self.call(name, args, sid, true)?;
                 }
             }
@@ -742,13 +742,13 @@ impl<'a> Compiler<'a> {
                     let real = self.lvalue_ty(lhs, sid);
                     let v = self.value_for(rhs, sid, lw, real)?;
                     self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
-                    let parent = self.pb.last().unwrap().proc;
+                    let parent = self.code.pb.last().unwrap().proc;
                     let name = self.scopes[sid].name.clone();
                     let c = self.begin_proc(name, ProcClass::Spawned);
                     self.prog.procs[c as usize].parent = parent;
                     let reg = self.open_block(key);
                     if let Some(r) = reg {
-                        self.block_reg[r].1.children.push(c);
+                        self.code.block_reg[r].1.children.push(c);
                     }
                     let top = self.here();
                     // ... and is kept up to date by the spawned process
@@ -779,7 +779,7 @@ impl<'a> Compiler<'a> {
                         cands.push(format!("{}.{}", self.scopes[x].name, name));
                         sc = self.scopes[x].parent;
                     }
-                    cands.extend(self.tops.keys().map(|t| format!("{t}.{}", name.split_once('.').map(|x| x.1).unwrap_or(""))));
+                    cands.extend(self.hier.tops.keys().map(|t| format!("{t}.{}", name.split_once('.').map(|x| x.1).unwrap_or(""))));
                     let target = self.disable_target(cands);
                     self.emit(Instr::Disable { target });
                 }
@@ -823,7 +823,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Return { value, line } => {
                 self.line = *line;
-                let Some((ret, _)) = self.pb.last().unwrap().rets.last().cloned() else {
+                let Some((ret, _)) = self.code.pb.last().unwrap().rets.last().cloned() else {
                     return self.err("return outside of a function or task");
                 };
                 if let (Some(v), Some(r)) = (value, ret) {
@@ -833,13 +833,13 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Store { t: Target::Whole { sig: r }, s: val, mode: StoreMode::Blocking });
                 }
                 let j = self.emit(Instr::Jmp { to: 0 });
-                self.pb.last_mut().unwrap().rets.last_mut().unwrap().1.push(j);
+                self.code.pb.last_mut().unwrap().rets.last_mut().unwrap().1.push(j);
             }
             Stmt::Break { line } | Stmt::Continue { line } => {
                 self.line = *line;
                 let is_break = matches!(st, Stmt::Break { .. });
                 let j = self.emit(Instr::Jmp { to: 0 });
-                match self.pb.last_mut().unwrap().loops.last_mut() {
+                match self.code.pb.last_mut().unwrap().loops.last_mut() {
                     Some(l) => {
                         if is_break {
                             l.0.push(j)
@@ -855,9 +855,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn loop_body(&mut self, body: &Stmt, sid: usize, cont_target: u32) -> R<()> {
-        self.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
+        self.code.pb.last_mut().unwrap().loops.push((Vec::new(), Vec::new()));
         self.stmt(body, sid)?;
-        let cont = std::mem::take(&mut self.pb.last_mut().unwrap().loops.last_mut().unwrap().1);
+        let cont = std::mem::take(&mut self.code.pb.last_mut().unwrap().loops.last_mut().unwrap().1);
         for j in cont {
             self.patch(j, cont_target);
         }
@@ -865,7 +865,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn finish_loop(&mut self, end: u32) {
-        let (brk, _) = self.pb.last_mut().unwrap().loops.pop().unwrap();
+        let (brk, _) = self.code.pb.last_mut().unwrap().loops.pop().unwrap();
         for j in brk {
             self.patch(j, end);
         }
@@ -1145,7 +1145,7 @@ impl<'a> Compiler<'a> {
                 if name.starts_with("$write") {
                     self.emit(sys(SysTask::WriteMem { hex, file, sig, start, end }));
                 } else {
-                    if start.is_none() && self.desc_arrays.contains(&sig) {
+                    if start.is_none() && self.sigs.desc_arrays.contains(&sig) {
                         // the 1364-2005 change of the default start address (as the reference
                         // reports it)
                         let msg = format!(
@@ -1252,7 +1252,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::TaskCall { name, args, .. } => {
                 // a void function called as a statement: like a call in an expression
-                if self.func_reads.get() && self.lookup_func(name, sid).is_some_and(|(f, _)| !f.is_task) {
+                if self.subr.func_reads.get() && self.lookup_func(name, sid).is_some_and(|(f, _)| !f.is_task) {
                     self.reads_expr(&Expr::Call(name.clone(), args.clone()), sid, out);
                     return;
                 }

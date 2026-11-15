@@ -463,6 +463,11 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   types, and the lowering shrinks piece by piece until the old AST is gone.
 - **R5. Split the compiler**: `elab/{params,hier,decls,generate,nets,udp,specify}.rs` plus
   codegen; `Compiler` fields grouped into sub-structs. Move first, regroup after.
+  *Done 2026-11-15*: `elab/{hier,params,decls,items,nets,udp,specify}.rs` and `codegen.rs`
+  (the item walk `elab_items` is `elab/items.rs`, 630 lines, still one function: splitting
+  it per item kind can come with R4); `lib.rs` keeps the state, scopes, lookup and constant
+  evaluation. Fields in `hier`, `diag`, `code`, `subr`, `nets`, `sigs`; `prog`, `scopes`,
+  `file`, `line`, `gprec`, `dialect` stay at the top.
 - **R6. Spans** (file, line, column) on `Expr`/`Stmt` instead of `self.line`.
 
 ### Architecture changes ahead (review 2026-11-14)

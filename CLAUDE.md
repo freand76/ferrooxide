@@ -9,8 +9,10 @@ Goal: output identical to Icarus Verilog, ≥10x its speed. Plan and status: `PL
   `syntax/`: the IEEE 1800 parser (keywords, tokens, syntax tree; it knows nothing but type
   names); `lower/`: syntax tree -> AST (type tables, struct layouts, patterns, enums,
   packages, expansions), reporting what it cannot do at its line.
-- `crates/ferrooxide-compile`: elaboration (params, hierarchy, generate, port aliasing, nets with
-  several drivers, force), codegen to `Instr` bytecode (`lib.rs`, `expr.rs`, `stmt.rs`, `lint.rs`).
+- `crates/ferrooxide-compile`: `lib.rs` (compiler state in sub-structs, scopes, name lookup,
+  constant evaluation), `elab/` (hierarchy, params, declarations, the item walk, nets with
+  several drivers and links, UDPs, specify), codegen to `Instr` bytecode (`codegen.rs`,
+  `expr.rs`, `stmt.rs`, `strings.rs`), `lint.rs`.
 - `crates/ferrooxide-rt`: `vm.rs` (scheduler + interpreter), `fast.rs` (lowering to `Op`),
   `jit.rs` (Cranelift, one function per process *shape*), `fuse.rs`, `ops.rs`, `fmt.rs`, `vcd.rs`.
 - `crates/ferrooxide`: CLI. `tests/verilog/*.v`: Icarus diff tests. `bench/`: benchmarks.

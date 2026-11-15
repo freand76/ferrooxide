@@ -45,10 +45,10 @@ impl<'a> Compiler<'a> {
                 }
                 if !p.local {
                     let key = format!("{}.{}", self.scopes[sid].name, p.name);
-                    if let Some(d) = self.defparams.get(&key) {
+                    if let Some(d) = self.hier.defparams.get(&key) {
                         ov = Some(d.clone());
                     }
-                    self.params_done.insert(key);
+                    self.hier.params_done.insert(key);
                 }
                 let v = self.param_value(p, ov, sid)?;
                 self.scopes[sid].syms.insert(p.name.clone(), v);
@@ -114,13 +114,13 @@ impl<'a> Compiler<'a> {
             };
             let key = match base {
                 Some(k) => k,
-                None if self.top_names.contains(&target[0]) && target.len() > 1 => rel,
+                None if self.hier.top_names.contains(&target[0]) && target.len() > 1 => rel,
                 None => format!("{}.{rel}", self.scopes[rel_base].name),
             };
-            if !self.restarted && self.params_done.contains(&key) && !self.defparams.contains_key(&key) {
-                self.late_defparam = true;
+            if !self.hier.restarted && self.hier.params_done.contains(&key) && !self.hier.defparams.contains_key(&key) {
+                self.hier.late_defparam = true;
             }
-            self.defparams.insert(key, v);
+            self.hier.defparams.insert(key, v);
         }
         Ok(())
     }

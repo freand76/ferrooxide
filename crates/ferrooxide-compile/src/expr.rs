@@ -50,7 +50,7 @@ impl<'a> Compiler<'a> {
     /// one index into the flat storage: `m[(i - lo0) * n1 + (j - lo1)]`.
     pub(crate) fn md_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
         // `ev.triggered` (IEEE 1800 15.5.3): the event was triggered in this time step
-        if self.has_events {
+        if self.sigs.has_events {
             if let Expr::Hier(p) = e {
                 if p.len() >= 2 && p.last().unwrap() == "triggered" {
                     let mut t = p[..p.len() - 1].to_vec();
@@ -71,7 +71,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        if self.md_dims.is_empty() && self.packed_dims.is_empty() {
+        if self.sigs.md_dims.is_empty() && self.sigs.packed_dims.is_empty() {
             return None;
         }
         let b = |x: Expr| Box::new(x);
@@ -108,7 +108,7 @@ impl<'a> Compiler<'a> {
             return Some(e);
         }
         let s = self.array_of(cur, sid)?;
-        let dims = self.md_dims.get(&s)?;
+        let dims = self.sigs.md_dims.get(&s)?;
         if idx.len() < dims.len() {
             return None;
         }
@@ -144,7 +144,7 @@ impl<'a> Compiler<'a> {
             _ => return None,
         };
         let Sym::Sig(s) = sym else { return None };
-        let dims = self.packed_dims.get(&s)?;
+        let dims = self.sigs.packed_dims.get(&s)?;
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
             let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
@@ -158,7 +158,7 @@ impl<'a> Compiler<'a> {
         // element, the others select in its packed dimensions
         let elem;
         let (flat, idx): (&Expr, &[&Expr]) = if self.sig(s).depth > 0 {
-            if self.md_dims.contains_key(&s) || idx.is_empty() {
+            if self.sigs.md_dims.contains_key(&s) || idx.is_empty() {
                 return None;
             }
             elem = Expr::Index(b(flat.clone()), b(idx[0].clone()));
@@ -211,7 +211,7 @@ impl<'a> Compiler<'a> {
         let arr_elem = match base {
             Expr::Index(a, k) => match &**a {
                 Expr::Ident(n) if !n.starts_with("$flat:") => match self.lookup(n, sid) {
-                    Some(Sym::Sig(s)) if self.sig(s).depth > 0 && !self.md_dims.contains_key(&s) && self.packed_dims.contains_key(&s) => {
+                    Some(Sym::Sig(s)) if self.sig(s).depth > 0 && !self.sigs.md_dims.contains_key(&s) && self.sigs.packed_dims.contains_key(&s) => {
                         Some((Expr::Index(Box::new(Expr::Ident(format!("$flat:{n}"))), k.clone()), s))
                     }
                     _ => None,
@@ -234,7 +234,7 @@ impl<'a> Compiler<'a> {
             },
             _ => return None,
         };
-        let dims = self.packed_dims.get(&s)?;
+        let dims = self.sigs.packed_dims.get(&s)?;
         let ew: i64 = dims[1..].iter().map(|d| (d.0 - d.1).abs() + 1).product();
         let (l0, r0) = dims[0];
         let pos = |i: i64| if l0 >= r0 { i - r0 } else { r0 - i };
@@ -284,7 +284,7 @@ impl<'a> Compiler<'a> {
             return None;
         }
         let Sym::Sig(s) = self.lookup(n, sid)? else { return None };
-        let dims = self.packed_dims.get(&s)?;
+        let dims = self.sigs.packed_dims.get(&s)?;
         // (an array's first index selects the element)
         let arr = usize::from(self.sig(s).depth > 0);
         if idx.len() + 1 != dims.len() + arr {
@@ -415,7 +415,7 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.ty(&n, sid);
         }
-        if !self.str_ids.is_empty() || matches!(e, Expr::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
+        if !self.code.str_ids.is_empty() || matches!(e, Expr::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
             if let Expr::Index(a, _) = e {
                 if self.is_string_scalar(a, sid) {
                     return Ok((8, false));
@@ -607,9 +607,9 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.expr(&n, sid, w, s);
         }
-        if !self.str_ids.is_empty() || matches!(e, Expr::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
+        if !self.code.str_ids.is_empty() || matches!(e, Expr::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
             // a string where a vector is needed: its characters
-            if !self.str_raw && self.is_string(e, sid) {
+            if !self.code.str_raw && self.is_string(e, sid) {
                 return self.str_to_vec(e, sid, w);
             }
             // s[i] of a string: its character; s.len() and co.
@@ -638,12 +638,12 @@ impl<'a> Compiler<'a> {
             return Ok(d);
         }
         // constant folding
-        if !self.pb.last().map(|p| p.proc == NONE).unwrap_or(true) && self.is_const(e, sid) {
+        if !self.code.pb.last().map(|p| p.proc == NONE).unwrap_or(true) && self.is_const(e, sid) {
             if !matches!(e, Expr::Num(_) | Expr::Ident(_)) {
                 // evaluate in the context width and signedness (operands are extended first)
-                self.pb.push(PState { proc: NONE, ..Default::default() });
+                self.code.pb.push(PState { proc: NONE, ..Default::default() });
                 let r = self.expr(e, sid, w, s);
-                let st = self.pb.pop().unwrap();
+                let st = self.code.pb.pop().unwrap();
                 let slot = r?;
                 if !st.code.is_empty() {
                     if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {
@@ -1264,7 +1264,7 @@ impl<'a> Compiler<'a> {
     /// (`key` distinguishes the instances).
     pub(crate) fn func_instance(&mut self, f: &'a SubroutineDecl, def_scope: usize, key: &str) -> R<()> {
         let key = (def_scope, key.to_string());
-        if self.func_inst.contains_key(&key) {
+        if self.subr.func_inst.contains_key(&key) {
             return Ok(());
         }
         let mem_lo = self.prog.mem.len() as u32;
@@ -1326,7 +1326,7 @@ impl<'a> Compiler<'a> {
                 };
                 let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
                 if let Some(d) = &pk {
-                    self.packed_dims.insert(sg, d.clone());
+                    self.sigs.packed_dims.insert(sg, d.clone());
                     self.scopes[fs].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(sg));
                 }
                 if d.kind == NetKind::Real {
@@ -1350,7 +1350,7 @@ impl<'a> Compiler<'a> {
             self.scopes[def_scope].children.entry(f.name.clone()).or_insert(fs);
         }
         let mem = (mem_lo, self.prog.mem.len() as u32);
-        self.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem });
+        self.subr.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem });
         Ok(())
     }
 
@@ -1382,22 +1382,22 @@ impl<'a> Compiler<'a> {
             }
         };
         // a call of a function that is being inlined: recursion, through a subroutine
-        if let Some(k) = self.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
+        if let Some(k) = self.subr.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
             return self.recursive_call(f, k, args, sid);
         }
-        if self.call_depth > 32 {
+        if self.subr.call_depth > 32 {
             return self.err(format!("calls nested too deeply in '{name}'"));
         }
         let kname = if f.automatic {
-            self.auto_count += 1;
-            format!("{}#{}", f.name, self.auto_count)
+            self.subr.auto_count += 1;
+            format!("{}#{}", f.name, self.subr.auto_count)
         } else {
             f.name.clone()
         };
         self.func_instance(f, fs_def, &kname)?;
         let key = (fs_def, kname);
         let (fscope, ret, ports) = {
-            let fi = &self.func_inst[&key];
+            let fi = &self.subr.func_inst[&key];
             (fi.scope, fi.ret, fi.ports.clone())
         };
         if args.len() > ports.len() {
@@ -1413,9 +1413,9 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
             }
         }
-        self.call_depth += 1;
-        self.inline_stack.push((fs_def, f.name.clone(), key.clone()));
-        self.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
+        self.subr.call_depth += 1;
+        self.subr.inline_stack.push((fs_def, f.name.clone(), key.clone()));
+        self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
         let saved_file = self.file.clone();
         // the body is a block `disable <task>` can end
         let bpath = format!("{}.{}", self.scopes[fs_def].name, f.name);
@@ -1423,9 +1423,9 @@ impl<'a> Compiler<'a> {
         let r = self.stmt(&f.body, fscope);
         self.close_block(reg);
         self.file = saved_file;
-        let (_, patches) = self.pb.last_mut().unwrap().rets.pop().unwrap();
-        self.call_depth -= 1;
-        self.inline_stack.pop();
+        let (_, patches) = self.code.pb.last_mut().unwrap().rets.pop().unwrap();
+        self.subr.call_depth -= 1;
+        self.subr.inline_stack.pop();
         r?;
         let end = self.here();
         for p in patches {
@@ -1452,7 +1452,7 @@ impl<'a> Compiler<'a> {
     /// jump to the function's subroutine; results come back in fresh temporaries.
     fn recursive_call(&mut self, f: &'a SubroutineDecl, key: (usize, String), args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
         let (ret, ports) = {
-            let fi = &self.func_inst[&key];
+            let fi = &self.subr.func_inst[&key];
             (fi.ret, fi.ports.clone())
         };
         if args.len() > ports.len() {
@@ -1471,17 +1471,17 @@ impl<'a> Compiler<'a> {
                 vals.push((ps, k));
             }
         }
-        let level = self.pb.len();
+        let level = self.code.pb.len();
         // recursion from another process (a fork branch inside the function) would need frames
         // shared between processes
-        if self.subs.iter().any(|r| r.key == key && r.level != level) {
+        if self.subr.subs.iter().any(|r| r.key == key && r.level != level) {
             return self.err(format!("recursive call of '{}' from a fork branch is not supported", f.name));
         }
-        let si = match self.subs.iter().position(|r| r.level == level && r.key == key) {
+        let si = match self.subr.subs.iter().position(|r| r.level == level && r.key == key) {
             Some(i) => i,
             None => {
-                self.subs.push(SubReq { level, f, key: key.clone(), calls: Vec::new(), saves: Vec::new(), entry: None, alloc: (0, 0) });
-                self.subs.len() - 1
+                self.subr.subs.push(SubReq { level, f, key: key.clone(), calls: Vec::new(), saves: Vec::new(), entry: None, alloc: (0, 0) });
+                self.subr.subs.len() - 1
             }
         };
         let save = self.emit(Instr::SaveFrame { ranges: Box::new([]) });
@@ -1502,8 +1502,8 @@ impl<'a> Compiler<'a> {
         }
         let dsts: Vec<u32> = outs.iter().map(|&(_, w)| self.tmp(w)).collect();
         let call = self.emit(Instr::CallSub { entry: 0, dsts: dsts.clone().into_boxed_slice() });
-        self.subs[si].saves.push(save);
-        self.subs[si].calls.push(call);
+        self.subr.subs[si].saves.push(save);
+        self.subr.subs[si].calls.push(call);
         // outputs to the caller's arguments
         let mut k = if ret.is_some() { 1 } else { 0 };
         for (i, a) in args.iter().enumerate() {
@@ -1526,33 +1526,33 @@ impl<'a> Compiler<'a> {
     /// Compile the subroutines of recursive functions the current process calls (after its
     /// code) and complete their calls and saved frames.
     pub(crate) fn finish_subs(&mut self) -> R<()> {
-        let level = self.pb.len();
-        if !self.subs.iter().any(|r| r.level == level) {
+        let level = self.code.pb.len();
+        if !self.subr.subs.iter().any(|r| r.level == level) {
             return Ok(());
         }
         // the process's own code ends before the subroutines
         self.emit(Instr::Halt);
-        while let Some(i) = self.subs.iter().position(|r| r.level == level && r.entry.is_none()) {
-            let (f, key) = (self.subs[i].f, self.subs[i].key.clone());
+        while let Some(i) = self.subr.subs.iter().position(|r| r.level == level && r.entry.is_none()) {
+            let (f, key) = (self.subr.subs[i].f, self.subr.subs[i].key.clone());
             let (fscope, ret, ports, _) = {
-                let fi = &self.func_inst[&key];
+                let fi = &self.subr.func_inst[&key];
                 (fi.scope, fi.ret, fi.ports.clone(), fi.mem)
             };
             let entry = self.here();
-            self.subs[i].entry = Some(entry as usize);
+            self.subr.subs[i].entry = Some(entry as usize);
             let a0 = self.prog.mem.len() as u32;
-            self.call_depth += 1;
-            self.inline_stack.push((key.0, f.name.clone(), key.clone()));
-            self.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
+            self.subr.call_depth += 1;
+            self.subr.inline_stack.push((key.0, f.name.clone(), key.clone()));
+            self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
             let bpath = format!("{}.{}", self.scopes[key.0].name, f.name);
             let reg = self.open_block(bpath);
             let r = self.stmt(&f.body, fscope);
             // (on an error the compilation stops: the state is not cleaned up)
             r?;
             self.close_block(reg);
-            let (_, patches) = self.pb.last_mut().unwrap().rets.pop().unwrap();
-            self.inline_stack.pop();
-            self.call_depth -= 1;
+            let (_, patches) = self.code.pb.last_mut().unwrap().rets.pop().unwrap();
+            self.subr.inline_stack.pop();
+            self.subr.call_depth -= 1;
             let end = self.here();
             for p in patches {
                 self.patch(p, end);
@@ -1569,21 +1569,21 @@ impl<'a> Compiler<'a> {
                 }
             }
             self.emit(Instr::RetSub { srcs: srcs.into_boxed_slice() });
-            self.subs[i].alloc = (a0, self.prog.mem.len() as u32);
+            self.subr.subs[i].alloc = (a0, self.prog.mem.len() as u32);
         }
         // complete calls and frames: the function's variables, what its body allocated, and the
         // process's temporaries
-        let hw = self.scratch_top;
-        let reqs: Vec<usize> = (0..self.subs.len()).filter(|&i| self.subs[i].level == level).collect();
+        let hw = self.code.scratch_top;
+        let reqs: Vec<usize> = (0..self.subr.subs.len()).filter(|&i| self.subr.subs[i].level == level).collect();
         for i in reqs.iter().rev() {
-            let r = self.subs.remove(*i);
-            let fm = self.func_inst[&r.key].mem;
+            let r = self.subr.subs.remove(*i);
+            let fm = self.subr.func_inst[&r.key].mem;
             let mut ranges = vec![(fm.0, fm.1 - fm.0), (r.alloc.0, r.alloc.1 - r.alloc.0)];
             if hw > 0 {
                 ranges.push((0, hw));
             }
             ranges.retain(|x| x.1 > 0);
-            let code = &mut self.pb.last_mut().unwrap().code;
+            let code = &mut self.code.pb.last_mut().unwrap().code;
             for &c in &r.calls {
                 if let Instr::CallSub { entry, .. } = &mut code[c] {
                     *entry = r.entry.unwrap() as u32;
@@ -1663,14 +1663,14 @@ impl<'a> Compiler<'a> {
                 // signals a function reads besides its arguments: they do not count for
                 // sensitivity (Icarus's continuous assignments and @* follow the arguments
                 // only), but the lint check (synthesis view) includes them
-                if let (Expr::Call(name, _), true) = (e, self.func_reads.get()) {
+                if let (Expr::Call(name, _), true) = (e, self.subr.func_reads.get()) {
                     if let Some((f, fs)) = self.lookup_func(name, sid) {
                         // (functions calling each other: each is followed once)
                         let key = (fs, f.name.clone());
-                        if !self.func_reads_seen.borrow().contains(&key) {
-                            self.func_reads_seen.borrow_mut().push(key.clone());
+                        if !self.subr.func_reads_seen.borrow().contains(&key) {
+                            self.subr.func_reads_seen.borrow_mut().push(key.clone());
                             let mut inner = Vec::new();
-                            if let Some(fi) = self.func_inst.get(&key) {
+                            if let Some(fi) = self.subr.func_inst.get(&key) {
                                 self.reads_stmt(&f.body, fi.scope, &mut inner);
                                 let own: Vec<u32> = fi.ports.iter().map(|p| p.1).chain(fi.ret).collect();
                                 out.extend(inner.into_iter().filter(|s| !own.contains(&s.0)));
@@ -1680,7 +1680,7 @@ impl<'a> Compiler<'a> {
                                 self.reads_stmt(&f.body, fs, &mut inner);
                                 out.extend(inner);
                             }
-                            self.func_reads_seen.borrow_mut().pop();
+                            self.subr.func_reads_seen.borrow_mut().pop();
                         }
                     }
                 }
@@ -1913,9 +1913,9 @@ impl<'a> Compiler<'a> {
         if let Expr::Real(r) = e {
             return Ok(*r);
         }
-        self.pb.push(PState { proc: NONE, ..Default::default() });
+        self.code.pb.push(PState { proc: NONE, ..Default::default() });
         let r = self.rexpr(e, sid);
-        let st = self.pb.pop().unwrap();
+        let st = self.code.pb.pop().unwrap();
         let slot = r?;
         if !st.code.is_empty() {
             if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {

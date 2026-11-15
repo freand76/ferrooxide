@@ -16,13 +16,13 @@ impl<'a> Compiler<'a> {
                 | Target::ElemPart { sig, .. }
                 | Target::ElemDynPart { sig, .. } => sig,
             };
-            if !self.alias_vars.is_empty() {
+            if !self.nets.alias_vars.is_empty() {
                 let mut v = sig;
                 loop {
-                    if self.alias_vars.contains(&v) {
-                        if self.mem_error.is_none() {
+                    if self.nets.alias_vars.contains(&v) {
+                        if self.sigs.mem_error.is_none() {
                             let name = self.sig(v).name.rsplit('.').next().unwrap_or("").to_string();
-                            self.mem_error = self
+                            self.sigs.mem_error = self
                                 .err::<()>(format!(
                                     "Cannot perform procedural assignment to variable '{name}' because it is also continuously assigned."
                                 ))
@@ -30,7 +30,7 @@ impl<'a> Compiler<'a> {
                         }
                         break;
                     }
-                    match self.view_of.get(&v) {
+                    match self.nets.view_of.get(&v) {
                         Some(&b) => v = b,
                         None => break,
                     }
@@ -39,7 +39,7 @@ impl<'a> Compiler<'a> {
             // (a value converted from a real keeps its x from inf/nan, as in the reference
             // simulator: ICARUS_NOTES.md)
             let from_real = {
-                let code = &self.pb.last().unwrap().code;
+                let code = &self.code.pb.last().unwrap().code;
                 let mut v = s;
                 let mut found = false;
                 for ins in code.iter().rev().take(4) {
@@ -54,27 +54,27 @@ impl<'a> Compiler<'a> {
                 }
                 found
             };
-            if self.two_state.contains(&self.canon(sig)) && !from_real {
+            if self.sigs.two_state.contains(&self.canon(sig)) && !from_real {
                 let w = match t {
                     Target::Part { w, .. } | Target::DynPart { w, .. } | Target::ElemPart { w, .. } | Target::ElemDynPart { w, .. } => w,
                     _ => self.sig(sig).width,
                 };
                 let d = self.tmp(w);
-                self.pb.last_mut().unwrap().code.push(Instr::Un { op: rt::UnOp::To2, d, s, w });
+                self.code.pb.last_mut().unwrap().code.push(Instr::Un { op: rt::UnOp::To2, d, s, w });
                 i = Instr::Store { t, s: d, mode };
             }
         }
-        let c = &mut self.pb.last_mut().unwrap().code;
+        let c = &mut self.code.pb.last_mut().unwrap().code;
         c.push(i);
         c.len() - 1
     }
 
     pub(crate) fn here(&self) -> u32 {
-        self.pb.last().unwrap().code.len() as u32
+        self.code.pb.last().unwrap().code.len() as u32
     }
 
     pub(crate) fn patch(&mut self, at: usize, to: u32) {
-        match &mut self.pb.last_mut().unwrap().code[at] {
+        match &mut self.code.pb.last_mut().unwrap().code[at] {
             Instr::Jmp { to: t } | Instr::Jz { to: t, .. } => *t = to,
             _ => panic!("patching a non-jump"),
         }
@@ -82,24 +82,24 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
-        self.proc_scope.push(self.job_scope);
+        self.code.proc_scope.push(self.code.job_scope);
         self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false, kick0: false });
-        self.pb.push(PState { proc: id, ..Default::default() });
-        self.scratch_saved.push(self.scratch_top);
-        self.scratch_top = 0;
+        self.code.pb.push(PState { proc: id, ..Default::default() });
+        self.code.scratch_saved.push(self.code.scratch_top);
+        self.code.scratch_top = 0;
         id
     }
 
     pub(crate) fn end_proc(&mut self) {
         if let Err(e) = self.finish_subs() {
-            if self.mem_error.is_none() {
-                self.mem_error = Some(e);
+            if self.sigs.mem_error.is_none() {
+                self.sigs.mem_error = Some(e);
             }
         }
         // nested processes ($monitor/$strobe bodies) restart at 0: the enclosing process's
         // temporaries are dead whenever the nested one runs (it runs in the postponed region)
-        self.scratch_top = self.scratch_saved.pop().unwrap().max(self.scratch_top);
-        let st = self.pb.pop().unwrap();
+        self.code.scratch_top = self.code.scratch_saved.pop().unwrap().max(self.code.scratch_top);
+        let st = self.code.pb.pop().unwrap();
         self.prog.procs[st.proc as usize].code = st.code;
     }
 
@@ -107,7 +107,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn make_ctl(&mut self, mut triggers: Vec<(u32, rt::Edge, u32)>) -> u32 {
         triggers.sort_by_key(|t| (t.0, t.2, t.1 as u8));
         triggers.dedup();
-        let proc = self.pb.last().unwrap().proc;
+        let proc = self.code.pb.last().unwrap().proc;
         let id = self.prog.ctls.len() as u32;
         self.prog.ctls.push(rt::EventCtl { proc, triggers });
         id
@@ -115,32 +115,32 @@ impl<'a> Compiler<'a> {
 
     /// Register a named block / task body; returns its registry index.
     pub(crate) fn open_block(&mut self, path: String) -> Option<usize> {
-        let proc = self.pb.last().map(|p| p.proc).unwrap_or(NONE);
+        let proc = self.code.pb.last().map(|p| p.proc).unwrap_or(NONE);
         if proc == NONE {
             return None; // constant evaluation
         }
         let start = self.here();
-        self.block_reg.push((path, rt::BlockDef { proc, start, end: start, children: Vec::new() }));
-        let i = self.block_reg.len() - 1;
-        self.open_blocks.push(i);
+        self.code.block_reg.push((path, rt::BlockDef { proc, start, end: start, children: Vec::new() }));
+        let i = self.code.block_reg.len() - 1;
+        self.code.open_blocks.push(i);
         Some(i)
     }
 
     pub(crate) fn close_block(&mut self, i: Option<usize>) {
         if let Some(i) = i {
-            self.block_reg[i].1.end = self.here();
-            let top = self.open_blocks.pop();
+            self.code.block_reg[i].1.end = self.here();
+            let top = self.code.open_blocks.pop();
             debug_assert_eq!(top, Some(i));
         }
     }
 
     /// Map the `disable` targets to the registered blocks (first matching scope outwards).
     pub(crate) fn resolve_disables(&mut self) {
-        let pending = std::mem::take(&mut self.pending_disables);
+        let pending = std::mem::take(&mut self.code.pending_disables);
         for (target, cands, file, line) in pending {
             let mut ids = Vec::new();
             for c in &cands {
-                ids = (0..self.block_reg.len() as u32).filter(|&i| &self.block_reg[i as usize].0 == c).collect();
+                ids = (0..self.code.block_reg.len() as u32).filter(|&i| &self.code.block_reg[i as usize].0 == c).collect();
                 if !ids.is_empty() {
                     break;
                 }
@@ -148,30 +148,30 @@ impl<'a> Compiler<'a> {
             if ids.is_empty() && !cands.iter().any(|c| c.starts_with("$force:")) {
                 let n = cands.first().map(|c| c.rsplit('.').next().unwrap_or(c).to_string()).unwrap_or_default();
                 let m = format!("{file}:{line}: warning: disable: no block or task named '{n}'");
-                if self.warned.insert(m.clone()) {
-                    self.warnings.push(m);
+                if self.diag.warned.insert(m.clone()) {
+                    self.diag.warnings.push(m);
                 }
             }
             self.prog.disables[target as usize] = ids;
         }
-        self.prog.blocks = self.block_reg.iter().map(|b| b.1.clone()).collect();
+        self.prog.blocks = self.code.block_reg.iter().map(|b| b.1.clone()).collect();
     }
 
     /// Assignment targets go to the job's driver signal when the net has several drivers.
     /// A view of a redirected net becomes a view of the job's driver signal.
     pub(crate) fn redir(&mut self, s: u32) -> u32 {
         let c = self.canon(s);
-        let Some(&d) = self.redirect.get(&c) else { return s };
+        let Some(&d) = self.nets.redirect.get(&c) else { return s };
         if c == s {
             return d;
         }
-        if let Some(&v) = self.drv_views.get(&(s, d)) {
+        if let Some(&v) = self.nets.drv_views.get(&(s, d)) {
             return v;
         }
         let i = self.sig(s).clone();
         let v = self.new_view(d, i.name, i.msb, i.lsb, i.signed);
         self.prog.names.pop();
-        self.drv_views.insert((s, d), v);
+        self.nets.drv_views.insert((s, d), v);
         v
     }
 
@@ -212,7 +212,7 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn codegen_jobs(&mut self) -> R<()> {
-        let jobs = std::mem::take(&mut self.jobs);
+        let jobs = std::mem::take(&mut self.code.jobs);
         let jobs = self.alias_assigns(jobs);
         // nets with more than one continuous driver are resolved from per-driver signals
         let mut count: HashMap<u32, u32> = HashMap::new();
@@ -225,7 +225,7 @@ impl<'a> Compiler<'a> {
             .into_iter()
             .filter(|&(s, n)| {
                 let i = self.sig(s);
-                let special = self.net_types.contains_key(&s) || self.pulls.contains_key(&s);
+                let special = self.nets.net_types.contains_key(&s) || self.nets.pulls.contains_key(&s);
                 (n > 1 || special) && i.kind == SigKind::Wire && i.depth == 0 && i.alias_of.is_none()
             })
             .map(|(s, _)| s)
@@ -233,7 +233,7 @@ impl<'a> Compiler<'a> {
         // linked nets (tran, inout ports on parts of nets) and nets with drivers of a
         // non-default strength are always resolved
         let mut multi = multi;
-        let job_strength = std::mem::take(&mut self.job_strength);
+        let job_strength = std::mem::take(&mut self.code.job_strength);
         for (k, job) in jobs.iter().enumerate() {
             if job_strength.get(&k).is_some_and(|st| *st != (6, 6)) {
                 for s in self.job_targets(job) {
@@ -244,7 +244,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        for l in &self.links {
+        for l in &self.nets.links {
             for s in [l.a, l.b] {
                 if self.sig(s).alias_of.is_none() {
                     multi.insert(s);
@@ -253,9 +253,9 @@ impl<'a> Compiler<'a> {
         }
         // special nets nothing drives: their resolved value is constant
         let undriven: Vec<u32> = self
-            .net_types
+            .nets.net_types
             .keys()
-            .chain(self.pulls.keys())
+            .chain(self.nets.pulls.keys())
             .copied()
             .filter(|s| !multi.contains(s))
             .collect();
@@ -271,34 +271,34 @@ impl<'a> Compiler<'a> {
         }
         let mut drv_strength: HashMap<u32, (u8, u8)> = HashMap::new();
         for (jk, job) in jobs.iter().enumerate() {
-            self.redirect.clear();
+            self.nets.redirect.clear();
             for s in self.job_targets(job) {
                 if multi.contains(&s) {
                     let i = self.sig(s).clone();
-                    let k = self.drivers.get(&s).map(|v| v.len()).unwrap_or(0);
+                    let k = self.nets.drivers.get(&s).map(|v| v.len()).unwrap_or(0);
                     let d = self.new_signal(format!("{}$drv{k}", i.name), i.width, i.signed, 0, i.msb, i.lsb, 0, SigKind::Wire);
                     self.prog.names.pop(); // driver signals are not dumped
                     if let Some(&st) = job_strength.get(&jk) {
                         drv_strength.insert(d, st);
                     }
-                    self.drivers.entry(s).or_default().push(d);
-                    self.redirect.insert(s, d);
+                    self.nets.drivers.entry(s).or_default().push(d);
+                    self.nets.redirect.insert(s, d);
                 }
             }
             self.codegen_job(job)?;
         }
-        self.redirect.clear();
+        self.nets.redirect.clear();
         let island = self.link_islands()?;
         // resolver processes: net = resolve(driver 0, driver 1, ...)
         let mut nets: Vec<(u32, Vec<u32>)> =
-            std::mem::take(&mut self.drivers).into_iter().filter(|(n, _)| !island.contains(n)).collect();
+            std::mem::take(&mut self.nets.drivers).into_iter().filter(|(n, _)| !island.contains(n)).collect();
         nets.sort();
         for (net, drv) in nets {
             let i = self.sig(net).clone();
             let p = self.begin_proc(i.name.clone(), ProcClass::Normal);
             self.prog.procs[p as usize].fusible = true;
             let top = self.here();
-            let nt = self.net_types.get(&net).copied().unwrap_or(NetType::Wire);
+            let nt = self.nets.net_types.get(&net).copied().unwrap_or(NetType::Wire);
             let rop = match nt {
                 NetType::Wand => rt::BinOp::ResolveAnd,
                 NetType::Wor => rt::BinOp::ResolveOr,
@@ -362,9 +362,9 @@ impl<'a> Compiler<'a> {
             self.prog.mem[info.slot as usize + i] = c.a[i];
             self.prog.mem[info.slot as usize + n + i] = c.b[i];
         }
-        self.init_touch_net.push(s);
+        self.code.init_touch_net.push(s);
         if s != s0 {
-            self.init_touch_net.push(s0);
+            self.code.init_touch_net.push(s0);
         }
         Ok(())
     }
@@ -372,16 +372,16 @@ impl<'a> Compiler<'a> {
     /// The time-0 change events of initial values: a process that runs after all others have
     /// started.
     pub(crate) fn init_events(&mut self) {
-        let mut v = std::mem::take(&mut self.init_touch_net);
+        let mut v = std::mem::take(&mut self.code.init_touch_net);
         if self.dialect.v2005 {
-            v.append(&mut self.init_touch);
+            v.append(&mut self.code.init_touch);
         }
         let mut seen = HashSet::new();
         v.retain(|s| seen.insert(*s));
         if v.is_empty() {
             return;
         }
-        self.job_scope = usize::MAX;
+        self.code.job_scope = usize::MAX;
         self.begin_proc("$init".into(), ProcClass::Normal);
         for sig in v {
             self.emit(Instr::Touch { sig });
@@ -393,7 +393,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn codegen_job(&mut self, job: &Job<'a>) -> R<()> {
         // (only initial / always blocks start in scope order; continuous assignments and
         // port connections keep theirs)
-        self.job_scope = match job {
+        self.code.job_scope = match job {
             Job::Proc { scope, .. } => *scope,
             _ => usize::MAX - 1,
         };
@@ -412,27 +412,27 @@ impl<'a> Compiler<'a> {
                         }
                         ProcKind::Always | ProcKind::AlwaysFf => {
                             if let Stmt::Timed { timing: Timing::Event(EventCtl::Star), .. } = body {
-                                let p = self.pb.last().unwrap().proc;
+                                let p = self.code.pb.last().unwrap().proc;
                                 self.prog.procs[p as usize].fusible = true;
                             }
                             let top = self.here();
                             self.stmt(body, *scope)?;
                             self.emit(Instr::Jmp { to: top });
-                            if self.lint_enabled {
+                            if self.diag.lint_enabled {
                                 if let Stmt::Timed { timing: Timing::Event(EventCtl::List(items)), body: inner, .. } = body {
                                     self.lint_sensitivity(items, inner, *scope, *line);
                                 }
                             }
                         }
                         ProcKind::AlwaysComb | ProcKind::AlwaysLatch => {
-                            let p = self.pb.last().unwrap().proc;
+                            let p = self.code.pb.last().unwrap().proc;
                             self.prog.procs[p as usize].fusible = *kind == ProcKind::AlwaysComb;
                             // IEEE 1800 9.2.2.2.1: what the block and the functions it calls read,
                             // except what the block writes itself
                             let mut reads = Vec::new();
-                            self.func_reads.set(true);
+                            self.subr.func_reads.set(true);
                             self.reads_stmt(body, *scope, &mut reads);
-                            self.func_reads.set(false);
+                            self.subr.func_reads.set(false);
                             let mut written = Vec::new();
                             self.blocking_writes(body, *scope, &mut written);
                             reads.retain(|(s, _)| !written.contains(s));

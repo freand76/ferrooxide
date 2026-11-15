@@ -14,14 +14,14 @@ impl<'a> Compiler<'a> {
         let id = self.prog.signals.len() as u32;
         self.prog.signals.push(info);
         self.prog.names.push((name, id));
-        self.view_of.insert(id, base);
+        self.nets.view_of.insert(id, base);
         id
     }
 
     /// After code generation: instructions, event controls and names refer to the signals the
     /// views stand for.
     pub(crate) fn resolve_views(&mut self) {
-        if self.view_of.is_empty() {
+        if self.nets.view_of.is_empty() {
             return;
         }
         let canon: Vec<u32> = (0..self.prog.signals.len() as u32).map(|s| self.canon(s)).collect();
@@ -38,7 +38,7 @@ impl<'a> Compiler<'a> {
         for n in &mut self.prog.names {
             n.1 = canon[n.1 as usize];
         }
-        for (&v, _) in &self.view_of {
+        for (&v, _) in &self.nets.view_of {
             if self.prog.signals[v as usize].forced {
                 self.prog.signals[canon[v as usize] as usize].forced = true;
             }
@@ -63,7 +63,7 @@ impl<'a> Compiler<'a> {
         sid: usize,
     ) -> R<()> {
         if kind == SigKind::Wire {
-            self.cur_strength = strength;
+            self.nets.cur_strength = strength;
             self.push_job(Job::Assign {
                 lhs: Expr::Ident(name.to_string()),
                 rhs: init.clone(),
@@ -71,7 +71,7 @@ impl<'a> Compiler<'a> {
                 scope: sid,
                 line: self.line,
             });
-            self.cur_strength = None;
+            self.nets.cur_strength = None;
         } else if nkind == NetKind::String {
             // the initial text
             let text = match init {
@@ -92,16 +92,16 @@ impl<'a> Compiler<'a> {
             let slot = self.sig(s).slot as usize;
             self.prog.mem[slot] = h;
             self.prog.mem[slot + 1] = 0;
-            self.init_touch.push(s);
+            self.code.init_touch.push(s);
         } else if is_real {
             let r = self.const_real(init, sid)?;
             let slot = self.sig(s).slot as usize;
             self.prog.mem[slot] = r.to_bits();
             self.prog.mem[slot + 1] = 0;
-            self.init_touch.push(s);
+            self.code.init_touch.push(s);
         } else {
             if depth == 0 {
-                self.init_touch.push(s);
+                self.code.init_touch.push(s);
             }
             let c = self.const_eval(init, sid)?;
             let c = c.resize(width, c.signed);
@@ -133,7 +133,7 @@ impl<'a> Compiler<'a> {
         let s = self.new_signal(full, width, false, 0, width as i64 - 1, 0, 0, SigKind::Wire);
         self.scopes[sid].syms.insert(n.to_string(), Sym::Sig(s));
         if net != NetType::Wire {
-            self.net_types.insert(s, net);
+            self.nets.net_types.insert(s, net);
         }
         Ok(s)
     }

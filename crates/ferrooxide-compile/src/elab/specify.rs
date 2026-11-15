@@ -56,7 +56,7 @@ impl<'a> Compiler<'a> {
                     }),
                     line: self.line,
                 }));
-                self.jobs.push(Job::Proc { kind: ProcKind::Always, body, scope: sid, line: self.line });
+                self.code.jobs.push(Job::Proc { kind: ProcKind::Always, body, scope: sid, line: self.line });
                 times.insert(src.clone(), tname);
             }
             let paths: Vec<(String, Expr)> = paths.into_iter().filter(|(s, _)| times.contains_key(s)).collect();
@@ -102,8 +102,8 @@ impl<'a> Compiler<'a> {
             let multi = info.width > 1;
             if multi {
                 let w = "sorry: multi-bit module path delays are currently not fully supported.\n     : using the LSB delay for all bits.".to_string();
-                if self.warned.insert(w.clone()) {
-                    self.warnings.push(w);
+                if self.diag.warned.insert(w.clone()) {
+                    self.diag.warnings.push(w);
                 }
             }
             let delay = Expr::SysCall(if multi { "$__pathdelays" } else { "$__delays" }.into(), sel.to_vec());

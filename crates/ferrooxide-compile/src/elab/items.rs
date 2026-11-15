@@ -254,7 +254,7 @@ impl<'a> Compiler<'a> {
                                 let v = self.new_view(s, full.clone(), msb, lsb, signed);
                                 self.prog.names.pop();
                                 if let Some(d) = pk.take() {
-                                    self.packed_dims.insert(v, d);
+                                    self.sigs.packed_dims.insert(v, d);
                                     self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(v));
                                 }
                                 v
@@ -281,7 +281,7 @@ impl<'a> Compiler<'a> {
                         }
                         let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
                         if desc {
-                            self.desc_arrays.insert(s);
+                            self.sigs.desc_arrays.insert(s);
                         }
                         if is_real {
                             self.mark_real(s);
@@ -293,10 +293,10 @@ impl<'a> Compiler<'a> {
                         let line = self.line;
                         match dir {
                             Dir::Input => {
-                                self.jobs.push(Job::PortIn { child_sig: s, expr: conn.clone(), scope: ps, line })
+                                self.code.jobs.push(Job::PortIn { child_sig: s, expr: conn.clone(), scope: ps, line })
                             }
                             Dir::Output => {
-                                self.jobs.push(Job::PortOut { lhs: conn.clone(), child_sig: s, scope: ps, line })
+                                self.code.jobs.push(Job::PortOut { lhs: conn.clone(), child_sig: s, scope: ps, line })
                             }
                             Dir::Inout if self.link_exprs(&Expr::Ident(name.clone()), sid, conn, ps, None) => {}
                             Dir::Inout => self.warn(format!(
@@ -312,14 +312,14 @@ impl<'a> Compiler<'a> {
             }
             let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
             if desc {
-                self.desc_arrays.insert(s);
+                self.sigs.desc_arrays.insert(s);
             }
             if let Some(d) = pk.take() {
-                self.packed_dims.insert(s, d);
+                self.sigs.packed_dims.insert(s, d);
                 self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));
             }
             if let Some(d) = md.take() {
-                self.md_dims.insert(s, d);
+                self.sigs.md_dims.insert(s, d);
                 // the flat storage, for index chains already turned into one index
                 self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));
             }
@@ -339,25 +339,25 @@ impl<'a> Compiler<'a> {
                 self.prog.mem[slot] = !0;
                 self.prog.mem[slot + 1] = 0;
                 self.scopes[sid].syms.insert(format!("{name}$trig"), Sym::Sig(ht));
-                self.has_events = true;
+                self.sigs.has_events = true;
             }
             self.mark_two_state(s, mg.kind);
             if mg.net != NetType::Wire {
-                self.net_types.insert(s, mg.net);
+                self.nets.net_types.insert(s, mg.net);
                 if matches!(mg.net, NetType::Supply0 | NetType::Supply1) {
                     let d = if mg.net == NetType::Supply1 { "1" } else { "0" };
                     let rhs = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: d.into(), fill: true });
                     let line = self.line;
-                    self.cur_strength = Some((7, 7));
+                    self.nets.cur_strength = Some((7, 7));
                     self.push_job(Job::Assign { lhs: Expr::Ident(name.clone()), rhs, delay: None, scope: sid, line });
-                    self.cur_strength = None;
+                    self.nets.cur_strength = None;
                 }
             }
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
             // `unconnected_drive: an unconnected input port is pulled
             if let (Some(Dir::Input), true, Some(up)) = (mg.dir, module_level, self.scopes[sid].uncdrive) {
                 if parent_scope.is_some() && !matches!(port_conns.get(&name), Some(Some(_))) && depth == 0 {
-                    self.pulls.entry(s).or_default().push((0, width, up));
+                    self.nets.pulls.entry(s).or_default().push((0, width, up));
                 }
             }
             if let Some(init) = mg.init {
@@ -401,13 +401,13 @@ impl<'a> Compiler<'a> {
         // 4. everything else; interface instances first, so that modules can be connected to
         // interfaces declared after them
         let mut genblk = 0;
-        let is_iface = |it: &Item| matches!(it, Item::Instances { module, .. } if self.mods.get(module.as_str()).is_some_and(|m| m.interface));
+        let is_iface = |it: &Item| matches!(it, Item::Instances { module, .. } if self.hier.mods.get(module.as_str()).is_some_and(|m| m.interface));
         let order: Vec<&'a Item> = items.iter().filter(|it| is_iface(it)).chain(items.iter().filter(|it| !is_iface(it))).collect();
         for it in order {
             match it {
                 Item::Decl(_) | Item::Param(_) | Item::TypeParam { .. } | Item::Subroutine(_) | Item::Defparam { .. } | Item::SpecPath { .. } => {}
                 Item::ContAssign { delay, lhs, rhs, strength, line } => {
-                    self.cur_strength = *strength;
+                    self.nets.cur_strength = *strength;
                     self.push_job(Job::Assign {
                         lhs: lhs.clone(),
                         rhs: rhs.clone(),
@@ -415,14 +415,14 @@ impl<'a> Compiler<'a> {
                         scope: sid,
                         line: *line,
                     });
-                    self.cur_strength = None;
+                    self.nets.cur_strength = None;
                 }
                 Item::Process { kind, body, line } => {
-                    self.jobs.push(Job::Proc { kind: *kind, body, scope: sid, line: *line });
+                    self.code.jobs.push(Job::Proc { kind: *kind, body, scope: sid, line: *line });
                 }
                 Item::Instances { module, params, insts, line } => {
                     self.line = *line;
-                    let m = match self.mods.get(module.as_str()) {
+                    let m = match self.hier.mods.get(module.as_str()) {
                         Some(m) => *m,
                         None => return self.err(format!("unknown module '{module}'")),
                     };
@@ -443,7 +443,7 @@ impl<'a> Compiler<'a> {
                             if terms.len() != m.ports.len() {
                                 return self.err(format!("primitive '{module}' needs {} terminals", m.ports.len()));
                             }
-                            self.jobs.push(Job::Udp { module: m, terms, delay: delay.clone(), scope: sid, line: inst.line });
+                            self.code.jobs.push(Job::Udp { module: m, terms, delay: delay.clone(), scope: sid, line: inst.line });
                         }
                         continue;
                     }
@@ -468,7 +468,7 @@ impl<'a> Compiler<'a> {
                             let (l, r) = (self.const_int(l, sid)?, self.const_int(r, sid)?);
                             let n = ((l - r).abs() + 1) as u32;
                             let pws = self.port_widths(m, &ovs)?;
-                            self.inst_arrays.insert((sid, inst.name.clone()), (l, r));
+                            self.hier.inst_arrays.insert((sid, inst.name.clone()), (l, r));
                             // elaborated lowest index first, like Icarus
                             for i in l.min(r)..=l.max(r) {
                                 let k = (i - l).unsigned_abs() as u32;
@@ -605,11 +605,11 @@ impl<'a> Compiler<'a> {
                 }
                 Item::Gate { kind, terms, line, dims, strength, delay, .. } => {
                     self.line = *line;
-                    self.cur_strength = *strength;
-                    self.cur_delay = delay.clone();
+                    self.nets.cur_strength = *strength;
+                    self.nets.cur_delay = delay.clone();
                     let r = self.gate_items(kind, terms, dims, sid, *line);
-                    self.cur_strength = None;
-                    self.cur_delay = None;
+                    self.nets.cur_strength = None;
+                    self.nets.cur_delay = None;
                     r?;
                 }
             }
