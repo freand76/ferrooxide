@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 struct Macro {
     params: Option<Vec<String>>,
+    /// default values of the parameters (`define M(a, b = 1)`)
+    defaults: Vec<Option<String>>,
     body: String,
 }
 
@@ -30,9 +32,9 @@ impl Preprocessor {
     pub fn new(opts: &Options) -> Self {
         let mut macros = HashMap::new();
         // Icarus-compatible output is the goal, so code written for Icarus takes its paths
-        macros.insert("__ICARUS__".to_string(), Macro { params: None, body: "1".into() });
+        macros.insert("__ICARUS__".to_string(), Macro { params: None, defaults: Vec::new(), body: "1".into() });
         for (k, v) in &opts.defines {
-            macros.insert(k.clone(), Macro { params: None, body: v.clone() });
+            macros.insert(k.clone(), Macro { params: None, defaults: Vec::new(), body: v.clone() });
         }
         Preprocessor { macros, incdirs: opts.incdirs.clone(), depth: 0, macro_line: None }
     }
@@ -210,7 +212,23 @@ impl Preprocessor {
                             body.push(s[i]);
                             i += 1;
                         }
-                        self.macros.insert(id, Macro { params, body: body.trim().to_string() });
+                        // `name = default` (IEEE 1800 22.5.1)
+                        let mut defaults = Vec::new();
+                        let params = params.map(|ps| {
+                            ps.into_iter()
+                                .map(|p| match p.split_once('=') {
+                                    Some((n, d)) => {
+                                        defaults.push(Some(d.trim().to_string()));
+                                        n.trim().to_string()
+                                    }
+                                    None => {
+                                        defaults.push(None);
+                                        p
+                                    }
+                                })
+                                .collect()
+                        });
+                        self.macros.insert(id, Macro { params, defaults, body: body.trim().to_string() });
                     }
                     "undef" => {
                         let id = read_ident(&s, &mut i);
@@ -319,6 +337,24 @@ impl Preprocessor {
                                 if ch == '\n' {
                                     line += 1;
                                 }
+                                // a string literal is one piece (commas and parentheses in it)
+                                if ch == '"' {
+                                    cur.push(ch);
+                                    i += 1;
+                                    while i < s.len() && s[i] != '"' {
+                                        if s[i] == '\\' && i + 1 < s.len() {
+                                            cur.push(s[i]);
+                                            i += 1;
+                                        }
+                                        cur.push(s[i]);
+                                        i += 1;
+                                    }
+                                    if i < s.len() {
+                                        cur.push(s[i]);
+                                        i += 1;
+                                    }
+                                    continue;
+                                }
                                 if (ch == ',' || ch == ')') && depth == 0 {
                                     args.push(cur.trim().to_string());
                                     cur.clear();
@@ -336,6 +372,17 @@ impl Preprocessor {
                                 }
                                 cur.push(ch);
                                 i += 1;
+                            }
+                            // missing or empty arguments take their defaults
+                            for (k, d) in m.defaults.iter().enumerate() {
+                                if let Some(d) = d {
+                                    if args.len() <= k {
+                                        args.resize(k + 1, String::new());
+                                    }
+                                    if args[k].is_empty() {
+                                        args[k] = d.clone();
+                                    }
+                                }
                             }
                             body = substitute_params(&body, params, &args);
                         } else {

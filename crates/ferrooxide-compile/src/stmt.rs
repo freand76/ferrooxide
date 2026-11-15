@@ -779,6 +779,27 @@ impl<'a> Compiler<'a> {
                 let Some(expr::Base::Sig(s)) = self.resolve_base(&e, sid)? else {
                     return self.err(format!("'{name}' is not an event"));
                 };
+                // the trigger time, for `.triggered` (before the waiters wake)
+                let mut te = e.clone();
+                match &mut te {
+                    Expr::Ident(n) => *n = format!("{n}$trig"),
+                    Expr::Hier(p) => {
+                        let l = p.last_mut().unwrap();
+                        *l = format!("{l}$trig");
+                    }
+                    _ => {}
+                }
+                // (only module-level events have one)
+                let hidden = match &te {
+                    Expr::Ident(n) => self.lookup(n, sid),
+                    Expr::Hier(p) => self.lookup_hier(p, sid),
+                    _ => None,
+                };
+                if let Some(Sym::Sig(ht)) = hidden {
+                    let d = self.tmp(64);
+                    self.emit(Instr::SysF { f: rt::SysFn::Time(0), d });
+                    self.emit(Instr::Store { t: Target::Whole { sig: ht }, s: d, mode: StoreMode::Blocking });
+                }
                 // a trigger toggles the event variable: every waiter sees a change
                 let slot = self.sig(s).slot;
                 let t = self.tmp(1);

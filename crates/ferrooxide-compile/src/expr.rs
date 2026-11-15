@@ -49,6 +49,28 @@ impl<'a> Compiler<'a> {
     /// An index chain on a multi-dimensional array (`m[i][j]`, also with selects after it) as
     /// one index into the flat storage: `m[(i - lo0) * n1 + (j - lo1)]`.
     pub(crate) fn md_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        // `ev.triggered` (IEEE 1800 15.5.3): the event was triggered in this time step
+        if self.has_events {
+            if let Expr::Hier(p) = e {
+                if p.len() >= 2 && p.last().unwrap() == "triggered" {
+                    let mut t = p[..p.len() - 1].to_vec();
+                    let ev = if t.len() == 1 { Expr::Ident(t[0].clone()) } else { Expr::Hier(t.clone()) };
+                    let sym = match &ev {
+                        Expr::Ident(n) => self.lookup(n, sid),
+                        Expr::Hier(p) => self.lookup_hier(p, sid),
+                        _ => None,
+                    };
+                    if let Some(Sym::Sig(s)) = sym {
+                        if self.sig(s).event {
+                            let l = t.last_mut().unwrap();
+                            *l = format!("{l}$trig");
+                            let h = if t.len() == 1 { Expr::Ident(t[0].clone()) } else { Expr::Hier(t) };
+                            return Some(Expr::Binary(BinOp::CaseEq, Box::new(h), Box::new(Expr::SysCall("$__ticks".into(), Vec::new()))));
+                        }
+                    }
+                }
+            }
+        }
         if self.md_dims.is_empty() && self.packed_dims.is_empty() {
             return None;
         }

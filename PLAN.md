@@ -305,10 +305,12 @@ how to present large memories.
   plusargs and misc), `hier` (parameters, generate, ports, hierarchical names), `subr`
   (functions, tasks), `real`, `vcd` (reads its own dump back), `prims` (UDPs, force/release
   and assign/deassign, specify paths), `arrays` (multi-dimensional, packed, arrays of packed
-  vectors). Next areas: `wait`/`disable` corner cases, named events with `@` and `wait`,
-  `$sformatf` corner cases, compiler directives (`define with arguments, `ifdef, `include,
-  `timescale inheritance); ideas from the regression suite's coverage, tests written
-  fresh. Pitfall when writing checks: a task argument is context-determined
+  vectors), `directives` (macros with arguments and defaults, conditionals, include
+  guards), `events` (named events, `iff`, `.triggered`, repeat with an event control). Next
+  areas: `$sformatf` corner cases, `timescale inheritance across files, `disable` corner
+  cases; ideas from the regression suite's coverage, tests written fresh. Pitfalls seen:
+  fork branches start last to first here and in the reference (order IEEE leaves open), so
+  a trigger in one branch for a waiter in another needs a `#0`. Pitfall when writing checks: a task argument is context-determined
   by the task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
   self-determined expressions in `{...}` and route signed values through `integer`.
 - `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both simulators.
@@ -401,7 +403,7 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 ## Status and next steps (2026-11-14, updated after the SystemVerilog work)
 
 Icarus regression suite (ivtest, normal tests): main list 1345 of 1526 (88 %), SystemVerilog
-list 360 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
+list 364 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
 sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
 debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
 the viewer) work.
@@ -558,6 +560,9 @@ SystemVerilog data types and testbench features:
   arrays; modport directions are not enforced (writing an input of a modport, members not
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
   a forward typedef defined in another scope than its declaration.
+- `.triggered` only on events declared in a module (not in tasks, functions or blocks).
+- `iff` only when every item of an event control has the same condition, and only in an
+  event control before a statement (not in intra-assignment controls).
 - unsized constants inside concatenations (`{a - 1}`) are accepted; the standard forbids
   them and the reference reports an error.
 - `unique` case/if: overlapping items are not reported (only "no item matches", as the

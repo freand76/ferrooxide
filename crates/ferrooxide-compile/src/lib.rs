@@ -215,6 +215,8 @@ pub struct Compiler<'a> {
     pub(crate) packed_dims: HashMap<u32, Vec<(i64, i64)>>,
     /// arrays declared with a descending range (`mem [N:0]`), for the $readmem warning
     pub(crate) desc_arrays: std::collections::HashSet<u32>,
+    /// some named event exists (`.triggered` needs the rewrite in `md_norm`)
+    pub(crate) has_events: bool,
     /// delay of the gate being instantiated
     cur_delay: Option<Expr>,
     job_strength: HashMap<usize, (u8, u8)>,
@@ -446,6 +448,7 @@ impl<'a> Compiler<'a> {
             md_dims: HashMap::new(),
             packed_dims: HashMap::new(),
             desc_arrays: Default::default(),
+            has_events: false,
             cur_delay: None,
             job_strength: HashMap::new(),
             func_reads: std::cell::Cell::new(false),
@@ -2021,6 +2024,14 @@ impl<'a> Compiler<'a> {
             if is_event {
                 self.zero_init(s);
                 self.prog.signals[s as usize].event = true;
+                // the time of the last trigger, for `.triggered` (never at the start)
+                let ht = self.new_signal(format!("{}.{name}$trig", self.scopes[sid].name), 64, false, 0, 63, 0, 0, SigKind::Reg);
+                self.prog.names.pop();
+                let slot = self.sig(ht).slot as usize;
+                self.prog.mem[slot] = !0;
+                self.prog.mem[slot + 1] = 0;
+                self.scopes[sid].syms.insert(format!("{name}$trig"), Sym::Sig(ht));
+                self.has_events = true;
             }
             self.mark_two_state(s, mg.kind);
             if mg.net != NetType::Wire {

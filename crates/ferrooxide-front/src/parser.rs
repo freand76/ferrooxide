@@ -1804,21 +1804,32 @@ impl Parser {
     }
 
     fn event_ctl(&mut self) -> Result<EventCtl> {
+        let (ec, guard) = self.event_ctl_iff()?;
+        if guard.is_some() {
+            return self.err("`iff` is only supported in an event control before a statement");
+        }
+        Ok(ec)
+    }
+
+    /// An event control with an optional `iff` condition (IEEE 1800 9.4.2.3), the same for
+    /// every item.
+    fn event_ctl_iff(&mut self) -> Result<(EventCtl, Option<Expr>)> {
         // after '@'
         if self.eat_p("*") {
-            return Ok(EventCtl::Star);
+            return Ok((EventCtl::Star, None));
         }
         if !self.eat_p("(") {
             // @name or @a.b.name
             let id = self.ident()?;
             let e = self.hier_tail(id)?;
-            return Ok(EventCtl::List(vec![(Edge::Any, e)]));
+            return Ok((EventCtl::List(vec![(Edge::Any, e)]), None));
         }
         if self.eat_p("*") {
             self.expect_p(")")?;
-            return Ok(EventCtl::Star);
+            return Ok((EventCtl::Star, None));
         }
         let mut v = Vec::new();
+        let mut guards = Vec::new();
         loop {
             let edge = if self.eat_kw("posedge") {
                 Edge::Pos
@@ -1829,12 +1840,18 @@ impl Parser {
             };
             let e = self.expr()?;
             v.push((edge, e));
+            guards.push(if self.eat_kw("iff") { Some(self.expr()?) } else { None });
             if !(self.eat_kw("or") || self.eat_p(",")) {
                 break;
             }
         }
         self.expect_p(")")?;
-        Ok(EventCtl::List(v))
+        let guard = match guards.first() {
+            Some(Some(g)) if guards.iter().all(|x| x.as_ref().is_some_and(|x| format!("{x:?}") == format!("{g:?}"))) => Some(g.clone()),
+            _ if guards.iter().all(|x| x.is_none()) => None,
+            _ => return self.err("`iff` on only some items of an event control is not supported"),
+        };
+        Ok((EventCtl::List(v), guard))
     }
 
     /// Statements up to `end` (or join_any / join_none for a fork). Returns the terminator.
@@ -1884,9 +1901,22 @@ impl Parser {
             }
             Tok::Punct("@") => {
                 self.bump();
-                let ec = self.event_ctl()?;
+                let (ec, guard) = self.event_ctl_iff()?;
                 let body = self.stmt()?;
-                Ok(Stmt::Timed { timing: Timing::Event(ec), body: Box::new(body), line })
+                let Some(g) = guard else {
+                    return Ok(Stmt::Timed { timing: Timing::Event(ec), body: Box::new(body), line });
+                };
+                // @(e iff g) s: wait again while g is false when e happens
+                let again = Stmt::While {
+                    cond: Expr::Unary(UnOp::LNot, Box::new(g)),
+                    body: Box::new(Stmt::Timed { timing: Timing::Event(ec.clone()), body: Box::new(Stmt::Null), line }),
+                    line,
+                };
+                Ok(Stmt::Timed {
+                    timing: Timing::Event(ec),
+                    body: Box::new(Stmt::Block { name: None, decls: vec![], stmts: vec![again, body], fork: None }),
+                    line,
+                })
             }
             Tok::Punct("->") => {
                 self.bump();
