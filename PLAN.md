@@ -135,8 +135,9 @@ case and if warnings for unmatched values, `break;`/`continue;`, prefix `++a;`/`
 *A1, first part (types in elaboration).* Packages and `$unit` are scopes of their own,
 elaborated once (`Module::package`; `Scope::imports` for lookups after a module's own names).
 Their variables are shared, their functions and tasks run in their scope (its names and time
-unit); a module's copy of a package parameter is `localparam X = P.X`, and constants in types
-declared there refer to that scope (`Lower::qualify_type`, `scoped_copy`). Type values in
+unit); a module finds package and `$unit` names (parameters, enum constants, functions)
+through `Scope::imports`, and constants in types declared there refer to that scope
+(`Lower::qualify_type`). Type values in
 the compiler: `Sym::Type` / `PVal::Type` hold an `SvType` with its dimensions evaluated
 (`resolve_type`), `Expr::Type` carries a type in a parameter list. `parameter type` works for
 declarations, ports, `$bits` and casts, per instance. Left: struct layout and member access
@@ -452,6 +453,9 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   - *F6 status (2026-11-15)*: done (CLAUDE.md, "Front end").
 - **R3. Compilation units.** (F4 replaces the field shuffle in `parse_files`.) Package items
   are no longer copied into modules (package scopes resolve them).
+  *Done 2026-11-15*: modules, packages and `$unit` keep only their own items; names come
+  from the imported scopes (`param_range` too). Left: a named import (`import p::X`) and a
+  reference `p::Y` make all of `p` visible, not only the imported name (as before).
 - **R4. Types in the compiler** (rest of A1): a `Type` per signal, one
   `type_of(expr) -> ExprType` replacing `ty`/`is_real`/`is_string`/`lvalue_ty`; members and
   patterns resolved in elaboration (type-parameter structs, unpacked structs); packed types

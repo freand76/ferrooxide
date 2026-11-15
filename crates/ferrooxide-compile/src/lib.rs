@@ -753,6 +753,11 @@ impl<'a> Compiler<'a> {
             if self.scopes[sid].syms.contains_key(name) {
                 return self.scopes[sid].param_ranges.get(name).copied();
             }
+            for &p in &self.scopes[sid].imports {
+                if self.scopes[p].syms.contains_key(name) {
+                    return self.scopes[p].param_ranges.get(name).copied();
+                }
+            }
             sid = self.scopes[sid].parent?;
         }
     }

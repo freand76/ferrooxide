@@ -1,9 +1,5 @@
 module top (clk);
   // imports p, $unit
-  localparam [1:0] A = p.A;
-  localparam [1:0] B = p.B;
-  localparam [1:0] C = p.C;
-  localparam integer signed W = p.W;
   parameter type T = reg [3:0];
   input wire clk;
   reg [5:0] s;

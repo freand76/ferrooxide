@@ -39,8 +39,6 @@ pub struct SvType {
 /// A package: its items (with those of the packages it imports) and its typedefs.
 #[derive(Debug, Default)]
 pub struct Package {
-    /// items copied into the modules that use the package (no variables)
-    pub items: Vec<Item>,
     /// its variables (in the package's own module) and their types
     pub vars: std::collections::HashMap<String, (Rc<SvType>, Vec<Range>)>,
     /// its functions and tasks (in the package's own module)
@@ -203,20 +201,6 @@ pub fn minus_one(w: Expr) -> Expr {
 /// `$__cast(width, sign, e)`: sign 0 unsigned, 1 signed, 2 the expression's.
 pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
     Expr::SysCall("$__cast".into(), vec![width, Expr::Num(dec(sign)), e])
-}
-
-/// A package (or file-scope) item copied into a module: a parameter becomes a local copy of
-/// the scope's own (`localparam X = P.X`).
-pub(crate) fn scoped_copy(it: &Item, scope: &str) -> Item {
-    match it {
-        Item::Param(p) if !p.real => {
-            let mut p = p.clone();
-            p.value = Expr::Hier(vec![scope.to_string(), p.name.clone()]);
-            p.local = true;
-            Item::Param(p)
-        }
-        _ => it.clone(),
-    }
 }
 
 /// `n` -> `scope.n` for the names in `names`.

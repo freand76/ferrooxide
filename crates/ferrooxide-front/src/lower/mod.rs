@@ -13,7 +13,6 @@ mod types;
 
 use crate::ast::*;
 pub use types::{Package, SvType};
-use types::scoped_copy;
 use crate::syntax::tree as t;
 use crate::{Error, Options, Result};
 use std::collections::{HashMap, HashSet};
@@ -346,25 +345,11 @@ impl Lower {
         let refs: Vec<&t::Item> = m.items.iter().collect();
         self.item_list(&refs, &mut items)?;
         self.types = saved_types;
-        // items of the packages it uses, then file-scope items, unless the module declares
-        // the name itself
+        // names of the packages it uses and of the file scope are found in their scopes
         let pkgs = std::mem::take(&mut self.mod_pkgs);
-        let mut imports = pkgs.clone();
+        let mut imports = pkgs;
         imports.extend(self.unit_pkgs.iter().cloned());
         imports.push(self.unit_name.clone());
-        let mut outer = self.package_items(&pkgs);
-        outer.extend(self.unit_items.iter().map(|i| scoped_copy(i, &self.unit_name)));
-        if !outer.is_empty() {
-            let mut own = declared_names(&items);
-            let mut all: Vec<Item> = Vec::new();
-            for it in outer {
-                if item_name(&it).is_none_or(|n| own.insert(n.to_string())) {
-                    all.push(it);
-                }
-            }
-            all.extend(items);
-            items = all;
-        }
         Ok(Module {
             name: mname,
             timescale: self.eff_timescale(),
@@ -593,9 +578,9 @@ impl Lower {
                 types.insert(k.clone(), v.clone());
             }
         }
-        // items of the packages it imports come first
+        // (the packages it imports are found through its scope's imports)
         let used = std::mem::replace(&mut self.mod_pkgs, saved_pkgs);
-        let mut items = self.package_items(&used);
+        let mut items = Vec::new();
         let mut var_items = Vec::new();
         for it in own {
             // variables, functions and tasks stay in the package's own scope
@@ -617,13 +602,13 @@ impl Lower {
                 }
             }
         }
-        let mut all = items.clone();
+        let mut all = items;
         all.extend(var_items);
         let m = self.package_module(name.clone(), all, used);
         self.pkg_modules.push(m);
         self.local_tu = saved_tu;
         self.types = saved_types;
-        self.packages.insert(name, Rc::new(Package { items, types, vars, funcs }));
+        self.packages.insert(name, Rc::new(Package { types, vars, funcs }));
         Ok(())
     }
 
@@ -661,31 +646,11 @@ impl Lower {
             if file_scope && !self.unit_pkgs.contains(&pkg) {
                 self.unit_pkgs.push(pkg.clone());
             }
-            if file_scope {
-                let items = self.package_items(std::slice::from_ref(&pkg));
-                let have: HashSet<String> = self.unit_items.iter().filter_map(|i| item_name(i).map(str::to_string)).collect();
-                self.unit_items.extend(items.into_iter().filter(|i| item_name(i).is_none_or(|n| !have.contains(n))));
-            } else if !self.mod_pkgs.contains(&pkg) {
+            if !file_scope && !self.mod_pkgs.contains(&pkg) {
                 self.mod_pkgs.push(pkg);
             }
         }
         Ok(())
-    }
-
-    /// The items of packages, each name once (the first package wins).
-    fn package_items(&self, pkgs: &[String]) -> Vec<Item> {
-        let mut seen = HashSet::new();
-        let mut v = Vec::new();
-        for name in pkgs {
-            if let Some(p) = self.packages.get(name) {
-                for it in &p.items {
-                    if item_name(it).is_none_or(|n| seen.insert(n.to_string())) {
-                        v.push(scoped_copy(it, name));
-                    }
-                }
-            }
-        }
-        v
     }
 
     /// A reference `pkg::...`: the package's items become part of the current module.
@@ -809,33 +774,6 @@ pub(crate) fn push_hier_index(e: Expr) -> usize {
         h.push(e);
         h.len() - 1
     })
-}
-
-/// The name an item declares (for file-scope items a module may redeclare).
-pub(crate) fn item_name(it: &Item) -> Option<&str> {
-    match it {
-        Item::Param(p) => Some(&p.name),
-        Item::Subroutine(f) => Some(&f.name),
-        Item::Decl(d) if d.names.len() == 1 => Some(&d.names[0].name),
-        _ => None,
-    }
-}
-
-pub(crate) fn declared_names(items: &[Item]) -> std::collections::HashSet<String> {
-    let mut v = std::collections::HashSet::new();
-    for it in items {
-        match it {
-            Item::Decl(d) => v.extend(d.names.iter().map(|n| n.name.clone())),
-            Item::Param(p) => {
-                v.insert(p.name.clone());
-            }
-            Item::Subroutine(f) => {
-                v.insert(f.name.clone());
-            }
-            _ => {}
-        }
-    }
-    v
 }
 
 /// Non-ANSI subroutine ports typed by a second declaration (`input x; integer x;`): the
