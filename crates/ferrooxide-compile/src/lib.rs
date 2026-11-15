@@ -11,7 +11,7 @@ pub use konst::Const;
 use ferrooxide_front::ast::*;
 use ferrooxide_front::Error;
 use ferrooxide_rt::{self as rt, Instr, Program, ProcClass, ProcDef, SigKind, SignalInfo, NONE};
-use ferrooxide_front::svtypes::SvType;
+use ferrooxide_front::lower::SvType;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -808,7 +808,7 @@ impl<'a> Compiler<'a> {
             match p.find("[@") {
                 Some(i) if p.ends_with(']') => {
                     let n: usize = p[i + 2..p.len() - 1].parse().ok()?;
-                    let e = ferrooxide_front::parser::hier_index_expr(n)?;
+                    let e = ferrooxide_front::lower::hier_index_expr(n)?;
                     let v = self.const_value(&e, sid)?;
                     out.push(format!("{}[{v}]", &p[..i]));
                 }
@@ -1530,7 +1530,7 @@ impl<'a> Compiler<'a> {
     /// lvalue when `e` is one.
     fn slice_bits(&mut self, e: &Expr, off: i64, w: i64, sid: usize) -> R<Expr> {
         let num = |v: i64| -> Expr {
-            let e = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            let e = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
                 Expr::Unary(UnOp::Neg, Box::new(e))
             } else {
@@ -1642,7 +1642,7 @@ impl<'a> Compiler<'a> {
     /// their types there).
     pub(crate) fn resolve_type(&mut self, t: &SvType, sid: usize) -> R<SvType> {
         let lit = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 { Expr::Unary(UnOp::Neg, Box::new(n)) } else { n }
         };
         let mut dims = Vec::new();

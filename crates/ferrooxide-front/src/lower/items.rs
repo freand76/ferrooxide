@@ -3,7 +3,7 @@
 
 use super::{item_loc, item_what, Lower};
 use crate::ast::*;
-use crate::parser::dec;
+
 use crate::syntax::kw::Kw;
 use crate::syntax::tree as t;
 use crate::Result;
@@ -387,7 +387,7 @@ impl Lower {
             if sv {
                 let t = self.data_type_req(rt)?;
                 let (k, sg, r, packed) = t.decl_parts();
-                range = if !packed.is_empty() { Some((crate::svtypes::minus_one(t.width()), Expr::Num(dec(0)))) } else { r };
+                range = if !packed.is_empty() { Some((super::types::minus_one(t.width()), Expr::Num(dec(0)))) } else { r };
                 signed = sg;
                 ret_kind = match k {
                     NetKind::Int(_) | NetKind::Integer if range.is_none() => NetKind::Integer,
@@ -499,7 +499,7 @@ impl Lower {
         self.in_subroutine = false;
         r?;
         let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], stmts, fork: None } };
-        let decls = crate::parser::merge_port_types(decls);
+        let decls = super::merge_port_types(decls);
         self.ret_type = None;
         Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, decls, body, line })
     }

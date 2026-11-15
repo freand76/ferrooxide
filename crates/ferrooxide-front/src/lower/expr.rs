@@ -5,8 +5,8 @@
 use super::types::Op;
 use super::Lower;
 use crate::ast::*;
-use crate::parser::push_hier_index;
-use crate::svtypes::cast;
+use super::push_hier_index;
+use super::types::cast;
 use crate::syntax::tree as t;
 use crate::Result;
 use std::rc::Rc;
@@ -275,7 +275,7 @@ impl Lower {
                 Ok(match (ge, le) {
                     (Some(g), Some(l)) => Expr::Binary(BinOp::LAnd, Box::new(g), Box::new(l)),
                     (Some(t), None) | (None, Some(t)) => t,
-                    (None, None) => Expr::Num(crate::parser::dec(1)),
+                    (None, None) => Expr::Num(crate::ast::dec(1)),
                 })
             }
             t::ValueRange::Value(v) => {

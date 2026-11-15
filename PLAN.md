@@ -112,7 +112,7 @@ Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
   is forced.
 
 ### SystemVerilog status
-Resolved in the parser (`front/src/svtypes.rs`): `typedef` (module and file scope, unpacked
+Resolved in the lowering (`front/src/lower/types.rs`): `typedef` (module and file scope, unpacked
 dimensions: the type's first, ICARUS_NOTES 9, forward typedefs, array typedefs), `enum`
 (constants as localparams of the base type; methods, also without parentheses), packed
 `struct`/`union` (flat vectors; member/index/select chains become one `[off +: w]` select, also
@@ -136,7 +136,7 @@ case and if warnings for unmatched values, `break;`/`continue;`, prefix `++a;`/`
 elaborated once (`Module::package`; `Scope::imports` for lookups after a module's own names).
 Their variables are shared, their functions and tasks run in their scope (its names and time
 unit); a module's copy of a package parameter is `localparam X = P.X`, and constants in types
-declared there refer to that scope (`svtypes::qualify_type`, `scoped_copy`). Type values in
+declared there refer to that scope (`Lower::qualify_type`, `scoped_copy`). Type values in
 the compiler: `Sym::Type` / `PVal::Type` hold an `SvType` with its dimensions evaluated
 (`resolve_type`), `Expr::Type` carries a type in a parameter list. `parameter type` works for
 declarations, ports, `$bits` and casts, per instance. Left: struct layout and member access
@@ -308,9 +308,6 @@ deterministic, long runs cancellable, a memory budget for history.
   branch for a waiter in another needs a `#0`. A task argument is context-determined by the
   task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
   self-determined expressions in `{...}` and route signed values through `integer`.
-- Front ends: `tests/frontdiff.py` runs `--dump-ast` with the old and the new
-  (`FX_FRONT=new`) front end over the corpus of `tests/parsecheck.py` and lists files whose
-  dumps differ or that only one of them accepts (`--diff NAME` shows one).
 - Parser snapshots: `front/tests/parse.rs`, `tests/parse/*.sv` → checked-in `.ast`
   (`--dump-ast`, `front/src/dump.rs`).
 - Regression suite: `tests/ivtest.py` (`--show 40` groups failures), per-test comparison
@@ -445,6 +442,10 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
     `cargo test` passes in all modes and `tests/regress.sh` shows no test worse, the new front
     end becomes the default; then `parser.rs` and the parsing half of `svtypes.rs` are deleted
     (type math moves to `lower/types.rs`), `FX_FRONT` goes.
+  - *F5 status (2026-11-15)*: done. The new front end is the only one; `parser.rs`,
+    `svtypes.rs` and `tests/frontdiff.py` are gone (`dec` is in `ast.rs`, the `name[@N]`
+    index table in `lower/mod.rs`). Regression suite as at F4 (23 better than the old
+    front end, none worse).
   - *F6.* CLAUDE.md rules: the parser resolves no names other than type names; new syntax gets
     a tree node and a parser snapshot, never a `$__` pseudo call; the lowering reports what it
     cannot do.
@@ -546,8 +547,6 @@ SystemVerilog data types and testbench features:
   sv_darray*]: need heap objects beyond strings (A2).
 - classes, `program` blocks, `export` in packages, forward `typedef class`
   [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd_class*].
-- size casts with a parameter or expression as the size (`W'(e)`, `(W+1)'(e)`): only
-  literal sizes and type names parse (the new front end, `FX_FRONT=new`, has them).
 - initial values of variables declared in functions and tasks are not applied; the front
   ends reject explicit lifetimes there (`static int acc = 1;`) and `module automatic`
   [func_init_var*, task_init_var*].

@@ -4,7 +4,7 @@
 
 use super::{item_loc, item_what, Lower};
 use crate::ast::*;
-use crate::parser::dec;
+
 use crate::syntax::kw::Kw;
 use crate::syntax::tree as t;
 use crate::Result;

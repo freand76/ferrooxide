@@ -6,8 +6,9 @@ Goal: output identical to Icarus Verilog, ≥10x its speed. Plan and status: `PL
 
 ## Layout
 - `crates/ferrooxide-front`: preprocessor, lexer, parser, AST (UDP tables are lexed as raw text).
-  `syntax/`: the new, complete IEEE 1800 parser (keywords, tokens, syntax tree) and `lower/`
-  (syntax tree -> AST; `FX_FRONT=new`) that replace `parser.rs`/`svtypes.rs` (PLAN.md, F5).
+  `syntax/`: the IEEE 1800 parser (keywords, tokens, syntax tree; it knows nothing but type
+  names); `lower/`: syntax tree -> AST (type tables, struct layouts, patterns, enums,
+  packages, expansions), reporting what it cannot do at its line.
 - `crates/ferrooxide-compile`: elaboration (params, hierarchy, generate, port aliasing, nets with
   several drivers, force), codegen to `Instr` bytecode (`lib.rs`, `expr.rs`, `stmt.rs`, `lint.rs`).
 - `crates/ferrooxide-rt`: `vm.rs` (scheduler + interpreter), `fast.rs` (lowering to `Op`),
@@ -23,10 +24,8 @@ cargo test --release                 # difftest + own suite + lint test + parser
 FX_BLESS=1 cargo test --release -p ferrooxide-front --test parse   # rewrite parser snapshots
 tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: tests write files)
 tests/regress.sh [--baseline]        # both regression lists, per-test changes vs the baseline
-tests/parsecheck.py [--baseline]     # new parser (--parse-only) over sv-tests, the regression
+tests/parsecheck.py [--baseline]     # parser (--parse-only) over sv-tests, the regression
                                      # suite, tests/ and real designs; changes vs the baseline
-tests/frontdiff.py [--diff NAME]     # --dump-ast of old vs new front end (FX_FRONT=new) over
-                                     # the same corpus; differing / one-sided files
 perf stat -e cycles target/release/ferrooxide bench/cpuish.v   # perf works on this machine
 ```
 Debug: `--dump-ast` (parsed tree, Verilog-like), `--dump-code`, `--stats`, `FX_TRACE=<time>`

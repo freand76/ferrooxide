@@ -228,9 +228,9 @@ impl Parser {
         let loc = self.loc();
         if self.eat_p("[") {
             let r = if self.eat_p("*") {
-                CycleRange::Range(Expr::new(ExprKind::Num(crate::parser::dec(0)), loc), Expr::new(ExprKind::Dollar, loc))
+                CycleRange::Range(Expr::new(ExprKind::Num(crate::ast::dec(0)), loc), Expr::new(ExprKind::Dollar, loc))
             } else if self.eat_p("+") {
-                CycleRange::Range(Expr::new(ExprKind::Num(crate::parser::dec(1)), loc), Expr::new(ExprKind::Dollar, loc))
+                CycleRange::Range(Expr::new(ExprKind::Num(crate::ast::dec(1)), loc), Expr::new(ExprKind::Dollar, loc))
             } else {
                 let a = self.expr()?;
                 if self.eat_p(":") {

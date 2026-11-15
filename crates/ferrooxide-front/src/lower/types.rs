@@ -2,13 +2,249 @@
 //! methods, array queries, assignment patterns and casts (what `svtypes.rs` does in the old
 //! parser).
 
+//!
+//! Types are resolved here, so elaboration only sees vectors: a type without a struct
+//! becomes the declaration's kind, sign and packed ranges; a type containing a struct is
+//! declared as one flat vector `[W-1:0]`, and every access chain (`v[i].f.g[3:0]`) becomes
+//! one select `v[off +: w]` (offsets are expressions, so parameterized widths and run-time
+//! indexes work); enum constants become `localparam`s of the base type; `T'(e)`, `N'(e)` are
+//! `$__cast(width, sign, e)` (sign 0, 1 or 2: keep); `'{...}` is resolved against the target
+//! type into a concatenation of casts.
+
 use super::Lower;
 use crate::ast::*;
-use crate::parser::dec;
-use crate::svtypes::{add, builtin, cast, descending, dim_pos, dim_size, lit, minus_one, mul, num, qualify_expr, sub, Struct, SvType};
 use crate::syntax::tree as t;
 use crate::Result;
 use std::rc::Rc;
+
+#[derive(Clone, Debug)]
+pub struct SvType {
+    pub kind: NetKind,
+    pub signed: bool,
+    /// packed dimensions, outermost first; integer types have their implicit [n-1:0]
+    pub dims: Vec<Range>,
+    /// the element is a packed struct / union
+    pub fields: Option<Rc<Struct>>,
+    /// `int`, `integer`, `byte`, ...: declared without a range
+    pub int_kind: bool,
+    /// an enum: its constants in order
+    pub enum_names: Option<Rc<Vec<String>>>,
+    /// unpacked dimensions of a typedef (`typedef logic [7:0] T [4];`): a declaration of the
+    /// type is an array with these dimensions after its own
+    pub unpacked: Vec<Range>,
+    /// a type parameter of this name (resolved per instance; `dims` are outer to it)
+    pub param: Option<String>,
+}
+
+/// A package: its items (with those of the packages it imports) and its typedefs.
+#[derive(Debug, Default)]
+pub struct Package {
+    /// items copied into the modules that use the package (no variables)
+    pub items: Vec<Item>,
+    /// its variables (in the package's own module) and their types
+    pub vars: std::collections::HashMap<String, (Rc<SvType>, Vec<Range>)>,
+    /// its functions and tasks (in the package's own module)
+    pub funcs: std::collections::HashSet<String>,
+    pub types: std::collections::HashMap<String, Rc<SvType>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Struct {
+    pub union: bool,
+    pub fields: Vec<(String, SvType)>,
+}
+
+/// The value of a plain literal (no x/z), possibly negated.
+pub(crate) fn lit(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
+            i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok()
+        }
+        Expr::Unary(UnOp::Neg, a) => lit(a).map(|v| -v),
+        _ => None,
+    }
+}
+
+pub(crate) fn num(v: i64) -> Expr {
+    if v < 0 {
+        Expr::Unary(UnOp::Neg, Box::new(Expr::Num(dec(-v as u64))))
+    } else {
+        Expr::Num(dec(v as u64))
+    }
+}
+
+fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
+    if let (Some(x), Some(y)) = (lit(&a), lit(&b)) {
+        match op {
+            BinOp::Add => return num(x + y),
+            BinOp::Sub => return num(x - y),
+            BinOp::Mul => return num(x * y),
+            _ => {}
+        }
+    }
+    match (op, lit(&a), lit(&b)) {
+        (BinOp::Add, Some(0), _) => return b,
+        (BinOp::Add | BinOp::Sub, _, Some(0)) => return a,
+        (BinOp::Mul, Some(1), _) => return b,
+        (BinOp::Mul, _, Some(1)) => return a,
+        _ => {}
+    }
+    Expr::Binary(op, Box::new(a), Box::new(b))
+}
+
+pub(crate) fn add(a: Expr, b: Expr) -> Expr {
+    bin(BinOp::Add, a, b)
+}
+pub(crate) fn sub(a: Expr, b: Expr) -> Expr {
+    bin(BinOp::Sub, a, b)
+}
+pub(crate) fn mul(a: Expr, b: Expr) -> Expr {
+    bin(BinOp::Mul, a, b)
+}
+
+/// Number of elements of a dimension [a:b].
+pub(crate) fn dim_size(r: &Range) -> Expr {
+    if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
+        return num((a - b).abs() + 1);
+    }
+    let ge = Expr::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
+    let d = Expr::Cond(Box::new(ge), Box::new(sub(r.0.clone(), r.1.clone())), Box::new(sub(r.1.clone(), r.0.clone())));
+    add(d, num(1))
+}
+
+/// Position of index `k` in dimension [msb:lsb], counted from the lsb side.
+pub(crate) fn dim_pos(r: &Range, k: Expr) -> Expr {
+    if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
+        return if a >= b { sub(k, num(b)) } else { sub(num(b), k) };
+    }
+    let ge = Expr::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
+    Expr::Cond(Box::new(ge), Box::new(sub(k.clone(), r.1.clone())), Box::new(sub(r.1.clone(), k)))
+}
+
+/// Whether a dimension counts down ([7:0]); unknown (parameterized) ones are assumed to.
+pub(crate) fn descending(r: &Range) -> bool {
+    match (lit(&r.0), lit(&r.1)) {
+        (Some(a), Some(b)) => a >= b,
+        _ => true,
+    }
+}
+
+impl SvType {
+    pub fn vector(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
+        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![], param: None }
+    }
+
+    /// Width of one element after the packed dimensions.
+    pub fn leaf_width(&self) -> Expr {
+        if let Some(p) = &self.param {
+            return Expr::SysCall("$bits".into(), vec![Expr::Ident(p.clone())]);
+        }
+        match &self.fields {
+            None => num(1),
+            Some(s) if s.union => s.fields.first().map_or(num(0), |f| f.1.width()),
+            Some(s) => s.fields.iter().fold(num(0), |acc, f| add(acc, f.1.width())),
+        }
+    }
+
+    /// Width of the dimensions from `from` on, times the element width.
+    pub fn width_from(&self, from: usize) -> Expr {
+        self.dims[from..].iter().fold(self.leaf_width(), |acc, d| mul(dim_size(d), acc))
+    }
+
+    pub fn width(&self) -> Expr {
+        self.width_from(0)
+    }
+
+    /// `$bits` of the type: the packed width times the unpacked dimensions.
+    pub fn bits(&self) -> Expr {
+        self.unpacked.iter().fold(self.width(), |acc, d| mul(dim_size(d), acc))
+    }
+
+    pub fn has_struct(&self) -> bool {
+        self.fields.is_some()
+    }
+
+    /// Declaration parts: kind, sign, range, further packed ranges.
+    pub fn decl_parts(&self) -> (NetKind, bool, Option<Range>, Vec<Range>) {
+        if self.has_struct() {
+            let kind = if self.kind == NetKind::Bit { NetKind::Bit } else { NetKind::Reg };
+            return (kind, self.signed, Some((sub(self.width(), num(1)), num(0))), vec![]);
+        }
+        if self.int_kind {
+            return (self.kind, self.signed, None, vec![]);
+        }
+        let mut it = self.dims.iter().cloned();
+        (self.kind, self.signed, it.next(), it.collect())
+    }
+}
+
+/// Builtin type keywords: (kind, signed, width of an integer type).
+pub(crate) fn builtin(s: &str) -> Option<(NetKind, bool, Option<u32>)> {
+    Some(match s {
+        "logic" | "reg" => (NetKind::Reg, false, None),
+        "bit" => (NetKind::Bit, false, None),
+        "int" => (NetKind::Int(32), true, Some(32)),
+        "integer" => (NetKind::Integer, true, Some(32)),
+        "byte" => (NetKind::Int(8), true, Some(8)),
+        "shortint" => (NetKind::Int(16), true, Some(16)),
+        "longint" => (NetKind::Int(64), true, Some(64)),
+        "time" => (NetKind::Time, false, Some(64)),
+        "real" | "realtime" => (NetKind::Real, true, Some(64)),
+        _ => return None,
+    })
+}
+
+
+/// `w - 1`, folded for literals.
+pub fn minus_one(w: Expr) -> Expr {
+    sub(w, num(1))
+}
+
+/// `$__cast(width, sign, e)`: sign 0 unsigned, 1 signed, 2 the expression's.
+pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
+    Expr::SysCall("$__cast".into(), vec![width, Expr::Num(dec(sign)), e])
+}
+
+/// A package (or file-scope) item copied into a module: a parameter becomes a local copy of
+/// the scope's own (`localparam X = P.X`).
+pub(crate) fn scoped_copy(it: &Item, scope: &str) -> Item {
+    match it {
+        Item::Param(p) if !p.real => {
+            let mut p = p.clone();
+            p.value = Expr::Hier(vec![scope.to_string(), p.name.clone()]);
+            p.local = true;
+            Item::Param(p)
+        }
+        _ => it.clone(),
+    }
+}
+
+/// `n` -> `scope.n` for the names in `names`.
+pub(crate) fn qualify_expr(e: &mut Expr, scope: &str, names: &std::collections::HashSet<String>) {
+    match e {
+        Expr::Ident(n) if names.contains(n.as_str()) => *e = Expr::Hier(vec![scope.to_string(), n.clone()]),
+        Expr::Index(a, b) => {
+            qualify_expr(a, scope, names);
+            qualify_expr(b, scope, names);
+        }
+        Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
+            qualify_expr(a, scope, names);
+            qualify_expr(b, scope, names);
+            qualify_expr(c, scope, names);
+        }
+        Expr::Unary(_, a) => qualify_expr(a, scope, names),
+        Expr::Binary(_, a, b) => {
+            qualify_expr(a, scope, names);
+            qualify_expr(b, scope, names);
+        }
+        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter_mut().for_each(|x| qualify_expr(x, scope, names)),
+        Expr::Repl(a, v) => {
+            qualify_expr(a, scope, names);
+            v.iter_mut().for_each(|x| qualify_expr(x, scope, names));
+        }
+        _ => {}
+    }
+}
 
 pub(crate) struct PType {
     pub signed: bool,

@@ -5,7 +5,7 @@
 //! move); SystemVerilog types appear as resolved by the parser.
 
 use crate::ast::*;
-use crate::svtypes::SvType;
+use crate::lower::SvType;
 use std::fmt::Write;
 
 /// The modules in source order.

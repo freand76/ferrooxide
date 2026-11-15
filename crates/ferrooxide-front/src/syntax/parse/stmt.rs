@@ -336,10 +336,10 @@ impl Parser {
         if self.eat_p("[") {
             let r = if self.eat_p("*") {
                 let d = Expr::new(ExprKind::Dollar, loc);
-                Expr::new(ExprKind::Range(Box::new(Expr::new(ExprKind::Null, loc)), RangeKind::Colon, Box::new(Expr::new(ExprKind::Num(crate::parser::dec(0)), loc)), Box::new(d)), loc)
+                Expr::new(ExprKind::Range(Box::new(Expr::new(ExprKind::Null, loc)), RangeKind::Colon, Box::new(Expr::new(ExprKind::Num(crate::ast::dec(0)), loc)), Box::new(d)), loc)
             } else if self.eat_p("+") {
                 let d = Expr::new(ExprKind::Dollar, loc);
-                Expr::new(ExprKind::Range(Box::new(Expr::new(ExprKind::Null, loc)), RangeKind::Colon, Box::new(Expr::new(ExprKind::Num(crate::parser::dec(1)), loc)), Box::new(d)), loc)
+                Expr::new(ExprKind::Range(Box::new(Expr::new(ExprKind::Null, loc)), RangeKind::Colon, Box::new(Expr::new(ExprKind::Num(crate::ast::dec(1)), loc)), Box::new(d)), loc)
             } else {
                 let a = self.expr()?;
                 self.expect_p(":")?;

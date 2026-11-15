@@ -176,7 +176,7 @@ pub enum Item {
     Decl(Decl),
     Param(ParamDecl),
     /// `parameter type T = logic [7:0];` (`default` None: no default type)
-    TypeParam { local: bool, name: String, default: Option<std::rc::Rc<crate::svtypes::SvType>>, line: Line },
+    TypeParam { local: bool, name: String, default: Option<std::rc::Rc<crate::lower::SvType>>, line: Line },
     /// a `specify` path delay: `(a, b *> q) = (rise, fall);` (conditions and edges ignored)
     SpecPath { srcs: Vec<String>, dsts: Vec<String>, delay: Expr, line: Line },
     /// `defparam a.b.P = value;` (the target path includes the parameter name)
@@ -329,5 +329,10 @@ pub enum Expr {
     Call(String, Vec<Expr>),
     SysCall(String, Vec<Expr>),
     /// a data type where a value can be a type (a type parameter's value)
-    Type(std::rc::Rc<crate::svtypes::SvType>),
+    Type(std::rc::Rc<crate::lower::SvType>),
+}
+
+/// An unsized decimal number.
+pub fn dec(v: u64) -> Number {
+    Number { size: None, signed: true, base: 10, based: false, digits: v.to_string(), fill: false }
 }

@@ -12,7 +12,8 @@ mod stmt;
 mod types;
 
 use crate::ast::*;
-use crate::svtypes::{scoped_copy, Package, SvType};
+pub use types::{Package, SvType};
+use types::scoped_copy;
 use crate::syntax::tree as t;
 use crate::{Error, Options, Result};
 use std::collections::{HashMap, HashSet};
@@ -135,7 +136,7 @@ impl Lower {
 
     /// A name read from the source: SystemVerilog keywords used as names are noted (lint).
     pub(crate) fn name(&mut self, n: &str, loc: t::Loc) -> String {
-        if crate::parser::SV_RESERVED.contains(&n) {
+        if SV_RESERVED.contains(&n) {
             self.kw_names.push((n.to_string(), loc.line));
         }
         n.to_string()
@@ -354,10 +355,10 @@ impl Lower {
         let mut outer = self.package_items(&pkgs);
         outer.extend(self.unit_items.iter().map(|i| scoped_copy(i, &self.unit_name)));
         if !outer.is_empty() {
-            let mut own = crate::parser::declared_names(&items);
+            let mut own = declared_names(&items);
             let mut all: Vec<Item> = Vec::new();
             for it in outer {
-                if crate::parser::item_name(&it).is_none_or(|n| own.insert(n.to_string())) {
+                if item_name(&it).is_none_or(|n| own.insert(n.to_string())) {
                     all.push(it);
                 }
             }
@@ -662,8 +663,8 @@ impl Lower {
             }
             if file_scope {
                 let items = self.package_items(std::slice::from_ref(&pkg));
-                let have: HashSet<String> = self.unit_items.iter().filter_map(|i| crate::parser::item_name(i).map(str::to_string)).collect();
-                self.unit_items.extend(items.into_iter().filter(|i| crate::parser::item_name(i).is_none_or(|n| !have.contains(n))));
+                let have: HashSet<String> = self.unit_items.iter().filter_map(|i| item_name(i).map(str::to_string)).collect();
+                self.unit_items.extend(items.into_iter().filter(|i| item_name(i).is_none_or(|n| !have.contains(n))));
             } else if !self.mod_pkgs.contains(&pkg) {
                 self.mod_pkgs.push(pkg);
             }
@@ -678,7 +679,7 @@ impl Lower {
         for name in pkgs {
             if let Some(p) = self.packages.get(name) {
                 for it in &p.items {
-                    if crate::parser::item_name(it).is_none_or(|n| seen.insert(n.to_string())) {
+                    if item_name(it).is_none_or(|n| seen.insert(n.to_string())) {
                         v.push(scoped_copy(it, name));
                     }
                 }
@@ -770,4 +771,111 @@ pub(crate) fn item_what(it: &t::Item) -> &'static str {
         I::Directive(..) => "a compiler directive",
         I::Empty(_) => "';'",
     }
+}
+
+/// Keywords IEEE 1800 (SystemVerilog) reserves beyond those of Verilog-2005: legal names in
+/// Verilog-2005 code, but such code does not compile as SystemVerilog (lint check).
+pub const SV_RESERVED: &[&str] = &[
+    "accept_on", "alias", "always_comb", "always_ff", "always_latch", "assert", "assume", "before", "bind", "bins",
+    "binsof", "bit", "break", "byte", "chandle", "checker", "class", "clocking", "const", "constraint", "context",
+    "continue", "cover", "covergroup", "coverpoint", "cross", "dist", "do", "endchecker", "endclass", "endclocking",
+    "endgroup", "endinterface", "endpackage", "endprogram", "endproperty", "endsequence", "enum", "eventually",
+    "expect", "export", "extends", "extern", "final", "first_match", "foreach", "forkjoin", "global", "iff",
+    "ignore_bins", "illegal_bins", "implements", "implies", "import", "inside", "int", "interconnect", "interface",
+    "intersect", "join_any", "join_none", "let", "local", "logic", "longint", "matches", "modport", "nettype", "new",
+    "nexttime", "null", "package", "packed", "priority", "program", "property", "protected", "pure", "rand", "randc",
+    "randcase", "randsequence", "ref", "reject_on", "restrict", "return", "s_always", "s_eventually", "s_nexttime",
+    "s_until", "s_until_with", "sequence", "shortint", "shortreal", "soft", "solve", "static", "string", "strong",
+    "struct", "super", "sync_accept_on", "sync_reject_on", "tagged", "this", "throughout", "timeprecision",
+    "timeunit", "type", "typedef", "union", "unique", "unique0", "until", "until_with", "untyped", "var", "virtual",
+    "void", "wait_order", "weak", "wildcard", "with", "within",
+];
+
+thread_local! {
+    /// Index expressions of hierarchical-name segments that are not literals (`blk[i].x`): the
+    /// segment is stored as `blk[@N]` and resolved by the compiler in the referencing scope.
+    static HIER_INDEX: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The index expression of a `name[@N]` hierarchical-name segment.
+pub fn hier_index_expr(n: usize) -> Option<Expr> {
+    HIER_INDEX.with(|h| h.borrow().get(n).cloned())
+}
+
+/// Store the index expression of a computed `name[@N]` segment; returns N.
+pub(crate) fn push_hier_index(e: Expr) -> usize {
+    HIER_INDEX.with(|h| {
+        let mut h = h.borrow_mut();
+        h.push(e);
+        h.len() - 1
+    })
+}
+
+/// The name an item declares (for file-scope items a module may redeclare).
+pub(crate) fn item_name(it: &Item) -> Option<&str> {
+    match it {
+        Item::Param(p) => Some(&p.name),
+        Item::Subroutine(f) => Some(&f.name),
+        Item::Decl(d) if d.names.len() == 1 => Some(&d.names[0].name),
+        _ => None,
+    }
+}
+
+pub(crate) fn declared_names(items: &[Item]) -> std::collections::HashSet<String> {
+    let mut v = std::collections::HashSet::new();
+    for it in items {
+        match it {
+            Item::Decl(d) => v.extend(d.names.iter().map(|n| n.name.clone())),
+            Item::Param(p) => {
+                v.insert(p.name.clone());
+            }
+            Item::Subroutine(f) => {
+                v.insert(f.name.clone());
+            }
+            _ => {}
+        }
+    }
+    v
+}
+
+/// Non-ANSI subroutine ports typed by a second declaration (`input x; integer x;`): the
+/// port takes the type, and the type-only declaration is dropped.
+pub(crate) fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
+    let typed: Vec<&Decl> = decls.iter().filter(|d| d.dir.is_none()).collect();
+    let find = |n: &str| typed.iter().find(|d| d.names.iter().any(|x| x.name == n)).copied();
+    let port_names: Vec<String> =
+        decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|x| x.name.clone())).collect();
+    if !port_names.iter().any(|n| find(n).is_some()) {
+        return decls;
+    }
+    let mut out = Vec::new();
+    for d in &decls {
+        if d.dir.is_some() {
+            for x in &d.names {
+                let mut nd = d.clone();
+                nd.names = vec![x.clone()];
+                if let Some(t) = find(&x.name) {
+                    nd.kind = t.kind;
+                    nd.net = t.net;
+                    nd.explicit_kind = true;
+                    nd.signed |= t.signed;
+                    if t.range.is_some() {
+                        nd.range = t.range.clone();
+                        nd.packed = t.packed.clone();
+                    }
+                    if t.type_param.is_some() {
+                        nd.type_param = t.type_param.clone();
+                    }
+                }
+                out.push(nd);
+            }
+        } else {
+            let mut nd = d.clone();
+            nd.names.retain(|x| !port_names.contains(&x.name));
+            if !nd.names.is_empty() {
+                out.push(nd);
+            }
+        }
+    }
+    out
 }

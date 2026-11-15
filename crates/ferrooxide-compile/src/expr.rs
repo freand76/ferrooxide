@@ -113,7 +113,7 @@ impl<'a> Compiler<'a> {
             return None;
         }
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
                 Expr::Unary(UnOp::Neg, b(n))
             } else {
@@ -147,7 +147,7 @@ impl<'a> Compiler<'a> {
         let dims = self.packed_dims.get(&s)?;
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
                 Expr::Unary(UnOp::Neg, b(n))
             } else {
@@ -240,7 +240,7 @@ impl<'a> Compiler<'a> {
         let pos = |i: i64| if l0 >= r0 { i - r0 } else { r0 - i };
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
                 Expr::Unary(UnOp::Neg, b(n))
             } else {
@@ -296,7 +296,7 @@ impl<'a> Compiler<'a> {
         let pos = |i: i64| if l >= r { i - r } else { r - i };
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::parser::dec(v.unsigned_abs()));
+            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
                 Expr::Unary(UnOp::Neg, b(n))
             } else {
