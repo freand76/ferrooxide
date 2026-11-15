@@ -1,0 +1,25 @@
+interface bus_if (clk);
+  // imports $unit
+  // modports master, slave
+  parameter W = 4;
+  input wire clk;
+  reg [(W - 1):0] data;
+  reg valid;
+endinterface
+module prod (b);
+  // imports $unit
+  // interface port bus_if.master b
+  always_ff
+    @(posedge b.clk)
+      b.valid <= (~b.valid);
+endmodule
+module top ();
+  // imports $unit
+  reg clk = 0;
+  bus_if #(.W(8)) bi(clk);
+  bus_if arr[0:(2 - 1)](clk);
+  prod p0(.b(bi));
+  prod p1(.*);
+  final
+    $display("done");
+endmodule

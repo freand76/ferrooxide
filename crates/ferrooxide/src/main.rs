@@ -19,6 +19,7 @@ options:
   -q, --quiet       no startup summary (parse/elaborate/compile times) on stderr
   --stats           print timing and scheduler statistics to stderr
   --dump-code       print the compiled bytecode to stderr
+  --dump-ast        print the parsed syntax tree to stdout and stop
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
@@ -76,6 +77,7 @@ fn main() -> ExitCode {
     let mut stats = false;
     let mut quiet = false;
     let mut dump_code = false;
+    let mut dump_ast = false;
     let mut jit = true;
     let mut fuse = true;
     let mut lint = false;
@@ -133,6 +135,7 @@ fn main() -> ExitCode {
                 None => return ExitCode::from(2),
             },
             "--dump-code" => dump_code = true,
+            "--dump-ast" => dump_ast = true,
             "--no-jit" => jit = false,
             "--no-fuse" => fuse = false,
             "--lint" => lint = true,
@@ -188,6 +191,10 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if dump_ast {
+        print!("{}", ferrooxide_front::dump::modules(&modules));
+        return ExitCode::SUCCESS;
+    }
     let t1 = Instant::now();
     let (mut prog, warnings, findings) = match ferrooxide_compile::compile_dialect(&modules, &tops, lint, dialect) {
         Ok(p) => p,

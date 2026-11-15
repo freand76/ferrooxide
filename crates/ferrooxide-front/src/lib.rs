@@ -1,6 +1,7 @@
 //! Verilog / SystemVerilog front end: preprocessor, lexer, AST and parser.
 
 pub mod ast;
+pub mod dump;
 pub mod lexer;
 pub mod parser;
 pub mod preproc;

@@ -1,0 +1,66 @@
+module top (clk);
+  // imports p, $unit
+  localparam [1:0] A = p.A;
+  localparam [1:0] B = p.B;
+  localparam [1:0] C = p.C;
+  localparam integer signed W = p.W;
+  parameter type T = reg [3:0];
+  input wire clk;
+  reg [5:0] s;
+  reg [5:0] u;
+  reg [5:0] arr[0:(2 - 1)];
+  reg type T tp;
+  int(32) signed i;
+  bit [(W - 1):0] bv;
+  reg [1:0] e;
+  string str;
+  always_comb begin
+    s = {$__cast(4, 0, 4'h3), $__cast(2, 0, B)};
+    u[2 +: 4] = s[2 +: 4];
+    arr[1][0 +: 2] = e;
+    i = ($__cast(32, 1, s) + p.dbl(3));
+    bv = $__cast(8, 2, i);
+    e = $__cast(2, 0, ((e === A) ? B : ((e === B) ? C : ((e === C) ? A : 'x))));
+    str = "abc";
+  end
+  always_ff
+    @(posedge clk) begin
+      case (1'b1)
+        (e ==? A), ((e >= B) && (e <= C)):
+          i <= (i + 1);
+        default:
+          i <= 0;
+      endcase
+      i = (i + 1);
+      i = (i + 2);
+    end
+  initial begin
+    begin
+      int(32) signed k;
+      for (k = 0; ((0 >= (2 - 1)) ? (k >= (2 - 1)) : (k <= (2 - 1))); k = ((0 >= (2 - 1)) ? (k - 1) : (k + 1)))
+        arr[k] = '0;
+    end
+    begin
+      int(32) signed j;
+      for (j = 0; (j < (((0 >= (2 - 1)) ? (0 - (2 - 1)) : (2 - 1)) + 1)); j = (j + 1)) begin
+        if (((j ==? 0) || (j ==? 1)))
+          continue;
+        break;
+      end
+    end
+    do
+      i = (i - 1);
+    while ((i > 0));
+    $display("%0d %0d", 6, (W - 1));
+  end
+endmodule
+package p ();
+  localparam [1:0] A = 0;
+  localparam [1:0] B = 2;
+  localparam [1:0] C = (B + 1);
+  parameter integer signed W = 8;
+  function automatic integer signed dbl;
+    input int(32) signed x;
+    return (2 * x);
+  endfunction
+endpackage

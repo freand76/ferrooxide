@@ -1,0 +1,61 @@
+module s ();
+  // imports $unit
+  reg [7:0] a, b;
+  reg c;
+  event ev;
+  integer signed k;
+  real r;
+  always
+    @(posedge c or negedge a[0])
+      a <= #(2) b;
+  always
+    @*
+      b = ((a << 2) >>> 1);
+  initial begin : blk
+    reg [3:0] loc;
+    a = 8'b1010xz10;
+    b = {a[3:0], {2{a[1:0]}}};
+    a[3 +: 2] = b[7 -: 2];
+    c = (a ? b : 1'b0);
+    if ((a == b))
+      c = 1;
+    else
+      if ((a === b))
+        c = 0;
+      else
+        ;
+    casez (a)
+      8'b1zzzzzzz:
+        c = 1;
+      8'h0z, 8'h1z: begin
+        c = 0;
+      end
+      default:
+        c = 1'bx;
+    endcase
+    for (k = 0; (k < 4); k = (k + 1))
+      loc = (loc + k);
+    while ((k > 0))
+      k = (k - 1);
+    repeat (3)
+      @(ev)
+        ;
+    forever
+      #(10)
+        c = (~c);
+    wait (c)
+      -> ev;
+    fork
+      #(1)
+        a = 1;
+      #(2)
+        b = 2;
+    join
+    force c = 1;
+    release c;
+    a = repeat (2) @(posedge c) b;
+    r = (2.5 ** (-k));
+    $display("x=%d %s", a, "str", , $time());
+    k = ($clog2(a) + $signed(b));
+  end
+endmodule

@@ -17,19 +17,23 @@ Goal: output identical to Icarus Verilog, ≥10x its speed. Plan and status: `PL
 cargo build --release
 tests/difftest.sh [files]            # vs iverilog/vvp; FX_FLAGS=--no-jit / --no-fuse for other modes
 tests/suite.sh [-v] [files|dirs]     # own suite (tests/suite/<area>), all three modes, no iverilog
-cargo test --release                 # difftest + own suite + lint test
+cargo test --release                 # difftest + own suite + lint test + parser snapshots
+FX_BLESS=1 cargo test --release -p ferrooxide-front --test parse   # rewrite parser snapshots
 tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: tests write files)
 perf stat -e cycles target/release/ferrooxide bench/cpuish.v   # perf works on this machine
 ```
-Debug: `--dump-code`, `--stats`, `FX_TRACE=<time>` (activations), `FX_GENSTATS=1` (generic-path
-instructions, notifies), `FX_MAX_MEM_MB` (design memory limit, default 2048), `FX_MEM_LIMIT_MB`
-(address-space cap of the process, default 4096, 0: none).
+Debug: `--dump-ast` (parsed tree, Verilog-like), `--dump-code`, `--stats`, `FX_TRACE=<time>`
+(activations), `FX_GENSTATS=1` (generic-path instructions, notifies), `FX_MAX_MEM_MB` (design
+memory limit, default 2048), `FX_MEM_LIMIT_MB` (address-space cap of the process, default
+4096, 0: none).
 
 ## Rules
 - Every new feature gets a small test that passes in all three modes (default, `--no-jit`,
   `--no-fuse`): in `tests/suite/<area>/` (self-checking, or `// expected` with a checked-in
   `.expected`; behaviour from the standard) and/or in `tests/verilog/` when matching Icarus's
   exact output matters (diffed against it; `// args: +x=1` passes plusargs to both).
+  New syntax also gets a parser snapshot in `crates/ferrooxide-front/tests/parse/` (a file,
+  or a directory for a multi-file unit, with its `.ast`); review the `.ast` diff when blessing.
 - Check benchmark cycles after scheduler/JIT changes; don't regress them.
 - Memory: this machine has 14 GB and an out-of-memory crash kills the session (it has happened).
   EVERY run of ferrooxide, iverilog/vvp or a test outside the scripts goes under a limit:

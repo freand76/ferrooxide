@@ -423,7 +423,7 @@ Next, roughly in order (see "Architecture changes ahead" below for why this orde
    padding" there, "given 32, pruning" here). Known difference left (order IEEE leaves open): on a
    change, a ranked combinational process (`always_comb`, `always @*`) runs before the other
    waiters of the signal; the reference wakes it among them (newest waiter first).
-2. **Types in elaboration** (A1 below): first part done (package scopes, `parameter type`);
+2. **Restructuring** (R0-R6 below), then **types in elaboration** (A1, = R4): first part done (package scopes, `parameter type`);
    next a type per signal in the compiler, then struct layout and members out of the parser.
 3. **Heap objects** (A2): `string` done (first version); queues, dynamic and associative
    arrays next.
@@ -464,6 +464,53 @@ declarations.
 
 Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
 multi-dimensional arrays as ports or whole-array assignments are not supported.
+
+## Restructuring for maintainability (review 2026-11-15)
+
+Adding SystemVerilog has become slow because of how the front end is built:
+- the parser does semantics: `svtypes.rs` resolves types, struct layouts, patterns, enum
+  methods and array queries while parsing, so `Parser` keeps a symbol table (24 fields:
+  `vars`, `types`, `packages`, `unit_*`, `decl_type`, `last_type`, `ret_type`, ...); whole-scope
+  knowledge needs workarounds (`early_typedefs`, `$root.` stripped from the tokens,
+  `scoped_copy`/`package_items` copying package items into every module);
+- `parse_files` moves ~15 parser fields from file to file by hand;
+- the AST has Verilog-2005 shapes only: SV is encoded as pseudo calls (`$__cast`,
+  `$__pattern`, `$__str`, `$__named`, `$__tostring`, ...), `Expr::Hier` means a hierarchical
+  name, a struct member, a method call or `.triggered`; types exist three times (`PType`,
+  `SvType`, the flags on `Decl`/`ParamDecl`);
+- keywords are strings (`Tok::Ident("module")`, `KEYWORDS`/`SV_ONLY`/`SV_RESERVED`);
+- no parser tests: a parser bug shows up as a wrong simulation result;
+- `compile/lib.rs` is 3500 lines, `Compiler` ~70 fields across elaboration, nets, codegen,
+  strings and lint; an expression's type comes from `ty`, `is_real`, `is_string`, `lvalue_ty`;
+  `Expr` has no position (errors use `self.line`).
+
+Steps (each ends with all tests in all three modes and unchanged regression counts):
+- **R0. Safety net.** `--dump-ast` (readable AST printer) and parser snapshot tests in
+  `ferrooxide-front` (`tests/parse/*.sv` -> checked-in `.ast`). *Done 2026-11-15*
+  (`front/src/dump.rs`, `front/tests/parse.rs`; per-test regression baseline in
+  `target/regress-baseline/{main,sv}.res`).
+- **R1. Tokens.** `Tok::Kw(Kw)`, the keyword set chosen by dialect in the lexer (replaces
+  `SV_ONLY`; lint uses the same table); helpers instead of string `matches!`; `$root` in
+  `primary()`.
+- **R2. An AST that says what the source says.** A syntactic `DataType` (built-in, named
+  `pkg::T`, struct/union/enum, type parameter, packed/unpacked dims) replaces `PType` and the
+  type flags; `Expr::Member`, `Method`, `Cast`, `Pattern`, `Scoped`, `Item::Typedef`,
+  `Import`, a top-level `Description` (module, interface, package, primitive). The parser keeps
+  only a scoped set of type names (to parse `T x;`). Migration: today's lowering moves out of
+  the parser into `front/src/lower.rs`, run per compilation unit and producing the current AST,
+  so the compiler is unchanged; forward references stop needing workarounds.
+- **R3. Compilation units.** A `Unit` struct instead of the field shuffle in `parse_files`;
+  package items are no longer copied into modules (package scopes resolve them).
+- **R4. Types in the compiler** (rest of A1): a `Type` per signal, one
+  `type_of(expr) -> ExprType` replacing `ty`/`is_real`/`is_string`/`lvalue_ty`; members and
+  patterns resolved in elaboration (type-parameter structs, unpacked structs); packed types
+  still flattened at the end (runtime/JIT unchanged); `lower.rs` shrinks and goes away.
+- **R5. Split the compiler**: `elab/{params,hier,decls,generate,nets,udp,specify}.rs` plus
+  codegen; `Compiler` fields grouped into sub-structs. Move first, regroup after.
+- **R6. Spans** (file, line, column) on `Expr`/`Stmt` instead of `self.line`.
+
+Rules once R2 is done: the parser resolves no names other than type names; new SV syntax gets
+an AST node, never a `$__` pseudo call.
 
 ## Architecture changes ahead (review 2026-11-14)
 
@@ -554,6 +601,8 @@ SystemVerilog data types and testbench features:
   sv_darray*]: need heap objects beyond strings (A2).
 - classes, `program` blocks, `export` in packages, forward `typedef class`
   [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd_class*].
+- size casts with a parameter or expression as the size (`W'(e)`, `(W+1)'(e)`): only
+  literal sizes and type names parse.
 - struct members of variables whose type is a type parameter; unpacked structs (struct
   layout is still resolved in the parser, A1).
 - nested module declarations [sv_timeunit_prec3b]; multi-dimensional interface port

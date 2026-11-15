@@ -1,0 +1,69 @@
+module m (a, b, y, q);
+  // timescale 1e-9 / 1e-12
+  // imports $unit
+  parameter integer signed N = 4;
+  parameter [7:0] P = 8'ha5;
+  input wire(implicit) [(N - 1):0] a, b;
+  output wire(implicit) y;
+  output reg [(N - 1):0] q;
+  wire (strength 6, 3) #(3) w = a[0];
+  wand wa;
+  tri1 [1:0] t;
+  localparam real R = 1500.0;
+  integer signed i;
+  reg [7:0] mem[0:15];
+  assign #($__delays(1, 2)) y = ((&a) | (^b));
+  and #(2) g1(wa, a[0], b[0]);
+  buf bb[1:0](t, a[1:0]);
+  sub #(.W(N)) u1(.x(a), .y(), .z(q[0]));
+  sub u2[1:0](a, , b);
+  defparam u1.W = 3;
+  specify (a => y) = $__delays(1, 2);
+  genvar g;
+  for (g = 0; (g < N); g = (g + 1)) begin : gl
+    wire x = (a[g] ^ b[g]);
+  end
+  if ((N > 2)) begin : big
+    assign t[0] = 1'bz;
+  end
+  else begin
+    assign t[1] = 1'b0;
+  end
+  case (N)
+    1, 2: begin : small
+    end
+    default: begin
+    end
+  endcase
+  function reg [3:0] f;
+    input reg(implicit) [3:0] x;
+    f = (x + 4'sd1);
+  endfunction
+  task automatic t2;
+    input integer signed n;
+    output reg [3:0] r;
+    begin : body
+      r = n;
+      disable body;
+    end
+  endtask
+endmodule
+primitive mux (o, s, a, b);
+  // timescale 1e-9 / 1e-12
+  table
+    0 1 ? : 1;
+    1 ? 0 : 0;
+  endtable
+  output wire(implicit) o;
+  input wire(implicit) s, a, b;
+endprimitive
+primitive lat (q, d, en);
+  // timescale 1e-9 / 1e-12
+  initial 1'b0;
+  table // sequential
+    ? 1 : ? : -;
+    (01) 0 : ? : 1;
+  endtable
+  output reg q;
+  input wire(implicit) d, en;
+endprimitive
