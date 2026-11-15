@@ -1305,6 +1305,17 @@ impl<'a> Compiler<'a> {
                 NetKind::Time | NetKind::Real | NetKind::String => (m, l) = (63, 0),
                 _ => {}
             }
+            // packed dimensions: one flat vector [W-1:0], the dimensions kept for selects
+            let mut pk: Option<Vec<(i64, i64)>> = None;
+            if !d.packed.is_empty() {
+                let mut dims = vec![(m, l)];
+                for (a, b) in &d.packed {
+                    dims.push((self.const_int(a, fs)?, self.const_int(b, fs)?));
+                }
+                let w: i64 = dims.iter().map(|(a, b)| (a - b).abs() + 1).product();
+                (m, l) = (w - 1, 0);
+                pk = Some(dims);
+            }
             let w = ((m - l).abs() + 1) as u32;
             for dl in &d.names {
                 let (depth, lo) = if let Some((a, b)) = dl.dims.first() {
@@ -1314,6 +1325,10 @@ impl<'a> Compiler<'a> {
                     (0, 0)
                 };
                 let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
+                if let Some(d) = &pk {
+                    self.packed_dims.insert(sg, d.clone());
+                    self.scopes[fs].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(sg));
+                }
                 if d.kind == NetKind::Real {
                     self.mark_real(sg);
                 }

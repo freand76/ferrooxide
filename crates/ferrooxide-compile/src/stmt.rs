@@ -406,7 +406,18 @@ impl<'a> Compiler<'a> {
                             }
                             _ => SigKind::Reg,
                         };
-                                        let is_real = d.kind == NetKind::Real;
+                        let is_real = d.kind == NetKind::Real;
+                        // packed dimensions: one flat vector [W-1:0], the dimensions kept
+                        let mut pk: Option<Vec<(i64, i64)>> = None;
+                        if !d.packed.is_empty() {
+                            let mut dims = vec![(m, l)];
+                            for (a, b2) in &d.packed {
+                                dims.push((self.const_int(a, b)?, self.const_int(b2, b)?));
+                            }
+                            let w: i64 = dims.iter().map(|(x, y)| (x - y).abs() + 1).product();
+                            (m, l) = (w - 1, 0);
+                            pk = Some(dims);
+                        }
                         let w = ((m - l).abs() + 1) as u32;
                         for dl in &d.names {
                             let (depth, lo) = if let Some((a, b2)) = dl.dims.first() {
@@ -417,6 +428,10 @@ impl<'a> Compiler<'a> {
                             };
                             let s =
                                 self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, kind);
+                            if let Some(d) = &pk {
+                                self.packed_dims.insert(s, d.clone());
+                                self.scopes[b].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(s));
+                            }
                             if is_real {
                                 self.mark_real(s);
                             }
