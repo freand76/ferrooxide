@@ -1,0 +1,773 @@
+//! Lowering: the syntax tree (`crate::syntax::tree`) to the AST the compiler reads
+//! (`crate::ast`). It does what the old parser does besides parsing, walking the tree in
+//! source order: type and variable tables, struct member chains, assignment patterns, enum
+//! constants and methods, array queries, packages and `$unit`, time literals, the expansions
+//! of foreach, case-inside, unique/priority, `iff`, `++`, hierarchical-name segments and
+//! unnamed instances. What has nothing behind it fails with "... is not supported" at its
+//! line. `FX_FRONT=new` selects it (see `crate::parse_files`).
+
+mod expr;
+mod items;
+mod stmt;
+mod types;
+
+use crate::ast::*;
+use crate::svtypes::{scoped_copy, Package, SvType};
+use crate::syntax::tree as t;
+use crate::{Error, Options, Result};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+pub(crate) struct Lower {
+    file: String,
+    timescale: Option<(i32, i32)>,
+    default_nettype: Option<String>,
+    unconnected_drive: Option<bool>,
+    /// counter for names of unnamed instances (per file)
+    unnamed: u32,
+    /// typedefs in scope (file scope and packages carry over to the next file)
+    types: HashMap<String, Rc<SvType>>,
+    /// declared names of the current module with their type and unpacked dimensions
+    vars: HashMap<String, (Rc<SvType>, Vec<Range>)>,
+    /// the data type of the declaration being lowered
+    decl_type: Option<Rc<SvType>>,
+    /// the type selected by the last lvalue (for an assignment pattern on the right)
+    last_type: Option<SvType>,
+    /// items produced while lowering a declaration (enum constants)
+    pending: Vec<Item>,
+    /// typedefs lowered ahead of their place for a forward declaration (node addresses)
+    early: HashSet<usize>,
+    /// items at file scope ($unit): added to every module that follows
+    unit_items: Vec<Item>,
+    /// variables, functions and tasks at file scope (in the `$unit` module) and the types
+    unit_vars: Vec<Item>,
+    unit_var_types: HashMap<String, (Rc<SvType>, Vec<Range>)>,
+    /// packages imported at file scope
+    unit_pkgs: Vec<String>,
+    unit_name: String,
+    /// `timeunit` / `timeprecision` at file scope and in the current module
+    file_tu: (Option<i32>, Option<i32>),
+    local_tu: (Option<i32>, Option<i32>),
+    /// in a package or file-scope items: the scope's name and its parameters
+    type_scope: Option<(String, HashSet<String>)>,
+    /// modules made for packages (added after the file's modules)
+    pkg_modules: Vec<Module>,
+    /// names that are SystemVerilog keywords (lint), until the next module ends
+    kw_names: Vec<(String, Line)>,
+    packages: HashMap<String, Rc<Package>>,
+    /// packages the current module (or package) imports or refers to
+    mod_pkgs: Vec<String>,
+    /// the return type of the function being lowered (for `return '{...}`)
+    ret_type: Option<Rc<SvType>>,
+    modports: Vec<String>,
+    /// lowering a function or task body
+    in_subroutine: bool,
+}
+
+/// Lower the parsed files (one compilation unit unless `separate_units`).
+pub fn lower_files(files: &[t::SourceFile], opts: &Options) -> Result<Vec<Module>> {
+    let mut l = Lower::new();
+    let mut modules = Vec::new();
+    for (k, f) in files.iter().enumerate() {
+        if opts.separate_units && k > 0 {
+            modules.extend(l.unit_module());
+            l.timescale = None;
+            l.default_nettype = None;
+            l.unconnected_drive = None;
+            l.types = HashMap::new();
+            l.unit_vars.clear();
+            l.unit_pkgs.clear();
+            l.unit_items.clear();
+            l.unit_var_types = HashMap::new();
+            l.file_tu = (None, None);
+            l.unit_name = format!("$unit#{k}");
+        }
+        l.file = f.name.clone();
+        l.unnamed = 0;
+        l.kw_names.clear();
+        l.mod_pkgs.clear();
+        l.local_tu = (None, None);
+        modules.extend(l.source(&f.items)?);
+    }
+    modules.extend(l.unit_module());
+    Ok(modules)
+}
+
+impl Lower {
+    fn new() -> Lower {
+        Lower {
+            file: String::new(),
+            timescale: None,
+            default_nettype: None,
+            unconnected_drive: None,
+            unnamed: 0,
+            types: HashMap::new(),
+            vars: HashMap::new(),
+            decl_type: None,
+            last_type: None,
+            pending: Vec::new(),
+            early: HashSet::new(),
+            unit_items: Vec::new(),
+            unit_vars: Vec::new(),
+            unit_var_types: HashMap::new(),
+            unit_pkgs: Vec::new(),
+            unit_name: "$unit".into(),
+            file_tu: (None, None),
+            local_tu: (None, None),
+            type_scope: None,
+            pkg_modules: Vec::new(),
+            kw_names: Vec::new(),
+            packages: HashMap::new(),
+            mod_pkgs: Vec::new(),
+            ret_type: None,
+            modports: Vec::new(),
+            in_subroutine: false,
+        }
+    }
+
+    pub(crate) fn err<X>(&self, loc: t::Loc, msg: impl Into<String>) -> Result<X> {
+        Err(Error { msg: msg.into(), file: self.file.clone(), line: loc.line })
+    }
+
+    pub(crate) fn unsupported<X>(&self, loc: t::Loc, what: &str) -> Result<X> {
+        self.err(loc, format!("{what} is not supported"))
+    }
+
+    /// A name read from the source: SystemVerilog keywords used as names are noted (lint).
+    pub(crate) fn name(&mut self, n: &str, loc: t::Loc) -> String {
+        if crate::parser::SV_RESERVED.contains(&n) {
+            self.kw_names.push((n.to_string(), loc.line));
+        }
+        n.to_string()
+    }
+
+    fn directive(&mut self, d: &t::Directive) {
+        match d {
+            t::Directive::Timescale(u, p) => self.timescale = Some((*u, *p)),
+            t::Directive::DefaultNettype(n) => self.default_nettype = if n == "wire" { None } else { Some(n.clone()) },
+            t::Directive::UnconnectedDrive(d) => self.unconnected_drive = *d,
+        }
+    }
+
+    // ---------------------------------------------------------------- source
+
+    fn source(&mut self, descs: &[t::Description]) -> Result<Vec<Module>> {
+        let mut mods = Vec::new();
+        // file-scope items, for forward typedefs (the rest of the file scope)
+        let file_items: Vec<&t::Item> = descs.iter().filter_map(|d| if let t::Description::Item(i) = d { Some(i) } else { None }).collect();
+        let mut nitem = 0;
+        for d in descs {
+            match d {
+                t::Description::Directive(d, _) => self.directive(d),
+                t::Description::Module(m) => match m.kind {
+                    _ if m.extern_ => return self.unsupported(m.loc, "an extern module declaration"),
+                    t::ModuleKind::Module | t::ModuleKind::Macromodule | t::ModuleKind::Interface => mods.push(self.module(m)?),
+                    t::ModuleKind::Program => return self.unsupported(m.loc, "a program"),
+                    t::ModuleKind::Checker => return self.unsupported(m.loc, "a checker"),
+                },
+                t::Description::Udp(u) => mods.push(self.primitive(u)?),
+                t::Description::Package(p) => self.package(p)?,
+                t::Description::Config(c) => return self.unsupported(c.loc, "a configuration"),
+                t::Description::Item(it) => {
+                    nitem += 1;
+                    let rest: Vec<&t::Item> = file_items[nitem..].to_vec();
+                    self.unit_item(it, &rest)?;
+                }
+            }
+        }
+        mods.append(&mut self.pkg_modules);
+        Ok(mods)
+    }
+
+    /// An item at file scope ($unit).
+    fn unit_item(&mut self, it: &t::Item, rest: &[&t::Item]) -> Result<()> {
+        match it {
+            t::Item::Import(v, _) => self.import(v, true),
+            t::Item::Empty(_) => Ok(()),
+            t::Item::Directive(d, _) => {
+                self.directive(d);
+                Ok(())
+            }
+            t::Item::Timeunits { unit, precision, loc } => {
+                let (u, p) = self.timeunits(*unit, *precision, *loc)?;
+                // (after a `timescale they are ignored, as in the reference)
+                if self.timescale.is_none() {
+                    self.file_tu = (u.or(self.file_tu.0), p.or(self.file_tu.1));
+                }
+                Ok(())
+            }
+            t::Item::Typedef(_) | t::Item::Subroutine(_) => self.unit_scoped(it, rest),
+            t::Item::Param(p) if matches!(p.kw, Some(crate::syntax::kw::Kw::Parameter | crate::syntax::kw::Kw::Localparam)) => {
+                self.unit_scoped(it, rest)
+            }
+            t::Item::Net(_) | t::Item::Var(_) => {
+                // a file-scope variable: one instance, shared by all modules
+                let before: HashSet<String> = self.vars.keys().cloned().collect();
+                let mut v = Vec::new();
+                self.module_item(it, rest, &mut v)?;
+                for (k, t) in &self.vars {
+                    if !before.contains(k) {
+                        self.unit_var_types.insert(k.clone(), t.clone());
+                    }
+                }
+                for it in v {
+                    if matches!(it, Item::Decl(_)) {
+                        self.unit_vars.push(it);
+                    } else {
+                        self.unit_items.push(it);
+                    }
+                }
+                Ok(())
+            }
+            other => self.unsupported(item_loc(other), &format!("{} at file scope", item_what(other))),
+        }
+    }
+
+    /// Typedefs, parameters, functions and tasks at file scope: types refer to the
+    /// file scope's parameters; subroutines run in the `$unit` scope.
+    fn unit_scoped(&mut self, it: &t::Item, rest: &[&t::Item]) -> Result<()> {
+        let names = self.unit_items.iter().filter_map(|i| if let Item::Param(p) = i { Some(p.name.clone()) } else { None }).collect();
+        self.type_scope = Some((self.unit_name.clone(), names));
+        let mut v = Vec::new();
+        let r = self.module_item(it, rest, &mut v);
+        self.type_scope = None;
+        r?;
+        for it in v {
+            if matches!(it, Item::Subroutine(_)) {
+                self.unit_vars.push(it);
+            } else {
+                self.unit_items.push(it);
+            }
+        }
+        Ok(())
+    }
+
+    /// After the last file: the `$unit` module holding the file-scope variables, if any.
+    fn unit_module(&mut self) -> Option<Module> {
+        if self.unit_vars.is_empty() && !self.unit_items.iter().any(|i| matches!(i, Item::Param(_))) {
+            return None;
+        }
+        let mut items = self.unit_items.clone();
+        items.append(&mut self.unit_vars);
+        self.local_tu = (None, None);
+        Some(self.package_module(self.unit_name.clone(), items, self.unit_pkgs.clone()))
+    }
+
+    /// `timeunit` / `timeprecision` values as powers of ten (only 1, 10 or 100 units).
+    pub(crate) fn timeunits(&self, unit: Option<(f64, i32)>, prec: Option<(f64, i32)>, loc: t::Loc) -> Result<(Option<i32>, Option<i32>)> {
+        let one = |x: Option<(f64, i32)>| -> Result<Option<i32>> {
+            match x {
+                None => Ok(None),
+                Some((v, e)) if v == 1.0 || v == 10.0 || v == 100.0 => Ok(Some(e + v.log10().round() as i32)),
+                Some(_) => self.err(loc, "expected a time literal of 1, 10 or 100 units"),
+            }
+        };
+        Ok((one(unit)?, one(prec)?))
+    }
+
+    /// The time unit and precision in effect.
+    pub(crate) fn eff_timescale(&self) -> Option<(i32, i32)> {
+        let base = self.timescale.or(match self.file_tu {
+            (None, None) => None,
+            (u, p) => Some((u.unwrap_or(0), p.unwrap_or(0))),
+        });
+        match self.local_tu {
+            (None, None) => base,
+            (u, p) => Some((u.or(base.map(|b| b.0)).unwrap_or(0), p.or(base.map(|b| b.1)).unwrap_or(0))),
+        }
+    }
+
+    /// A time literal in units of the current module, rounded to its precision, as a real.
+    pub(crate) fn time_literal(&self, v: f64, e: i32) -> Expr {
+        let (unit, prec) = self.eff_timescale().unwrap_or((0, 0));
+        let scale = |v: f64, k: i32| if k >= 0 { v * 10f64.powi(k) } else { v / 10f64.powi(-k) };
+        let steps = scale(v, e - prec).round();
+        Expr::Real(scale(steps, prec - unit))
+    }
+
+    fn package_module(&self, name: String, items: Vec<Item>, imports: Vec<String>) -> Module {
+        Module {
+            name,
+            timescale: self.eff_timescale(),
+            default_nettype: self.default_nettype.clone(),
+            unconnected_drive: None,
+            file: self.file.clone(),
+            line: 0,
+            ports: vec![],
+            items,
+            udp: None,
+            keyword_names: vec![],
+            interface: false,
+            iface_ports: vec![],
+            modports: vec![],
+            package: true,
+            imports,
+        }
+    }
+
+    // ---------------------------------------------------------------- modules
+
+    fn module(&mut self, m: &t::ModuleDecl) -> Result<Module> {
+        let line = m.loc.line;
+        if m.lifetime == Some(t::Lifetime::Automatic) {
+            // (initial values of subroutine variables would be lost)
+            return self.unsupported(m.loc, "an automatic default lifetime");
+        }
+        let interface = m.kind == t::ModuleKind::Interface;
+        let mname = self.name(&m.name, m.loc);
+        let mut iface_ports = Vec::new();
+        self.modports.clear();
+        let saved_types = self.types.clone();
+        self.local_tu = (None, None);
+        self.vars.clear();
+        self.vars.extend(self.unit_var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.mod_pkgs.clear();
+        let mut items = Vec::new();
+        self.import(&m.imports, false)?;
+        let mut ports = Vec::new();
+        if let Some(params) = &m.params {
+            self.param_ports(params, &mut items)?;
+        }
+        match &m.ports {
+            t::Ports::None => {}
+            t::Ports::Wildcard => return self.unsupported(m.loc, "a `.*` port list"),
+            t::Ports::NonAnsi(v) => {
+                for p in v {
+                    match (&p.name, &p.expr) {
+                        (None, None) => ports.push(String::new()),
+                        (None, Some(t::Expr { kind: t::ExprKind::Ident(n), loc })) => ports.push(self.name(n, *loc)),
+                        _ => return self.unsupported(p.loc, "a port expression"),
+                    }
+                }
+            }
+            t::Ports::Ansi(v) => self.ansi_ports(v, &mut ports, &mut iface_ports, &mut items)?,
+        }
+        let refs: Vec<&t::Item> = m.items.iter().collect();
+        self.item_list(&refs, &mut items)?;
+        self.types = saved_types;
+        // items of the packages it uses, then file-scope items, unless the module declares
+        // the name itself
+        let pkgs = std::mem::take(&mut self.mod_pkgs);
+        let mut imports = pkgs.clone();
+        imports.extend(self.unit_pkgs.iter().cloned());
+        imports.push(self.unit_name.clone());
+        let mut outer = self.package_items(&pkgs);
+        outer.extend(self.unit_items.iter().map(|i| scoped_copy(i, &self.unit_name)));
+        if !outer.is_empty() {
+            let mut own = crate::parser::declared_names(&items);
+            let mut all: Vec<Item> = Vec::new();
+            for it in outer {
+                if crate::parser::item_name(&it).is_none_or(|n| own.insert(n.to_string())) {
+                    all.push(it);
+                }
+            }
+            all.extend(items);
+            items = all;
+        }
+        Ok(Module {
+            name: mname,
+            timescale: self.eff_timescale(),
+            default_nettype: self.default_nettype.clone(),
+            unconnected_drive: self.unconnected_drive,
+            file: self.file.clone(),
+            line,
+            ports,
+            items,
+            udp: None,
+            keyword_names: std::mem::take(&mut self.kw_names),
+            interface,
+            iface_ports,
+            modports: std::mem::take(&mut self.modports),
+            package: false,
+            imports,
+        })
+    }
+
+    /// The `#(...)` parameter port list of a module.
+    fn param_ports(&mut self, params: &[t::ParamDecl], items: &mut Vec<Item>) -> Result<()> {
+        use crate::syntax::kw::Kw;
+        let mut local = false;
+        for p in params {
+            match p.kw {
+                Some(Kw::Parameter) => local = false,
+                Some(Kw::Localparam) => local = true,
+                _ => {}
+            }
+            match &p.kind {
+                t::ParamKind::Type { assigns } => {
+                    for (n, d, loc) in assigns {
+                        let it = self.type_param(local, n, d.as_ref(), *loc)?;
+                        items.push(it);
+                    }
+                }
+                t::ParamKind::Value { ty, assigns } => {
+                    let pt = self.param_type(ty)?;
+                    for d in assigns {
+                        let it = self.param_assign(local, &pt, d)?;
+                        items.append(&mut self.pending);
+                        items.push(Item::Param(it));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An ANSI port list: what a port omits it inherits from the one before.
+    fn ansi_ports(
+        &mut self,
+        v: &[t::AnsiPort],
+        ports: &mut Vec<String>,
+        iface_ports: &mut Vec<(String, String, Option<Range>, Option<String>)>,
+        items: &mut Vec<Item>,
+    ) -> Result<()> {
+        let mut cur: Option<Decl> = None;
+        let mut cur_iface: Option<(String, Option<String>)> = None;
+        for p in v {
+            let pline = p.loc.line;
+            if p.expr.is_some() {
+                return self.unsupported(p.loc, "an explicit port `.name(expr)`");
+            }
+            let iface = match &p.header {
+                t::PortHeader::Interface { name: Some(n), modport } if p.dir.is_none() => Some((n.clone(), modport.clone())),
+                t::PortHeader::Interface { .. } => return self.unsupported(p.loc, "a generic interface port"),
+                t::PortHeader::None if p.dir.is_none() && cur_iface.is_some() => cur_iface.clone(),
+                _ => None,
+            };
+            if let Some((iface, modport)) = iface {
+                let pname = self.name(&p.name, p.loc);
+                let dims = match p.dims.as_slice() {
+                    [] => None,
+                    [d] => Some(self.dim(d, p.loc)?),
+                    _ => return self.unsupported(p.loc, "a multi-dimensional interface port array"),
+                };
+                if p.default.is_some() {
+                    return self.unsupported(p.loc, "a default value of an interface port");
+                }
+                iface_ports.push((pname.clone(), iface.clone(), dims, modport.clone()));
+                ports.push(pname);
+                cur = None;
+                cur_iface = Some((iface, modport));
+                continue;
+            }
+            cur_iface = None;
+            let dir = match p.dir {
+                None => None,
+                Some(t::Dir::Input) => Some(Dir::Input),
+                Some(t::Dir::Output) => Some(Dir::Output),
+                Some(t::Dir::Inout) => Some(Dir::Inout),
+                Some(_) => return self.unsupported(p.loc, "a ref port"),
+            };
+            match (&p.header, dir) {
+                (t::PortHeader::Data { net, var, ty }, Some(_)) => cur = Some(self.decl_head(dir, *net, *var, ty, None, None, p.loc)?),
+                (_, Some(_)) => {
+                    let ty = t::DataType { kind: t::TypeKind::Implicit, signed: None, packed: vec![], loc: p.loc };
+                    cur = Some(self.decl_head(dir, None, false, &ty, None, None, p.loc)?);
+                }
+                _ if cur.is_none() => return self.err(p.loc, "expected port direction"),
+                (t::PortHeader::Data { net, var, ty }, None) => {
+                    // a new type without a direction: inherits the direction
+                    let dir = cur.as_ref().unwrap().dir;
+                    cur = Some(self.decl_head(dir, *net, *var, ty, None, None, p.loc)?);
+                }
+                _ => {}
+            }
+            let pname = self.name(&p.name, p.loc);
+            let mut dims = self.dims(&p.dims, p.loc)?;
+            if let Some(t) = &self.decl_type {
+                dims.splice(0..0, t.unpacked.iter().cloned());
+            }
+            let init = match &p.default {
+                Some(e) => Some(self.expr(e)?),
+                None => None,
+            };
+            self.declare_var(&pname, &dims);
+            items.append(&mut self.pending);
+            let mut d = cur.clone().unwrap();
+            d.line = pline;
+            d.names = vec![Declarator { name: pname.clone(), dims, init, line: pline }];
+            items.push(Item::Decl(d));
+            ports.push(pname);
+        }
+        Ok(())
+    }
+
+    /// `primitive name (ports); declarations; [initial q = v;] table ... endtable endprimitive`
+    fn primitive(&mut self, u: &t::UdpDecl) -> Result<Module> {
+        let name = self.name(&u.name, u.loc);
+        let mut items = Vec::new();
+        let mut sequential = false;
+        let mut init = None;
+        let ports: Vec<String> = u.ports.clone();
+        for it in &u.decls {
+            let (dir, net, var, ty, decls, loc) = match it {
+                t::Item::Port(p) => (Some(p.dir), p.net, p.var, &p.ty, &p.decls, p.loc),
+                t::Item::Var(v) => (None, None, v.var, &v.ty, &v.decls, v.loc),
+                t::Item::Net(n) => (None, n.net, false, &n.ty, &n.decls, n.loc),
+                other => return self.unsupported(item_loc(other), &format!("{} in a primitive", item_what(other))),
+            };
+            let dir = match dir {
+                None => None,
+                Some(t::Dir::Input) => Some(Dir::Input),
+                Some(t::Dir::Output) => Some(Dir::Output),
+                Some(_) => return self.unsupported(loc, "this port direction in a primitive"),
+            };
+            let mut d = self.decl_head(dir, net, var, ty, None, None, loc)?;
+            if d.kind == NetKind::Reg {
+                sequential = true;
+            }
+            let mut names = Vec::new();
+            for x in decls {
+                let n = self.name(&x.name, x.loc);
+                if !x.dims.is_empty() {
+                    return self.unsupported(x.loc, "an array in a primitive");
+                }
+                // `output reg q = 1'b0`: the initial value
+                if let Some(e) = &x.init {
+                    if d.kind != NetKind::Reg {
+                        return self.err(x.loc, "an initial value needs an `output reg`");
+                    }
+                    let v = self.expr(e)?;
+                    if init.is_none() {
+                        init = Some(v);
+                    }
+                }
+                names.push(Declarator { name: n, dims: vec![], init: None, line: x.loc.line });
+            }
+            d.names = names;
+            items.push(Item::Decl(d));
+        }
+        if let Some((_, e)) = &u.init {
+            init = Some(self.expr(e)?);
+        }
+        let rows = u.rows.clone();
+        let sequential = sequential || rows.iter().any(|r| r.1.is_some());
+        Ok(Module {
+            name,
+            timescale: self.eff_timescale(),
+            default_nettype: None,
+            unconnected_drive: None,
+            file: self.file.clone(),
+            line: u.loc.line,
+            ports,
+            items,
+            udp: Some(UdpDef { sequential, rows, init }),
+            keyword_names: std::mem::take(&mut self.kw_names),
+            interface: false,
+            iface_ports: vec![],
+            modports: vec![],
+            package: false,
+            imports: vec![],
+        })
+    }
+
+    // ---------------------------------------------------------------- packages
+
+    /// `package name; items endpackage`
+    fn package(&mut self, p: &t::PackageDecl) -> Result<()> {
+        if p.lifetime == Some(t::Lifetime::Automatic) {
+            return self.unsupported(p.loc, "an automatic default lifetime");
+        }
+        let name = self.name(&p.name, p.loc);
+        let saved_types = self.types.clone();
+        let saved_pkgs = std::mem::take(&mut self.mod_pkgs);
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_tu = std::mem::take(&mut self.local_tu);
+        let saved_scope = self.type_scope.replace((name.clone(), Default::default()));
+        let mut own = Vec::new();
+        let refs: Vec<&t::Item> = p.items.iter().collect();
+        for (k, it) in refs.iter().enumerate() {
+            let n = own.len();
+            self.module_item(it, &refs[k + 1..], &mut own)?;
+            let new_params: Vec<String> = own[n..].iter().filter_map(|i| if let Item::Param(p) = i { Some(p.name.clone()) } else { None }).collect();
+            if let Some((_, names)) = &mut self.type_scope {
+                names.extend(new_params);
+            }
+        }
+        self.type_scope = saved_scope;
+        // the package's typedefs: those added while lowering it
+        let mut types = HashMap::new();
+        for (k, v) in &self.types {
+            if saved_types.get(k).is_none_or(|o| !Rc::ptr_eq(o, v)) {
+                types.insert(k.clone(), v.clone());
+            }
+        }
+        // items of the packages it imports come first
+        let used = std::mem::replace(&mut self.mod_pkgs, saved_pkgs);
+        let mut items = self.package_items(&used);
+        let mut var_items = Vec::new();
+        for it in own {
+            // variables, functions and tasks stay in the package's own scope
+            if matches!(it, Item::Decl(_) | Item::Subroutine(_)) {
+                var_items.push(it);
+            } else {
+                items.push(it);
+            }
+        }
+        let funcs = var_items.iter().filter_map(|it| if let Item::Subroutine(f) = it { Some(f.name.clone()) } else { None }).collect();
+        let mut vars = HashMap::new();
+        let declared = std::mem::replace(&mut self.vars, saved_vars);
+        for it in &var_items {
+            if let Item::Decl(d) = it {
+                for n in &d.names {
+                    if let Some(t) = declared.get(&n.name) {
+                        vars.insert(n.name.clone(), t.clone());
+                    }
+                }
+            }
+        }
+        let mut all = items.clone();
+        all.extend(var_items);
+        let m = self.package_module(name.clone(), all, used);
+        self.pkg_modules.push(m);
+        self.local_tu = saved_tu;
+        self.types = saved_types;
+        self.packages.insert(name, Rc::new(Package { items, types, vars, funcs }));
+        Ok(())
+    }
+
+    /// `import p::*, q::name;` (in a module, a package, or at file scope).
+    pub(crate) fn import(&mut self, v: &[t::Import], file_scope: bool) -> Result<()> {
+        for im in v {
+            let pkg = im.package.clone();
+            let Some(p) = self.packages.get(&pkg).cloned() else {
+                return self.err(im.loc, format!("unknown package '{pkg}'"));
+            };
+            match &im.name {
+                None => {
+                    for (k, v) in &p.types {
+                        self.types.insert(k.clone(), v.clone());
+                    }
+                    for (k, v) in &p.vars {
+                        self.vars.entry(k.clone()).or_insert_with(|| v.clone());
+                        if file_scope {
+                            self.unit_var_types.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+                Some(n) => {
+                    if let Some(t) = p.types.get(n) {
+                        self.types.insert(n.clone(), t.clone());
+                    }
+                    if let Some(v) = p.vars.get(n) {
+                        self.vars.entry(n.clone()).or_insert_with(|| v.clone());
+                        if file_scope {
+                            self.unit_var_types.entry(n.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+            }
+            if file_scope && !self.unit_pkgs.contains(&pkg) {
+                self.unit_pkgs.push(pkg.clone());
+            }
+            if file_scope {
+                let items = self.package_items(std::slice::from_ref(&pkg));
+                let have: HashSet<String> = self.unit_items.iter().filter_map(|i| crate::parser::item_name(i).map(str::to_string)).collect();
+                self.unit_items.extend(items.into_iter().filter(|i| crate::parser::item_name(i).is_none_or(|n| !have.contains(n))));
+            } else if !self.mod_pkgs.contains(&pkg) {
+                self.mod_pkgs.push(pkg);
+            }
+        }
+        Ok(())
+    }
+
+    /// The items of packages, each name once (the first package wins).
+    fn package_items(&self, pkgs: &[String]) -> Vec<Item> {
+        let mut seen = HashSet::new();
+        let mut v = Vec::new();
+        for name in pkgs {
+            if let Some(p) = self.packages.get(name) {
+                for it in &p.items {
+                    if crate::parser::item_name(it).is_none_or(|n| seen.insert(n.to_string())) {
+                        v.push(scoped_copy(it, name));
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// A reference `pkg::...`: the package's items become part of the current module.
+    pub(crate) fn use_package(&mut self, pkg: &str) {
+        if !self.mod_pkgs.iter().any(|p| p == pkg) {
+            self.mod_pkgs.push(pkg.to_string());
+        }
+    }
+}
+
+pub(crate) fn item_loc(it: &t::Item) -> t::Loc {
+    use t::Item as I;
+    match it {
+        I::Net(d) => d.loc,
+        I::Var(d) => d.loc,
+        I::Port(d) => d.loc,
+        I::Param(p) => p.loc,
+        I::Typedef(t::Typedef::Type { loc, .. } | t::Typedef::Forward { loc, .. } | t::Typedef::IfaceType { loc, .. }) => *loc,
+        I::Import(_, l) | I::Export(_, l) | I::NetAlias(_, l) | I::Generate(_, l) | I::Defparam(_, l) | I::Specify(_, l) | I::Modport(_, l) => *l,
+        I::Genvar(v) => v.first().map(|x| x.1).unwrap_or_default(),
+        I::ContAssign(c) => c.loc,
+        I::Process(p) => p.loc,
+        I::Subroutine(s) => s.loc,
+        I::Dpi(d) => d.loc,
+        I::Instances(i) => i.loc,
+        I::Gates(g) => g.loc,
+        I::GenFor(g) => g.loc,
+        I::GenIf(g) => g.loc,
+        I::GenCase(g) => g.loc,
+        I::GenBlock(b) => b.loc,
+        I::Clocking(c) => c.loc,
+        I::ClockingRef { loc, .. } | I::Timeunits { loc, .. } | I::ElabTask { loc, .. } | I::Nettype { loc, .. } => *loc,
+        I::DefaultDisable(_, l) | I::Directive(_, l) | I::Empty(l) => *l,
+        I::Assertion(a) => a.loc,
+        I::Property(p) => p.loc,
+        I::Sequence(s) => s.loc,
+        I::Let(l) => l.loc,
+        I::Covergroup(c) => c.loc,
+        I::Class(c) => c.loc,
+        I::Constraint(c) => c.loc,
+        I::Bind(b) => b.loc,
+        I::Module(m) => m.loc,
+    }
+}
+
+/// What an item is, for messages.
+pub(crate) fn item_what(it: &t::Item) -> &'static str {
+    use t::Item as I;
+    match it {
+        I::Net(_) => "a net declaration",
+        I::Var(_) => "a variable declaration",
+        I::Port(_) => "a port declaration",
+        I::Param(_) => "a parameter",
+        I::Typedef(_) => "a typedef",
+        I::Import(..) => "an import",
+        I::Export(..) => "an export",
+        I::Genvar(_) => "a genvar",
+        I::ContAssign(_) => "a continuous assignment",
+        I::NetAlias(..) => "a net alias",
+        I::Process(_) => "a process",
+        I::Subroutine(_) => "a function or task",
+        I::Dpi(_) => "a DPI import or export",
+        I::Instances(_) => "an instance",
+        I::Gates(_) => "a gate",
+        I::Generate(..) | I::GenFor(_) | I::GenIf(_) | I::GenCase(_) | I::GenBlock(_) => "a generate construct",
+        I::Defparam(..) => "a defparam",
+        I::Specify(..) => "a specify block",
+        I::Modport(..) => "a modport",
+        I::Clocking(_) | I::ClockingRef { .. } => "a clocking block",
+        I::DefaultDisable(..) => "default disable iff",
+        I::Assertion(_) => "a concurrent assertion",
+        I::Property(_) => "a property declaration",
+        I::Sequence(_) => "a sequence declaration",
+        I::Let(_) => "a let declaration",
+        I::Covergroup(_) => "a covergroup",
+        I::Class(_) => "a class",
+        I::Constraint(_) => "a constraint",
+        I::Bind(_) => "bind",
+        I::Module(_) => "a nested module",
+        I::Timeunits { .. } => "timeunit",
+        I::ElabTask { .. } => "an elaboration system task",
+        I::Nettype { .. } => "a user-defined nettype",
+        I::Directive(..) => "a compiler directive",
+        I::Empty(_) => "';'",
+    }
+}

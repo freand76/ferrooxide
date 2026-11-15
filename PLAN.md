@@ -308,6 +308,9 @@ deterministic, long runs cancellable, a memory budget for history.
   branch for a waiter in another needs a `#0`. A task argument is context-determined by the
   task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
   self-determined expressions in `{...}` and route signed values through `integer`.
+- Front ends: `tests/frontdiff.py` runs `--dump-ast` with the old and the new
+  (`FX_FRONT=new`) front end over the corpus of `tests/parsecheck.py` and lists files whose
+  dumps differ or that only one of them accepts (`--diff NAME` shows one).
 - Parser snapshots: `front/tests/parse.rs`, `tests/parse/*.sv` → checked-in `.ast`
   (`--dump-ast`, `front/src/dump.rs`).
 - Regression suite: `tests/ivtest.py` (`--show 40` groups failures), per-test comparison
@@ -427,7 +430,17 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
     tables, struct member chains, patterns, enum constants and methods, array queries,
     packages and `$unit`, time literals, foreach/case-inside/unique/iff/`++` expansions,
     `name[@N]` segments, unnamed instances), walking the tree in source order. `FX_FRONT=new`
-    selects it; `tests/frontdiff.sh` compares `--dump-ast` of both front ends over the corpus.
+    selects it; `tests/frontdiff.py` compares `--dump-ast` of both front ends over the corpus.
+  - *F4 status (2026-11-15)*: done (`front/src/lower/`). `--dump-ast` equal for all own
+    tests, 3332 regression-suite files and 315 real-design files; the differences are fixes:
+    `int unsigned` functions/parameters were signed, `$bits(logic [3:0])` was a select of a
+    variable `logic`, an ANSI UDP output initializer (`output reg q = 0`) was dropped, and
+    the new front end accepts what the old one could not parse (`W'(e)` size casts,
+    `byte`/`shortint`/`longint` parameters and return types, `name: begin`, ...; regression
+    suite: 23 SV tests from compile error to pass, none worse). Rejected as before:
+    explicit variable lifetimes in subroutines and `module automatic` (the compiler does not
+    apply initial values of subroutine variables yet). `expect(e);` without an action is a
+    call of a task named `expect`; a bare `new` is a name when a variable `new` exists.
   - *F5. Switch*: when `frontdiff` is equal (or each difference is understood and better),
     `cargo test` passes in all modes and `tests/regress.sh` shows no test worse, the new front
     end becomes the default; then `parser.rs` and the parsing half of `svtypes.rs` are deleted
@@ -534,7 +547,10 @@ SystemVerilog data types and testbench features:
 - classes, `program` blocks, `export` in packages, forward `typedef class`
   [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd_class*].
 - size casts with a parameter or expression as the size (`W'(e)`, `(W+1)'(e)`): only
-  literal sizes and type names parse.
+  literal sizes and type names parse (the new front end, `FX_FRONT=new`, has them).
+- initial values of variables declared in functions and tasks are not applied; the front
+  ends reject explicit lifetimes there (`static int acc = 1;`) and `module automatic`
+  [func_init_var*, task_init_var*].
 - struct members of variables whose type is a type parameter; unpacked structs (struct
   layout is still resolved in the parser, A1); struct-typed function arguments with patterns.
 - nested module declarations [sv_timeunit_prec3b]; multi-dimensional interface port

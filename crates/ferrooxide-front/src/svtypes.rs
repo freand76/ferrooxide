@@ -53,7 +53,7 @@ pub struct Struct {
 }
 
 /// The value of a plain literal (no x/z), possibly negated.
-fn lit(e: &Expr) -> Option<i64> {
+pub(crate) fn lit(e: &Expr) -> Option<i64> {
     match e {
         Expr::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
             i64::from_str_radix(&n.digits.replace('_', ""), n.base as u32).ok()
@@ -63,7 +63,7 @@ fn lit(e: &Expr) -> Option<i64> {
     }
 }
 
-fn num(v: i64) -> Expr {
+pub(crate) fn num(v: i64) -> Expr {
     if v < 0 {
         Expr::Unary(UnOp::Neg, Box::new(Expr::Num(dec(-v as u64))))
     } else {
@@ -90,18 +90,18 @@ fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
     Expr::Binary(op, Box::new(a), Box::new(b))
 }
 
-fn add(a: Expr, b: Expr) -> Expr {
+pub(crate) fn add(a: Expr, b: Expr) -> Expr {
     bin(BinOp::Add, a, b)
 }
-fn sub(a: Expr, b: Expr) -> Expr {
+pub(crate) fn sub(a: Expr, b: Expr) -> Expr {
     bin(BinOp::Sub, a, b)
 }
-fn mul(a: Expr, b: Expr) -> Expr {
+pub(crate) fn mul(a: Expr, b: Expr) -> Expr {
     bin(BinOp::Mul, a, b)
 }
 
 /// Number of elements of a dimension [a:b].
-fn dim_size(r: &Range) -> Expr {
+pub(crate) fn dim_size(r: &Range) -> Expr {
     if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
         return num((a - b).abs() + 1);
     }
@@ -111,7 +111,7 @@ fn dim_size(r: &Range) -> Expr {
 }
 
 /// Position of index `k` in dimension [msb:lsb], counted from the lsb side.
-fn dim_pos(r: &Range, k: Expr) -> Expr {
+pub(crate) fn dim_pos(r: &Range, k: Expr) -> Expr {
     if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
         return if a >= b { sub(k, num(b)) } else { sub(num(b), k) };
     }
@@ -120,7 +120,7 @@ fn dim_pos(r: &Range, k: Expr) -> Expr {
 }
 
 /// Whether a dimension counts down ([7:0]); unknown (parameterized) ones are assumed to.
-fn descending(r: &Range) -> bool {
+pub(crate) fn descending(r: &Range) -> bool {
     match (lit(&r.0), lit(&r.1)) {
         (Some(a), Some(b)) => a >= b,
         _ => true,
@@ -177,7 +177,7 @@ impl SvType {
 }
 
 /// Builtin type keywords: (kind, signed, width of an integer type).
-fn builtin(s: &str) -> Option<(NetKind, bool, Option<u32>)> {
+pub(crate) fn builtin(s: &str) -> Option<(NetKind, bool, Option<u32>)> {
     Some(match s {
         "logic" | "reg" => (NetKind::Reg, false, None),
         "bit" => (NetKind::Bit, false, None),

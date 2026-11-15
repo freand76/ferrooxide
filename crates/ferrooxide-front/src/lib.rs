@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod dump;
 pub mod lexer;
+pub mod lower;
 pub mod parser;
 pub mod preproc;
 pub mod svtypes;
@@ -38,8 +39,13 @@ pub struct Options {
     pub separate_units: bool,
 }
 
-/// Parse a list of source files into modules.
+/// Parse a list of source files into modules (`FX_FRONT=new`: the new parser and the
+/// lowering of its syntax tree).
 pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<ast::Module>> {
+    if std::env::var("FX_FRONT").is_ok_and(|v| v == "new") {
+        let tree = syntax::parse_files(files, opts)?;
+        return lower::lower_files(&tree, opts);
+    }
     let mut pp = preproc::Preprocessor::new(opts);
     let mut modules = Vec::new();
     // `timescale stays in effect across files, in command-line order

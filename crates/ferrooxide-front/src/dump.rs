@@ -254,7 +254,13 @@ impl Printer {
             self.line(format!("// modports {}", m.modports.join(", ")));
         }
         if !m.keyword_names.is_empty() {
-            let names: Vec<&str> = m.keyword_names.iter().map(|(n, _)| n.as_str()).collect();
+            // each name once, where it first appears (what the lint reports)
+            let mut names: Vec<&str> = Vec::new();
+            for (n, _) in &m.keyword_names {
+                if !names.contains(&n.as_str()) {
+                    names.push(n);
+                }
+            }
             self.line(format!("// keyword names {}", names.join(", ")));
         }
         if let Some(u) = &m.udp {

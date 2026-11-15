@@ -2845,7 +2845,7 @@ impl Parser {
 
 /// Non-ANSI subroutine ports typed by a second declaration (`input x; integer x;`): the
 /// port takes the type, and the type-only declaration is dropped.
-fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
+pub(crate) fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
     let typed: Vec<&Decl> = decls.iter().filter(|d| d.dir.is_none()).collect();
     let find = |n: &str| typed.iter().find(|d| d.names.iter().any(|x| x.name == n)).copied();
     let port_names: Vec<String> =
@@ -2866,6 +2866,10 @@ fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
                     nd.signed |= t.signed;
                     if t.range.is_some() {
                         nd.range = t.range.clone();
+                        nd.packed = t.packed.clone();
+                    }
+                    if t.type_param.is_some() {
+                        nd.type_param = t.type_param.clone();
                     }
                 }
                 out.push(nd);
@@ -2906,7 +2910,7 @@ pub(crate) fn item_name(it: &Item) -> Option<&str> {
     }
 }
 
-fn declared_names(items: &[Item]) -> std::collections::HashSet<String> {
+pub(crate) fn declared_names(items: &[Item]) -> std::collections::HashSet<String> {
     let mut v = std::collections::HashSet::new();
     for it in items {
         match it {
@@ -2921,4 +2925,13 @@ fn declared_names(items: &[Item]) -> std::collections::HashSet<String> {
         }
     }
     v
+}
+
+/// Store the index expression of a computed `name[@N]` segment; returns N.
+pub(crate) fn push_hier_index(e: Expr) -> usize {
+    HIER_INDEX.with(|h| {
+        let mut h = h.borrow_mut();
+        h.push(e);
+        h.len() - 1
+    })
 }

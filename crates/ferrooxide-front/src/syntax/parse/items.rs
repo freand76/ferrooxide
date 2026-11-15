@@ -278,7 +278,9 @@ impl Parser {
             Kw::Constraint | Kw::Static if k == Kw::Constraint || self.is_kw_at(1, Kw::Constraint) => {
                 out.push(Item::Constraint(Box::new(self.constraint_decl(vec![])?)))
             }
-            Kw::Module | Kw::Macromodule | Kw::Interface | Kw::Program | Kw::Checker => {
+            Kw::Module | Kw::Macromodule => out.push(Item::Module(Box::new(self.module_decl(false)?))),
+            // `interface u (...);` in Verilog code: an instance of a module named `interface`
+            Kw::Interface | Kw::Program | Kw::Checker if self.nested_decl_ends(k) => {
                 out.push(Item::Module(Box::new(self.module_decl(false)?)))
             }
             Kw::Extern if matches!(self.peek_at(1), T::Kw(Kw::Module | Kw::Macromodule | Kw::Interface | Kw::Program)) => {
@@ -303,6 +305,24 @@ impl Parser {
             _ => return self.err(format!("unexpected '{}' in module", k.as_str())),
         }
         Ok(())
+    }
+
+    /// A nested interface / program / checker declaration: its own end keyword comes before
+    /// the end of the enclosing one.
+    fn nested_decl_ends(&self, k: Kw) -> bool {
+        let end = match k {
+            Kw::Interface => Kw::Endinterface,
+            Kw::Program => Kw::Endprogram,
+            _ => Kw::Endchecker,
+        };
+        let mut i = 1;
+        loop {
+            match self.peek_at(i) {
+                T::Kw(e) if *e == end => return true,
+                T::Kw(Kw::Endmodule | Kw::Endinterface | Kw::Endprogram | Kw::Endchecker | Kw::Endpackage) | T::Eof => return false,
+                _ => i += 1,
+            }
+        }
     }
 
     /// An item starting with a name: a declaration with a user type, or an instantiation.
