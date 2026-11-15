@@ -489,22 +489,54 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   `ferrooxide-front` (`tests/parse/*.sv` -> checked-in `.ast`). *Done 2026-11-15*
   (`front/src/dump.rs`, `front/tests/parse.rs`; per-test regression baseline in
   `target/regress-baseline/{main,sv}.res`).
-- **R1. Tokens.** `Tok::Kw(Kw)`, the keyword set chosen by dialect in the lexer (replaces
-  `SV_ONLY`; lint uses the same table); helpers instead of string `matches!`; `$root` in
-  `primary()`.
-- **R2. An AST that says what the source says.** A syntactic `DataType` (built-in, named
-  `pkg::T`, struct/union/enum, type parameter, packed/unpacked dims) replaces `PType` and the
-  type flags; `Expr::Member`, `Method`, `Cast`, `Pattern`, `Scoped`, `Item::Typedef`,
-  `Import`, a top-level `Description` (module, interface, package, primitive). The parser keeps
-  only a scoped set of type names (to parse `T x;`). Migration: today's lowering moves out of
-  the parser into `front/src/lower.rs`, run per compilation unit and producing the current AST,
-  so the compiler is unchanged; forward references stop needing workarounds.
-- **R3. Compilation units.** A `Unit` struct instead of the field shuffle in `parse_files`;
-  package items are no longer copied into modules (package scopes resolve them).
+- **R1/R2. A new, complete front end beside the old one** (plan 2026-11-15, replaces "convert
+  the tokens" and "change the AST in place"). Goal: the parser accepts all of IEEE 1800-2017
+  (Annex A) even where elaboration has nothing behind it yet; unsupported constructs fail in
+  the lowering with "X is not supported" at their line, never silently.
+  - *F1. Tokens* (`front/src/syntax/{kw,token,lexer}.rs`): a `Kw` enum for every 1364-2005 and
+    1800-2017 keyword, line and column per token, the SV operators the old lexer splits (`##`,
+    `|->`, `|=>`, `<->`, `->>`, `:=`, `:/`, `@@`, `&&&`, `#-#`, `#=#`, `'{`, ...). Keywords
+    added by 1800 are "soft": accepted as names where only a name can stand (what the old
+    parser does with `SV_ONLY`/`sv_ident_here`). Dialect-dependent keyword sets
+    (`begin_keywords`, `-g2005`) come after the switch, as their own step with a regression
+    check.
+  - *F2. Syntax tree* (`syntax/tree.rs`): what the source says, nothing resolved. Source
+    units with descriptions (module/interface/program/checker, primitive, package, class,
+    config, bind, file-scope items, directives in source order); a syntactic `DataType`
+    (integer/real keywords, struct/union, enum, named `pkg::T` / `C#(..)::T`, virtual
+    interface, `type(e)`, packed/unpacked/queue/dynamic/associative dimensions); declarations
+    as written (net/var/port/param groups, ANSI port lists without inheritance applied);
+    expressions with members, scoped names, calls with named arguments and `with`, casts,
+    patterns, streaming, `inside`/`dist`, `new`, tagged; all statements (incl. randcase,
+    randsequence, assertions, `wait fork`, `->>`, clocking drives); properties and sequences;
+    classes, constraints, covergroups, clocking blocks, specify (paths and timing checks), UDP
+    tables, DPI, `let`, nettypes.
+  - *F3. Parser* (`syntax/parse/*.rs`, one file per area): recursive descent, no semantics.
+    Only state: scoped sets of type names (typedefs, type parameters, classes, forward
+    typedefs) and the type names each package exports, to parse `T x;`, `T'(e)`, `$bits(T)`.
+    `--parse-only`, `--dump-syntax`. Corpus check `tests/parsecheck.py`: every sv-tests file
+    (`~/projects/sv-tests`, 1028; those marked to fail in parsing must fail), every regression
+    suite source, `tests/`, and the local real designs; per-file results against a stored
+    baseline, as for the regression suite.
+  - *F4. Lowering* (`front/src/lower/`): syntax tree -> today's AST, so the compiler does not
+    change. It holds what `parser.rs`/`svtypes.rs` do besides parsing (type and variable
+    tables, struct member chains, patterns, enum constants and methods, array queries,
+    packages and `$unit`, time literals, foreach/case-inside/unique/iff/`++` expansions,
+    `name[@N]` segments, unnamed instances), walking the tree in source order. `FX_FRONT=new`
+    selects it; `tests/frontdiff.sh` compares `--dump-ast` of both front ends over the corpus.
+  - *F5. Switch*: when `frontdiff` is equal (or each difference is understood and better),
+    `cargo test` passes in all modes and `tests/regress.sh` shows no test worse, the new front
+    end becomes the default; then `parser.rs` and the parsing half of `svtypes.rs` are deleted
+    (type math moves to `lower/types.rs`), `FX_FRONT` goes.
+  - *F6.* CLAUDE.md rules: the parser resolves nothing but type names; new syntax gets a tree
+    node and a parser snapshot; the lowering reports what it cannot do.
+- **R3. Compilation units.** (F4 replaces the field shuffle in `parse_files`.) Package items
+  are no longer copied into modules (package scopes resolve them).
 - **R4. Types in the compiler** (rest of A1): a `Type` per signal, one
   `type_of(expr) -> ExprType` replacing `ty`/`is_real`/`is_string`/`lvalue_ty`; members and
   patterns resolved in elaboration (type-parameter structs, unpacked structs); packed types
-  still flattened at the end (runtime/JIT unchanged); `lower.rs` shrinks and goes away.
+  still flattened at the end (runtime/JIT unchanged); the compiler reads the syntax tree's
+  types, and the lowering shrinks piece by piece until the old AST is gone.
 - **R5. Split the compiler**: `elab/{params,hier,decls,generate,nets,udp,specify}.rs` plus
   codegen; `Compiler` fields grouped into sub-structs. Move first, regroup after.
 - **R6. Spans** (file, line, column) on `Expr`/`Stmt` instead of `self.line`.
