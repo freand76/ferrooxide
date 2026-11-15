@@ -1,321 +1,159 @@
 # ferrooxide — a fast 4-state, event-driven Verilog simulator in Rust
 
 ## Goals
-- IEEE 1364-2005 Verilog first, then a pragmatic synthesizable/testbench subset of SystemVerilog (1800).
-- Full 4-state semantics (0/1/X/Z), IEEE stratified event scheduler (active / inactive / NBA / postponed).
+- IEEE 1364-2005 Verilog first, then a pragmatic synthesizable/testbench subset of
+  SystemVerilog (1800).
+- Full 4-state semantics (0/1/X/Z), IEEE stratified event scheduler (active / inactive / NBA /
+  postponed).
 - **≥10x Icarus (vvp) throughput** on typical RTL + testbench workloads.
-- Output-compatible with Icarus for `$display`-style testbenches → differential testing against `iverilog` is the main correctness oracle.
+- Output-compatible with Icarus for `$display`-style testbenches: differential testing against
+  `iverilog` is the main correctness oracle.
 
 ## Architecture
 
 ```
  .v/.sv files
      │  ferrooxide-front    preprocessor (`define/`ifdef/`include) → lexer → recursive-descent/Pratt parser → AST
-     ▼
+     ▼                      (new front end being written in front/src/syntax, see R1/R2)
    AST
      │  ferrooxide-compile  elaboration: params, hierarchy flattening, port collapsing (aliasing),
      │                width/sign inference (IEEE context-determined rules), codegen
      ▼
   Program  (flat memory image + per-process bytecode + static fanout tables)
-     │  ferrooxide-rt       event scheduler + bytecode VM (later: Cranelift JIT backend)
+     │  ferrooxide-rt       event scheduler + bytecode VM, lowering to fast ops, fusion, Cranelift JIT
      ▼
   simulation
 ```
 
-### Usage model
-One command, no intermediate files: `ferrooxide tb.v dut.v` parses, elaborates, compiles to in-memory
-bytecode (milliseconds) and simulates. Unlike `iverilog` + `vvp` there is no separate compile step.
+**Usage model.** One command, no intermediate files: `ferrooxide tb.v dut.v` parses,
+elaborates, compiles to in-memory bytecode (milliseconds) and simulates. Unlike `iverilog` +
+`vvp` there is no separate compile step.
 
-### Key performance decisions
-1. **Flat memory**: every signal, temp and constant lives in one `Vec<u64>`. A value of width W uses
-   `n = ceil(W/64)` words of `aval` followed by `n` words of `bval` (VPI encoding: 00=0, 10=1, 01=Z, 11=X).
-   Unused high bits are always kept zero → equality is a word compare.
-2. **2-state fast path**: every op on ≤64-bit values checks `(b_a | b_b) == 0` once and then does plain
-   machine arithmetic. X/Z handling is the slow path.
-3. **Static everything**: temps are statically allocated per process (no allocation during simulation),
-   event controls get static ids, and the signal→waiter fanout is a precomputed flat table. Waking a
-   process = one compare + push.
-4. **Port collapsing**: ports connected to whole signals alias the parent signal (no copy process).
-5. **Processes are coroutines with a single `pc`** — suspension is free.
-6. Planned (where the 10x really comes from):
-   - **Cranelift JIT** of process bytecode (removes dispatch overhead, keeps 2-state fast path in registers).
-   - **Levelized/static scheduling of combinational logic** (`assign`, `always @*`) inside clock domains:
-     evaluate in topological order instead of through the event queue; fall back to events on loops.
-   - **Clock-domain batching**: `always @(posedge clk)` processes with only NBAs are run as one fused function.
-   - Timing wheel instead of a BTreeMap for the future-event queue.
-   - Optional 2-state "shadow" for signals proven never to hold X (after reset).
-   - Multi-threading of independent partitions (stretch goal).
+**Key design decisions.**
+1. *Flat memory*: every signal, temp and constant lives in one `Vec<u64>`. A value of width W
+   uses `n = ceil(W/64)` words of `aval` followed by `n` words of `bval` (VPI encoding: 00=0,
+   10=1, 01=Z, 11=X). Unused high bits are always zero, so equality is a word compare.
+2. *2-state fast path*: every op on ≤64-bit values checks `(b_a | b_b) == 0` once and then
+   does plain machine arithmetic. X/Z handling is the slow path.
+3. *Static everything*: temps are statically allocated per process (no allocation during
+   simulation), event controls get static ids, the signal→waiter fanout is a precomputed flat
+   table. Waking a process = one compare + push.
+4. *Port collapsing*: ports connected to whole signals (and constant-index array elements)
+   alias the parent signal (no copy process).
+5. *Processes are coroutines with a single `pc`*: suspension is free.
+6. *Rank-ordered combinational settle* (from digsim-native `levels.rs`): every combinational
+   process gets a rank above its drivers (Kahn longest path, SCCs/loops excluded); each dirty
+   one is evaluated once per settle in rank order, without events in between. Loops fall back
+   to events. This gave digsim 45–100x.
+7. *Cranelift JIT per process shape*: identical processes of different instances share one
+   native function and get their slots/signals/controls from a per-process table.
 
-### Learnings adopted from digsim-native
-- Same value encoding (value word + undefined-bits word) and its `get_bits`/`set_bits` helpers (`ferrooxide-rt/src/ops.rs`).
-- **Rank-ordered combinational settle** (digsim `levels.rs`): give every combinational process a rank
-  above its drivers (Kahn longest path, SCCs/loops excluded), evaluate each dirty one once per settle in
-  rank order, without events in between. Loops fall back to events. This gave digsim 45–100x and is
-  the core of M4.
-- Flip-flops update "in the next round" = our NBA region; group edge-triggered processes per clock edge.
-- Whole-block "sweep" evaluation when most inputs changed (cheaper than tracking dirtiness).
-- Profiling counters behind a cargo `prof` feature.
-- Deterministic event order so engines can be diffed exactly (here: vs. Icarus).
+The two simplifications the design was built around: types are resolved in the parser, and
+everything (processes, storage, fan-out) is static. RTL, performance and the debug front ends
+fit this; SystemVerilog testbench features and VPI do not (see "Architecture changes ahead").
 
-## Milestones
+Also adopted from digsim-native: the value encoding and its `get_bits`/`set_bits` helpers
+(`rt/ops.rs`); flip-flops update "in the next round" = our NBA region, edge-triggered processes
+grouped per clock edge; deterministic event order so engines can be diffed exactly. Not
+(yet) adopted: whole-block "sweep" evaluation when most inputs changed, profiling counters
+behind a cargo `prof` feature.
+
+**Scheduling order** mimics Icarus where IEEE leaves it open: wakes are FIFO (sequence
+numbers) between active processes and the combinational settle (`tests/verilog/race.v`);
+waiters woken by one change run newest first (Icarus's LIFO waiting lists, also for edge
+groups, which alternate their member order); fork branches start last to first; time-0
+processes start by scope (instances before the instantiating module's own blocks,
+`start_order`); `always_comb`/`always_latch` run at time 0 after all other processes have
+started (IEEE 1800 9.2.2.2.2).
+
+## Status (2026-11-15)
+
+Regression suite (normal tests): main list 1345 of 1526 (88 %), SystemVerilog list
+(`--list regress-sv.list`) 364 of 700 (52 %). Real design benchmark (TetrIC): output identical
+to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
+`--vcd`/`--trace`, the CDSP debug server with value history and the Surfer pairing work.
+Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
 
 | # | Content | Status |
 |---|---------|--------|
 | M0 | Workspace, plan, CLI, diff-test harness vs iverilog, benchmark | ✅ |
-| M1 | Core Verilog: modules/ports (ANSI + non-ANSI), params/localparam + overrides, wire/reg/integer/time, vectors + memories, assign, initial/always, blocking/NBA (incl. `<= #d`), if/case/casez/casex/for/while/repeat/forever, `#`, `@`, `wait`, all operators w/ correct width & sign rules, functions/tasks (inlined), generate for/if/case, gate primitives, `$display/$write/$monitor/$strobe/$finish/$time/$random/$signed/$unsigned/$clog2/$readmemh/b/$fopen/$fdisplay` | ✅ initial version |
-| M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff` | ✅ basic (dumps everything; scope/level args ignored) |
+| M1 | Core Verilog: modules/ports (ANSI + non-ANSI), params + overrides, vectors + memories, assign, initial/always, blocking/NBA (incl. `<= #d`), all procedural statements, `#`/`@`/`wait`, all operators with IEEE width & sign rules, functions/tasks, generate, gate primitives, common system tasks | ✅ |
+| M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff/$dumpall/$dumpflush`, reals, events | ✅ (dumps everything; scope/level args ignored) |
 | M2 | `timescale`, reals, plusargs, hierarchical task calls, `$sformat`, `$fopen` modes | ✅ |
-| M2b | Testbench concurrency: fork/join (+ SV join_any/join_none, disable fork), named events, `disable` of blocks/tasks across processes, automatic tasks/functions (per-call storage, recursion), Icarus wake order | ✅ |
-| M3 | Nets: multiple drivers, tri-state buses, wand/wor/tri0/tri1/supply, static drive strengths, tran islands, inertial delays (rise/fall/turn-off), specify path delays (-gspecify) | ✅ (strength values on nets / `%v`: pending) |
+| M2b | Testbench concurrency: fork/join (+ join_any/join_none, disable fork), named events, `disable`, automatic tasks/functions, recursion, Icarus wake order | ✅ (fork/join_none in a loop: A3) |
+| M3 | Nets: multiple drivers, tri-state, wand/wor/tri0/tri1/supply, static drive strengths, tran islands, inertial delays (rise/fall/turn-off), specify path delays (-gspecify), UDPs, switches | ✅ (strength values on nets / `%v` pending) |
 | M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
-| M5 | Performance II: Cranelift JIT backend | ✅ ≤64-bit ops, shared per shape (wide ops pending) |
-| M6 | SystemVerilog: logic/bit/int types, always_comb/ff, `++/+=`, typedef/enum/struct (packed), packages, interfaces (basic), `$display` extensions | typedef, enum, packed struct/union, casts, assignment patterns, packages/import, `$unit` done (parser-level, `svtypes.rs`); next: see "SystemVerilog status" |
-| M7 | FST output, VPI-lite, better diagnostics | |
-| M9 | CXXRTL Debug Server Protocol (CDSP): interactive debugging / live waveforms in CDSP clients | ✅ first version (`--cdsp`): hierarchy, references, history queries, run/pause; `--surfer` (starts Surfer, adds signals over WCP); reals; `-i` console next to the viewer (cursor follows run/step/breakpoints); next: arrays, port directions, diagnostics, goto_declaration |
-| M10 | MCP server: the simulator as a tool for AI agents (load, run, inspect, force, waveforms, lint) | ✅ first version over stdio (`--mcp`); next: value history queries, resources, HTTP transport |
-| M11 | Interactive mode (`-i`): run/step/print/list/set/force/release commands on stdin | ✅ first version (next: watch, breakpoints on conditions, waveform history, scopes) |
-| M8 | Multi-threading: partition same-clock-edge and same-rank processes that write disjoint signals; thread pool per settle step, serial fallback for small buckets; deterministic output | |
+| M5 | Performance II: Cranelift JIT backend, shared per shape | ✅ (wide ops leave the JIT in places) |
+| M6 | SystemVerilog | partial, see below |
+| M7 | FST, VPI-lite, better diagnostics | |
+| M8 | Multi-threading: same-edge / same-rank partitions writing disjoint signals, deterministic | (A5) |
+| M9 | CXXRTL Debug Server Protocol (`--cdsp`, `--surfer`) | ✅ first version |
+| M10 | MCP server over stdio (`--mcp`) | ✅ first version |
+| M11 | Interactive mode (`-i`): run/step/print/list/set/force/release, `restart`, `trace` | ✅ first version |
 
-## Road to full Verilog-2005 (notes)
+### Verilog notes
+- Fork branches are processes started by `Fork` (last branch first), joins count finished
+  branches, `disable` uses a table of named-block code ranges (+ the branches forked inside
+  them) and process generations to drop stale wake-ups; events are toggled variables;
+  automatic subroutines get storage per call site.
+- Recursion: a call of a function that is being inlined becomes a subroutine call
+  (`SaveFrame` copies the function's variables and the process's temporaries to a per-process
+  frame stack, `CallSub`/`RetSub`; such processes keep no temporaries in JIT registers; depth
+  limit 100000 frames). `?:` with calls in its branches evaluates only the selected one.
+- Done beyond M1: arrays of instances, `defparam`, `` `default_nettype ``, implicit nets,
+  multi-dimensional unpacked arrays and packed vectors (stored flat; index chains become one
+  index/select), hierarchical names with genvar indices, file input, `$random`/`$urandom`
+  (Icarus sequences), `$timeformat`/`$printtimescale`, `$writemem*`, force/release,
+  assign/deassign; static strengths per driver (the strongest wins per bit), pull gates, MOS
+  switches, `tran`/`tranif` (islands solved in one process).
+- `assign z = a;` (also `{a}`, a constant-index element, `#0`, `wire z = a;`, chains, `logic`
+  variables) makes `z` a view of `a` (`alias_assigns`), so it updates immediately as in the
+  reference, unless `z` has other drivers, is a special net type, has a strength, a link or
+  is forced.
 
-Order of work: measure first (ivtest), then the groups below roughly in order of how often real
-code needs them.
+### SystemVerilog status
+Resolved in the parser (`front/src/svtypes.rs`): `typedef` (module and file scope, unpacked
+dimensions: the type's first, ICARUS_NOTES 9, forward typedefs, array typedefs), `enum`
+(constants as localparams of the base type; methods, also without parentheses), packed
+`struct`/`union` (flat vectors; member/index/select chains become one `[off +: w]` select, also
+at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`, `$bits(T)`,
+assignment patterns (positional, and beyond the reference: named and `default:`), packages
+with `import p::*` / `import p::x` (module, header, file scope), `pkg::name`, `P::x`/`P::f()`.
+Lint reports names that are SystemVerilog keywords.
 
-0. **Conformance measurement.** Run Icarus's regression suite *ivtest* (a few thousand small
-   tests with expected output) through `tests/difftest.sh`-style comparison; track the pass rate
-   and let the failures order the work below. Also chipsalliance *sv-tests* for parser coverage.
-1. **Testbench concurrency** (M2b, done): fork branches are processes started by `Fork`
-   (Icarus order: last branch first), joins count finished branches, `disable` uses a table of
-   named-block code ranges (+ the branches forked inside them) and process generations to drop
-   stale wake-ups, events are toggled variables, automatic subroutines get storage per call
-   site. Waiters woken by one change run newest first (Icarus's LIFO waiting lists, also for
-   edge groups, which alternate their member order). Recursion (done): a call of a function
-   that is being inlined becomes a subroutine call — `SaveFrame` copies the function's
-   variables and the process's temporaries to a per-process frame stack, `CallSub`/`RetSub`
-   jump and return (processes with recursion keep no temporaries in JIT registers; depth
-   limit 100000 frames). `?:` with calls in its branches evaluates only the selected one.
-   Remaining: a fork branch restarted while still running (fork/join_none in a loop) should
-   become a new process instance instead of restarting the old one.
-2. **Structural RTL gaps**: multi-dimensional arrays as ports and whole-array assignments,
-   real-valued function arguments in expressions everywhere. Done: arrays of instances,
-   `defparam`, `` `default_nettype ``, implicit nets, multi-dimensional unpacked arrays and
-   packed vectors (stored flat; index chains become one index/select), hierarchical names
-   with genvar indices.
-3. **Testbench I/O and system functions**: `$fread`, `$dist_*`, `%u`/`%z` in `$fscanf`;
-   `$dumpvars` scope/level arguments and `$dumpall`/`$dumplimit`; force on array elements; real
-   math (`$sqrt`, `$ln`, `$pow`, `$floor`, ...); `$countdrivers`, `$q_*` (rare). Done: file
-   input, `$random`/`$urandom` (Icarus sequences), `$timeformat`/`$printtimescale`,
-   `$writemem*`, force/release and assign/deassign.
-4. **Gate level / netlists**: done: UDPs, net types, static drive strengths (per driver;
-   the strongest wins per bit), pull gates, MOS switches, `tran`/`tranif` (islands solved in
-   one process). Remaining: strength values on nets (`%v`, strength reduction through
-   switches, `trireg` charge), gate and net delays (rise/fall/turn-off), inertial delays on
-   `assign`, `specify` path delays and timing checks, SDF back-annotation.
-5. **Tool interfaces and the rest**: VPI/PLI (cocotb and friends), Verilog-2001 configurations
-   and libraries (`config`, `-y`/`-v` library search, `` `uselib ``), `$dumpports`, VCD of
-   reals and events.
+Also done: interfaces and modports (interface ports alias the connected instance's scope),
+arrays of interfaces and interface port arrays, array query functions, 2-state types
+(`bit`/`int`/...: start at 0, stores turn x/z into 0; `UnOp::To2`), `always_comb`/
+`always_latch` (sensitivity through called functions, time-0 run), `` `__LINE__ ``,
+`$isunknown`, `$countones`/`$onehot`/`$onehot0`, file-scope and package variables (one
+instance, shared), `timeunit`/`timeprecision` (module and file scope), time literals,
+`input var`/`input logic` port kinds, `-u` (separate compilation units), `unique`/`priority`
+case and if warnings for unmatched values, `break;`/`continue;`, prefix `++a;`/`--a;`,
+`inside` and `case ... inside`, `foreach`, several variables and steps in a `for` header,
+`iff`, `.triggered`.
 
-## M9: CXXRTL Debug Server Protocol (notes)
+*A1, first part (types in elaboration).* Packages and `$unit` are scopes of their own,
+elaborated once (`Module::package`; `Scope::imports` for lookups after a module's own names).
+Their variables are shared, their functions and tasks run in their scope (its names and time
+unit); a module's copy of a package parameter is `localparam X = P.X`, and constants in types
+declared there refer to that scope (`svtypes::qualify_type`, `scoped_copy`). Type values in
+the compiler: `Sym::Type` / `PVal::Type` hold an `SvType` with its dimensions evaluated
+(`resolve_type`), `Expr::Type` carries a type in a parameter list. `parameter type` works for
+declarations, ports, `$bits` and casts, per instance. Left: struct layout and member access
+are still resolved in the parser (`struct_access`), so variables of a type parameter have no
+members and unpacked structs are not possible; the compiler still types expressions as
+(width, signed, real).
 
-Spec: https://cxxrtl.org/protocol.html (v0.14.0, protocol version 0, still changing). Lets a
-client (waveform viewer / debugger front end; Surfer has a client, see below) attach to
-a running simulation, run/pause it and query waveforms of any signal over any past interval.
+*A2, first part (strings).* A string value is the 64-bit handle of an interned text
+(`Program::strings` from the compiler, the table in `Sim`), so equal texts have equal handles
+and stores, change events and `==` need nothing new; the rest are `Instr::Str` operations on
+the generic path (`compile/src/strings.rs`, `Sim::exec_str`). The compiler knows a string
+signal by `SignalInfo::string` and types expressions with `is_string` next to `is_real`
+(`strings::VTy` for assignment targets). Interning never frees a text.
 
-**Protocol in short.** Byte stream (TCP or Unix socket), each message a UTF-8 JSON object
-terminated by NUL. Greeting both ways (`version: 0`; the server lists its commands, events and
-`item_values_encoding: ["base64(u32)"]`). Commands: `list_scopes`, `list_items` (scope = direct
-children only; ids are space-separated hierarchical names, root scope `""`), `reference_items`
-(bind a name to a list of items / memory row ranges), `query_interval` (samples with item values
-and diagnostics for an inclusive time interval, optionally collapsed to one sample per time),
-`get_simulation_status`, `run_simulation` (`until_time`, `until_diagnostics`, async),
-`pause_simulation`. Events: `simulation_paused`, `simulation_finished`. Times are strings
-`"<s>.<fs>"`. Values: per item little-endian u32 words, concatenated, base64. Diagnostics:
-`print`/`break`/`assert`/`assume` with source location. No value setting yet.
+### Performance
 
-**Design for ferrooxide.**
-1. *Server thread + simulation thread.* `--debug-server tcp:HOST:PORT` (or `unix:PATH`). The
-   simulation thread runs time steps and checks a command channel between time steps (cheap
-   atomic flag), so run/pause/until_time need no locking inside the hot loop. Paused = the
-   simulation thread blocks on the channel.
-2. *Hierarchy.* Scopes from instance paths (`tb.u1.sub` → `"tb u1 sub"`), items from signal
-   names (all `prog.names` including port aliases); `type` node/memory, `width`, `lsb_at` from the
-   declared range, `input`/`output` from port direction (keep it in `SignalInfo`), memories with
-   `depth`/`zero_at`, `src` from file:line (keep declaration locations), `settable: false`.
-3. *History for query_interval.* Phase 1: an in-memory change log (time, signal, value) fed by
-   the same per-time-step dirty list as VCD (`notify` already marks changed signals when dumping),
-   for all non-array signals, with a memory budget (drop or compress old history; follow the
-   project's memory rules). Memories: log element writes (`notify_elem` knows the element).
-   Phase 2 (CXXRTL's approach): periodic checkpoints of the whole simulation state (`mem`,
-   process states, queues, NBA buffer, RNG, file handles muted) and deterministic re-simulation
-   from the nearest checkpoint; only cheap checkpoints are stored, values are recomputed on demand.
-4. *Values.* `base64(u32)` is two-state: x/z bits are sent as the value plane (x→1, z→0) for now.
-   Propose/negotiate a four-state encoding (value + unknown planes, e.g. a `base64(u32,4state)`
-   feature) since 4-state is the point of this simulator; check what clients accept.
-5. *Diagnostics.* `$display`/`$write` output → `print` (with time and src), `$finish`/`$stop` →
-   `break`, SystemVerilog immediate assertions later → `assert`. Keep them in the history so
-   `query_interval` can return them; `run_simulation until_diagnostics` pauses on them.
-6. *Time.* ticks × 10^(15 + precision) femtoseconds; `run_simulation until_time` stops before the
-   first time step after the target and emits `simulation_paused` (cause `until_time`).
-7. *Later.* Setting values (when the spec adds it: force-like writes through the force mask),
-   breakpoints on signal conditions, scope/item attributes (`(* ... *)` are currently dropped by
-   the lexer and would need keeping), a VCD/FST import mode as a read-only server.
-
-**Status (first version, `--cdsp`).** `cdsp.rs`: listener thread, one reader thread per
-connection, the simulation thread owns `Sim` and steps one time step at a time while running
-(checking the command channel between steps). History: `rt/history.rs`, one sequential log
-(signal id + planes packed to the width, 6 bytes per 1-bit change) fed from the dirty list at
-the end of each time step (`Sim::history_start`; `track` replaces `dumping` as the dirty-list
-switch), budget `FX_HISTORY_MB`; per-signal indexes are built on demand for the queried
-signals. Running: `advance_steps` chunks sized to 10-40 ms. Cost on `bench/cpuish.v` (all
-signals toggle): 0.64 s plain, 1.1-1.3 s with full history (290 MB); a query of 10 signals
-over the whole run (400k samples) about 0.85 s, the first one 0.45 s more (indexing). Samples are sent at the interval
-start and at each change of a referenced item. Reals are 64-bit items (IEEE double bits).
-Not yet: arrays (memory items, row ranges; Surfer designates every item as a node, so a memory
-would make its whole reference fail), port directions (`input`/`output` are false; needs direction in `SignalInfo`), `src`,
-diagnostics (`$display` → `print`, `until_diagnostics`), the WCP pairing below.
-
-**Surfer as client** (checked in its source, 2026-11-03 snapshot, `libsurfer/src/cxxrtl*`).
-Connect with `surfer cxxrtl+tcp://HOST:PORT` (TCP only in native builds). What it sends, and so
-what a server must handle:
-- greeting `version: 0`; the server greeting needs `commands`, `events`, `features` (contents
-  of `features` ignored).
-- `list_scopes {scope: null}`: expects *all* scopes in one flat map (space-separated names);
-  Surfer builds the tree itself. `list_items` with `null` (all items) and per scope; only
-  `width` is read, unknown fields are ignored (send the full spec fields anyway).
-- `reference_items "ALL_VARIABLES"` with `[[name], ...]`, re-sent whenever a signal is added.
-- `query_interval`: always `[0, latest_time]`, `collapse: true`, `base64(u32)`, no
-  diagnostics, re-sent after every status change. No incremental fetch: each pause transfers
-  the whole history of the displayed signals. Surfer looks up the latest sample <= t, so
-  samples only at times where a referenced item changed are enough.
-- `run_simulation`: the play button asks for `until_time = latest + 100 ns` (hard-coded),
-  `sample_item_values: true`, no diagnostics. `pause_simulation` expects `{time}` back.
-  `get_simulation_status` → `{status, latest_time}`; events `simulation_paused` (with cause),
-  `simulation_finished`. No polling while running: the view updates at events and pauses.
-- Responses carry no ids; Surfer pairs them FIFO with its requests (an error pops one too), so
-  the server must answer strictly in order.
-- Values are decoded as unsigned integers: two-state only, x/z are lost. Value setting and
-  diagnostics are not used.
-
-**WCP: driving the viewer.** Surfer's Waveform Control Protocol (`surfer-wcp`, unfinished,
-NUL-terminated JSON like CDSP) lets a tool control the viewer: `add_items` (signals or scopes,
-recursive), `set_cursor`, `set_viewport_to/range`, `add_markers`, `load`, `reload`, `clear`,
-`zoom_to_fit`, `set_item_color`, `get_item_list/info`, `remove_items`, `focus_item`. Events from
-Surfer: `waveforms_loaded`, and, if the tool lists them in its greeting, `goto_declaration`,
-`add_drivers`, `add_loads` (requests to the tool). `surfer --wcp-initiate PORT` makes Surfer
-connect to a listening tool (always 127.0.0.1). WCP `load` accepts only files and URLs, not a
-`cxxrtl+tcp://` source, and `waveforms_loaded` is only sent for file sources.
-
-**Pairing (`--surfer`, first version done).** ferrooxide opens a CDSP and a WCP listener and
-starts `surfer cxxrtl+tcp://127.0.0.1:<cdsp> --wcp-initiate <wcp>`. After Surfer's WCP greeting
-it sends `add_items` (dotted names), retried every 250 ms while Surfer answers "No waveform
-loaded"; `$finish` gets a marker (WCP times are femtoseconds for a CXXRTL source); ferrooxide
-exits with Surfer. Checked with Surfer 0.7.0 (2026-11-14, a logging proxy on both
-connections): greeting, scopes, items, `reference_items`, `query_interval` and WCP
-`add_items` work. Surfer shows nothing until the simulation has run (it queries only at
-status changes), so `--surfer` without `-i` now runs at once and pauses after 2 s of wall
-time if the simulation has not ended; without `--trace` the top modules' signals are shown
-(`--trace-all`: all, at most 2000); the first values after time 0 get one WCP `zoom_to_fit`.
-`restart` in the console (`-i`) loads the design again (sources and data files as they are
-now) and starts over at time 0 on the same connections (the viewer gets `simulation_paused`
-at 0); a running VCD trace (`--vcd`, `--trace`, console `trace`) is written anew from time 0.
-`quit` closes the viewer. The console has line
-editing and a history (`~/.ferrooxide_history`, rustyline).
-
-Surfer 0.7.0 (11bb2e3) shows no live waves because of two bugs in its CXXRTL path (found with
-a debug build, 2026-11-14; fixed locally in the user's `/projects/surfer`, to report
-upstream): (1) `WaveData::cached_time_range` is computed when the source loads (latest time
-0 -> 1 fs) and only refreshed on load / config / time-offset changes, so a live source never
-grows: refresh it on `Message::InvalidateDrawCommands`; (2) `variable_draw_commands` skips
-every variable whose `signal_id` fails, and `WaveContainer::signal_id` is not implemented for
-CXXRTL: skip the check for CXXRTL (its values come from the query cache). With both fixes the
-waves show. Surfer's value cache never forgets samples: after a `restart` it can show samples of the
-previous run until a new run overwrites them (feature request to report: clear the cache
-when the latest time goes backwards). Still to do; it then pushes views: `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
-`$display`/assertions as markers. It answers `goto_declaration` from declaration locations and
-`add_drivers`/`add_loads` from the elaborated netlist (something a VCD-only viewer cannot do).
-Without a server Surfer also reads `--vcd` files directly. Both protocols still change.
-
-**Upstream proposals.** A four-state value encoding (value + unknown planes) in CDSP and in
-Surfer's decoder; incremental `query_interval` (only the new interval after a pause); a
-configurable run step instead of the fixed 100 ns.
-
-Open questions: how large a history is useful by default (it is re-sent at every pause), and
-whether to expose x/z before the spec defines it.
-
-## M10: MCP server (notes)
-
-The Model Context Protocol (https://modelcontextprotocol.io) lets an AI agent (Claude Code,
-other MCP clients) call tools of a server. Exposing ferrooxide this way lets an agent debug a
-design by running and probing it instead of reading logs and dumping huge VCDs.
-
-**Transport.** `ferrooxide --mcp` speaks JSON-RPC 2.0 over stdio (the standard local transport;
-streamable HTTP later). No design on the command line needed: the agent loads one through a tool.
-Use an existing Rust MCP SDK if it is mature (e.g. the official `rmcp` crate), else implement
-the small subset (initialize, tools/list, tools/call, resources) by hand.
-
-**Shares the M9 core.** The interactive mode (M11) already has the basic pieces: the simulator
-can be started, advanced to a time and stopped between time steps (`Sim::start/advance/finish`),
-and signals read, deposited, forced and released by name; an MCP or CDSP front end can drive the
-same API from a server thread. Simulation thread + command channel checked between time steps, the
-hierarchy model, the change-log history and diagnostics capture are the same as for CDSP; MCP and
-CDSP are two front ends. Build that core once (M9 step 1-3), then add whichever front end first.
-
-**Tools (first cut).**
-- `load_design {files, defines, include_dirs, top, plusargs, dialect}` → top scopes, warnings and
-  compile errors with file:line (an agent's edit-compile loop wants these structured).
-- `lint` → incomplete sensitivity lists etc. (existing `--lint`).
-- `run {until_time | for_time | until_condition, max_steps}` → stop reason, current time,
-  `$display` output produced meanwhile (truncated, with a count).
-- `list_scopes {scope}` / `list_signals {scope, pattern}` → names, widths, directions, kinds.
-- `get_values {signals, radix}` → current 4-state values (x/z shown as in `$display`).
-- `get_history {signals, from, to, max_changes}` → value changes (from the change log), so an
-  agent can ask "when did `state` change before `err` rose?" without a VCD.
-- `set_value {signal, value}` (deposit), `force {signal, value}`, `release {signal}` → existing
-  force masks.
-- `add_breakpoint {condition}` (expression over signals, compiled like a `wait`), `list` /
-  `remove_breakpoint`; `run` stops on them.
-- `dump_vcd {file, scopes, from, to}` → write a VCD for a human (or a viewer) from history.
-- `reset` / `restart` (re-elaborate) and `status` (time, finished, memory use).
-
-**Resources.** Source files of the loaded design, the elaborated hierarchy, the simulation log.
-
-**Agent-oriented details.** Every result small and bounded (agents pay per token): truncation
-with counts, pattern filters, no unbounded dumps. Errors as structured content with locations.
-Deterministic (same commands → same results), long runs cancellable, memory budget for history
-(same rules as the rest: an out-of-memory crash takes the client down with it).
-
-Open questions: one server per design or several sessions; whether conditions/breakpoints use
-the normal expression compiler (likely: compile to a small process that wakes on the signals);
-how to present large memories.
-
-## Testing strategy
-- `tests/verilog/*.v`: self-contained testbenches. `tests/difftest.sh` runs each through `iverilog`+`vvp`
-  and `ferrooxide` and diffs stdout. `cargo test` runs the same comparison (skipped if iverilog is absent).
-- `tests/suite/<area>/*.v` (`tests/suite.sh`, also in `cargo test`): our own suite, no other
-  simulator needed. Tests are self-checking (print `PASSED`, never a line starting `FAILED`) or
-  compared with a checked-in `<name>.expected` (`// expected`; `--bless` writes it: review
-  it). Every test runs in all three modes. Expected behaviour comes from IEEE 1364/1800 (cite
-  the section); where the reference agrees, it is a useful check of the test itself. Order
-  that IEEE leaves open (wakes of one change, races) does not belong here but in
-  `tests/verilog`. Areas so far: `sched` (NBA, always_comb at time 0, edges and events,
-  fork/join, delays), `sv` (bit functions, unique case/if, procedural statements, enums,
-  packed structs, patterns, inside, foreach, strings, forward typedefs, interface arrays),
-  `expr` (widths, signedness, 4-state, selects, operators), `nets` (resolution, strengths,
-  gates, switches), `systasks` (display formats, %t, file I/O, $readmem, $strobe/$monitor,
-  plusargs and misc), `hier` (parameters, generate, ports, hierarchical names), `subr`
-  (functions, tasks), `real`, `vcd` (reads its own dump back), `prims` (UDPs, force/release
-  and assign/deassign, specify paths), `arrays` (multi-dimensional, packed, arrays of packed
-  vectors), `directives` (macros with arguments and defaults, conditionals, include
-  guards), `events` (named events, `iff`, `.triggered`, repeat with an event control). Next
-  areas: `$sformatf` corner cases, `timescale inheritance across files, `disable` corner
-  cases; ideas from the regression suite's coverage, tests written fresh. Pitfalls seen:
-  fork branches start last to first here and in the reference (order IEEE leaves open), so
-  a trigger in one branch for a waiter in another needs a `#0`. Pitfall when writing checks: a task argument is context-determined
-  by the task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
-  self-determined expressions in `{...}` and route signed values through `integer`.
-- `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both simulators.
-
-## Performance status (CPU cycles, `perf stat`, same machine)
+CPU cycles (`perf stat`, same machine):
 
 | benchmark | Icarus | ferrooxide JIT | ferrooxide `--no-jit` | speed-up |
 |-----------|--------|----------------|-----------------------|----------|
@@ -329,44 +167,35 @@ With a full VCD dump (all signals; wall time, same machine, 2026-11-13):
 | `bench/cpuish.v` | 14.3 s | 19.5 s | 0.73 s | 1.95 s | 707 MB (Icarus 720 MB) |
 | `bench/mixed.v` | 3.1 s | 7.4 s | 0.15 s | 0.51 s | 175 MB (Icarus 308 MB) |
 
-Dumping everything costs ferrooxide 2.7-3.4x (mostly formatting and writing the text); the lead
-over Icarus with a dump is 10-14x. `--trace REGEX` limits the cost to the selected signals.
+Dumping everything costs ferrooxide 2.7-3.4x (mostly formatting and writing the text); the
+lead over Icarus with a dump is 10-14x. `--trace REGEX` limits the cost to the selected
+signals. Real design (TetrIC run target): about 25-32 s wall with the machine loaded; compare
+builds with `perf stat -e instructions` (231 G at 69f7fb4).
 
 What got us here (in order of impact):
 1. Lowering to single-word fast ops with the 2-state check inline (`rt/fast.rs`).
-2. Cranelift JIT per *process shape*: identical processes of different instances share one native
-   function and get their slots/signals/controls from a per-process table. Without sharing, 32 lane
-   copies thrashed the instruction cache (586M i-cache misses → 2M).
-3. Shared scratch region for temporaries (dead at every suspension point): L1d misses 161M → 42M.
-4. Rank-ordered combinational settle (from digsim-native), as a dirty bitset in rank order, with a
-   separate combinational fan-out list that needs no per-process state.
+2. JIT code shared per process shape: without sharing, 32 lane copies thrashed the
+   instruction cache (586M i-cache misses → 2M).
+3. Shared scratch region for temporaries (dead at every suspension point): L1d misses
+   161M → 42M.
+4. Rank-ordered combinational settle as a dirty bitset in rank order, with a separate
+   combinational fan-out list that needs no per-process state.
 5. Constant-index array accesses resolved at compile time; inline `Wait` and inline NBA queue
    appends in JIT code.
-6. Element-level sensitivity for constant-index array accesses (virtual element signals, element
-   granular rank graph): mixed.v 27.6M → 8.4M activations.
+6. Element-level sensitivity for constant-index array accesses (virtual element signals,
+   element-granular rank graph): mixed.v 27.6M → 8.4M activations.
 7. Wide (≤1024-bit) ops compiled natively (unrolled word loops), concatenation as bit-field
-   inserts, and scratch temporaries promoted to SSA variables (registers) unless a generic
-   callback reads them.
-
-8. Ports connected to constant-index array elements alias the element (no copy process).
+   inserts, scratch temporaries promoted to SSA variables unless a generic callback reads them.
+8. Ports connected to constant-index array elements alias the element.
 9. Fusion of combinational chains (`rt/fuse.rs`): a pure combinational process whose only
    combinational consumer is B is merged into B (cpuish 26.0M → 19.6M activations, mixed
    3.6M → 1.2M).
 10. Fast paths for variable-index memory reads/writes, part-select stores, signed compares,
     logical not and wire resolution; edge groups (clocked processes with identical triggers
-    run as one activation instead of one per process).
+    run as one activation).
 
-Scheduling order: wakes are ordered FIFO (sequence numbers) between active processes and the
-combinational settle, matching Icarus in the usual same-time-step testbench races
-(tests/verilog/race.v).
-
-Next performance steps: ports connected to part selects as aliases, fusing sibling processes
-with the same inputs, signal values cached in registers within an activation, timing wheel,
-`--threads` (partitioned same-edge/same-rank parallelism, see M8).
-
-**Where to work when speed matters again** (profile 2026-11-14, `perf record -g`, commit
-after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 0.68 G /
-1.82 G):
+Profile (2026-11-14, `perf record -g`; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed
+0.68 G / 1.82 G):
 
 | function | cpuish | mixed |
 |----------|--------|-------|
@@ -376,123 +205,192 @@ after the type parameters; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed 
 | `Sim::exec` (generic instructions) | 10 % | 7 % |
 | future queue: `BTreeMap` entry + malloc/free/realloc of `Vec<Fut>` | 1.5 % | 7.5 % |
 
-1. `notify` is the largest single item. Per change it follows `parent` (array elements),
-   checks the dirty list, sets one comb bit per combinational reader with a `comb_wake` call
-   each, then scans the event fan-out (edge check from the value's LSB) and sorts `wake_buf`
-   when more than one waiter wakes. Ideas: per-signal flags precomputed at build time (no
-   event fan-out / only combinational readers / no parent) so the common case is one bit
-   loop; set the comb bits of small fan-outs directly in JIT code (as `Wait` and NBA appends
-   already are); skip the sort when the waiters are already in `wseq` order.
-2. Timing wheel for `future` (vm.rs `Sim::future`), and reuse the `Vec<Fut>` of a finished
-   time slot instead of allocating one per slot (`BTreeMap::entry().or_default()`).
-3. Wide (>64-bit) operations still leave the JIT for the generic path in places
-   (`FX_GENSTATS=1` counts them); mixed.v has a 128-bit datapath.
-4. Nets with several drivers are resolved by a process in the settle; resolving inline at the
-   driver's store (as the reference does, see the known difference) would also save
-   activations.
-5. `Sim::advance_steps`: per time step bookkeeping (dirty list, postponed, NBA swap); profile
-   it with `perf annotate` before changing it.
-6. Real design (TetrIC run target): about 25-32 s wall with the machine loaded; compare builds
-   with `perf stat -e instructions` (231 G at 69f7fb4).
-7. Measuring: cycles move by up to ±4 % between builds whose instruction counts are identical
-   (code layout of `notify` / `advance_steps` after unrelated changes: cpuish 2.86 G at
-   7d1ee50, 2.96 G after the SystemVerilog work, both 7.964 G instructions). Compare
-   `-e instructions,cycles`, several runs each; a layout-only swing is not a regression, and
-   pinning the hot functions' alignment (or PGO) may recover it.
+Measuring: cycles move by up to ±4 % between builds whose instruction counts are identical
+(code layout of `notify` / `advance_steps` after unrelated changes: cpuish 2.86 G at 7d1ee50,
+2.96 G after the SystemVerilog work, both 7.964 G instructions). Compare
+`-e instructions,cycles`, several runs each; a layout-only swing is not a regression, and
+pinning the hot functions' alignment (or PGO) may recover it.
 
-## Status and next steps (2026-11-14, updated after the SystemVerilog work)
+### Debug front ends (M9, M10, M11)
 
-Icarus regression suite (ivtest, normal tests): main list 1345 of 1526 (88 %), SystemVerilog
-list 364 of 700. Real-design benchmark: output identical to Icarus byte for byte (run, fwd,
-sound), 10-13x faster. Interactive mode, MCP server, `--vcd/--trace`, the CDSP
-debug server with value history and the Surfer pairing (`--cdsp`, `--surfer`, `-i` next to
-the viewer) work.
+**CDSP** (spec https://cxxrtl.org/protocol.html, v0.14.0, protocol version 0, still
+changing). NUL-terminated UTF-8 JSON over TCP or a Unix socket. Commands: `list_scopes`,
+`list_items` (direct children; ids are space-separated hierarchical names, root `""`),
+`reference_items`, `query_interval` (samples and diagnostics for an inclusive interval,
+optionally collapsed), `get_simulation_status`, `run_simulation` (`until_time`,
+`until_diagnostics`), `pause_simulation`; events `simulation_paused`, `simulation_finished`.
+Times are `"<s>.<fs>"` (ticks × 10^(15 + precision) fs); values per item are little-endian
+u32 words in base64; no value setting in the spec yet.
 
-Next, roughly in order (see "Architecture changes ahead" below for why this order):
-1. **SystemVerilog RTL items that fit the current design**: struct-typed function arguments
-   with patterns, nested module declarations, `export` in packages. (Done: arrays of
-   interfaces and interface port arrays, forward typedefs, the `assign z = a;` alias, file-scope and package variables, `timeunit`,
-   array typedefs, `unique`/`priority` case warnings for unmatched values,
-   `$countones`/`$onehot`/`$onehot0`, the time-0 run of `always_comb`/`always_latch` after
-   all other processes have started (IEEE 1800 9.2.2.2.2), `break;`/`continue;`, prefix
-   `++a;`/`--a;`, `inside` and `case ... inside`, `foreach` (not over hierarchical names),
-   enum methods without parentheses, several variables and steps in a `for` header,
-   `unique if`/`priority if` warnings.) Not checked: overlapping items of a `unique`
-   case/if (the reference does not report them either). Found: the reference sizes a
-   genvar in a port expression differently (`8'd10 + g` to an 8-bit port: "given 5 bits,
-   padding" there, "given 32, pruning" here). Known difference left (order IEEE leaves open): on a
-   change, a ranked combinational process (`always_comb`, `always @*`) runs before the other
-   waiters of the signal; the reference wakes it among them (newest waiter first).
-2. **Restructuring** (R0-R6 below), then **types in elaboration** (A1, = R4): first part done (package scopes, `parameter type`);
-   next a type per signal in the compiler, then struct layout and members out of the parser.
-3. **Heap objects** (A2): `string` done (first version); queues, dynamic and associative
-   arrays next.
-4. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
-   loop. Then classes and `program`; VPI (A4) on the same base.
-5. **Remaining ivtest failures** (`tests/ivtest.py ... --show 40` groups them): compiler
-   warnings Icarus prints (port coercion to inout, constant out-of-range selects, `@*` without
-   sensitivities), `%v` strength display (needs strength values on nets), `$countdrivers`,
-   `$fread`, `%u`/`%z` in `$scanf`, event-controlled nonblocking assignments updating at the
-   trigger (ICARUS_NOTES 3), specify paths on inout ports and conditional paths, force on array
-   elements, generate blocks referenced before their definition.
-6. **Debug server follow-ups** (M9/M10): try `--surfer` with Surfer itself; MCP over HTTP
-   (attach to a running simulation) and MCP history queries on the CDSP value history; arrays
-   in CDSP (per-element items for small memories), `$display` as diagnostics, source
-   locations (`goto_declaration`).
-7. **Performance** (in parallel with the above): wide (>64-bit) ops in the JIT, a timing
-   wheel; multi-threading (M8) last (A5).
-8. **Outputs**: FST, VCD of arrays, `$dumpvars` scope/level arguments (done: reals and
-   events in the VCD, `$dumpoff`/`$dumpon`/`$dumpall` blocks, `$dumpflush`). The VCD is not
-   byte-identical to the reference's: it orders variables by kind (events, nets, regs,
-   integers, reals), gives a port and the net it is connected to separate codes and names
-   nets `wire` (here: one code, and an output port collapsed onto a variable is `reg`).
+Implementation (`cdsp.rs`): listener thread, one reader thread per connection; the simulation
+thread owns `Sim` and runs `advance_steps` chunks of 10-40 ms, checking the command channel
+between time steps, so the hot loop needs no locking. History (`rt/history.rs`): one
+sequential log (signal id + planes packed to the width, 6 bytes per 1-bit change) fed from the
+dirty list at the end of each time step (`Sim::history_start`; `track` replaces `dumping` as
+the dirty-list switch), budget `FX_HISTORY_MB`; per-signal indexes are built on demand.
+Samples are sent at the interval start and at each change of a referenced item. Reals are
+64-bit items (IEEE double bits). `base64(u32)` is two-state: x/z are sent as the value plane
+(x→1, z→0). Cost on `bench/cpuish.v` (all signals toggle): 0.64 s plain, 1.1-1.3 s with full
+history (290 MB); a query of 10 signals over the whole run (400k samples) about 0.85 s, the
+first one 0.45 s more (indexing).
 
-Known difference (found 2026-11-14): the reference propagates some net updates immediately,
-inside the writing process (`a = 1; $display(z)` shows the new value). Done: a plain `assign
-z = a;` (also `{a}`, a constant-index element, `#0`, `wire z = a;`, chains, `logic` variables)
-makes `z` a view of `a` (`alias_assigns`), unless `z` has other drivers, is a special net
-type, has a strength, a link or is forced. Not yet: nets with several drivers, `wand`/`tri1`
-and strength drivers (resolved immediately there, in the settle here), and `assign z = m[i]`
-with a run-time index. Not immediate there either: logic (`a & b`), part selects, widening.
-Interactive/MCP `force` of an aliased net forces its source.
+**Surfer as client** (its source, 2026-11-03 snapshot, `libsurfer/src/cxxrtl*`;
+`surfer cxxrtl+tcp://HOST:PORT`, TCP only in native builds). Its greeting check needs
+`commands`, `events`, `features` (contents ignored). `list_scopes {scope: null}` expects *all*
+scopes in one flat map; `list_items` (with `null` and per scope) reads only `width`; every item
+is taken as a node, so a memory item would make its whole reference fail. `reference_items
+"ALL_VARIABLES"` is re-sent whenever a signal is added; `query_interval` always asks for
+`[0, latest_time]`, `collapse: true`, no diagnostics, after every status change (no
+incremental fetch; it looks up the latest sample <= t). Play = `run_simulation until_time =
+latest + 100 ns` (hard-coded); `pause_simulation` expects `{time}`; no polling while running.
+Responses carry no ids and are paired FIFO (an error pops one too): answer strictly in order.
+Values are decoded as unsigned integers: x/z are lost.
 
-Also found 2026-11-14: the reference starts time-0 processes by scope (instances before the
-instantiating module's own blocks; done, `start_order`), which the real design's first two
-output lines depend on. Not yet: `~` / `buf` of an undriven input stays z there (ICARUS_NOTES
-8); a second `$dumpvars` prints "ignoring signals in previously scanned scope"; nested module
-declarations.
+**WCP** (Surfer's Waveform Control Protocol, `surfer-wcp`, unfinished, NUL-terminated JSON):
+`add_items`, `set_cursor`, `set_viewport_to/range`, `add_markers`, `load`, `reload`, `clear`,
+`zoom_to_fit`, `set_item_color`, `get_item_list/info`, `remove_items`, `focus_item`; events
+`waveforms_loaded` and, if listed in the tool's greeting, `goto_declaration`, `add_drivers`,
+`add_loads`. `surfer --wcp-initiate PORT` connects to a listening tool (127.0.0.1). `load`
+accepts only files and URLs, and `waveforms_loaded` is only sent for file sources.
 
-Known limitations: recursion copies frames (fine for testbench code, slow for deep recursion);
-multi-dimensional arrays as ports or whole-array assignments are not supported.
+**Pairing (`--surfer`).** ferrooxide opens a CDSP and a WCP listener and starts
+`surfer cxxrtl+tcp://127.0.0.1:<cdsp> --wcp-initiate <wcp>`; after the WCP greeting it sends
+`add_items` (dotted names), retried every 250 ms while Surfer answers "No waveform loaded";
+`$finish` gets a marker (WCP times are fs for a CXXRTL source); ferrooxide exits with Surfer.
+Without `-i` it runs at once and pauses after 2 s of wall time if not ended (Surfer queries
+only at status changes); without `--trace` the top modules' signals are shown (`--trace-all`:
+all, at most 2000); the first values after time 0 get one `zoom_to_fit`. Console (`-i`):
+cursor follows run/step/breakpoints, `restart` reloads the design (sources and data files as
+they are now) and starts at time 0 on the same connections (viewer gets `simulation_paused` at
+0; a running VCD trace is written anew), `quit` closes the viewer; line editing and history
+(`~/.ferrooxide_history`, rustyline). Checked with Surfer 0.7.0 (2026-11-14, logging proxy on
+both connections): greeting, scopes, items, `reference_items`, `query_interval` and
+`add_items` work.
 
-## Restructuring for maintainability (review 2026-11-15)
+Surfer 0.7.0 (11bb2e3) shows no live waves because of two bugs in its CXXRTL path (fixed
+locally in `/projects/surfer`, to report upstream): (1) `WaveData::cached_time_range` is
+computed at load (latest time 0 → 1 fs) and never refreshed for a live source: refresh it on
+`Message::InvalidateDrawCommands`; (2) `variable_draw_commands` skips every variable whose
+`signal_id` fails, and `WaveContainer::signal_id` is not implemented for CXXRTL: skip the check
+for CXXRTL. With both fixes the waves show. Its value cache never forgets samples, so after a
+`restart` it can show the previous run's samples (feature request: clear the cache when the
+latest time goes backwards).
+
+**MCP** (`--mcp`, JSON-RPC 2.0 over stdio; https://modelcontextprotocol.io). Lets an agent
+load, run, inspect, force and lint a design instead of reading logs and huge VCDs. It shares
+the core with CDSP and `-i`: `Sim::start/advance/finish`, signals read, deposited, forced and
+released by name, the hierarchy model, the change-log history. Tool set of the first cut:
+`load_design {files, defines, include_dirs, top, plusargs, dialect}` (structured errors with
+file:line), `lint`, `run {until_time | for_time | until_condition, max_steps}` (stop reason,
+time, `$display` output truncated with a count), `list_scopes`/`list_signals {scope,
+pattern}`, `get_values {signals, radix}` (x/z as in `$display`), `get_history {signals, from,
+to, max_changes}`, `set_value`/`force`/`release`, `add_breakpoint {condition}`/`list`/
+`remove_breakpoint`, `dump_vcd {file, scopes, from, to}`, `reset`/`restart`, `status`.
+Resources: source files, elaborated hierarchy, simulation log. Rules: every result small and
+bounded (truncation with counts, pattern filters), structured errors with locations,
+deterministic, long runs cancellable, a memory budget for history.
+
+## Testing
+- `tests/verilog/*.v`: self-contained testbenches; `tests/difftest.sh` runs each through
+  `iverilog`+`vvp` and `ferrooxide` and diffs stdout. `cargo test` runs the same comparison
+  (skipped if iverilog is absent).
+- `tests/suite/<area>/*.v` (`tests/suite.sh`, also in `cargo test`): our own suite, no other
+  simulator needed, every test in all three modes. Self-checking (print `PASSED`, never a line
+  starting `FAILED`) or compared with a checked-in `<name>.expected` (`// expected`; `--bless`
+  writes it: review it). Expected behaviour comes from IEEE 1364/1800 (cite the section);
+  where the reference agrees, that checks the test itself. Order IEEE leaves open (wakes of
+  one change, races) belongs in `tests/verilog`. Areas: `sched`, `sv`, `expr`, `nets`,
+  `systasks`, `hier`, `subr`, `real`, `vcd` (reads its own dump back), `prims`, `arrays`,
+  `directives`, `events`. Next areas: `$sformatf` corner cases, `` `timescale `` inheritance
+  across files, `disable` corner cases; ideas from the regression suite's coverage, tests
+  written fresh.
+- Pitfalls: fork branches start last to first (here and in the reference), so a trigger in one
+  branch for a waiter in another needs a `#0`. A task argument is context-determined by the
+  task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
+  self-determined expressions in `{...}` and route signed values through `integer`.
+- Parser snapshots: `front/tests/parse.rs`, `tests/parse/*.sv` → checked-in `.ast`
+  (`--dump-ast`, `front/src/dump.rs`).
+- Regression suite: `tests/ivtest.py` (`--show 40` groups failures), per-test comparison
+  against the baseline with `tests/regress.sh`. Also chipsalliance *sv-tests* for parser
+  coverage.
+- `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both
+  simulators.
+
+## Next steps (in priority order)
+
+1. **Restructuring** (R1-R6 below, R0 done). The new front end is being written now.
+2. **Types in elaboration** (rest of A1, = R4): a type per signal in the compiler (string,
+   queue, ...) and expression typing that uses it; then struct layout and member access move
+   out of the parser.
+3. **SystemVerilog RTL items**: struct-typed function arguments with patterns, nested module
+   declarations (`sv_timeunit_prec3b`), `export` in packages.
+4. **Heap objects** (A2): queues, dynamic and associative arrays (mutable objects: handles to
+   a separate heap with copy on assignment).
+5. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
+   loop. Then classes and `program`; VPI (A4) on the same base. (First SV measurement, as a
+   size hint: queues/dynamic arrays ~76 failing tests, `program` 49, classes 19.)
+6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them): the
+   Verilog items under "Unsupported (known)", from compiler warnings and `%v` (needs strength
+   values on nets) to force on array elements.
+7. **Debug front ends**: report the Surfer bugs upstream; MCP over streamable HTTP (attach to
+   a running simulation), MCP history queries on the CDSP value history, MCP resources; CDSP
+   arrays (per-element items for small memories; memories with `depth`/`zero_at`), port
+   directions (`input`/`output` are false; needs direction in `SignalInfo`), `src` from
+   declaration locations, diagnostics (`$display`/`$write` → `print`, `$finish`/`$stop` →
+   `break`, assertions → `assert`; kept in the history, `until_diagnostics`); WCP pushes:
+   `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
+   `$display`/assertions as markers, `goto_declaration` from declaration locations,
+   `add_drivers`/`add_loads` from the elaborated netlist. Interactive mode: watch, conditional
+   breakpoints, waveform history, scopes.
+8. **Performance** (in parallel, when speed matters again):
+   - `notify` (largest item): per change it follows `parent` (array elements), checks the
+     dirty list, sets one comb bit per combinational reader with a `comb_wake` call each, then
+     scans the event fan-out (edge check from the value's LSB) and sorts `wake_buf` when more
+     than one waiter wakes. Ideas: per-signal flags precomputed at build time (no event
+     fan-out / only combinational readers / no parent) so the common case is one bit loop;
+     set comb bits of small fan-outs directly in JIT code; skip the sort when waiters are
+     already in `wseq` order.
+   - Timing wheel for `Sim::future`, and reuse the `Vec<Fut>` of a finished time slot instead
+     of allocating one per slot (`BTreeMap::entry().or_default()`).
+   - Wide (>64-bit) ops that still leave the JIT (`FX_GENSTATS=1` counts them).
+   - Nets with several drivers resolved inline at the driver's store (as the reference does)
+     instead of by a process in the settle; saves activations.
+   - `advance_steps` per-step bookkeeping (dirty list, postponed, NBA swap): `perf annotate`
+     before changing it.
+   - Ports connected to part selects as aliases, fusing sibling processes with the same
+     inputs, signal values cached in registers within an activation, an optional 2-state
+     shadow for signals proven never to hold X.
+   - Multi-threading (M8, A5) last.
+9. **Outputs**: FST, VCD of arrays, `$dumpvars` scope/level arguments, `$dumplimit`,
+   `$dumpports`.
+10. **Verilog-2005 rest**: VPI/PLI, configurations and libraries (`config`, `-y`/`-v`,
+    `` `uselib ``), timing checks, SDF back-annotation, see Unsupported.
+
+### Restructuring for maintainability (review 2026-11-15)
 
 Adding SystemVerilog has become slow because of how the front end is built:
 - the parser does semantics: `svtypes.rs` resolves types, struct layouts, patterns, enum
   methods and array queries while parsing, so `Parser` keeps a symbol table (24 fields:
-  `vars`, `types`, `packages`, `unit_*`, `decl_type`, `last_type`, `ret_type`, ...); whole-scope
-  knowledge needs workarounds (`early_typedefs`, `$root.` stripped from the tokens,
-  `scoped_copy`/`package_items` copying package items into every module);
+  `vars`, `types`, `packages`, `unit_*`, `decl_type`, `last_type`, `ret_type`, ...);
+  whole-scope knowledge needs workarounds (`early_typedefs`, `$root.` stripped from the
+  tokens, `scoped_copy`/`package_items` copying package items into every module);
 - `parse_files` moves ~15 parser fields from file to file by hand;
 - the AST has Verilog-2005 shapes only: SV is encoded as pseudo calls (`$__cast`,
   `$__pattern`, `$__str`, `$__named`, `$__tostring`, ...), `Expr::Hier` means a hierarchical
   name, a struct member, a method call or `.triggered`; types exist three times (`PType`,
   `SvType`, the flags on `Decl`/`ParamDecl`);
 - keywords are strings (`Tok::Ident("module")`, `KEYWORDS`/`SV_ONLY`/`SV_RESERVED`);
-- no parser tests: a parser bug shows up as a wrong simulation result;
 - `compile/lib.rs` is 3500 lines, `Compiler` ~70 fields across elaboration, nets, codegen,
   strings and lint; an expression's type comes from `ty`, `is_real`, `is_string`, `lvalue_ty`;
   `Expr` has no position (errors use `self.line`).
 
 Steps (each ends with all tests in all three modes and unchanged regression counts):
-- **R0. Safety net.** `--dump-ast` (readable AST printer) and parser snapshot tests in
-  `ferrooxide-front` (`tests/parse/*.sv` -> checked-in `.ast`). *Done 2026-11-15*
-  (`front/src/dump.rs`, `front/tests/parse.rs`; per-test regression baseline in
-  `target/regress-baseline/{main,sv}.res`).
-- **R1/R2. A new, complete front end beside the old one** (plan 2026-11-15, replaces "convert
-  the tokens" and "change the AST in place"). Goal: the parser accepts all of IEEE 1800-2017
-  (Annex A) even where elaboration has nothing behind it yet; unsupported constructs fail in
-  the lowering with "X is not supported" at their line, never silently.
+- **R0. Safety net.** *Done 2026-11-15*: `--dump-ast` and parser snapshot tests (see Testing),
+  per-test regression baseline.
+- **R1/R2. A new, complete front end beside the old one** (plan 2026-11-15). Goal: the parser
+  accepts all of IEEE 1800-2017 (Annex A) even where elaboration has nothing behind it yet;
+  unsupported constructs fail in the lowering with "X is not supported" at their line, never
+  silently.
   - *F1. Tokens* (`front/src/syntax/{kw,token,lexer}.rs`): a `Kw` enum for every 1364-2005 and
     1800-2017 keyword, line and column per token, the SV operators the old lexer splits (`##`,
     `|->`, `|=>`, `<->`, `->>`, `:=`, `:/`, `@@`, `&&&`, `#-#`, `#=#`, `'{`, ...). Keywords
@@ -518,7 +416,7 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
     (`~/projects/sv-tests`, 1028; those marked to fail in parsing must fail), every regression
     suite source, `tests/`, and the local real designs; per-file results against a stored
     baseline, as for the regression suite.
-  - *F4. Lowering* (`front/src/lower/`): syntax tree -> today's AST, so the compiler does not
+  - *F4. Lowering* (`front/src/lower/`): syntax tree → today's AST, so the compiler does not
     change. It holds what `parser.rs`/`svtypes.rs` do besides parsing (type and variable
     tables, struct member chains, patterns, enum constants and methods, array queries,
     packages and `$unit`, time literals, foreach/case-inside/unique/iff/`++` expansions,
@@ -528,8 +426,9 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
     `cargo test` passes in all modes and `tests/regress.sh` shows no test worse, the new front
     end becomes the default; then `parser.rs` and the parsing half of `svtypes.rs` are deleted
     (type math moves to `lower/types.rs`), `FX_FRONT` goes.
-  - *F6.* CLAUDE.md rules: the parser resolves nothing but type names; new syntax gets a tree
-    node and a parser snapshot; the lowering reports what it cannot do.
+  - *F6.* CLAUDE.md rules: the parser resolves no names other than type names; new syntax gets
+    a tree node and a parser snapshot, never a `$__` pseudo call; the lowering reports what it
+    cannot do.
 - **R3. Compilation units.** (F4 replaces the field shuffle in `parse_files`.) Package items
   are no longer copied into modules (package scopes resolve them).
 - **R4. Types in the compiler** (rest of A1): a `Type` per signal, one
@@ -541,67 +440,30 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   codegen; `Compiler` fields grouped into sub-structs. Move first, regroup after.
 - **R6. Spans** (file, line, column) on `Expr`/`Stmt` instead of `self.line`.
 
-Rules once R2 is done: the parser resolves no names other than type names; new SV syntax gets
-an AST node, never a `$__` pseudo call.
-
-## Architecture changes ahead (review 2026-11-14)
-
-What we know now that we did not at the start: RTL, performance and the debug front ends fit
-the current design; SystemVerilog testbench features and VPI do not. The design was built
-around two simplifications: types are resolved in the parser, and everything (processes,
-storage, fan-out) is static.
+### Architecture changes ahead (review 2026-11-14)
 
 **Fits as is.** Wide JIT ops, timing wheel (`future` is a `BTreeMap` behind a few calls),
-part-select port aliases, `assign z = a` aliasing (one more port-alias case), strength values
-(per-bit strength data next to the value, only on nets with resolve processes / tran
-islands; the value encoding stays), FST, `$dumpvars` arguments, CDSP/MCP history and
-breakpoints between time steps, the remaining Verilog-2005 gaps.
+part-select port aliases, strength values (per-bit strength data next to the value, only on
+nets with resolve processes / tran islands; the value encoding stays), FST, `$dumpvars`
+arguments, CDSP/MCP history and breakpoints between time steps, the remaining Verilog-2005
+gaps.
 
-**A1. Types in elaboration.** `svtypes.rs` lowers every type to a flat vector in the parser,
-and the compiler knows an expression only as (slot, width, signed) plus `is_real`. That cannot
-express `parameter type T` (known per instance), unpacked structs (or structs with reals /
-strings), `string`, queues, dynamic/associative arrays or class handles, which all have their
-own operator rules. Change: the parser keeps only *which* names are types (needed to parse
-`T x;`); a `Type` enum in the compiler (vector, real, string, queue(T), darray(T), assoc(K,T),
-class(id), unpacked struct, ...) carries the meaning; packed types are still lowered to flat
-vectors at the end, so runtime and JIT are unchanged for RTL. Prerequisite for most of the
-remaining SystemVerilog. Good moment to split elaboration (types, nets/drivers, hierarchy) out
-of `compile/lib.rs`.
-
-*A1 status (2026-11-14).* First part done:
-- packages and `$unit` are scopes of their own, elaborated once (`Module::package`, the
-  package's module from the parser; `Scope::imports` for lookups after a module's own names).
-  Their variables are shared, their functions and tasks run in their scope (its names and time
-  unit); a module's copy of a package parameter is `localparam X = P.X`, and constants in
-  types declared there refer to that scope (`svtypes::qualify_type`, `scoped_copy`);
-- type values in the compiler: `Sym::Type` / `PVal::Type` hold an `SvType` with its
-  dimensions evaluated (`resolve_type`), `Expr::Type` carries a type in a parameter list.
-  `parameter type` works for declarations, ports, `$bits` and casts, per instance.
-Left: struct layout and member access are still resolved in the parser (`struct_access`),
-so variables of a type parameter have no members and unpacked structs are not possible; the
-compiler still types expressions as (width, signed, real). For A2 the next piece is a type per
-signal in the compiler (string, queue, ...) and expression typing that uses it; then member
-access moves to the compiler with the layout.
+**A1. Types in elaboration** (= R4; first part done, see SystemVerilog status). The compiler
+knows an expression only as (slot, width, signed) plus `is_real`/`is_string`, which cannot
+express unpacked structs (or structs with reals / strings), queues, dynamic/associative arrays
+or class handles, all with their own operator rules. A `Type` enum in the compiler (vector,
+real, string, queue(T), darray(T), assoc(K,T), class(id), unpacked struct, ...) carries the
+meaning. Prerequisite for most of the remaining SystemVerilog.
 
 **A2. Heap objects.** Strings, queues, dynamic and associative arrays live in a heap of
 objects, referred to by handles stored in the flat memory (one value word; a null handle is
-0). Ops on them are generic-path instructions at first. No dynamic processes needed, so this
-can come right after A1.
-
-*A2 status (2026-11-14).* Strings done the simple way: a string value is the 64-bit handle of
-an interned text (`Program::strings` from the compiler, the table in `Sim`), so equal texts
-have equal handles and stores, change events and `==` need nothing new; the rest are
-`Instr::Str` operations on the generic path (`compile/src/strings.rs`, `Sim::exec_str`). The
-compiler knows a string signal by `SignalInfo::string` and types expressions with
-`is_string` next to `is_real` (`strings::VTy` for assignment targets). Interning never frees
-a text (listed under Unsupported). Queues and dynamic arrays need mutable objects: handles to
-a separate heap with copy on assignment.
+0). Ops on them are generic-path instructions at first. No dynamic processes needed.
 
 **A3. Dynamic processes, calls and waiters.** Today a process is a fixed `ProcDef` with one
-`ProcRt`, fork branches are fixed processes that get restarted (hence the open fork/join_none
-in a loop), automatic storage is per call site, functions are inlined (recursion copies
-frames), and fan-out is a fixed range of `(proc, ctl)` entries. Classes, fork in a loop, VPI
-callbacks and MCP conditional breakpoints all need the same three things:
+`ProcRt`, fork branches are fixed processes that get restarted (hence fork/join_none in a
+loop), automatic storage is per call site, functions are inlined (recursion copies frames),
+and fan-out is a fixed range of `(proc, ctl)` entries. Classes, fork in a loop, VPI callbacks
+and MCP conditional breakpoints all need:
 - process instances created at run time from a `ProcDef` template, with their own frame for
   automatic storage. The JIT already gets slots/signals/controls through a per-process table
   (`ProcFn(sim, mem, pc, table, hot)`), so an instance is a new table, no recompilation;
@@ -618,11 +480,43 @@ the scheduler (ReadWriteSynch / ReadOnlySynch) and an `AfterDelay` entry in the 
 **A5. Multi-threading costs more than M8 suggests.** Absolute shared scratch slots, one NBA
 queue in `Hot`, one wake buffer, and exact event order to match. Needs per-thread scratch (a
 base pointer in the JIT ABI), per-thread NBA queues merged in a fixed order, parallel work
-only for processes without system tasks. Pays off only on large designs: last of the
-performance items.
+only for processes without system tasks. Pays off only on large designs.
+
+**CDSP later.** Phase 2 history (CXXRTL's approach): periodic checkpoints of the whole state
+(`mem`, process states, queues, NBA buffer, RNG; file handles muted) and deterministic
+re-simulation from the nearest checkpoint. Setting values (when the spec adds it: force-like
+writes through the force mask), breakpoints on signal conditions, scope/item attributes
+(`(* ... *)` are dropped by the lexer today), a VCD/FST import mode as a read-only server.
+Upstream proposals: a four-state value encoding (value + unknown planes, e.g. a
+`base64(u32,4state)` feature) in CDSP and in Surfer's decoder; incremental `query_interval`;
+a configurable run step instead of the fixed 100 ns.
+
+**Open questions.** How large a CDSP history is useful by default (it is re-sent at every
+pause), and whether to expose x/z before the spec defines it. MCP: one server per design or
+several sessions; breakpoint conditions likely compiled by the normal expression compiler to a
+small process that wakes on the signals; how to present large memories.
 
 **Watch.** Elaboration and codegen run per instance (only the JIT shares code between
 instances); measure compile time and memory on a large netlist before assuming it scales.
+
+## Differences from the reference
+
+Orders IEEE leaves open and other deliberate or known differences (Icarus deviations from the
+standard that we match are in `ICARUS_NOTES.md`):
+- On a change, a ranked combinational process (`always_comb`, `always @*`) runs before the
+  other waiters of the signal; the reference wakes it among them (newest waiter first).
+- The reference propagates some net updates immediately, inside the writing process
+  (`a = 1; $display(z)` shows the new value). Here only for `assign z = a`-style aliases (see
+  Verilog notes); nets with several drivers, `wand`/`tri1`, strength drivers and
+  `assign z = m[i]` with a run-time index update in the combinational settle (immediately
+  there). Not immediate there either: logic (`a & b`), part selects, widening.
+- A genvar in a port expression is sized differently (`8'd10 + g` to an 8-bit port: "given 5
+  bits, padding" there, "given 32, pruning" here).
+- The VCD is not byte-identical: the reference orders variables by kind (events, nets, regs,
+  integers, reals), gives a port and the net it is connected to separate codes and names nets
+  `wire`; here one code, and an output port collapsed onto a variable is `reg`.
+- Beyond the reference: named and `default:` assignment patterns. Like the reference,
+  overlapping `unique` case/if items are not reported.
 
 ## Unsupported (known)
 
@@ -636,7 +530,7 @@ SystemVerilog data types and testbench features:
 - size casts with a parameter or expression as the size (`W'(e)`, `(W+1)'(e)`): only
   literal sizes and type names parse.
 - struct members of variables whose type is a type parameter; unpacked structs (struct
-  layout is still resolved in the parser, A1).
+  layout is still resolved in the parser, A1); struct-typed function arguments with patterns.
 - nested module declarations [sv_timeunit_prec3b]; multi-dimensional interface port
   arrays; modport directions are not enforced (writing an input of a modport, members not
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
@@ -657,50 +551,20 @@ SystemVerilog data types and testbench features:
 
 Verilog / scheduling:
 - nets with several drivers, `wand`/`tri1`, strength drivers and `assign z = m[i]` update in
-  the combinational settle, the reference updates them immediately (see the known difference).
+  the combinational settle, the reference updates them immediately (see Differences).
 - `~`/`buf` of a never-driven input gives x, the reference z (ICARUS_NOTES 8) [sv_unit1c].
-- strength values on nets (`%v`), `$countdrivers`, `$fread`, `%u`/`%z` in `$scanf`,
-  event-controlled NBAs updating at the trigger (ICARUS_NOTES 3), specify paths on inout
-  ports and conditional paths, force on array elements.
+- strength values on nets (`%v`, strength reduction through switches, `trireg` charge),
+  `$countdrivers`, `$fread`, `%u`/`%z` in `$scanf`, event-controlled NBAs updating at the
+  trigger (ICARUS_NOTES 3), specify paths on inout ports and conditional paths, timing
+  checks, SDF, force on array elements, generate blocks referenced before their definition.
+- compiler warnings the reference prints: port coercion to inout, constant out-of-range
+  selects, `@*` without sensitivities.
+- `$dist_*` and `$q_*` system functions.
 - a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
-  `$dumpvars` scope/level arguments; FST; VCD of arrays.
+  `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
 - multi-dimensional arrays as ports, whole-array assignments; fork/join_none restarting a
-  running branch (A3); VPI (A4).
+  running branch (A3); VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
+  `` `uselib ``).
+- recursion copies frames (fine for testbench code, slow for deep recursion).
 - interactive/MCP `force` of a net made an alias of its source (`assign z = a`) forces the
   source.
-
-## SystemVerilog status (2026-11-14)
-
-Done (resolved in the parser, `crates/ferrooxide-front/src/svtypes.rs`): `typedef` (module and
-file scope), `enum` (constants as localparams of the base type), packed `struct`/`union`
-(struct-typed values are flat vectors; member/index/select chains become one `[off +: w]`
-select, also at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`,
-`$bits(T)`, assignment patterns (positional, and beyond the reference: named and `default:`),
-packages with `import p::*` / `import p::x` (module, header, file scope) and `pkg::name`.
-Package items are copied into each module that uses the package (the module's own names win).
-Lint reports names that are SystemVerilog keywords.
-
-Since then: interfaces and modports (interface ports alias the connected instance's scope),
-enum methods, array query functions, 2-state types (`bit`/`int`/...: start at 0, stores turn
-x/z into 0; `UnOp::To2`), `always_comb`/`always_latch` sensitivity through called functions,
-`` `__LINE__ `` in macros, `$isunknown`. SystemVerilog list now 251 of 700 (35.9%), main list
-unchanged at 1337 of 1526.
-
-Regression suite, SystemVerilog list (`--list regress-sv.list`), at the start: 229 of 700 pass (32.7%). The
-failures by construct (compile errors): `string` (~60), queues and dynamic arrays `[$]`/`[]`
-(~76), `program` blocks (49), file-scope variables (24), classes (19), unpacked dimensions in
-typedefs (16), `timeunit`/`timeprecision` (12), plus enum methods (`.name()`, `.next()`),
-`$left`/`$right`/`$size`/`$is_signed` and other query functions, `always_comb` rules (31 FAIL:
-no PASSED, e.g. always_comb checks).
-
-Since then (2026-11-14, second part): file-scope variables and package variables (one
-instance, shared), `P::x` / `P::f()` naming the package's own, `timeunit` / `timeprecision`
-(module and file scope), time literals, typedefs with unpacked dimensions (the type's
-dimensions first, ICARUS_NOTES 9), `parameter type`, constants of package / `$unit` types
-evaluated in their scope, `input var` / `input logic` port kinds, `-u` (separate
-compilation units), `string` (first version, see A2 status and Unsupported).
-SystemVerilog list 324 of 700 (46.3 %, from 251), main list 1341 of 1526 (from 1337).
-
-Next, for real RTL: struct-typed function arguments with patterns, nested module
-declarations (`sv_timeunit_prec3b`), `export` in packages; then testbench features: `string`, queues/dynamic
-arrays, `program`, classes (large).
