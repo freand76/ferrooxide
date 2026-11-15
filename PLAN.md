@@ -461,6 +461,16 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   patterns resolved in elaboration (type-parameter structs, unpacked structs); packed types
   still flattened at the end (runtime/JIT unchanged); the compiler reads the syntax tree's
   types, and the lowering shrinks piece by piece until the old AST is gone.
+  Slices (each ends with all tests in all three modes and unchanged regression counts):
+  1. A `Type` per signal (vector, real, string, packed struct), filled from today's
+     declarations, and one `type_of(expr)` replacing `ty`/`is_real`/`is_string`/`lvalue_ty`;
+     no behaviour change. `elab_items` (`elab/items.rs`) split per item kind where it is
+     touched.
+  2. Struct member access and assignment patterns resolved in elaboration from the `Type`;
+     the lowering's `struct_access` and pattern code go; members of variables of a type
+     parameter work.
+  3. Unpacked structs (and structs with reals or strings).
+  4. Then A2 (queues, dynamic and associative arrays) builds on the same `Type`.
 - **R5. Split the compiler**: `elab/{params,hier,decls,generate,nets,udp,specify}.rs` plus
   codegen; `Compiler` fields grouped into sub-structs. Move first, regroup after.
   *Done 2026-11-15*: `elab/{hier,params,decls,items,nets,udp,specify}.rs` and `codegen.rs`
@@ -468,7 +478,10 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   it per item kind can come with R4); `lib.rs` keeps the state, scopes, lookup and constant
   evaluation. Fields in `hier`, `diag`, `code`, `subr`, `nets`, `sigs`; `prog`, `scopes`,
   `file`, `line`, `gprec`, `dialect` stay at the top.
-- **R6. Spans** (file, line, column) on `Expr`/`Stmt` instead of `self.line`.
+- **R6. Spans** (file, line, column) on `Expr`/`Stmt` instead of `self.line`: part of R4,
+  not a step of its own. The syntax tree already has a `Loc` on every expression and
+  statement (a column is a small parser change, tokens carry positions); spans come with
+  the compiler reading the tree instead of the old AST, so the old AST gets none.
 
 ### Architecture changes ahead (review 2026-11-14)
 
