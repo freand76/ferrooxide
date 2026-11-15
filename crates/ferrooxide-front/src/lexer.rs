@@ -30,6 +30,10 @@ pub enum Tok {
 pub struct Token {
     pub tok: Tok,
     pub line: u32,
+    /// byte offsets of the token's start and end in the preprocessed text (adjacency of
+    /// punctuation for the SystemVerilog operators, columns)
+    pub pos: u32,
+    pub end: u32,
 }
 
 const PUNCTS: &[&str] = &[
@@ -93,18 +97,19 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
                 continue;
             }
         }
+        let start = i as u32;
         if c.is_ascii_alphabetic() || c == b'_' {
             let st = i;
             while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'_' || s[i] == b'$') {
                 i += 1;
             }
             let word = &text[st..i];
-            toks.push(Token { tok: Tok::Ident(word.to_string()), line });
+            toks.push(Token { tok: Tok::Ident(word.to_string()), line, pos: start, end: i as u32 });
             // a UDP table body does not tokenise like Verilog: keep it as raw text
             if word == "table" {
                 if let Some(end) = text[i..].find("endtable") {
                     let raw = &text[i..i + end];
-                    toks.push(Token { tok: Tok::Str(raw.to_string()), line });
+                    toks.push(Token { tok: Tok::Str(raw.to_string()), line, pos: i as u32, end: (i + end) as u32 });
                     line += raw.matches('\n').count() as u32;
                     i += end;
                 }
@@ -118,7 +123,7 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
             while i < s.len() && !s[i].is_ascii_whitespace() {
                 i += 1;
             }
-            toks.push(Token { tok: Tok::Ident(text[st..i].to_string()), line });
+            toks.push(Token { tok: Tok::Ident(text[st..i].to_string()), line, pos: start, end: i as u32 });
             continue;
         }
         if c == b'$' && i + 1 < s.len() && (s[i + 1].is_ascii_alphabetic() || s[i + 1] == b'_') {
@@ -127,7 +132,7 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
             while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'_' || s[i] == b'$') {
                 i += 1;
             }
-            toks.push(Token { tok: Tok::SysIdent(text[st..i].to_string()), line });
+            toks.push(Token { tok: Tok::SysIdent(text[st..i].to_string()), line, pos: start, end: i as u32 });
             continue;
         }
         if c == b'"' {
@@ -181,7 +186,7 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             i += 1;
-            toks.push(Token { tok: Tok::Str(v), line });
+            toks.push(Token { tok: Tok::Str(v), line, pos: start, end: i as u32 });
             continue;
         }
         if c.is_ascii_digit() || (c == b'\'' && i + 1 < s.len() && is_base_start(&s[i + 1..])) {
@@ -207,7 +212,7 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
                 }
             }
             i = ni;
-            toks.push(Token { tok, line });
+            toks.push(Token { tok, line, pos: start, end: i as u32 });
             continue;
         }
         // SV fill literals '0 '1 'x 'z
@@ -216,6 +221,8 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
             toks.push(Token {
                 tok: Tok::Num(Number { size: None, signed: false, base: 2, based: true, digits: d.to_string(), fill: true }),
                 line,
+                pos: start,
+                end: start + 2,
             });
             i += 2;
             continue;
@@ -223,7 +230,7 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
         let mut matched = false;
         for p in PUNCTS {
             if s[i..].starts_with(p.as_bytes()) {
-                toks.push(Token { tok: Tok::Punct(p), line });
+                toks.push(Token { tok: Tok::Punct(p), line, pos: start, end: start + p.len() as u32 });
                 i += p.len();
                 matched = true;
                 break;
@@ -233,11 +240,11 @@ pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
             return Err(err(format!("unexpected character '{}'", c as char), line));
         }
     }
-    toks.push(Token { tok: Tok::Eof, line });
+    toks.push(Token { tok: Tok::Eof, line, pos: s.len() as u32, end: s.len() as u32 });
     Ok(toks)
 }
 
-fn is_base_start(s: &[u8]) -> bool {
+pub(crate) fn is_base_start(s: &[u8]) -> bool {
     let mut k = 0;
     if k < s.len() && (s[k] == b's' || s[k] == b'S') {
         k += 1;

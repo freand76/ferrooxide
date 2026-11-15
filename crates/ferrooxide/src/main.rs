@@ -20,6 +20,8 @@ options:
   --stats           print timing and scheduler statistics to stderr
   --dump-code       print the compiled bytecode to stderr
   --dump-ast        print the parsed syntax tree to stdout and stop
+  --parse-only      parse with the new (complete) parser and stop; exit status 1 on errors
+  --dump-syntax     print the new parser's syntax tree (debug format) and stop
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
@@ -78,6 +80,8 @@ fn main() -> ExitCode {
     let mut quiet = false;
     let mut dump_code = false;
     let mut dump_ast = false;
+    let mut parse_only = false;
+    let mut dump_syntax = false;
     let mut jit = true;
     let mut fuse = true;
     let mut lint = false;
@@ -136,6 +140,8 @@ fn main() -> ExitCode {
             },
             "--dump-code" => dump_code = true,
             "--dump-ast" => dump_ast = true,
+            "--parse-only" => parse_only = true,
+            "--dump-syntax" => dump_syntax = true,
             "--no-jit" => jit = false,
             "--no-fuse" => fuse = false,
             "--lint" => lint = true,
@@ -183,6 +189,20 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    if parse_only || dump_syntax {
+        return match ferrooxide_front::syntax::parse_files(&files, &opts) {
+            Ok(units) => {
+                if dump_syntax {
+                    println!("{units:#?}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let t0 = Instant::now();
     let modules = match ferrooxide_front::parse_files(&files, &opts) {
         Ok(m) => m,

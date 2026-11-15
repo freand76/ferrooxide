@@ -49,3 +49,30 @@ fn parse_snapshots() {
 fn is_source(p: &Path) -> bool {
     matches!(p.extension().and_then(|e| e.to_str()), Some("v" | "sv"))
 }
+
+/// The new parser accepts every snapshot input and the parse-only files in `tests/syntax`.
+#[test]
+fn new_parser_accepts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files: Vec<PathBuf> = Vec::new();
+    for d in ["parse", "syntax"] {
+        for e in std::fs::read_dir(root.join(d)).unwrap() {
+            let p = e.unwrap().path();
+            if is_source(&p) {
+                files.push(p);
+            } else if p.is_dir() {
+                let mut v: Vec<PathBuf> = std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()).filter(|p| is_source(p)).collect();
+                v.sort();
+                if let Err(e) = ferrooxide_front::syntax::parse_files(&v, &ferrooxide_front::Options::default()) {
+                    panic!("{e}");
+                }
+            }
+        }
+    }
+    files.sort();
+    for f in &files {
+        if let Err(e) = ferrooxide_front::syntax::parse_files(std::slice::from_ref(f), &ferrooxide_front::Options::default()) {
+            panic!("{e}");
+        }
+    }
+}

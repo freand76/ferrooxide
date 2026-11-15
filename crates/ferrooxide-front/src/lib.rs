@@ -6,6 +6,7 @@ pub mod lexer;
 pub mod parser;
 pub mod preproc;
 pub mod svtypes;
+pub mod syntax;
 
 use std::collections::HashMap;
 use std::fmt;

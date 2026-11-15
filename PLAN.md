@@ -416,6 +416,12 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
     (`~/projects/sv-tests`, 1028; those marked to fail in parsing must fail), every regression
     suite source, `tests/`, and the local real designs; per-file results against a stored
     baseline, as for the regression suite.
+  - *F1-F3 status (2026-11-15)*: done, parse only (`--parse-only`, `--dump-syntax`). The
+    tokens come from the old lexer (identical numbers and strings), converted in
+    `syntax/token.rs`. Every file the old parser accepts parses; sv-tests 896 of 914 that
+    must parse (the rest are preprocessor gaps: `` `undefineall``, predefined `` `SV_COV_*``,
+    include names from macros; 13 directive tests that should fail do not); 92 need UVM.
+    Baseline in `target/parsecheck-baseline.res`.
   - *F4. Lowering* (`front/src/lower/`): syntax tree → today's AST, so the compiler does not
     change. It holds what `parser.rs`/`svtypes.rs` do besides parsing (type and variable
     tables, struct member chains, patterns, enum constants and methods, array queries,
