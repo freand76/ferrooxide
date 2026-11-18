@@ -228,6 +228,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             vec![*d, *s]
         }
         Instr::Clog2 { d, s, .. } | Instr::Ones { d, s, .. } => vec![*d, *s],
+        Instr::CountBits { d, s, ctl, .. } => [*d, *s].into_iter().chain(ctl.iter().copied()).collect(),
         Instr::IToR { d, s, .. } | Instr::RToI { d, s, .. } | Instr::RNeg { d, s } | Instr::RToTicks { d, s, .. } => {
             vec![*d, *s]
         }
@@ -685,6 +686,9 @@ pub enum Instr {
     /// number of 1 bits (x/z bits do not count): `$countones` (32 bits), `$onehot` (mode 1:
     /// exactly one), `$onehot0` (mode 2: at most one)
     Ones { d: u32, s: u32, w: u32, mode: u8 },
+    /// `$countbits`: the number of bits of `s` equal to one of the (1-bit, 4-state) control
+    /// values in `ctl` (32 bits)
+    CountBits { d: u32, s: u32, w: u32, ctl: Box<[u32]> },
     /// start the fork branches; join: 0 = join (all), 1 = join_any, 2 = join_none
     Fork { children: Box<[u32]>, join: u8 },
     /// disable the named blocks / tasks of `Program::disables[target]`

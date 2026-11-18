@@ -39,3 +39,7 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
 11. **Immediate `cover` statements do nothing.** `cover (i == 1) $display("covered");` never
    runs its statement and prints nothing, at compile time or at run time; 1800-2017 16.3 runs
    the pass statement when the expression is true. Test: `tests/verilog/sv_assertions.v`.
+12. **Array queries of a parameter ignore its declared range.** For `localparam [3:10] P = 0;`
+   `$left(P)` is 7 and `$increment(P)` 1 (as for `[7:0]`), and `$size(Q + 1'b1)` of an
+   expression is x; 1800-2017 20.7 gives the declared range (3, -1) and the expression's
+   width. ferrooxide follows the standard here. Test: `tests/suite/sv/array_query_param.v`.

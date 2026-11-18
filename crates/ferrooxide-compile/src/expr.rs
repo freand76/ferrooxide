@@ -1137,6 +1137,69 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Ones { d, s: v, w: vw, mode });
                 Ok(self.resize(d, ow, w, false))
             }
+            // array queries of what the front end could not answer (a parameter, an
+            // expression): one packed dimension, the parameter's declared range or [w-1:0]
+            "$left" | "$right" | "$low" | "$high" | "$size" | "$increment" | "$dimensions" | "$unpacked_dimensions" => {
+                let Some(a) = args.first() else { return self.err(format!("{name} needs an argument")) };
+                if let Some(d) = args.get(1) {
+                    if self.const_int(d, sid)? != 1 {
+                        return self.err(format!("{name}: the dimension is out of range"));
+                    }
+                }
+                // a queue or dynamic array: [0:size-1] at run time
+                if let Type::Dyn { .. } = self.type_of(a, sid)? {
+                    let size = match a {
+                        Expr::Ident(n) => Expr::Call(format!("{n}.size"), vec![]),
+                        Expr::Hier(p) => Expr::Call(format!("{}.size", p.join(".")), vec![]),
+                        _ => return self.err(format!("{name} of this array is not supported")),
+                    };
+                    let last = Expr::Binary(BinOp::Sub, Box::new(size.clone()), Box::new(Expr::Num(ferrooxide_front::ast::dec(1))));
+                    let zero = Expr::Num(ferrooxide_front::ast::dec(0));
+                    let e = match name {
+                        "$size" => size,
+                        "$left" | "$low" => zero,
+                        "$right" | "$high" => last,
+                        "$increment" => Expr::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(Expr::Num(ferrooxide_front::ast::dec(1)))),
+                        "$dimensions" | "$unpacked_dimensions" => {
+                            return self.err(format!("{name} of a queue or dynamic array is not supported"));
+                        }
+                        _ => unreachable!(),
+                    };
+                    return self.expr(&e, sid, w, s);
+                }
+                let range = match a {
+                    Expr::Ident(n) => self.param_range(n, sid),
+                    _ => None,
+                };
+                let (l, r) = match range {
+                    Some(lr) => lr,
+                    None => (self.type_of(a, sid)?.width() as i64 - 1, 0),
+                };
+                let v = match name {
+                    "$left" => l,
+                    "$right" => r,
+                    "$low" => l.min(r),
+                    "$high" => l.max(r),
+                    "$size" => (l - r).abs() + 1,
+                    "$increment" => if l >= r { 1 } else { -1 },
+                    "$dimensions" => 1,
+                    _ => 0,
+                };
+                Ok(self.const_slot(&Const::from_i64(v, w, s)))
+            }
+            "$countbits" => {
+                if args.len() < 2 {
+                    return self.err("$countbits needs an expression and at least one control bit");
+                }
+                let (v, vw, _) = self.self_expr(&args[0], sid)?;
+                let mut ctl = Vec::new();
+                for c in &args[1..] {
+                    ctl.push(self.self_expr(c, sid)?.0);
+                }
+                let d = self.tmp(32);
+                self.emit(Instr::CountBits { d, s: v, w: vw, ctl: ctl.into_boxed_slice() });
+                Ok(self.resize(d, 32, w, false))
+            }
             "$clog2" => {
                 let (v, vw, _) = self.self_expr(&args[0], sid)?;
                 let d = self.tmp(32);

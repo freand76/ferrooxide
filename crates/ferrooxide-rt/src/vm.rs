@@ -2213,6 +2213,7 @@ impl Sim {
                 }
                 Instr::Clog2 { d, s, w } => ops::clog2(m, *d as usize, *s as usize, *w),
                 Instr::Ones { d, s, w, mode } => ops::ones(m, *d as usize, *s as usize, *w, *mode),
+                Instr::CountBits { d, s, w, ctl } => ops::count_bits(m, *d as usize, *s as usize, *w, ctl),
                 Instr::IToR { .. }
                 | Instr::RToI { .. }
                 | Instr::RBin { .. }
@@ -3588,6 +3589,7 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
             }
             Instr::Clog2 { d, s, w } => ops::clog2(m, *d as usize, *s as usize, *w),
                 Instr::Ones { d, s, w, mode } => ops::ones(m, *d as usize, *s as usize, *w, *mode),
+                Instr::CountBits { d, s, w, ctl } => ops::count_bits(m, *d as usize, *s as usize, *w, ctl),
             Instr::IToR { .. }
             | Instr::RToI { .. }
             | Instr::RBin { .. }

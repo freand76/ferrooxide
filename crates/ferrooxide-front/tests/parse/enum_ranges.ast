@@ -1,0 +1,9 @@
+module m ();
+  // imports $unit
+  localparam signed [31:0] A = 2;
+  localparam signed [31:0] N0 = (A + 1);
+  localparam signed [31:0] N1 = (N0 + 1);
+  localparam signed [31:0] M4 = (N1 + 1);
+  localparam signed [31:0] M3 = (M4 + 1);
+  int(32) signed e;
+endmodule

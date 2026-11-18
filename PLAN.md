@@ -138,7 +138,9 @@ enclosing instance), the checks on `final` procedures (no NBAs, delays, event or
 controls, task calls), immediate `assert`/`assume` (default `$error`; `cover` does nothing,
 as in the reference), `$error`/`$warning`/`$info`/`$fatal` with file, line, time and scope,
 initial values of variables in functions and tasks (static: once; automatic: per call;
-constant calls start afresh), `module automatic`, `void'(f())`, `++`/`--` inside expressions (with short-circuit `&&`/`||`/`?:` when the
+constant calls start afresh), `module automatic`, `void'(f())`, `->`/`<->`, enum name ranges (`N[3]`, `M[5:3]`), `$countbits`, array
+queries of parameters, expressions and queues, `wire integer`/`wire time`, `++`/`--` inside
+expressions (with short-circuit `&&`/`||`/`?:` when the
 right side has side effects).
 
 *A1, first part (types in elaboration).* Packages and `$unit` are scopes of their own,
@@ -638,6 +640,8 @@ SystemVerilog data types and testbench features:
 - `.triggered` only on events declared in a module (not in tasks, functions or blocks).
 - `iff` only when every item of an event control has the same condition, and only in an
   event control before a statement (not in intra-assignment controls).
+- nets of 2-state types (`wire bit`, `wire int`; a reference extension, 6.7.1 allows only
+  4-state types) [implicit_cast4-13, br_gh337].
 - deferred (`assert #0`, `assert final`) and concurrent assertions, properties, sequences
   [sv_deferred_assert*]; a compound assignment or increment whose target index has an
   increment (`x[i++] += 2`) [pr3390385, pr3390385c, pr3462145].

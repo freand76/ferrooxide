@@ -29,7 +29,7 @@ pub(crate) fn assign_binop(op: t::AssignOp) -> Option<BinOp> {
 }
 
 /// Whether evaluating an expression assigns something (an increment in it).
-fn side_effects(e: &Expr) -> bool {
+pub(crate) fn side_effects(e: &Expr) -> bool {
     match e {
         Expr::IncDec { .. } => true,
         Expr::Index(a, b) | Expr::Binary(_, a, b) => side_effects(a) || side_effects(b),

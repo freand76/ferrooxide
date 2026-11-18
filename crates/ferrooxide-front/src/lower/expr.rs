@@ -115,7 +115,7 @@ const ENUM_METHODS: &[&str] = &["first", "last", "num", "next", "prev", "name"];
 const ARRAY_QUERIES: &[&str] = &["$left", "$right", "$low", "$high", "$size", "$increment", "$dimensions", "$unpacked_dimensions"];
 
 /// The value of a literal index (no x/z), possibly negated.
-fn lit_index(e: &Expr) -> Option<i64> {
+pub(crate) fn lit_index(e: &Expr) -> Option<i64> {
     match e {
         Expr::Num(n) if !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok(),
         Expr::Unary(UnOp::Neg, b) => match &**b {
@@ -152,10 +152,22 @@ impl Lower {
             t::ExprKind::SysCall { name, args, .. } => self.sys_call(name, args, loc)?,
             t::ExprKind::Unary(op, a) => Expr::Unary(unop(*op), Box::new(self.expr(a)?)),
             t::ExprKind::Binary(op, a, b) => {
-                let Some(op) = binop(*op) else { return self.unsupported(loc, "the `->` / `<->` operator") };
+                let Some(bop) = binop(*op) else {
+                    // `a -> b` is `!a || b`, `a <-> b` is `(a -> b) && (b -> a)` (IEEE 1800-2017
+                    // 11.4.7)
+                    let (a, b) = (self.expr(a)?, self.expr(b)?);
+                    let imp = |x: &Expr, y: &Expr| Expr::Binary(BinOp::LOr, Box::new(Expr::Unary(UnOp::LNot, Box::new(x.clone()))), Box::new(y.clone()));
+                    if *op == t::BinOp::LImpl {
+                        return Ok(imp(&a, &b));
+                    }
+                    if super::stmt::side_effects(&a) || super::stmt::side_effects(&b) {
+                        return self.unsupported(loc, "`<->` with an increment in an operand");
+                    }
+                    return Ok(Expr::Binary(BinOp::LAnd, Box::new(imp(&a, &b)), Box::new(imp(&b, &a))));
+                };
                 let a = self.expr(a)?;
                 let b = self.expr(b)?;
-                Expr::Binary(op, Box::new(a), Box::new(b))
+                Expr::Binary(bop, Box::new(a), Box::new(b))
             }
             t::ExprKind::Cond(c, a, b) => {
                 let c = self.expr(c)?;
@@ -372,7 +384,8 @@ impl Lower {
         }
         if ARRAY_QUERIES.contains(&name) && (1..=2).contains(&args.len()) {
             if let t::Arg::Pos(Some(t::Expr { kind: t::ExprKind::Ident(n), loc: nloc })) = &args[0] {
-                if self.vars.contains_key(n) {
+                // (a queue or dynamic array: its size is known at run time, in the compiler)
+                if self.vars.get(n).is_some_and(|v| v.0.heap.is_none()) {
                     let dim = match args.get(1) {
                         Some(t::Arg::Pos(Some(e))) => Some(e),
                         None => None,

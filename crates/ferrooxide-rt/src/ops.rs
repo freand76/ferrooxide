@@ -960,6 +960,30 @@ pub fn ones(m: &mut [u64], d: usize, s: usize, w: u32, mode: u8) {
     m[d + 1] = 0;
 }
 
+/// `$countbits(s, ctl...)`: bits of `s` whose value (0, 1, z, x) is one of the controls' bit 0.
+pub fn count_bits(m: &mut [u64], d: usize, s: usize, w: u32, ctl: &[u32]) {
+    let n = nw(w);
+    // the value/unknown plane pairs to count: (0,0)=0, (1,0)=1, (0,1)=z, (1,1)=x
+    let mut want = [false; 4];
+    for &c in ctl {
+        let c = c as usize;
+        want[((m[c] & 1) | (m[c + 1] & 1) << 1) as usize] = true;
+    }
+    let mut count = 0u64;
+    for i in 0..n {
+        let (a, b) = (m[s + i], m[s + n + i]);
+        let valid = if i + 1 == n && w % 64 != 0 { (1u64 << (w % 64)) - 1 } else { !0 };
+        let planes = [!a & !b, a & !b, !a & b, a & b];
+        for k in 0..4 {
+            if want[k] {
+                count += (planes[k] & valid).count_ones() as u64;
+            }
+        }
+    }
+    m[d] = count;
+    m[d + 1] = 0;
+}
+
 pub fn clog2(m: &mut [u64], d: usize, s: usize, w: u32) {
     if !is_known(m, s, w) {
         m[d] = 0xffff_ffff;

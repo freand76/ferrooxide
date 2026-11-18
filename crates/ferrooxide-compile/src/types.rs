@@ -304,7 +304,8 @@ impl<'a> Compiler<'a> {
                 }
                 "$rtoi" => v(32, true),
                 "$realtobits" | "$__ticks" | "$__strbits" => v(64, false),
-                "$countones" => v(32, false),
+                "$countones" | "$countbits" => v(32, false),
+                "$left" | "$right" | "$low" | "$high" | "$size" | "$increment" | "$dimensions" | "$unpacked_dimensions" => v(32, true),
                 "$onehot" | "$onehot0" | "$isunknown" => v(1, false),
                 _ => return self.err(format!("unsupported system function '{name}'")),
             },

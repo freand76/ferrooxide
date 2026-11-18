@@ -1,0 +1,6 @@
+module m ();
+  // imports $unit
+  reg a, b, c;
+  initial
+    c = (((!a) || b) || (((!a) || b) && ((!b) || a)));
+endmodule

@@ -375,20 +375,44 @@ impl Lower {
                 let (_, signed, range, _) = base.decl_parts();
                 let range = range.or_else(|| base.int_kind.then(|| base.dims[0].clone()));
                 for it in &et.items {
-                    if it.range.is_some() {
-                        return self.unsupported(it.loc, "an enum name range");
-                    }
-                    let name = self.name(&it.name, it.loc);
-                    let value = match &it.value {
-                        Some(e) => self.expr(e)?,
-                        None => match &prev {
-                            Some(p) => add(Expr::Ident(p.clone()), num(1)),
-                            None => num(0),
-                        },
+                    // `name[N]`: name0 .. name(N-1); `name[N:M]`: nameN .. nameM (6.19)
+                    let base_name = self.name(&it.name, it.loc);
+                    let item_names: Vec<String> = match &it.range {
+                        None => vec![base_name],
+                        Some((a, b)) => {
+                            let lit = |l: &mut Self, e: &t::Expr| -> Result<i64> {
+                                let x = l.expr(e)?;
+                                match super::expr::lit_index(&x) {
+                                    Some(v) if v >= 0 => Ok(v),
+                                    _ => l.err(e.loc, "an enum name range needs a non-negative integer literal"),
+                                }
+                            };
+                            let (lo, hi) = match b {
+                                None => {
+                                    let n = lit(self, a)?;
+                                    if n == 0 {
+                                        return self.err(it.loc, "an enum name range of size 0");
+                                    }
+                                    (0, n - 1)
+                                }
+                                Some(b) => (lit(self, a)?, lit(self, b)?),
+                            };
+                            let ks: Vec<i64> = if lo <= hi { (lo..=hi).collect() } else { (hi..=lo).rev().collect() };
+                            ks.iter().map(|k| format!("{base_name}{k}")).collect()
+                        }
                     };
-                    self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value, line: it.loc.line }));
-                    names.push(name.clone());
-                    prev = Some(name);
+                    for (k, name) in item_names.into_iter().enumerate() {
+                        let value = match (&it.value, k) {
+                            (Some(e), 0) => self.expr(e)?,
+                            _ => match &prev {
+                                Some(p) => add(Expr::Ident(p.clone()), num(1)),
+                                None => num(0),
+                            },
+                        };
+                        self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value, line: it.loc.line }));
+                        names.push(name.clone());
+                        prev = Some(name);
+                    }
                 }
                 let mut t = base;
                 t.enum_names = Some(Rc::new(names));
@@ -644,7 +668,22 @@ impl Lower {
                         kind = NetKind::Real;
                         real_net = true;
                     }
-                    _ => return self.unsupported(ty.loc, "a net of this data type"),
+                    // 4-state integer types (6.7.1): a vector net of their width
+                    t::TypeKind::Int(k @ (t::IntKw::Integer | t::IntKw::Time)) if ty.packed.is_empty() => {
+                        let integer = *k == t::IntKw::Integer;
+                        let w = if integer { 31 } else { 63 };
+                        let mut d = self.decl_head(dir, net, var, &t::DataType { kind: t::TypeKind::Implicit, signed: Some(ty.signed.unwrap_or(integer)), packed: vec![], loc: ty.loc }, None, None, loc)?;
+                        d.range = Some((Expr::Num(dec(w)), Expr::Num(dec(0))));
+                        d.strength = strength;
+                        d.delay = delay;
+                        let mut t = SvType::vector(NetKind::Wire, d.signed, vec![d.range.clone().unwrap()]);
+                        t.int_kind = true;
+                        let t = Rc::new(t);
+                        self.decl_type = Some(t.clone());
+                        d.ty = Some(t);
+                        return Ok(d);
+                    }
+                    _ => return self.unsupported(ty.loc, "a net of this data type (only 4-state types)"),
                 }
                 net_type(n)
             }
