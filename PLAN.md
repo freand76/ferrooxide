@@ -135,7 +135,10 @@ case and if warnings for unmatched values, `break;`/`continue;`, prefix `++a;`/`
 gates or nested declarations in them), nested module declarations (23.4: without ports
 instantiated once under their own name; names not found inside are looked up in the
 enclosing instance), the checks on `final` procedures (no NBAs, delays, event or wait
-controls, task calls).
+controls, task calls), immediate `assert`/`assume` (default `$error`; `cover` does nothing,
+as in the reference), `$error`/`$warning`/`$info`/`$fatal` with file, line, time and scope,
+`void'(f())`, `++`/`--` inside expressions (with short-circuit `&&`/`||`/`?:` when the
+right side has side effects).
 
 *A1, first part (types in elaboration).* Packages and `$unit` are scopes of their own,
 elaborated once (`Module::package`; `Scope::imports` for lookups after a module's own names).
@@ -634,6 +637,9 @@ SystemVerilog data types and testbench features:
 - `.triggered` only on events declared in a module (not in tasks, functions or blocks).
 - `iff` only when every item of an event control has the same condition, and only in an
   event control before a statement (not in intra-assignment controls).
+- deferred (`assert #0`, `assert final`) and concurrent assertions, properties, sequences
+  [sv_deferred_assert*]; a compound assignment or increment whose target index has an
+  increment (`x[i++] += 2`) [pr3390385, pr3390385c, pr3462145].
 - unsized constants inside concatenations (`{a - 1}`) are accepted; the standard forbids
   them and the reference reports an error.
 - `unique` case/if: overlapping items are not reported (only "no item matches", as the

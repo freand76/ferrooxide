@@ -28,6 +28,18 @@ pub(crate) fn assign_binop(op: t::AssignOp) -> Option<BinOp> {
     })
 }
 
+/// Whether evaluating an expression assigns something (an increment in it).
+fn side_effects(e: &Expr) -> bool {
+    match e {
+        Expr::IncDec { .. } => true,
+        Expr::Index(a, b) | Expr::Binary(_, a, b) => side_effects(a) || side_effects(b),
+        Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => side_effects(a) || side_effects(b) || side_effects(c),
+        Expr::Unary(_, a) | Expr::Member(a, _) => side_effects(a),
+        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter().any(side_effects),
+        _ => false,
+    }
+}
+
 fn block(stmts: Vec<Stmt>) -> Stmt {
     Stmt::Block { name: None, decls: vec![], stmts, fork: None }
 }
@@ -359,6 +371,12 @@ impl Lower {
                 let name = self.task_name(e, loc)?;
                 Ok(Stmt::TaskCall { name, args: vec![], line })
             }
+            t::ExprKind::Cast(t::CastTarget::Type(ty), x) if matches!(ty.kind, t::TypeKind::Void) => {
+                if !matches!(x.kind, t::ExprKind::Call { .. } | t::ExprKind::SysCall { .. } | t::ExprKind::Member(..)) {
+                    return self.err(loc, "a void cast needs a function call");
+                }
+                Ok(Stmt::Discard { e: self.expr(x)?, line })
+            }
             _ => self.unsupported(loc, "this expression as a statement"),
         }
     }
@@ -432,6 +450,9 @@ impl Lower {
         match &s.kind {
             t::StmtKind::Expr(t::Expr { kind: t::ExprKind::IncDec { inc, e, .. }, .. }) => {
                 let lhs = self.lvalue(e)?;
+                if side_effects(&lhs) {
+                    return self.unsupported(s.loc, "an increment of a target with side effects");
+                }
                 let op = if *inc { BinOp::Add } else { BinOp::Sub };
                 let rhs = Expr::Binary(op, Box::new(lhs.clone()), Box::new(Expr::Num(dec(1))));
                 Ok(Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line })
@@ -441,6 +462,9 @@ impl Lower {
                     return self.unsupported(s.loc, "a timing control in a compound assignment");
                 }
                 let lhs = self.lvalue(lhs)?;
+                if side_effects(&lhs) {
+                    return self.unsupported(s.loc, "a compound assignment to a target with side effects");
+                }
                 let r = self.expr(rhs)?;
                 let rhs = Expr::Binary(assign_binop(*op).unwrap(), Box::new(lhs.clone()), Box::new(r));
                 Ok(Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line })

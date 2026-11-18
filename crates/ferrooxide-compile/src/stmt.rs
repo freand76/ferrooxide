@@ -886,6 +886,10 @@ impl<'a> Compiler<'a> {
                 let j = self.emit(Instr::Jmp { to: 0 });
                 self.code.pb.last_mut().unwrap().rets.last_mut().unwrap().1.push(j);
             }
+            Stmt::Discard { e, line } => {
+                self.line = *line;
+                self.self_expr(e, sid)?;
+            }
             Stmt::Break { line } | Stmt::Continue { line } => {
                 self.line = *line;
                 let is_break = matches!(st, Stmt::Break { .. });
@@ -1234,6 +1238,7 @@ impl<'a> Compiler<'a> {
     fn reads_stmt_inner(&self, st: &Stmt, sid: usize, out: &mut Vec<(u32, u32)>, locals: &mut Vec<u32>) {
         match st {
             Stmt::Null | Stmt::Disable { .. } | Stmt::Trigger { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Discard { e, .. } => self.reads_expr(e, sid, out),
             Stmt::Force { lhs, rhs, .. } => {
                 if let Some(r) = rhs {
                     self.reads_expr(r, sid, out);

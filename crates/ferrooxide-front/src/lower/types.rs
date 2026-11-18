@@ -206,7 +206,7 @@ pub(crate) fn qualify_expr(e: &mut Expr, scope: &str, names: &std::collections::
             qualify_expr(b, scope, names);
             qualify_expr(c, scope, names);
         }
-        Expr::Unary(_, a) => qualify_expr(a, scope, names),
+        Expr::Unary(_, a) | Expr::IncDec { e: a, .. } => qualify_expr(a, scope, names),
         Expr::Binary(_, a, b) => {
             qualify_expr(a, scope, names);
             qualify_expr(b, scope, names);

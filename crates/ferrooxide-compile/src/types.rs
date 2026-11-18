@@ -147,6 +147,7 @@ impl<'a> Compiler<'a> {
             Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..) => return self.err("no classes are declared"),
             Expr::EmptyArg => return self.err("an empty argument is allowed only in a call of a function or task"),
             Expr::Last => return self.err("`$` outside an index of a queue"),
+            Expr::IncDec { e, .. } => return self.type_of(e, sid),
             Expr::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
                 return self.type_of(&r, sid);

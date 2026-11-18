@@ -315,6 +315,8 @@ pub enum Stmt {
     Return { value: Option<Expr>, line: Line },
     Break { line: Line },
     Continue { line: Line },
+    /// `void'(f(...))`: a function call whose value is not used
+    Discard { e: Expr, line: Line },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +404,8 @@ pub enum Expr {
     MethodCall(Box<Expr>, String, Vec<Expr>),
     /// `$` in an index of a queue: its last index
     Last,
+    /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value
+    IncDec { prefix: bool, inc: bool, e: Box<Expr> },
 }
 
 /// An item of an assignment pattern.

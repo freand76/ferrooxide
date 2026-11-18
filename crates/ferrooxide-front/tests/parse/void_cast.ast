@@ -1,0 +1,13 @@
+module m ();
+  // imports $unit
+  int(32) signed q[$];
+  function integer signed f;
+    input int(32) signed x;
+    return x;
+  endfunction
+  initial begin
+    void'(f(1));
+    void'(q.pop_back());
+    void'($random());
+  end
+endmodule

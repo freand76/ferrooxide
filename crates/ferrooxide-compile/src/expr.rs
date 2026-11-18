@@ -5,10 +5,11 @@ use crate::*;
 use ferrooxide_front::ast::BinOp as B;
 use ferrooxide_rt::{BinOp as RB, CmpOp, Index, RedOp, ShOp, SysFn, Target, UnOp as RU};
 
-/// Whether an expression contains a (user) function call.
+/// Whether an expression contains a (user) function or method call or an increment: it may
+/// have side effects, so only what the operators select may run.
 pub(crate) fn has_call(e: &Expr) -> bool {
     match e {
-        Expr::Call(..) => true,
+        Expr::Call(..) | Expr::MethodCall(..) | Expr::IncDec { .. } => true,
         Expr::Index(a, b) | Expr::Binary(_, a, b) => has_call(a) || has_call(b),
         Expr::Range(a, b, c) | Expr::Cond(a, b, c) | Expr::IndexedRange(a, b, c, _) => has_call(a) || has_call(b) || has_call(c),
         Expr::Unary(_, a) => has_call(a),
@@ -362,7 +363,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
         match e {
-            Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last => false,
+            Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last | Expr::IncDec { .. } => false,
             Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::EmptyArg => false,
             // a member of a struct parameter
             Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
@@ -452,6 +453,27 @@ impl<'a> Compiler<'a> {
         }
         let (v, w, _) = self.self_expr(e, sid)?;
         Ok((v, w))
+    }
+
+    /// `++t` / `t--` in an expression: the assignment `t = t +/- 1` (as a statement would do
+    /// it), then the new value (prefix) or the old one, in a temporary (64-bit f64 if `real`).
+    fn inc_dec(&mut self, prefix: bool, inc: bool, t: &Expr, sid: usize, real: bool) -> R<u32> {
+        let read = |c: &mut Self| -> R<u32> {
+            let (v, w) = if real { (c.rexpr(t, sid)?, 64) } else { (c.self_expr(t, sid)?.0, c.type_of(t, sid)?.width()) };
+            let d = c.tmp(w);
+            c.emit(Instr::Copy { d, s: v, w });
+            Ok(d)
+        };
+        let old = if prefix { None } else { Some(read(self)?) };
+        let op = if inc { BinOp::Add } else { BinOp::Sub };
+        let one = Expr::Num(ferrooxide_front::ast::dec(1));
+        let line = self.line;
+        let st = Stmt::Assign { lhs: t.clone(), rhs: Expr::Binary(op, Box::new(t.clone()), Box::new(one)), nonblocking: false, timing: None, line };
+        self.stmt(&st, sid)?;
+        match old {
+            Some(d) => Ok(d),
+            None => read(self),
+        }
     }
 
     pub(crate) fn self_expr(&mut self, e: &Expr, sid: usize) -> R<(u32, u32, bool)> {
@@ -547,6 +569,11 @@ impl<'a> Compiler<'a> {
                 self.expr(&r, sid, w, s)
             }
             Expr::NewArray(..) | Expr::Last => self.type_of(e, sid).map(|_| NONE),
+            Expr::IncDec { prefix, inc, e: t } => {
+                let (tw, ts) = self.type_of(t, sid)?.ws();
+                let r = self.inc_dec(*prefix, *inc, t, sid, false)?;
+                Ok(self.resize(r, tw, w, s && ts))
+            }
             Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..) => self.err("no classes are declared"),
             Expr::EmptyArg => self.err("an empty argument is allowed only in a call of a function or task"),
             Expr::Num(n) => {
@@ -747,7 +774,9 @@ impl<'a> Compiler<'a> {
             }
             Expr::Call(name, args) => {
                 let (slot, rw, rs) = self.call(name, args, sid, false)?;
-                let slot = slot.unwrap();
+                let Some(slot) = slot else {
+                    return self.err(format!("void function '{name}' has no value"));
+                };
                 // copy the result: the return variable is shared between calls
                 let d = self.tmp(rw);
                 self.emit(Instr::Copy { d, s: slot, w: rw });
@@ -844,6 +873,32 @@ impl<'a> Compiler<'a> {
                 let d = self.tmp(w);
                 self.emit(Instr::Shift { op: sop, d, a: av, w, b: bv, bw });
                 Ok(d)
+            }
+            B::LAnd | B::LOr if has_call(b) => {
+                // short-circuit (IEEE 1800 11.4.7): the right side runs only when the left
+                // does not decide the result (it is unknown, or 1 for &&, 0 for ||)
+                let (av, aw) = self.truth(a, sid)?;
+                let d = self.tmp(1);
+                self.emit(Instr::Red { op: RedOp::Bool, d, s: av, w: aw });
+                let decided = if op == B::LAnd {
+                    let nz = self.tmp(1);
+                    self.emit(Instr::Red { op: RedOp::Nor, d: nz, s: d, w: 1 });
+                    nz
+                } else {
+                    d
+                };
+                let to_b = self.emit(Instr::Jz { c: decided, w: 1, to: 0 });
+                let end = self.emit(Instr::Jmp { to: 0 });
+                let h = self.here();
+                self.patch(to_b, h);
+                let (bv, bw) = self.truth(b, sid)?;
+                let tb = self.tmp(1);
+                self.emit(Instr::Red { op: RedOp::Bool, d: tb, s: bv, w: bw });
+                let rop = if op == B::LAnd { RB::And } else { RB::Or };
+                self.emit(Instr::Bin { op: rop, d, a: d, b: tb, w: 1 });
+                let h = self.here();
+                self.patch(end, h);
+                Ok(self.resize(d, 1, w, false))
             }
             B::LAnd | B::LOr => {
                 let (av, aw) = self.truth(a, sid)?;
@@ -1621,6 +1676,7 @@ impl<'a> Compiler<'a> {
         }
         match e {
             Expr::Type(_) | Expr::Last | Expr::Null | Expr::EmptyArg => {}
+            Expr::IncDec { e, .. } => self.reads_expr(e, sid, out),
             Expr::New(v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             Expr::NewCopy(x) => self.reads_expr(x, sid, out),
             Expr::MethodCall(o, _, args) => {
@@ -1769,6 +1825,11 @@ impl<'a> Compiler<'a> {
     pub(crate) fn rexpr(&mut self, e: &Expr, sid: usize) -> R<u32> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.rexpr(&n, sid);
+        }
+        if let Expr::IncDec { prefix, inc, e: t } = e {
+            if self.type_of(t, sid)?.is_real() {
+                return self.inc_dec(*prefix, *inc, t, sid, true);
+            }
         }
         if !self.type_of(e, sid)?.is_real() {
             let (s, w, signed) = self.self_expr(e, sid)?;

@@ -115,6 +115,10 @@ pub fn expr(e: &Expr) -> String {
             None => format!("new[{}]", expr(n)),
         },
         Expr::Last => "$".into(),
+        Expr::IncDec { prefix, inc, e } => {
+            let op = if *inc { "++" } else { "--" };
+            if *prefix { format!("({op}{})", expr(e)) } else { format!("({}{op})", expr(e)) }
+        }
         Expr::Null => "null".into(),
         Expr::EmptyArg => String::new(),
         Expr::New(args) => format!("new({})", list(args)),
@@ -646,6 +650,7 @@ impl Printer {
             },
             Stmt::Break { .. } => self.line("break;"),
             Stmt::Continue { .. } => self.line("continue;"),
+            Stmt::Discard { e, .. } => self.line(format!("void'({});", expr(e))),
         }
     }
 }

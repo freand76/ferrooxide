@@ -181,7 +181,7 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
             this_expr(b, c, locals);
             this_expr(d, c, locals);
         }
-        Expr::Unary(_, a) | Expr::Member(a, _) | Expr::NewCopy(a) => this_expr(a, c, locals),
+        Expr::Unary(_, a) | Expr::Member(a, _) | Expr::NewCopy(a) | Expr::IncDec { e: a, .. } => this_expr(a, c, locals),
         Expr::Binary(_, a, b) => {
             this_expr(a, c, locals);
             this_expr(b, c, locals);

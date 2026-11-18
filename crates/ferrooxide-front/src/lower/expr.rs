@@ -236,7 +236,7 @@ impl Lower {
             t::ExprKind::Step => return self.unsupported(loc, "1step"),
             t::ExprKind::Default => return self.unsupported(loc, "`default` here"),
             t::ExprKind::Root => return self.unsupported(loc, "$root alone"),
-            t::ExprKind::IncDec { .. } => return self.unsupported(loc, "an increment in an expression"),
+            t::ExprKind::IncDec { prefix, inc, e } => Expr::IncDec { prefix: *prefix, inc: *inc, e: Box::new(self.lvalue(e)?) },
             t::ExprKind::Assign(..) => return self.unsupported(loc, "an assignment in an expression"),
             t::ExprKind::Dist(..) => return self.unsupported(loc, "dist"),
             t::ExprKind::Matches(..) | t::ExprKind::TripleAnd(..) => return self.unsupported(loc, "pattern matching"),
