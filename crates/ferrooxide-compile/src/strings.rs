@@ -4,19 +4,9 @@
 //! everything else is an `Instr::Str` operation.
 
 use crate::expr::Base;
+use crate::types::{Type, STR_METHODS};
 use crate::*;
 use ferrooxide_rt::{CmpOp, StrOp};
-
-/// The kind of value an assignment target holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum VTy {
-    Vec,
-    Real,
-    Str,
-}
-
-/// String methods that give a string.
-const STR_METHODS: &[&str] = &["substr", "toupper", "tolower"];
 
 impl<'a> Compiler<'a> {
     /// The handle of a text known at compile time.
@@ -38,52 +28,30 @@ impl<'a> Compiler<'a> {
         self.intern(b"");
         let i = &mut self.prog.signals[s as usize];
         i.string = true;
+        self.sigs.types[s as usize] = Type::Str;
+        let i = &self.prog.signals[s as usize];
         let (slot, n) = (i.slot as usize, 2 * rt::nw(i.width) * i.depth.max(1) as usize);
         for k in 0..n {
             self.prog.mem[slot + k] = 0;
         }
     }
 
-    pub(crate) fn sig_vty(&self, s: u32) -> VTy {
-        let i = self.sig(s);
-        if i.string {
-            VTy::Str
-        } else if i.real {
-            VTy::Real
-        } else {
-            VTy::Vec
-        }
-    }
-
-    /// The kind of value an assignment target holds.
-    pub(crate) fn lvalue_ty(&self, e: &Expr, sid: usize) -> VTy {
-        if self.is_string_var(e, sid) {
-            VTy::Str
-        } else if self.lvalue_is_real(e, sid) {
-            VTy::Real
-        } else {
-            VTy::Vec
-        }
-    }
-
-    /// A string variable or an element of a string array.
-    pub(crate) fn is_string_var(&self, e: &Expr, sid: usize) -> bool {
-        match e {
-            Expr::Ident(n) => matches!(self.lookup(n, sid), Some(Sym::Sig(s)) if self.sig(s).string),
-            Expr::Hier(p) => matches!(self.lookup_hier(p, sid), Some(Sym::Sig(s)) if self.sig(s).string),
-            Expr::Index(a, _) => self.array_of(a, sid).is_some_and(|s| self.sig(s).string),
-            _ => false,
-        }
-    }
-
-    /// A string variable that is not an array (`s[i]` is its character).
-    pub(crate) fn is_string_scalar(&self, e: &Expr, sid: usize) -> bool {
+    /// The string variable (or array of strings) a name refers to.
+    fn string_var(&self, e: &Expr, sid: usize) -> Option<u32> {
         let sym = match e {
             Expr::Ident(n) => self.lookup(n, sid),
             Expr::Hier(p) => self.lookup_hier(p, sid),
             _ => None,
         };
-        matches!(sym, Some(Sym::Sig(s)) if self.sig(s).string && self.sig(s).depth == 0)
+        match sym {
+            Some(Sym::Sig(s)) if self.sig_type(s).is_str() => Some(s),
+            _ => None,
+        }
+    }
+
+    /// A string variable that is not an array (`s[i]` is its character).
+    pub(crate) fn is_string_scalar(&self, e: &Expr, sid: usize) -> bool {
+        self.string_var(e, sid).is_some_and(|s| self.sig(s).depth == 0)
     }
 
     /// `base.method` of a call name whose base is a string variable.
@@ -91,31 +59,7 @@ impl<'a> Compiler<'a> {
         let (base, m) = name.rsplit_once('.')?;
         let parts: Vec<String> = base.split('.').map(String::from).collect();
         let e = if parts.len() == 1 { Expr::Ident(parts[0].clone()) } else { Expr::Hier(parts) };
-        self.is_string_var(&e, sid).then_some((e, m))
-    }
-
-    /// An expression whose value is a string (not a literal: that is a vector unless the
-    /// context makes it a string).
-    pub(crate) fn is_string(&self, e: &Expr, sid: usize) -> bool {
-        if let Expr::SysCall(n, _) = e {
-            return n == "$sformatf" || n == "$psprintf" || n == "$__tostring";
-        }
-        if self.code.str_ids.is_empty() {
-            return false;
-        }
-        match e {
-            Expr::Ident(_) | Expr::Hier(_) => self.is_string_var(e, sid),
-            Expr::Index(a, _) => self.array_of(a, sid).is_some_and(|s| self.sig(s).string),
-            Expr::Concat(v) => v.iter().any(|x| self.is_string(x, sid)),
-            Expr::Repl(_, v) => v.iter().any(|x| self.is_string(x, sid)),
-            Expr::Cond(_, t, f) => self.is_string(t, sid) || self.is_string(f, sid),
-            Expr::Call(name, _) => match self.str_method(name, sid) {
-                Some((_, m)) => STR_METHODS.contains(&m),
-                None => self.lookup_func(name, sid).is_some_and(|(f, _)| f.ret_kind == NetKind::String),
-            },
-            Expr::SysCall(n, _) => n == "$sformatf" || n == "$psprintf" || n == "$__tostring",
-            _ => false,
-        }
+        self.string_var(&e, sid).is_some().then_some((e, m))
     }
 
     /// Compile `e` as a string: the slot of its handle.
@@ -127,12 +71,12 @@ impl<'a> Compiler<'a> {
                 let h = self.intern(&b);
                 return Ok(self.const_slot(&Const::from_i64(h as i64, 64, false)));
             }
-            Expr::Ident(_) | Expr::Hier(_) if self.is_string_var(e, sid) => {
+            Expr::Ident(_) | Expr::Hier(_) if self.string_var(e, sid).is_some() => {
                 if let Some(Base::Sig(s)) = self.resolve_base(e, sid)? {
                     return Ok(self.sig(s).slot);
                 }
             }
-            Expr::Index(a, _) if self.array_of(a, sid).is_some_and(|s| self.sig(s).string) => {
+            Expr::Index(a, _) if self.array_of(a, sid).is_some_and(|s| self.sig_type(s).is_str()) => {
                 // an element of a string array: its handle
                 self.code.str_raw = true;
                 let r = self.expr(e, sid, 64, false);
@@ -197,7 +141,7 @@ impl<'a> Compiler<'a> {
                         return self.str_method_call(&base, m, args, sid);
                     }
                 }
-                if self.is_string(e, sid) {
+                if self.type_of(e, sid)?.is_str() {
                     // a function returning a string: its result variable holds the handle
                     self.code.str_raw = true;
                     let r = self.expr(e, sid, 64, false);

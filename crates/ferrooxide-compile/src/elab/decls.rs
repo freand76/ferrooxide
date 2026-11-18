@@ -11,8 +11,11 @@ impl<'a> Compiler<'a> {
         info.msb = msb;
         info.lsb = lsb;
         info.signed = signed;
-        let id = self.prog.signals.len() as u32;
-        self.prog.signals.push(info);
+        let ty = match self.sig_type(base) {
+            types::Type::Vec { w, .. } => types::Type::vec(w, signed),
+            t => t,
+        };
+        let id = self.push_signal(info, ty);
         self.prog.names.push((name, id));
         self.nets.view_of.insert(id, base);
         id

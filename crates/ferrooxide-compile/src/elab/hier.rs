@@ -17,8 +17,8 @@ impl<'a> Compiler<'a> {
         if let Some(&s) = self.nets.elem_alias.get(&(arr, e)) {
             return Some(s);
         }
-        let id = self.prog.signals.len() as u32;
-        self.prog.signals.push(SignalInfo {
+        let ty = self.sig_type(arr);
+        let id = self.push_signal(SignalInfo {
             name: name.to_string(),
             slot: info.slot + e * rt::words(width),
             width,
@@ -33,7 +33,7 @@ impl<'a> Compiler<'a> {
             forced: false,
             string: info.string,
             event: info.event,
-        });
+        }, ty);
         self.nets.elem_alias.insert((arr, e), id);
         Some(id)
     }
@@ -277,11 +277,15 @@ impl<'a> Compiler<'a> {
             let Some(Some(e)) = port_conns.get(pn) else { continue };
             let Some(Sym::Sig(s)) = self.scopes[sid].syms.get(pn).cloned() else { continue };
             let info = self.sig(s);
-            if info.real || info.depth != 0 || self.is_real(e, ps) {
+            if self.sig_type(s).is_real() || info.depth != 0 {
                 continue;
             }
             let pw = info.width;
-            let ew = self.ty(e, ps)?.0;
+            let et = self.type_of(e, ps)?;
+            if et.is_real() {
+                continue;
+            }
+            let ew = et.width();
             if pw == ew {
                 continue;
             }
@@ -392,7 +396,7 @@ impl<'a> Compiler<'a> {
                 let mut pieces = Vec::new();
                 let mut base = 0i64;
                 for p in parts.iter().rev() {
-                    let pw = self.ty(p, sid)?.0 as i64;
+                    let pw = self.type_of(p, sid)?.width() as i64;
                     let (s0, s1) = (off.max(base), (off + w).min(base + pw));
                     if s0 < s1 {
                         let piece =
@@ -406,7 +410,7 @@ impl<'a> Compiler<'a> {
             }
             _ => {}
         }
-        let d = decl(self, e).unwrap_or((self.ty(e, sid)?.0 as i64 - 1, 0));
+        let d = decl(self, e).unwrap_or((self.type_of(e, sid)?.width() as i64 - 1, 0));
         let idx = |o: i64| if d.0 >= d.1 { d.1 + o } else { d.1 - o };
         Ok(if w == 1 {
             Expr::Index(Box::new(e.clone()), Box::new(num(idx(off))))

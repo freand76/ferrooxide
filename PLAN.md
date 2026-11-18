@@ -466,6 +466,12 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
      declarations, and one `type_of(expr)` replacing `ty`/`is_real`/`is_string`/`lvalue_ty`;
      no behaviour change. `elab_items` (`elab/items.rs`) split per item kind where it is
      touched.
+     *Done 2026-11-18*: `types.rs`: `Type` (vector, real, string) per signal in
+     `sigs.types` (every signal goes through `push_signal`; `mark_real`/`mark_string` set
+     it), `type_of(expr)` computes it bottom-up and replaces `ty`, `is_real`, `is_string`,
+     `lvalue_ty`, `lvalue_is_real`, `sig_vty` and `VTy`; the compiler no longer reads the
+     runtime's `real`/`string` flags. Packed structs are not a `Type` yet: declarations
+     still arrive flattened from the lowering, so they come with slice 2.
   2. Struct member access and assignment patterns resolved in elaboration from the `Type`;
      the lowering's `struct_access` and pattern code go; members of variables of a type
      parameter work.

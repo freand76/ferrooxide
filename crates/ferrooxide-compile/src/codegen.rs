@@ -346,13 +346,13 @@ impl<'a> Compiler<'a> {
     /// A continuous assignment of a constant to a whole net (or net driver) sets its initial
     /// value, so processes see it already at time 0, as with Icarus.
     pub(crate) fn const_assign_init(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<()> {
-        if !matches!(lhs, Expr::Ident(_) | Expr::Hier(_)) || !self.is_const(rhs, sid) || self.is_real(rhs, sid) {
+        if !matches!(lhs, Expr::Ident(_) | Expr::Hier(_)) || !self.is_const(rhs, sid) || self.type_of(rhs, sid)?.is_real() {
             return Ok(());
         }
         let Some(expr::Base::Sig(s0)) = self.resolve_base(lhs, sid)? else { return Ok(()) };
         let s = self.redir(s0);
         let info = self.sig(s).clone();
-        if info.depth != 0 || info.real || info.forced {
+        if info.depth != 0 || self.sig_type(s).is_real() || info.forced {
             return Ok(());
         }
         let c = self.const_eval(rhs, sid)?;

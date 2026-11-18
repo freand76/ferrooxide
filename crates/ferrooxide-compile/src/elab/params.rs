@@ -138,7 +138,7 @@ impl<'a> Compiler<'a> {
         let v = match ov {
             Some(v) => v,
             None => {
-                if self.is_real(&p.value, sid) {
+                if self.type_of(&p.value, sid)?.is_real() {
                     PVal::Real(self.const_real(&p.value, sid)?)
                 } else {
                     PVal::Int(self.const_eval(&p.value, sid)?)
@@ -169,7 +169,7 @@ impl<'a> Compiler<'a> {
         if let Expr::Type(t) = e {
             return Ok(PVal::Type(Rc::new(self.resolve_type(t, sid)?)));
         }
-        if self.is_real(e, sid) {
+        if self.type_of(e, sid)?.is_real() {
             Ok(PVal::Real(self.const_real(e, sid)?))
         } else {
             Ok(PVal::Int(self.const_eval(e, sid)?))

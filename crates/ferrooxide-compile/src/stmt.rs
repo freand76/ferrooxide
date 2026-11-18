@@ -16,7 +16,7 @@ pub(crate) enum Rhs<'e> {
 impl<'a> Compiler<'a> {
     /// Value of an assignment RHS converted to the LHS width.
     pub(crate) fn rhs_value(&mut self, rhs: &Expr, sid: usize, lw: u32) -> R<u32> {
-        let (rw, rs) = self.ty(rhs, sid)?;
+        let (rw, rs) = self.type_of(rhs, sid)?.ws();
         let w = rw.max(lw);
         let v = self.expr(rhs, sid, w, rs)?;
         Ok(self.resize(v, w, lw, false))
@@ -198,7 +198,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn lhs_width(&mut self, lhs: &Lhs) -> R<u32> {
         match lhs {
             Lhs::Sig(s) => Ok(self.sig(*s).width),
-            Lhs::Expr(e, sid) => Ok(self.ty(e, *sid)?.0),
+            Lhs::Expr(e, sid) => Ok(self.type_of(e, *sid)?.width()),
         }
     }
 
@@ -239,8 +239,8 @@ impl<'a> Compiler<'a> {
         let v = match &rhs {
             Rhs::Expr(e, sid) => {
                 let real = match &lhs {
-                    Lhs::Expr(l, ls) => self.lvalue_ty(l, *ls),
-                    Lhs::Sig(s) => self.sig_vty(*s),
+                    Lhs::Expr(l, ls) => self.type_of(l, *ls)?,
+                    Lhs::Sig(s) => self.sig_type(*s),
                 };
                 let v = self.value_for(e, *sid, lw, real)?;
                 self.reads_expr(e, *sid, &mut reads);
@@ -335,7 +335,7 @@ impl<'a> Compiler<'a> {
 
     /// A hidden signal that follows the value of an event expression (e.g. `posedge a[3]`).
     fn event_signal(&mut self, e: &Expr, sid: usize) -> R<u32> {
-        let (w, _) = self.ty(e, sid)?;
+        let (w, _) = self.type_of(e, sid)?.ws();
         let name = format!("{}.$event{}", self.scopes[sid].name, self.prog.signals.len());
         let h = self.new_signal(name, w, false, 0, w as i64 - 1, 0, 0, SigKind::Reg);
         self.prog.names.pop(); // not a user-visible name (no VCD entry)
@@ -444,11 +444,7 @@ impl<'a> Compiler<'a> {
                             self.mark_two_state(s, d.kind);
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
                             if let Some(init) = &dl.init {
-                                let ty = match d.kind {
-                                    NetKind::String => crate::strings::VTy::Str,
-                                    NetKind::Real => crate::strings::VTy::Real,
-                                    _ => crate::strings::VTy::Vec,
-                                };
+                                let ty = self.sig_type(s);
                                 let v = self.value_for(init, b, w, ty)?;
                                 self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
                             }
@@ -504,9 +500,9 @@ impl<'a> Compiler<'a> {
                 if !*nonblocking && timing.is_none() && !self.code.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
-                let lw = self.ty(lhs, sid)?.0;
-                let real = self.lvalue_ty(lhs, sid);
-                let v = self.value_for(rhs, sid, lw, real)?;
+                let lt = self.type_of(lhs, sid)?;
+                let lw = lt.width();
+                let v = self.value_for(rhs, sid, lw, lt)?;
                 let lv = Lhs::Expr(lhs, sid);
                 match timing {
                     None => {
@@ -546,10 +542,10 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Case { kind, expr, arms, default, line } => {
                 self.line = *line;
-                let (mut w, mut s) = self.ty(expr, sid)?;
+                let (mut w, mut s) = self.type_of(expr, sid)?.ws();
                 for (labels, _) in arms {
                     for l in labels {
-                        let (lw, ls) = self.ty(l, sid)?;
+                        let (lw, ls) = self.type_of(l, sid)?.ws();
                         w = w.max(lw);
                         s &= ls;
                     }
@@ -738,9 +734,9 @@ impl<'a> Compiler<'a> {
                 }
                 if let Some(rhs) = rhs {
                     // the forced value applies at once ...
-                    let lw = self.ty(lhs, sid)?.0;
-                    let real = self.lvalue_ty(lhs, sid);
-                    let v = self.value_for(rhs, sid, lw, real)?;
+                    let lt = self.type_of(lhs, sid)?;
+                    let lw = lt.width();
+                    let v = self.value_for(rhs, sid, lw, lt)?;
                     self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
                     let parent = self.code.pb.last().unwrap().proc;
                     let name = self.scopes[sid].name.clone();
@@ -752,7 +748,7 @@ impl<'a> Compiler<'a> {
                     }
                     let top = self.here();
                     // ... and is kept up to date by the spawned process
-                    let v = self.value_for(rhs, sid, lw, real)?;
+                    let v = self.value_for(rhs, sid, lw, lt)?;
                     self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
                     let mut reads = Vec::new();
                     self.reads_expr(rhs, sid, &mut reads);
@@ -828,7 +824,7 @@ impl<'a> Compiler<'a> {
                 };
                 if let (Some(v), Some(r)) = (value, ret) {
                     let w = self.sig(r).width;
-                    let real = self.sig_vty(r);
+                    let real = self.sig_type(r);
                     let val = self.value_for(v, sid, w, real)?;
                     self.emit(Instr::Store { t: Target::Whole { sig: r }, s: val, mode: StoreMode::Blocking });
                 }
@@ -877,8 +873,8 @@ impl<'a> Compiler<'a> {
             v.push(match a {
                 None => FmtArg::Empty,
                 Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),
-                Some(e) if self.is_string(e, sid) => FmtArg::SVar { s: self.str_expr(e, sid)? },
-                Some(e) if self.is_real(e, sid) => FmtArg::Real { s: self.rexpr(e, sid)? },
+                Some(e) if self.type_of(e, sid)?.is_str() => FmtArg::SVar { s: self.str_expr(e, sid)? },
+                Some(e) if self.type_of(e, sid)?.is_real() => FmtArg::Real { s: self.rexpr(e, sid)? },
                 // a string value (an enum's .name())
                 Some(Expr::SysCall(n, a)) if n == "$__str" => {
                     let (s, w, _) = self.self_expr(&a[0], sid)?;
@@ -991,7 +987,7 @@ impl<'a> Compiler<'a> {
                 let Some(Some(var)) = args.first() else {
                     return self.err(format!("{name} needs a variable"));
                 };
-                let vw = self.ty(var, sid)?.0;
+                let vw = self.type_of(var, sid)?.width();
                 let fargs = self.fmt_args(&args[1..], sid)?;
                 let d = self.tmp(vw);
                 let texp = self.texp(sid);

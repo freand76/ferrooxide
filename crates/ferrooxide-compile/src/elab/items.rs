@@ -485,7 +485,7 @@ impl<'a> Compiler<'a> {
                                     let e = match e {
                                         Some(e) => {
                                             let pw = pws.get(&port).copied().unwrap_or(1);
-                                            let tw = self.ty(e, sid)?.0;
+                                            let tw = self.type_of(e, sid)?.width();
                                             if n > 1 && tw == pw * n {
                                                 Some(self.array_slice(e, k, n, pw, sid)?)
                                             } else if tw == pw || tw < pw * n {

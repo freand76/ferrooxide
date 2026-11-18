@@ -10,6 +10,7 @@ mod konst;
 mod lint;
 mod stmt;
 mod strings;
+mod types;
 
 pub use konst::Const;
 
@@ -266,6 +267,8 @@ pub(crate) struct Sigs {
     pub(crate) desc_arrays: std::collections::HashSet<u32>,
     /// some named event exists (`.triggered` needs the rewrite in `md_norm`)
     pub(crate) has_events: bool,
+    /// the type of each signal (of its elements for an array), by signal id
+    pub(crate) types: Vec<types::Type>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).
@@ -567,8 +570,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let id = self.prog.signals.len() as u32;
-        self.prog.signals.push(SignalInfo {
+        let id = self.push_signal(SignalInfo {
             name: name.clone(),
             slot,
             width,
@@ -583,7 +585,7 @@ impl<'a> Compiler<'a> {
             forced: false,
             string: false,
             event: false,
-        });
+        }, types::Type::vec(width, signed));
         self.prog.names.push((name, id));
         id
     }
@@ -632,6 +634,8 @@ impl<'a> Compiler<'a> {
     pub(crate) fn mark_real(&mut self, s: u32) {
         let info = &mut self.prog.signals[s as usize];
         info.real = true;
+        self.sigs.types[s as usize] = types::Type::Real;
+        let info = &self.prog.signals[s as usize];
         let (slot, n) = (info.slot as usize, rt::words(info.width) as usize * info.depth.max(1) as usize);
         for w in &mut self.prog.mem[slot..slot + n] {
             *w = 0;

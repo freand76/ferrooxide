@@ -14,7 +14,7 @@ impl<'a> Compiler<'a> {
                             for k in 0..n {
                                 let mut ts = Vec::new();
                                 for t in terms {
-                                    let tw = self.ty(t, sid)?.0;
+                                    let tw = self.type_of(t, sid)?.width();
                                     ts.push(if tw == n && n > 1 { self.array_slice(t, k, n, 1, sid)? } else { t.clone() });
                                 }
                                 self.gate(kind, &ts, sid, line)?;
@@ -31,7 +31,7 @@ impl<'a> Compiler<'a> {
             match me.resolve_base(b, sid).ok()?? {
                 expr::Base::Sig(s) => {
                     let i = me.sig(s);
-                    (i.kind == SigKind::Wire && i.depth == 0 && !i.real).then_some(s)
+                    (i.kind == SigKind::Wire && i.depth == 0 && !me.sig_type(s).is_real()).then_some(s)
                 }
                 _ => None,
             }
@@ -294,7 +294,7 @@ impl<'a> Compiler<'a> {
                             && i.kind != SigKind::Integer
                             && i.depth == 0
                             && i.alias_of.is_none()
-                            && !i.real
+                            && !self.sig_type(z).is_real()
                             && !self.nets.net_types.contains_key(&z)
                             && !self.nets.pulls.contains_key(&z)
                             && !self.sigs.two_state.contains(&z)
@@ -363,7 +363,7 @@ impl<'a> Compiler<'a> {
         };
         let a = self.canon(a);
         let ai = self.sig(a);
-        if a == z || ai.width != width || ai.real {
+        if a == z || ai.width != width || self.sig_type(a).is_real() {
             return None;
         }
         Some((z, a))
