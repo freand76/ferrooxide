@@ -971,17 +971,23 @@ impl<'a> Compiler<'a> {
                 if name == "$fatal" && !a.is_empty() && !matches!(a[0], Some(Expr::Str(_))) {
                     a = &a[1..];
                 }
-                let args = self.fmt_args(a, sid)?;
                 let prefix = match name {
                     "$error" => "ERROR: ",
                     "$warning" => "WARNING: ",
                     "$info" => "INFO: ",
                     _ => "FATAL: ",
                 };
+                // `ERROR: file:line: message` and the time and scope below it
+                let mut v = vec![Some(Expr::Str(format!("{prefix}{}:{}: ", self.file, self.line).replace('%', "%%")))];
+                v.extend(a.iter().cloned());
+                let pad = " ".repeat(prefix.len());
+                v.push(Some(Expr::Str(format!("\n{pad}Time: %0d  Scope: %m"))));
+                v.push(Some(Expr::SysCall("$__ticks".into(), Vec::new())));
+                let args = self.fmt_args(&v, sid)?;
                 let texp = self.texp(sid);
-                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix, texp, radix: 'd' }));
+                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix: "", texp, radix: 'd' }));
                 if name == "$fatal" {
-                    self.emit(sys(SysTask::Finish { loc: String::new(), stop: false }));
+                    self.emit(sys(SysTask::Finish { loc: String::new(), stop: false, fatal: true }));
                 }
             }
             "$__unhandled_case" | "$__unhandled_if" => {
@@ -1141,7 +1147,7 @@ impl<'a> Compiler<'a> {
                 // $finish(0) prints nothing; otherwise "file:line: $finish called at <time> (<unit>)"
                 let quiet = matches!(args.first(), Some(Some(Expr::Num(n))) if n.digits == "0");
                 let loc = if quiet { String::new() } else { format!("{}:{}", self.file, self.line) };
-                self.emit(sys(SysTask::Finish { loc, stop: name == "$stop" }));
+                self.emit(sys(SysTask::Finish { loc, stop: name == "$stop", fatal: false }));
             }
             "$dumpfile" => {
                 if let Some(Some(Expr::Str(f))) = args.first() {

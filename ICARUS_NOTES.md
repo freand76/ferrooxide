@@ -36,3 +36,6 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    directions; 1800-2017 23.3.3 (connections of unpacked arrays, as unpacked array
    assignment, 7.6) pairs the elements from the left (`p[1]` = `y[2]`). Same directions
    give the same result. Test: `tests/verilog/sv_iface_array.v`.
+11. **Immediate `cover` statements do nothing.** `cover (i == 1) $display("covered");` never
+   runs its statement and prints nothing, at compile time or at run time; 1800-2017 16.3 runs
+   the pass statement when the expression is true. Test: `tests/verilog/sv_assertions.v`.

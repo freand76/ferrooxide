@@ -510,7 +510,8 @@ pub enum SysTask {
     MonitorOn(bool),
     Strobe { proc: u32 },
     /// $finish / $stop; `loc` is "file:line" for the message (empty: no message)
-    Finish { loc: String, stop: bool },
+    /// `$finish` / `$stop` (`loc`: print the message), `$fatal` (`fatal`: exit status 1)
+    Finish { loc: String, stop: bool, fatal: bool },
     DumpFile(String),
     DumpVars,
     DumpOn(bool),

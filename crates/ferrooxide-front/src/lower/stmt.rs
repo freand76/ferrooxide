@@ -33,6 +33,39 @@ fn block(stmts: Vec<Stmt>) -> Stmt {
 }
 
 impl Lower {
+    /// An immediate assertion (IEEE 1800-2017 16.3): `assert`/`assume` run the pass action
+    /// when the expression is true, else the fail action (by default `$error`). `cover` does
+    /// nothing, as in the reference (ICARUS_NOTES 11). A label names a scope around it (for
+    /// `%m`).
+    fn immediate_assertion(&mut self, a: &t::Assertion, label: Option<&String>) -> Result<Stmt> {
+        let line = a.loc.line;
+        let expr = match &a.body {
+            t::AssertBody::Immediate { deferred: None, expr } => expr,
+            t::AssertBody::Immediate { .. } => return self.unsupported(a.loc, "a deferred assertion"),
+            _ => return self.unsupported(a.loc, "a concurrent assertion"),
+        };
+        if a.kind == t::AssertKind::Restrict {
+            return self.unsupported(a.loc, "an immediate restrict");
+        }
+        if a.kind == t::AssertKind::Cover {
+            return Ok(Stmt::Null);
+        }
+        let cond = self.expr(expr)?;
+        let pass = match &a.action.pass {
+            Some(st) => self.stmt(st)?,
+            None => Stmt::Null,
+        };
+        let fail = match &a.action.fail {
+            Some(st) => Some(self.stmt(st)?),
+            None => Some(Stmt::SysTask { name: "$error".into(), args: Vec::new(), line }),
+        };
+        let st = Stmt::If { cond, then_s: Box::new(pass), else_s: fail.map(Box::new), line };
+        Ok(match label {
+            Some(l) => Stmt::Block { name: Some(self.name(l, a.loc)), decls: vec![], stmts: vec![st], fork: None },
+            None => st,
+        })
+    }
+
     /// The declarations of a block (no directions).
     fn block_decls(&mut self, v: &[t::Item]) -> Result<Vec<Decl>> {
         let mut decls = Vec::new();
@@ -63,7 +96,7 @@ impl Lower {
 
     pub(crate) fn stmt(&mut self, s: &t::Stmt) -> Result<Stmt> {
         let line = s.loc.line;
-        if s.label.is_some() && !matches!(s.kind, t::StmtKind::Block { .. }) {
+        if s.label.is_some() && !matches!(s.kind, t::StmtKind::Block { .. } | t::StmtKind::Assertion(_)) {
             return self.unsupported(s.loc, "a statement label");
         }
         Ok(match &s.kind {
@@ -278,7 +311,7 @@ impl Lower {
             t::StmtKind::WaitOrder { .. } => return self.unsupported(s.loc, "wait_order"),
             t::StmtKind::RandCase(_) => return self.unsupported(s.loc, "randcase"),
             t::StmtKind::RandSequence { .. } => return self.unsupported(s.loc, "randsequence"),
-            t::StmtKind::Assertion(_) => return self.unsupported(s.loc, "an assertion"),
+            t::StmtKind::Assertion(a) => self.immediate_assertion(a, s.label.as_ref().or(a.label.as_ref()))?,
             // `expect(e);` in Verilog code: a call of a task named `expect`
             t::StmtKind::Expect { prop: t::Prop::Expr(e), action } if action.pass.is_none() && action.fail.is_none() => {
                 let e = self.arg(e)?;

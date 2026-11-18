@@ -193,6 +193,8 @@ pub struct Sim {
     postponed: Vec<u32>,
     pub time: u64,
     finished: bool,
+    /// a `$fatal` ended the simulation: the process exit status is 1
+    pub fatal: bool,
     out: BufWriter<Box<dyn Write>>,
     monitor: u32,
     monitor_on: bool,
@@ -468,6 +470,7 @@ impl Sim {
             postponed: Vec::new(),
             time: 0,
             finished: false,
+            fatal: false,
             out: BufWriter::with_capacity(1 << 16, Box::new(std::io::stdout())),
             monitor: NONE,
             monitor_on: true,
@@ -2303,7 +2306,8 @@ impl Sim {
                 self.procs[*proc as usize].pc = 0;
                 self.postponed.push(*proc);
             }
-            SysTask::Finish { loc, stop } => {
+            SysTask::Finish { loc, stop, fatal } => {
+                self.fatal |= *fatal;
                 if !loc.is_empty() {
                     let unit = match self.prog.precision.rem_euclid(3) {
                         0 => "1",

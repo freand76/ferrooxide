@@ -351,5 +351,8 @@ fn main() -> ExitCode {
         );
         eprintln!("ferrooxide: final time {}, {:?}", sim.time, sim.stats);
     }
+    if sim.fatal {
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
 }

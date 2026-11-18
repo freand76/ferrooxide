@@ -10,7 +10,7 @@ base=target/regress-baseline
 out=target/regress-current
 [[ ${1:-} == --baseline ]] && out=$base
 rm -rf "$out" && mkdir -p "$out"
-git rev-parse --short HEAD > "$out/commit"
+{ git rev-parse --short HEAD 2>/dev/null || echo unknown; } > "$out/commit"
 for list in main sv; do
     cp -r "$src" "$out/$list"
     extra=()
