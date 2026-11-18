@@ -45,6 +45,7 @@ options:
                     executable); with -i the console runs next to the viewer and controls it
   --lint            check the design (incomplete sensitivity lists, SystemVerilog keywords
                     as names) and exit; status 1 on findings
+  -pfileline=1      run-time warnings (queue operations) start with the source location
   +<arg>            plusarg for $test$plusargs / $value$plusargs
   -h, --help        show this help
 environment: FX_MEM_LIMIT_MB (address-space cap, default 4096, 0: none), FX_MAX_MEM_MB (design
@@ -74,6 +75,7 @@ fn main() -> ExitCode {
     limit_memory();
     let mut files = Vec::new();
     let mut plusargs = Vec::new();
+    let mut fileline = false;
     let mut tops = Vec::new();
     let mut opts = ferrooxide_front::Options::default();
     let mut stats = false;
@@ -156,6 +158,8 @@ fn main() -> ExitCode {
             "-g2005-sv" | "-g2009" | "-g2012" | "-g2017" => dialect.v2005 = false,
             "-gspecify" => dialect.specify = true,
             "-u" => opts.separate_units = true,
+            "-pfileline=1" => fileline = true,
+            "-pfileline=0" => fileline = false,
             _ if a.starts_with("-D") => {
                 let v = &a[2..];
                 let (k, v) = v.split_once('=').unwrap_or((v, "1"));
@@ -261,6 +265,7 @@ fn main() -> ExitCode {
     }
     let mut sim = ferrooxide_rt::Sim::new(prog);
     sim.set_plusargs(plusargs.clone());
+    sim.set_fileline(fileline);
     if jit {
         if let Err(e) = sim.enable_jit() {
             eprintln!("ferrooxide: JIT compilation failed ({e}), interpreting");

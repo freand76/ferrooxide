@@ -66,14 +66,14 @@ def run(t, root, timeout):
             plargs.append(o)
         elif o.startswith("-D") or o.startswith("-I"):
             args.append(o)
-        elif o == "-gspecify" or o == "-u":
+        elif o == "-gspecify" or o == "-u" or o == "-pfileline=1":
             args.append(o)
         elif o.endswith(".v") or o.endswith(".sv"):
             # another source file, before the test's own
             args.append(o)
         elif o.startswith("-s"):
             args += ["-s", o[2:]]
-        # -g... (language generation), -T..., -p... are ignored
+        # other -g... (language generation), -T..., -p... are ignored
     if t["top"]:
         args += ["-s", t["top"]]
     args.append(src)

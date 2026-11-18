@@ -41,7 +41,19 @@ impl<'a> Compiler<'a> {
     /// The kind of an array dimension (an associative array's key type evaluated in `sid`).
     pub(crate) fn dyn_kind(&mut self, h: &HeapKind, sid: usize) -> R<DynKind> {
         Ok(match h {
-            HeapKind::Queue(_) => DynKind::Queue,
+            HeapKind::Queue(None) => DynKind::Queue(0),
+            HeapKind::Queue(Some(max)) => {
+                // `[$:N]`: at most N + 1 elements
+                if !self.is_const(max, sid) {
+                    return self.err("queue bound must be constant.");
+                }
+                let c = self.const_eval(max, sid)?;
+                match c.to_i64() {
+                    None => return self.err("queue bound must be defined."),
+                    Some(v) if v < 0 => return self.err(format!("queue bound must be positive ({v}).")),
+                    Some(v) => DynKind::Queue(v as u32 + 1),
+                }
+            }
             HeapKind::Dynamic => DynKind::Darray,
             // `[*]`: integer keys
             HeapKind::Assoc(None) => DynKind::Assoc(KeyKind::Int { w: 64, signed: false }),
@@ -74,8 +86,43 @@ impl<'a> Compiler<'a> {
         s
     }
 
+    /// A heap operation on an array that is no variable's (a new or copied one).
     fn heap_op(&mut self, op: HeapOp, d: u32, a: u32, b: u32, c: u32, elem: Elem) {
-        self.emit(Instr::Heap { op, d, a, b, c, w: elem.w, x: elem.x() });
+        self.heap_op_t(op, d, a, b, c, elem, DynKind::Darray);
+    }
+
+    fn heap_op_t(&mut self, op: HeapOp, d: u32, a: u32, b: u32, c: u32, elem: Elem, kind: DynKind) {
+        let ek = match elem.leaf {
+            Leaf::Bits => rt::ElemKind::Vec,
+            Leaf::Real => rt::ElemKind::Real,
+            Leaf::Str => rt::ElemKind::Str,
+        };
+        let (queue, bound) = match kind {
+            DynKind::Queue(b) => (true, b),
+            _ => (false, 0),
+        };
+        let t = rt::HeapTy { elem: ek, queue, bound, x: elem.x() };
+        let at = self.loc_id();
+        self.emit(Instr::Heap { op, d, a, b, c, w: elem.w, t, at });
+    }
+
+    /// A heap operation on the array of variable `s`.
+    fn var_op(&mut self, s: u32, op: HeapOp, d: u32, b: u32, c: u32, elem: Elem) {
+        let kind = match self.sig_type(s) {
+            Type::Dyn { kind, .. } => kind,
+            _ => DynKind::Darray,
+        };
+        let slot = self.sig(s).slot;
+        self.heap_op_t(op, d, slot, b, c, elem, kind);
+    }
+
+    /// The current source location for run-time warnings (`Program::locs`).
+    fn loc_id(&mut self) -> u32 {
+        let l = format!("{}:{}", self.file, self.line);
+        if self.prog.locs.last() != Some(&l) {
+            self.prog.locs.push(l);
+        }
+        self.prog.locs.len() as u32 - 1
     }
 
     fn assoc_op(&mut self, op: AssocOp, d: u32, a: u32, b: u32, c: u32, elem: Elem, key: KeyKind) {
@@ -203,19 +250,18 @@ impl<'a> Compiler<'a> {
                     return Ok(Some((d, elem.ty())));
                 }
                 let ix = self.dyn_index(a, i, sid)?;
-                self.heap_op(HeapOp::Get, d, slot, ix, NONE, elem);
+                self.var_op(s, HeapOp::Get, d, ix, NONE, elem);
                 Ok(Some((d, elem.ty())))
             }
             Expr::Call(name, args) => {
                 let Some((_, s, elem, m)) = self.dyn_method(name, sid) else { return Ok(None) };
-                let slot = self.sig(s).slot;
                 if let Some(key) = self.assoc_key(s) {
                     return self.assoc_value(s, m, args, elem, key, sid).map(Some);
                 }
                 match m {
                     "size" => {
                         let d = self.tmp(32);
-                        self.heap_op(HeapOp::Size, d, slot, NONE, NONE, elem);
+                        self.var_op(s, HeapOp::Size, d, NONE, NONE, elem);
                         Ok(Some((d, Type::vec(32, true))))
                     }
                     "pop_back" | "pop_front" => {
@@ -224,7 +270,7 @@ impl<'a> Compiler<'a> {
                         }
                         let d = self.tmp(elem.w);
                         let op = if m == "pop_back" { HeapOp::PopBack } else { HeapOp::PopFront };
-                        self.heap_op(op, d, slot, NONE, NONE, elem);
+                        self.var_op(s, op, d, NONE, NONE, elem);
                         self.emit(Instr::Touch { sig: s });
                         Ok(Some((d, elem.ty())))
                     }
@@ -345,13 +391,12 @@ impl<'a> Compiler<'a> {
                 let (s, el) = self.dyn_var(a, sid).unwrap();
                 let (lo, hi) = (self.dyn_index(a, lo, sid)?, self.dyn_index(a, hi, sid)?);
                 let d = self.tmp(64);
-                let slot = self.sig(s).slot;
-                self.heap_op(HeapOp::Slice, d, slot, lo, hi, el);
+                self.var_op(s, HeapOp::Slice, d, lo, hi, el);
                 Ok((d, true))
             }
             Expr::Cond(c, x, y) => {
                 // (both arrays are made; the condition picks one)
-                let k = if assoc { DynKind::Assoc(KeyKind::Str) } else { DynKind::Queue };
+                let k = if assoc { DynKind::Assoc(KeyKind::Str) } else { DynKind::Queue(0) };
                 let x = self.dyn_owned(x, k, elem, sid)?;
                 let y = self.dyn_owned(y, k, elem, sid)?;
                 let (cv, cw) = self.truth(c, sid)?;
@@ -375,20 +420,51 @@ impl<'a> Compiler<'a> {
     /// A queue or dynamic array value as a new array (a variable's array copied).
     pub(crate) fn dyn_owned(&mut self, e: &Expr, kind: DynKind, elem: Elem, sid: usize) -> R<u32> {
         let (h, fresh) = self.dyn_rhs_k(e, elem, matches!(kind, DynKind::Assoc(_)), sid)?;
-        if fresh {
-            return Ok(h);
+        let h = if fresh {
+            h
+        } else {
+            let d = self.tmp(64);
+            self.heap_op(HeapOp::Copy, d, h, NONE, NONE, elem);
+            d
+        };
+        // a bounded queue keeps its first elements
+        if let DynKind::Queue(b) = kind {
+            if b > 0 {
+                self.heap_op_t(HeapOp::Truncate, NONE, h, NONE, NONE, elem, kind);
+            }
         }
-        let d = self.tmp(64);
-        self.heap_op(HeapOp::Copy, d, h, NONE, NONE, elem);
-        Ok(d)
+        Ok(h)
+    }
+
+    /// An assignment pattern with more elements than bounded queue `name` holds: the
+    /// reference's compile-time warning and the pattern cut to the first elements.
+    pub(crate) fn bounded_pattern(&mut self, rhs: &Expr, lhs: &Expr, sid: usize) -> Option<Expr> {
+        let Expr::Pattern(None, items) = rhs else { return None };
+        let (s, _) = self.dyn_var(lhs, sid)?;
+        let Type::Dyn { kind: DynKind::Queue(b), .. } = self.sig_type(s) else { return None };
+        if b == 0 || items.len() <= b as usize {
+            return None;
+        }
+        let name = match lhs {
+            Expr::Ident(n) => n.clone(),
+            Expr::Hier(p) => p.last().cloned().unwrap_or_default(),
+            _ => return None,
+        };
+        let w = format!(
+            "{}:{}: Warning: Array pattern assignment has more elements ({}) than bounded queue '{name}' supports ({b}).\n         Only using first {b} elements.",
+            self.file,
+            self.line,
+            items.len()
+        );
+        self.diag.warnings.push(w);
+        Some(Expr::Pattern(None, items[..b as usize].to_vec()))
     }
 
     /// Free the array of the queue variable assigned by `lhs` (before a blocking assignment
     /// of a new array to it).
     pub(crate) fn dyn_free_target(&mut self, lhs: &Expr, sid: usize) {
         if let Some((s, elem)) = self.dyn_var(lhs, sid) {
-            let slot = self.sig(s).slot;
-            self.heap_op(HeapOp::Free, NONE, slot, NONE, NONE, elem);
+            self.var_op(s, HeapOp::Free, NONE, NONE, NONE, elem);
         }
     }
 
@@ -405,7 +481,7 @@ impl<'a> Compiler<'a> {
             return Ok(true);
         }
         let ix = self.dyn_index(a, i, sid)?;
-        self.heap_op(HeapOp::Set, NONE, slot, ix, v, elem);
+        self.var_op(s, HeapOp::Set, NONE, ix, v, elem);
         self.emit(Instr::Touch { sig: s });
         Ok(true)
     }
@@ -441,13 +517,13 @@ impl<'a> Compiler<'a> {
                 nargs(self, 1)?;
                 let v = self.elem_value(&args[0], elem, sid)?;
                 let op = if m == "push_back" { HeapOp::PushBack } else { HeapOp::PushFront };
-                self.heap_op(op, NONE, slot, NONE, v, elem);
+                self.var_op(s, op, NONE, NONE, v, elem);
             }
             "insert" => {
                 nargs(self, 2)?;
                 let ix = self.dyn_index(&base, &args[0], sid)?;
                 let v = self.elem_value(&args[1], elem, sid)?;
-                self.heap_op(HeapOp::Insert, NONE, slot, ix, v, elem);
+                self.var_op(s, HeapOp::Insert, NONE, ix, v, elem);
             }
             "delete" => {
                 let ix = match args {
@@ -455,7 +531,7 @@ impl<'a> Compiler<'a> {
                     [i] => self.dyn_index(&base, i, sid)?,
                     _ => return self.err("delete() takes at most 1 argument"),
                 };
-                self.heap_op(HeapOp::Delete, NONE, slot, ix, NONE, elem);
+                self.var_op(s, HeapOp::Delete, NONE, ix, NONE, elem);
             }
             // a value method called for its effect (pop) or ignored (size)
             _ => {

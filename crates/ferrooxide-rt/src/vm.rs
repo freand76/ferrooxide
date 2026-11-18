@@ -216,6 +216,8 @@ pub struct Sim {
     /// queues and dynamic arrays (`Instr::Heap`): handle h is `heap[h - 1]`
     heap: Vec<Option<HObj>>,
     heap_free: Vec<usize>,
+    /// run-time warnings start with "file:line: "
+    fileline: bool,
     /// open files
     files: HashMap<u32, FileH>,
     next_fd: u32,
@@ -483,6 +485,7 @@ impl Sim {
             str_ids: HashMap::new(),
             heap: Vec::new(),
             heap_free: Vec::new(),
+            fileline: false,
             files: HashMap::new(),
             next_fd: 3,
             scratch: Vec::new(),
@@ -1956,8 +1959,8 @@ impl Sim {
             self.exec_str(*op, *d, *a, *b, *c, *w);
             return false;
         }
-        if let Instr::Heap { op, d, a, b, c, w, x } = ins {
-            self.exec_heap(*op, *d, *a, *b, *c, *w, *x);
+        if let Instr::Heap { op, d, a, b, c, w, t, at } = ins {
+            self.exec_heap(*op, *d, *a, *b, *c, *w, *t, *at);
             return false;
         }
         if let Instr::Assoc { op, d, a, b, c, w, key, x } = ins {
@@ -2667,6 +2670,20 @@ impl Sim {
         }
     }
 
+    /// After an element went in at the front or the middle of a full bounded queue: its last
+    /// element goes, with the reference's warning (`what`: the operation).
+    fn drop_over_bound(&mut self, a: u32, n: usize, w: u32, t: HeapTy, at: u32, what: &str) {
+        let bound = t.bound as usize;
+        let len = self.harr(a).len() / n;
+        if bound == 0 || len <= bound {
+            return;
+        }
+        let last = self.hmut(a).split_off(bound * n);
+        let ls = self.hval(&last[..n], w, t);
+        let ty = Self::htype(w, t, false);
+        self.hwarn(at, format!("{what} removed {ls} from already full bounded {ty} [{bound}]."));
+    }
+
     /// The words of the array at `slot`, to change in place (an empty array gets an object).
     fn hmut(&mut self, slot: u32) -> &mut Vec<u64> {
         &mut self.hobj_mut(slot).data
@@ -2709,9 +2726,55 @@ impl Sim {
         self.mem[d as usize + 1] = 0;
     }
 
+    /// A run-time warning of a queue operation (as the reference words it).
+    fn hwarn(&mut self, at: u32, msg: String) {
+        if self.fileline {
+            let loc = self.prog.locs.get(at as usize).cloned().unwrap_or_default();
+            let _ = writeln!(self.out, "{loc}: Warning: {msg}");
+        } else {
+            let _ = writeln!(self.out, "Warning: {msg}");
+        }
+    }
+
+    /// An element value in a warning: `32'b0101`, a real as with %g, a string quoted.
+    fn hval(&self, v: &[u64], w: u32, t: HeapTy) -> String {
+        match t.elem {
+            ElemKind::Vec => {
+                let n = nw(w);
+                let val = crate::fmt::Val { a: &v[..n], b: &v[n..2 * n], w, signed: false };
+                format!("{w}'b{}", crate::fmt::fmt_radix(&val, 1, true))
+            }
+            ElemKind::Real => crate::fmt::fmt_real(f64::from_bits(v[0]), 'g', 6),
+            ElemKind::Str => {
+                // (the run-time table starts with the program's strings once a string
+                // operation ran)
+                let h = v[0] as usize;
+                let s: Vec<u8> = match self.strs.get(h) {
+                    Some(s) => s.to_vec(),
+                    None if self.strs.is_empty() => self.prog.strings.get(h).cloned().unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                format!("\"{}\"", String::from_utf8_lossy(&s))
+            }
+        }
+    }
+
+    /// The queue type in a warning: `queue<vector[32]>` (`short`: `queue<vector>`).
+    fn htype(w: u32, t: HeapTy, short: bool) -> String {
+        match t.elem {
+            ElemKind::Vec if short => "queue<vector>".into(),
+            ElemKind::Vec => format!("queue<vector[{w}]>"),
+            ElemKind::Real => "queue<real>".into(),
+            ElemKind::Str => "queue<string>".into(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn exec_heap(&mut self, op: HeapOp, d: u32, a: u32, b: u32, c: u32, w: u32, x: bool) {
+    fn exec_heap(&mut self, op: HeapOp, d: u32, a: u32, b: u32, c: u32, w: u32, t: HeapTy, at: u32) {
+        let x = t.x;
         let n = 2 * nw(w);
+        let bound = t.bound as usize;
+        let ty = Self::htype(w, t, false);
         let int = |m: &[u64], s: u32| -> Option<i64> { if s == NONE { None } else { ops::read_index(m, s as usize, 32, true) } };
         // the default value of an element
         let dflt = |w: u32| -> Vec<u64> {
@@ -2745,13 +2808,32 @@ impl Sim {
                 let i = int(&self.mem, b);
                 let v = elem(&self.mem, c);
                 let len = self.harr(a).len() / n;
+                let fits = matches!(i, Some(i) if i >= 0 && ((i as usize) < len || (i as usize == len && (bound == 0 || len < bound))));
+                if !fits && t.queue {
+                    // (as in the reference, a failed write makes the queue's object)
+                    self.hobj_mut(a);
+                }
                 match i {
                     Some(i) if i >= 0 && (i as usize) < len => {
                         let arr = self.hmut(a);
                         arr[i as usize * n..(i as usize + 1) * n].copy_from_slice(&v);
                     }
-                    Some(i) if i >= 0 && i as usize == len => self.hmut(a).extend_from_slice(&v),
-                    _ => {}
+                    Some(i) if i >= 0 && i as usize == len && (bound == 0 || len < bound) => self.hmut(a).extend_from_slice(&v),
+                    _ if !t.queue => {}
+                    None => {
+                        let vs = self.hval(&v, w, t);
+                        self.hwarn(at, format!("cannot assign to an undefined {ty} index. {vs} was not added."));
+                    }
+                    Some(i) if i < 0 => {
+                        let vs = self.hval(&v, w, t);
+                        self.hwarn(at, format!("cannot assign to a negative {ty} index ({i}). {vs} was not added."));
+                    }
+                    Some(i) => {
+                        let vs = self.hval(&v, w, t);
+                        let st = Self::htype(w, t, true);
+                        let why = if i as usize == len { format!("outside bound ({bound})") } else { format!("outside of size ({len})") };
+                        self.hwarn(at, format!("assigning to {st}[{i}] is {why}. {vs} was not added."));
+                    }
                 }
             }
             HeapOp::New => {
@@ -2792,15 +2874,26 @@ impl Sim {
             }
             HeapOp::PushBack => {
                 let v = elem(&self.mem, c);
+                if bound != 0 && self.harr(a).len() / n >= bound {
+                    let vs = self.hval(&v, w, t);
+                    self.hwarn(at, format!("push_back({vs}) skipped for already full bounded {ty} [{bound}]."));
+                    return;
+                }
                 self.hmut(a).extend_from_slice(&v);
             }
             HeapOp::PushFront => {
                 let v = elem(&self.mem, c);
-                self.hmut(a).splice(0..0, v);
+                self.hmut(a).splice(0..0, v.clone());
+                let what = format!("push_front({})", self.hval(&v, w, t));
+                self.drop_over_bound(a, n, w, t, at, &what);
             }
             HeapOp::PopBack | HeapOp::PopFront => {
                 let len = self.harr(a).len();
                 let v = if len == 0 {
+                    if t.queue {
+                        let m = if op == HeapOp::PopBack { "pop_back" } else { "pop_front" };
+                        self.hwarn(at, format!("{m}() on empty {ty}."));
+                    }
                     dflt(w)
                 } else if op == HeapOp::PopBack {
                     self.hmut(a).split_off(len - n)
@@ -2813,8 +2906,30 @@ impl Sim {
                 let i = int(&self.mem, b);
                 let v = elem(&self.mem, c);
                 let len = self.harr(a).len() / n;
-                if let Some(i) = i.filter(|&i| i >= 0 && i as usize <= len) {
-                    self.hmut(a).splice(i as usize * n..i as usize * n, v);
+                let fits = matches!(i, Some(i) if i >= 0 && i as usize <= len && (bound == 0 || (i as usize) < bound));
+                if !fits && t.queue {
+                    self.hobj_mut(a);
+                }
+                match i {
+                    Some(i) if i >= 0 && i as usize <= len && (bound == 0 || (i as usize) < bound) => {
+                        self.hmut(a).splice(i as usize * n..i as usize * n, v.clone());
+                        let what = format!("insert({i}, {})", self.hval(&v, w, t));
+                        self.drop_over_bound(a, n, w, t, at, &what);
+                    }
+                    _ if !t.queue => {}
+                    None => {
+                        let vs = self.hval(&v, w, t);
+                        self.hwarn(at, format!("cannot insert at an undefined {ty} index. {vs} was not added."));
+                    }
+                    Some(i) if i < 0 => {
+                        let vs = self.hval(&v, w, t);
+                        self.hwarn(at, format!("cannot insert at a negative {ty} index ({i}). {vs} was not added."));
+                    }
+                    Some(i) => {
+                        let vs = self.hval(&v, w, t);
+                        let why = if i as usize > len { format!("outside of size ({len})") } else { format!("outside bound ({bound})") };
+                        self.hwarn(at, format!("inserting to {ty}[{i}] is {why}. {vs} was not added."));
+                    }
                 }
             }
             HeapOp::Delete => {
@@ -2825,8 +2940,24 @@ impl Sim {
                     return;
                 }
                 let len = self.harr(a).len() / n;
-                if let Some(i) = int(&self.mem, b).filter(|&i| i >= 0 && (i as usize) < len) {
-                    self.hmut(a).drain(i as usize * n..(i as usize + 1) * n);
+                match int(&self.mem, b) {
+                    Some(i) if i >= 0 && (i as usize) < len => {
+                        self.hmut(a).drain(i as usize * n..(i as usize + 1) * n);
+                    }
+                    _ if !t.queue => {}
+                    None => self.hwarn(at, "skipping queue delete() with undefined index.".into()),
+                    Some(i) if i < 0 => self.hwarn(at, "skipping queue delete() with negative index.".into()),
+                    // (a queue that never had an object; else out of range)
+                    Some(i) if self.hobj(a).is_none() => self.hwarn(at, format!("skipping delete({i}) on empty queue.")),
+                    Some(i) => self.hwarn(at, format!("skipping out of range delete({i}) on queue of size {len}.")),
+                }
+            }
+            HeapOp::Truncate => {
+                let len = self.harr(a).len() / n;
+                if bound != 0 && len > bound {
+                    let st = Self::htype(w, t, true);
+                    self.hwarn(at, format!("{st} is bounded to have at most {bound} elements, source has {len} elements."));
+                    self.hmut(a).truncate(bound * n);
                 }
             }
             HeapOp::Slice => {
@@ -3151,6 +3282,11 @@ impl Sim {
     /// Plusargs from the command line (without the leading '+').
     pub fn set_plusargs(&mut self, args: Vec<String>) {
         self.plusargs = args;
+    }
+
+    /// Run-time warnings start with their source location (the reference's `-pfileline=1`).
+    pub fn set_fileline(&mut self, on: bool) {
+        self.fileline = on;
     }
 
     fn readmem(&mut self, hex: bool, file: &str, sig: u32, start: Option<u64>, end: Option<u64>, loc: &str) {

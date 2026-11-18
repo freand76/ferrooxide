@@ -126,6 +126,8 @@ pub struct Program {
     pub start_order: Vec<u32>,
     /// strings known at compile time; a handle is an index (0: the empty string)
     pub strings: Vec<Vec<u8>>,
+    /// source locations ("file:line") of the instructions that can warn at run time
+    pub locs: Vec<String>,
     /// packages with variables (not dumped; `$dumpvars` warns about them)
     pub packages: Vec<String>,
     /// memory words [0, scratch_words) are the shared scratch region for process temporaries
@@ -593,6 +595,8 @@ pub enum HeapOp {
     Append,
     /// d (1 bit) = arrays a and b have the same size and elements
     Eq,
+    /// keep at most `bound` elements of the array at a (an array assigned to a bounded queue)
+    Truncate,
 }
 
 /// Operations on strings (handles, `Program::strings`) in `Instr::Str`.
@@ -705,12 +709,32 @@ pub enum Instr {
     Sys(Box<SysTask>),
     /// a string operation; unused operands are NONE
     Str { op: StrOp, d: u32, a: u32, b: u32, c: u32, w: u32 },
-    /// an operation on a queue or dynamic array of `w`-bit elements; unused operands are NONE.
-    /// `x`: an element outside the array reads as x (4-state vectors), else as 0
-    Heap { op: HeapOp, d: u32, a: u32, b: u32, c: u32, w: u32, x: bool },
+    /// an operation on a queue or dynamic array of `w`-bit elements; unused operands are NONE;
+    /// `at`: the source location for warnings (`Program::locs`)
+    Heap { op: HeapOp, d: u32, a: u32, b: u32, c: u32, w: u32, t: HeapTy, at: u32 },
     /// an operation on an associative array of `w`-bit elements with keys of type `key`
     /// (slot `b`); `x` as for `Heap`
     Assoc { op: AssocOp, d: u32, a: u32, b: u32, c: u32, w: u32, key: KeyKind, x: bool },
+}
+
+/// The array of an `Instr::Heap`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeapTy {
+    pub elem: ElemKind,
+    /// a queue (its operations warn about indexes outside it, as the reference does)
+    pub queue: bool,
+    /// the most elements a bounded queue (`[$:N]`, N + 1) holds; 0: unbounded
+    pub bound: u32,
+    /// an element outside the array reads as x (4-state vectors), else as 0
+    pub x: bool,
+}
+
+/// The element type of an array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElemKind {
+    Vec,
+    Real,
+    Str,
 }
 
 /// Operations on associative arrays in `Instr::Assoc` (objects on the heap as for

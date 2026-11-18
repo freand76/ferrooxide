@@ -523,7 +523,8 @@ impl<'a> Compiler<'a> {
                 let lt = self.type_of(lhs, sid)?;
                 let lw = lt.width();
                 let tl = self.target_layout(lhs, sid);
-                let v = self.value_for(rhs, sid, lw, lt, tl.as_ref())?;
+                let cut = if let Type::Dyn { .. } = lt { self.bounded_pattern(rhs, lhs, sid) } else { None };
+                let v = self.value_for(cut.as_ref().unwrap_or(rhs), sid, lw, lt, tl.as_ref())?;
                 // the target's old array goes (the new one is a copy or a new array)
                 if let (Type::Dyn { .. }, false, None) = (lt, *nonblocking, timing) {
                     self.dyn_free_target(lhs, sid);

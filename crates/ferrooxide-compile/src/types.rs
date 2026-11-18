@@ -20,7 +20,8 @@ pub(crate) enum Type {
 /// The kind of a `Type::Dyn`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DynKind {
-    Queue,
+    /// a queue holding at most this many elements (0: unbounded)
+    Queue(u32),
     Darray,
     Assoc(rt::KeyKind),
 }
