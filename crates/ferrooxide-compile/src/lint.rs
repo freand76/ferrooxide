@@ -93,6 +93,14 @@ impl<'a> Compiler<'a> {
     pub(crate) fn blocking_writes(&self, st: &Stmt, sid: usize, out: &mut Vec<u32>) {
         match st {
             Stmt::Assign { lhs, nonblocking: false, .. } => self.lvalue_bases(lhs, sid, out),
+            // a method that changes a queue or dynamic array
+            Stmt::TaskCall { name, .. } => {
+                if let Some((_, s, _, m)) = self.dyn_method(name, sid) {
+                    if m != "size" {
+                        out.push(s);
+                    }
+                }
+            }
             Stmt::Block { stmts, .. } => {
                 for s in stmts {
                     self.blocking_writes(s, sid, out);

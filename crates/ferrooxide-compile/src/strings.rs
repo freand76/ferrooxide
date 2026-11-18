@@ -67,6 +67,15 @@ impl<'a> Compiler<'a> {
         if let Some(h) = self.str_member(e, sid)? {
             return Ok(h);
         }
+        // a string element of a queue or dynamic array
+        if self.sigs.has_dyn {
+            if let Some((v, t)) = self.dyn_value(e, sid)? {
+                if t != Type::Str {
+                    return self.err("not a string");
+                }
+                return Ok(v);
+            }
+        }
         match e {
             Expr::Str(t) => {
                 // (the lexer keeps one char per byte of the literal)

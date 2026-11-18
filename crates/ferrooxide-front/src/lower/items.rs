@@ -199,7 +199,7 @@ impl Lower {
                 for (n, loc) in v {
                     let n = self.name(n, *loc);
                     self.declare_var(&n, &[]);
-                    names.push(Declarator { name: n, dims: vec![], init: None, line: loc.line });
+                    names.push(Declarator { name: n, dims: vec![], heap: None, init: None, line: loc.line });
                 }
                 let d = Decl {
                     dir: None,
@@ -435,7 +435,7 @@ impl Lower {
         if let Some(ports) = &s.ports {
             let mut cur: Option<Decl> = None;
             for p in ports {
-                if !p.dims.is_empty() {
+                if !p.dims.is_empty() && !matches!(p.dims.as_slice(), [t::Dim::Unsized | t::Dim::Queue(_)]) {
                     return self.unsupported(p.loc, "an array argument");
                 }
                 if p.dir.is_some() || p.ty.is_some() || p.var || cur.is_none() {
@@ -451,13 +451,14 @@ impl Lower {
                     cur = Some(d);
                 }
                 let n = self.name(&p.name, p.loc);
-                self.declare_var(&n, &[]);
+                let (dims, heap) = self.declarator_dims(&p.dims, p.loc)?;
+                self.declare_var_heap(&n, &dims, heap.as_ref());
                 let init = match &p.default {
                     Some(e) => Some(self.expr(e)?),
                     None => None,
                 };
                 let mut d = cur.clone().unwrap();
-                d.names = vec![Declarator { name: n, dims: vec![], init, line: p.loc.line }];
+                d.names = vec![Declarator { name: n, dims, heap, init, line: p.loc.line }];
                 decls.push(d);
             }
         }

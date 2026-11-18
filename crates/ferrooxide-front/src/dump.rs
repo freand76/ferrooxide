@@ -110,6 +110,11 @@ pub fn expr(e: &Expr) -> String {
         Expr::SysCall(n, args) => format!("{n}({})", list(args)),
         Expr::Type(t) => format!("type({})", sv_type(t)),
         Expr::Member(a, m) => format!("{}.{m}", expr(a)),
+        Expr::NewArray(n, init) => match init {
+            Some(i) => format!("new[{}]({})", expr(n), expr(i)),
+            None => format!("new[{}]", expr(n)),
+        },
+        Expr::Last => "$".into(),
         Expr::Pattern(t, items) => {
             let items: Vec<String> = items
                 .iter()
@@ -341,7 +346,15 @@ impl Printer {
             .iter()
             .map(|n| {
                 let init = n.init.as_ref().map(|i| format!(" = {}", expr(i))).unwrap_or_default();
-                format!("{}{}{init}", n.name, ranges(&n.dims))
+                let heap = match &n.heap {
+                    None => String::new(),
+                    Some(HeapKind::Dynamic) => "[]".into(),
+                    Some(HeapKind::Queue(None)) => "[$]".into(),
+                    Some(HeapKind::Queue(Some(m))) => format!("[$:{}]", expr(m)),
+                Some(HeapKind::Assoc(None)) => "[*]".into(),
+                Some(HeapKind::Assoc(Some(k))) => format!("[{}]", sv_type(k)),
+                };
+                format!("{}{}{heap}{init}", n.name, ranges(&n.dims))
             })
             .collect();
         let _ = write!(s, " {};", names.join(", "));
@@ -468,7 +481,15 @@ impl Printer {
             if let Some(r) = &f.range {
                 let _ = write!(ret, " {}", range(r));
             }
-            self.line(format!("function{auto} {ret} {};", f.name));
+            let heap = match f.ret_ty.as_ref().and_then(|t| t.heap.as_ref()) {
+                None => String::new(),
+                Some(HeapKind::Dynamic) => "[]".into(),
+                Some(HeapKind::Queue(None)) => "[$]".into(),
+                Some(HeapKind::Queue(Some(m))) => format!("[$:{}]", expr(m)),
+                Some(HeapKind::Assoc(None)) => "[*]".into(),
+                Some(HeapKind::Assoc(Some(k))) => format!("[{}]", sv_type(k)),
+            };
+            self.line(format!("function{auto} {ret} {}{heap};", f.name));
         }
         self.ind += 1;
         for d in &f.decls {

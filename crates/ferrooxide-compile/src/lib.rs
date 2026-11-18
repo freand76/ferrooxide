@@ -6,6 +6,7 @@
 mod codegen;
 mod elab;
 mod expr;
+mod heap;
 mod konst;
 mod lint;
 mod stmt;
@@ -80,6 +81,8 @@ pub(crate) struct Scope<'a> {
 enum Job<'a> {
     Proc { kind: ProcKind, body: &'a Stmt, scope: usize, line: u32 },
     Assign { lhs: Expr, rhs: Expr, delay: Option<Expr>, scope: usize, line: u32 },
+    /// a variable initializer that is not a constant (a queue's): assigned once at time 0
+    Init { lhs: Expr, rhs: Expr, scope: usize, line: u32 },
     /// child input port driven by a parent expression
     PortIn { child_sig: u32, expr: Expr, scope: usize, line: u32 },
     /// parent lvalue driven by a child output port
@@ -275,6 +278,8 @@ pub(crate) struct Sigs {
     pub(crate) has_structs: bool,
     /// some struct has real or string members
     pub(crate) has_struct_values: bool,
+    /// some queue or dynamic array exists (`q.size` needs the rewrite in `md_norm`)
+    pub(crate) has_dyn: bool,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).

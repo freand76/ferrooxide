@@ -492,6 +492,16 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
      Left: unpacked array members, member defaults, method calls on members
      (`s.name.len()`), `%p` of a whole struct.
   4. Then A2 (queues, dynamic and associative arrays) builds on the same `Type`.
+     *4a done 2026-11-18*: queues and dynamic arrays. A variable holds a 64-bit handle of
+     an object on the simulator's heap (`Instr::Heap`, generic path; 0 is the empty array);
+     each variable owns its object (an assignment of another variable's array copies it,
+     the old one is freed on blocking assignments), elements and methods change it in place
+     and give the variable a change event (`Touch`). `Type::Dyn`, `compile/heap.rs`; front end: `Declarator::heap`,
+     `SvType::heap` (typedefs, return types), `Expr::NewArray`, `Expr::Last` (`$`), `{}`,
+     foreach. Left: 4b associative arrays; 4c bounded queues (`[$:N]`) and the reference's
+     run-time warnings (out of range, empty pop); queues of structs, arrays of queues,
+     queue ports, `%p`, array methods (`sort`, `find`, ... `with`), element writes with
+     `<=` (done at once).
 - **R5. Split the compiler**: `elab/{params,hier,decls,generate,nets,udp,specify}.rs` plus
   codegen; `Compiler` fields grouped into sub-structs. Move first, regroup after.
   *Done 2026-11-15*: `elab/{hier,params,decls,items,nets,udp,specify}.rs` and `codegen.rs`

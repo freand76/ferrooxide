@@ -216,11 +216,13 @@ impl Lower {
                 }
             },
             t::ExprKind::Type(dt) => Expr::Type(Rc::new(self.data_type_req(dt)?)),
-            t::ExprKind::Concat(_) => return self.unsupported(loc, "an empty concatenation"),
+            // `{}`: an empty queue
+            t::ExprKind::Concat(_) => Expr::Concat(vec![]),
             t::ExprKind::Repl(..) => return self.unsupported(loc, "an empty replication"),
             t::ExprKind::Null => return self.unsupported(loc, "null"),
             t::ExprKind::This | t::ExprKind::Super => return self.unsupported(loc, "this / super"),
-            t::ExprKind::Dollar => return self.unsupported(loc, "`$` here"),
+            // (the last index of a queue; elsewhere an error in elaboration)
+            t::ExprKind::Dollar => Expr::Last,
             t::ExprKind::Step => return self.unsupported(loc, "1step"),
             t::ExprKind::Default => return self.unsupported(loc, "`default` here"),
             t::ExprKind::Root => return self.unsupported(loc, "$root alone"),
@@ -232,6 +234,15 @@ impl Lower {
             t::ExprKind::Tagged(..) => return self.unsupported(loc, "a tagged union expression"),
             // Verilog code may name a variable `new`
             t::ExprKind::New { size: None, args: None, copy: None } if self.vars.contains_key("new") => Expr::Ident(self.name("new", loc)),
+            t::ExprKind::New { size: Some(n), args, copy: None } => {
+                let n = self.expr(n)?;
+                let init = match args.as_deref() {
+                    None => None,
+                    Some([t::Arg::Pos(Some(x))]) => Some(Box::new(self.expr(x)?)),
+                    Some(_) => return self.unsupported(loc, "these arguments of new[]"),
+                };
+                Expr::NewArray(Box::new(n), init)
+            }
             t::ExprKind::New { .. } => return self.unsupported(loc, "new"),
             t::ExprKind::Prop(_) => return self.unsupported(loc, "a property expression"),
         })

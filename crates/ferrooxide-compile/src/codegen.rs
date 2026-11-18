@@ -204,7 +204,7 @@ impl<'a> Compiler<'a> {
             Job::Assign { lhs, scope, .. } | Job::PortOut { lhs, scope, .. } => self.lvalue_bases(lhs, *scope, &mut v),
             Job::PortIn { child_sig, .. } => v.push(*child_sig),
             Job::Udp { terms, scope, .. } => self.lvalue_bases(&terms[0], *scope, &mut v),
-            Job::Proc { .. } => {}
+            Job::Proc { .. } | Job::Init { .. } => {}
         }
         v.sort_unstable();
         v.dedup();
@@ -446,6 +446,16 @@ impl<'a> Compiler<'a> {
                             self.prog.procs[p as usize].kick0 = true;
                         }
                     }
+                    self.end_proc();
+                }
+                Job::Init { lhs, rhs, scope, line } => {
+                    self.line = *line;
+                    self.file = self.scopes[*scope].file.clone();
+                    let name = self.scopes[*scope].name.clone();
+                    self.begin_proc(name, ProcClass::Normal);
+                    let st = Stmt::Assign { lhs: lhs.clone(), rhs: rhs.clone(), nonblocking: false, timing: None, line: *line };
+                    self.stmt(&st, *scope)?;
+                    self.emit(Instr::Halt);
                     self.end_proc();
                 }
                 Job::Assign { lhs, rhs, delay, scope, line } => {

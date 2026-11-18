@@ -213,6 +213,9 @@ pub struct Sim {
     /// interned strings: a string value is the index of its text (0: "")
     strs: Vec<Rc<[u8]>>,
     str_ids: HashMap<Rc<[u8]>, u64>,
+    /// queues and dynamic arrays (`Instr::Heap`): handle h is `heap[h - 1]`
+    heap: Vec<Option<HObj>>,
+    heap_free: Vec<usize>,
     /// open files
     files: HashMap<u32, FileH>,
     next_fd: u32,
@@ -478,6 +481,8 @@ impl Sim {
             is_dirty: vec![false; nsig],
             strs: Vec::new(),
             str_ids: HashMap::new(),
+            heap: Vec::new(),
+            heap_free: Vec::new(),
             files: HashMap::new(),
             next_fd: 3,
             scratch: Vec::new(),
@@ -1951,6 +1956,14 @@ impl Sim {
             self.exec_str(*op, *d, *a, *b, *c, *w);
             return false;
         }
+        if let Instr::Heap { op, d, a, b, c, w, x } = ins {
+            self.exec_heap(*op, *d, *a, *b, *c, *w, *x);
+            return false;
+        }
+        if let Instr::Assoc { op, d, a, b, c, w, key, x } = ins {
+            self.exec_assoc(*op, *d, *a, *b, *c, *w, *key, *x);
+            return false;
+        }
         {
             let m = &mut self.mem;
             match ins {
@@ -2198,7 +2211,7 @@ impl Sim {
                 | Instr::RToTicks { .. } => {
                     ops::exec_real(ins, m);
                 }
-                Instr::Str { .. } => unreachable!("handled before"),
+                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } => unreachable!("handled before"),
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -2619,6 +2632,333 @@ impl Sim {
             let word = if k == 0 { v as u64 } else if v < 0 { !0 } else { 0 };
             self.mem[d + k] = if k == n - 1 { word & ops::mask(w - 64 * k as u32) } else { word };
             self.mem[d + n + k] = 0;
+        }
+    }
+
+    /// The elements (words, `2 * nw(w)` per element) of the array whose handle is at `slot`.
+    fn harr(&self, slot: u32) -> &[u64] {
+        let h = self.mem[slot as usize];
+        if h == 0 || self.mem[slot as usize + 1] != 0 {
+            return &[];
+        }
+        self.heap.get(h as usize - 1).and_then(|o| o.as_ref()).map_or(&[], |o| &o.data[..])
+    }
+
+    /// A new array with these words; its handle (0 for an empty one: no object).
+    fn halloc(&mut self, data: Vec<u64>) -> u64 {
+        if data.is_empty() {
+            return 0;
+        }
+        self.alloc_obj(HObj { data, ..Default::default() })
+    }
+
+    /// A handle of a new heap object.
+    fn alloc_obj(&mut self, o: HObj) -> u64 {
+        let o = Some(o);
+        match self.heap_free.pop() {
+            Some(i) => {
+                self.heap[i] = o;
+                i as u64 + 1
+            }
+            None => {
+                self.heap.push(o);
+                self.heap.len() as u64
+            }
+        }
+    }
+
+    /// The words of the array at `slot`, to change in place (an empty array gets an object).
+    fn hmut(&mut self, slot: u32) -> &mut Vec<u64> {
+        &mut self.hobj_mut(slot).data
+    }
+
+    /// The object of the handle at `slot`, if there is one.
+    fn hobj(&self, slot: u32) -> Option<&HObj> {
+        let h = self.mem[slot as usize];
+        if h == 0 || self.mem[slot as usize + 1] != 0 {
+            return None;
+        }
+        self.heap.get(h as usize - 1).and_then(|o| o.as_ref())
+    }
+
+    /// The object of the handle at `slot`, to change in place (created if there is none).
+    fn hobj_mut(&mut self, slot: u32) -> &mut HObj {
+        let s = slot as usize;
+        let h = self.mem[s];
+        let live = h != 0 && self.mem[s + 1] == 0 && self.heap.get(h as usize - 1).is_some_and(|o| o.is_some());
+        if !live {
+            let i = match self.heap_free.pop() {
+                Some(i) => {
+                    self.heap[i] = Some(HObj::default());
+                    i
+                }
+                None => {
+                    self.heap.push(Some(HObj::default()));
+                    self.heap.len() - 1
+                }
+            };
+            self.mem[s] = i as u64 + 1;
+            self.mem[s + 1] = 0;
+        }
+        let h = self.mem[s] as usize;
+        self.heap[h - 1].as_mut().unwrap()
+    }
+
+    fn put_handle(&mut self, d: u32, h: u64) {
+        self.mem[d as usize] = h;
+        self.mem[d as usize + 1] = 0;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_heap(&mut self, op: HeapOp, d: u32, a: u32, b: u32, c: u32, w: u32, x: bool) {
+        let n = 2 * nw(w);
+        let int = |m: &[u64], s: u32| -> Option<i64> { if s == NONE { None } else { ops::read_index(m, s as usize, 32, true) } };
+        // the default value of an element
+        let dflt = |w: u32| -> Vec<u64> {
+            let n = nw(w);
+            let mut v = vec![0u64; 2 * n];
+            if x {
+                for k in 0..n {
+                    let full = if k == n - 1 { tmask(w) } else { !0 };
+                    v[k] = full;
+                    v[n + k] = full;
+                }
+            }
+            v
+        };
+        let elem = |m: &[u64], s: u32| -> Vec<u64> { m[s as usize..s as usize + n].to_vec() };
+        match op {
+            HeapOp::Size => {
+                let len = (self.harr(a).len() / n) as i64;
+                self.put_int(d, 32, len);
+            }
+            HeapOp::Get => {
+                let i = int(&self.mem, b);
+                let arr = self.harr(a);
+                let v = match i {
+                    Some(i) if i >= 0 && (i as usize) < arr.len() / n => arr[i as usize * n..(i as usize + 1) * n].to_vec(),
+                    _ => dflt(w),
+                };
+                self.mem[d as usize..d as usize + n].copy_from_slice(&v);
+            }
+            HeapOp::Set => {
+                let i = int(&self.mem, b);
+                let v = elem(&self.mem, c);
+                let len = self.harr(a).len() / n;
+                match i {
+                    Some(i) if i >= 0 && (i as usize) < len => {
+                        let arr = self.hmut(a);
+                        arr[i as usize * n..(i as usize + 1) * n].copy_from_slice(&v);
+                    }
+                    Some(i) if i >= 0 && i as usize == len => self.hmut(a).extend_from_slice(&v),
+                    _ => {}
+                }
+            }
+            HeapOp::New => {
+                let size = int(&self.mem, b).unwrap_or(0).max(0) as usize;
+                let src = if c == NONE { &[][..] } else { self.harr(c) };
+                let mut data = Vec::with_capacity(size * n);
+                data.extend_from_slice(&src[..src.len().min(size * n)]);
+                let dv = dflt(w);
+                while data.len() < size * n {
+                    data.extend_from_slice(&dv);
+                }
+                let h = self.halloc(data);
+                self.put_handle(d, h);
+            }
+            HeapOp::Copy => {
+                let h = match self.hobj(a) {
+                    // (an associative array: a new object with the same entries)
+                    Some(o) if !o.map.is_empty() => {
+                        let o = o.clone();
+                        self.alloc_obj(o)
+                    }
+                    _ => {
+                        let data = self.harr(a).to_vec();
+                        self.halloc(data)
+                    }
+                };
+                self.put_handle(d, h);
+            }
+            HeapOp::Free => {
+                let h = self.mem[a as usize];
+                if h != 0 && self.mem[a as usize + 1] == 0 {
+                    if let Some(o) = self.heap.get_mut(h as usize - 1) {
+                        if o.take().is_some() {
+                            self.heap_free.push(h as usize - 1);
+                        }
+                    }
+                }
+            }
+            HeapOp::PushBack => {
+                let v = elem(&self.mem, c);
+                self.hmut(a).extend_from_slice(&v);
+            }
+            HeapOp::PushFront => {
+                let v = elem(&self.mem, c);
+                self.hmut(a).splice(0..0, v);
+            }
+            HeapOp::PopBack | HeapOp::PopFront => {
+                let len = self.harr(a).len();
+                let v = if len == 0 {
+                    dflt(w)
+                } else if op == HeapOp::PopBack {
+                    self.hmut(a).split_off(len - n)
+                } else {
+                    self.hmut(a).drain(0..n).collect()
+                };
+                self.mem[d as usize..d as usize + n].copy_from_slice(&v);
+            }
+            HeapOp::Insert => {
+                let i = int(&self.mem, b);
+                let v = elem(&self.mem, c);
+                let len = self.harr(a).len() / n;
+                if let Some(i) = i.filter(|&i| i >= 0 && i as usize <= len) {
+                    self.hmut(a).splice(i as usize * n..i as usize * n, v);
+                }
+            }
+            HeapOp::Delete => {
+                if b == NONE {
+                    if !self.harr(a).is_empty() {
+                        self.hmut(a).clear();
+                    }
+                    return;
+                }
+                let len = self.harr(a).len() / n;
+                if let Some(i) = int(&self.mem, b).filter(|&i| i >= 0 && (i as usize) < len) {
+                    self.hmut(a).drain(i as usize * n..(i as usize + 1) * n);
+                }
+            }
+            HeapOp::Slice => {
+                let arr = self.harr(a);
+                let len = (arr.len() / n) as i64;
+                let data = match (int(&self.mem, b), int(&self.mem, c)) {
+                    (Some(lo), Some(hi)) => {
+                        let (lo, hi) = (lo.max(0), hi.min(len - 1));
+                        if lo <= hi { arr[lo as usize * n..(hi as usize + 1) * n].to_vec() } else { Vec::new() }
+                    }
+                    _ => Vec::new(),
+                };
+                let h = self.halloc(data);
+                self.put_handle(d, h);
+            }
+            HeapOp::Append => {
+                let v = self.harr(c).to_vec();
+                if !v.is_empty() {
+                    self.hmut(a).extend_from_slice(&v);
+                }
+            }
+            HeapOp::Eq => {
+                let eq = self.harr(a) == self.harr(b);
+                self.put_int(d, 1, eq as i64);
+            }
+        }
+    }
+
+
+    /// The key in slot `b` (None: an unknown integer key).
+    fn akey(&mut self, b: u32, key: KeyKind) -> Option<AKey> {
+        match key {
+            KeyKind::Str => Some(AKey::Str(self.str_at(b))),
+            KeyKind::Int { w, signed } => ops::read_index(&self.mem, b as usize, w, signed).map(|v| {
+                if signed || w >= 64 { AKey::Int(v as i128) } else { AKey::Int((v as u64 & tmask(w)) as i128) }
+            }),
+        }
+    }
+
+    fn put_akey(&mut self, d: u32, k: &AKey, key: KeyKind) {
+        match (k, key) {
+            (AKey::Str(t), _) => {
+                let t = t.clone();
+                self.put_str(d, &t);
+            }
+            (AKey::Int(v), KeyKind::Int { w, .. }) => self.put_int(d, w, *v as i64),
+            (AKey::Int(_), KeyKind::Str) => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_assoc(&mut self, op: AssocOp, d: u32, a: u32, b: u32, c: u32, w: u32, key: KeyKind, x: bool) {
+        let n = 2 * nw(w);
+        let dflt = || -> Vec<u64> {
+            let k = nw(w);
+            let mut v = vec![0u64; 2 * k];
+            if x {
+                for i in 0..k {
+                    let full = if i == k - 1 { tmask(w) } else { !0 };
+                    v[i] = full;
+                    v[k + i] = full;
+                }
+            }
+            v
+        };
+        let k = if b == NONE { None } else { self.akey(b, key) };
+        match op {
+            AssocOp::Num => {
+                let len = self.hobj(a).map_or(0, |o| o.map.len()) as i64;
+                self.put_int(d, 32, len);
+            }
+            AssocOp::Get => {
+                let v = match &k {
+                    Some(k) => self.hobj(a).and_then(|o| o.map.get(k)).cloned(),
+                    None => None,
+                };
+                let v = v.unwrap_or_else(dflt);
+                self.mem[d as usize..d as usize + n].copy_from_slice(&v);
+            }
+            AssocOp::Set => {
+                if let Some(k) = k {
+                    let v = self.mem[c as usize..c as usize + n].to_vec();
+                    self.hobj_mut(a).map.insert(k, v);
+                }
+            }
+            AssocOp::Exists => {
+                let e = match &k {
+                    Some(k) => self.hobj(a).is_some_and(|o| o.map.contains_key(k)),
+                    None => false,
+                };
+                self.put_int(d, 32, e as i64);
+            }
+            AssocOp::Delete => {
+                if self.hobj(a).is_none() {
+                    return;
+                }
+                if b == NONE {
+                    self.hobj_mut(a).map.clear();
+                } else if let Some(k) = k {
+                    self.hobj_mut(a).map.remove(&k);
+                }
+            }
+            AssocOp::First | AssocOp::Last | AssocOp::Next | AssocOp::Prev => {
+                let found = match self.hobj(a) {
+                    None => None,
+                    Some(o) => match op {
+                        AssocOp::First => o.map.keys().next().cloned(),
+                        AssocOp::Last => o.map.keys().next_back().cloned(),
+                        AssocOp::Next => k.as_ref().and_then(|k| {
+                            o.map.range((std::ops::Bound::Excluded(k.clone()), std::ops::Bound::Unbounded)).next().map(|e| e.0.clone())
+                        }),
+                        _ => k.as_ref().and_then(|k| o.map.range(..k.clone()).next_back().map(|e| e.0.clone())),
+                    },
+                };
+                match found {
+                    Some(f) => {
+                        self.put_akey(c, &f, key);
+                        self.put_int(d, 32, 1);
+                    }
+                    None => {
+                        // (the key variable keeps its value)
+                        if b != NONE && b != c {
+                            let m = 2 * match key {
+                                KeyKind::Str => 1,
+                                KeyKind::Int { w, .. } => nw(w),
+                            };
+                            self.mem.copy_within(b as usize..b as usize + m, c as usize);
+                        }
+                        self.put_int(d, 32, 0);
+                    }
+                }
+            }
         }
     }
 
@@ -3717,4 +4057,19 @@ fn udp_eval(t: &UdpTable, cur: &[u8], prev: &[u8], q: u8) -> u8 {
     } else {
         UDP_X
     }
+}
+
+/// A queue or dynamic array on the heap: its elements' words, `2 * nw(w)` per element; an
+/// associative array: its entries by key.
+#[derive(Clone, Default)]
+struct HObj {
+    data: Vec<u64>,
+    map: BTreeMap<AKey, Vec<u64>>,
+}
+
+/// A key of an associative array (integer keys in numeric order, strings lexicographic).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum AKey {
+    Int(i128),
+    Str(Rc<[u8]>),
 }

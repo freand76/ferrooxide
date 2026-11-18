@@ -13,6 +13,34 @@ pub(crate) enum Type {
     Real,
     /// `string`: a 64-bit handle of an interned text
     Str,
+    /// a queue or dynamic array: a 64-bit handle of a heap object (`heap.rs`)
+    Dyn { queue: bool, elem: Elem },
+}
+
+/// The element type of a queue or dynamic array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Elem {
+    pub(crate) w: u32,
+    pub(crate) signed: bool,
+    pub(crate) leaf: Leaf,
+    /// a 2-state type: an element outside the array reads as 0, not x
+    pub(crate) two_state: bool,
+}
+
+impl Elem {
+    /// The type of an element value.
+    pub(crate) fn ty(self) -> Type {
+        match self.leaf {
+            Leaf::Bits => Type::vec(self.w, self.signed),
+            Leaf::Real => Type::Real,
+            Leaf::Str => Type::Str,
+        }
+    }
+
+    /// An element outside the array reads as x.
+    pub(crate) fn x(self) -> bool {
+        self.leaf == Leaf::Bits && !self.two_state
+    }
 }
 
 impl Type {
@@ -25,7 +53,7 @@ impl Type {
     pub(crate) fn width(self) -> u32 {
         match self {
             Type::Vec { w, .. } => w,
-            Type::Real | Type::Str => 64,
+            Type::Real | Type::Str | Type::Dyn { .. } => 64,
         }
     }
 
@@ -34,7 +62,7 @@ impl Type {
         match self {
             Type::Vec { signed, .. } => signed,
             Type::Real => true,
-            Type::Str => false,
+            Type::Str | Type::Dyn { .. } => false,
         }
     }
 
@@ -87,6 +115,11 @@ impl<'a> Compiler<'a> {
         if let Some(t) = self.member_type(e, sid) {
             return Ok(t);
         }
+        if self.sigs.has_dyn {
+            if let Some(t) = self.dyn_type_of(e, sid) {
+                return t;
+            }
+        }
         if let Some(n) = self.md_norm(e, sid) {
             return self.type_of(&n, sid);
         }
@@ -94,6 +127,8 @@ impl<'a> Compiler<'a> {
         Ok(match e {
             Expr::Type(_) => return self.err("a data type is not a value"),
             Expr::Member(..) => return self.member_error(e, sid),
+            Expr::NewArray(..) => return self.err("new[] needs a dynamic array to assign to"),
+            Expr::Last => return self.err("`$` outside an index of a queue"),
             Expr::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
                 return self.type_of(&r, sid);
@@ -171,10 +206,21 @@ impl<'a> Compiler<'a> {
             Expr::Concat(xs) | Expr::Repl(_, xs) => {
                 let mut w = 0;
                 let mut str = false;
+                let mut dynt = None;
                 for x in xs {
                     let t = self.type_of(x, sid)?;
                     str |= t.is_str();
+                    if let Type::Dyn { .. } = t {
+                        dynt.get_or_insert(t);
+                    }
                     w += t.width();
+                }
+                if let (Some(t), Expr::Concat(_)) = (dynt, e) {
+                    // (a concatenation with a queue makes a queue)
+                    return Ok(t);
+                }
+                if xs.is_empty() {
+                    return self.err("an empty concatenation needs a queue to assign to");
                 }
                 if str {
                     Type::Str
@@ -248,6 +294,11 @@ impl<'a> Compiler<'a> {
 
     /// The type a function returns.
     pub(crate) fn func_ret_type(&mut self, f: &SubroutineDecl, fs: usize) -> R<Type> {
+        if let Some(t) = f.ret_ty.as_ref().filter(|t| t.heap.is_some()) {
+            let w = self.const_int(&t.width(), fs)? as u32;
+            let elem = Self::elem_of(t.kind, w, t.signed);
+            return Ok(Type::Dyn { queue: matches!(t.heap, Some(HeapKind::Queue(_))), elem });
+        }
         Ok(match f.ret_kind {
             NetKind::Integer => Type::vec(32, true),
             NetKind::Real => Type::Real,

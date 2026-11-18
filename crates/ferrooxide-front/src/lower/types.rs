@@ -28,6 +28,8 @@ pub struct SvType {
     /// unpacked dimensions of a typedef (`typedef logic [7:0] T [4];`): a declaration of the
     /// type is an array with these dimensions after its own
     pub unpacked: Vec<Range>,
+    /// a typedef of a queue or dynamic array (`typedef int Q[$];`)
+    pub heap: Option<HeapKind>,
     /// a type parameter of this name (resolved per instance; `dims` are outer to it)
     pub param: Option<String>,
 }
@@ -111,7 +113,7 @@ pub(crate) fn dim_size(r: &Range) -> Expr {
 
 impl SvType {
     pub fn vector(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
-        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![], param: None }
+        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None }
     }
 
     /// Width of one element after the packed dimensions.
@@ -258,6 +260,25 @@ impl Lower {
         }
     }
 
+    /// The unpacked dimensions of a declarator: ranges, or the one dimension of a queue or
+    /// dynamic array.
+    pub(crate) fn unpacked_dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Option<HeapKind>)> {
+        let heap = |d: &t::Dim| matches!(d, t::Dim::Unsized | t::Dim::Queue(_) | t::Dim::Assoc(_));
+        match v {
+            [t::Dim::Unsized] => Ok((vec![], Some(HeapKind::Dynamic))),
+            [t::Dim::Queue(max)] => {
+                let max = match max {
+                    Some(e) => Some(self.expr(e)?),
+                    None => None,
+                };
+                Ok((vec![], Some(HeapKind::Queue(max))))
+            }
+            [t::Dim::Assoc(_)] => self.unsupported(loc, "an associative array"),
+            v if v.iter().any(heap) => self.unsupported(loc, "an array of queues or dynamic arrays"),
+            v => Ok((self.dims(v, loc)?, None)),
+        }
+    }
+
     pub(crate) fn dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<Vec<Range>> {
         let mut out = Vec::new();
         for d in v {
@@ -316,13 +337,13 @@ impl Lower {
                 }
                 let dims = self.dims(&ty.packed, ty.loc)?;
                 let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], param: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None }))
             }
             t::TypeKind::Enum(et) => {
                 if !ty.packed.is_empty() {
                     return self.unsupported(ty.loc, "packed dimensions after an enum");
                 }
-                let int32 = |signed: bool| SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], param: None };
+                let int32 = |signed: bool| SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None };
                 let base = match &et.base {
                     None => int32(true),
                     Some(b) => match self.data_type(b)? {
@@ -363,13 +384,13 @@ impl Lower {
                     dims.push((num(w as i64 - 1), num(0)));
                 }
                 dims.extend(self.dims(&ty.packed, ty.loc)?);
-                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![], param: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![], heap: None, param: None }))
             }
             t::TypeKind::Real(t::RealKw::Real | t::RealKw::Realtime) => {
                 let (kind, signed, iw) = builtin("real").unwrap();
                 let mut dims = vec![(num(iw.unwrap() as i64 - 1), num(0))];
                 dims.extend(self.dims(&ty.packed, ty.loc)?);
-                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: true, enum_names: None, unpacked: vec![], param: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None }))
             }
             t::TypeKind::Named(n) => {
                 if n.params.is_some() || n.scopes.iter().any(|s| s.params.is_some()) || n.scopes.len() > 1 {
@@ -442,7 +463,7 @@ impl Lower {
                     return Ok(());
                 }
                 let mut t = if matches!(ty.kind, t::TypeKind::String) && ty.packed.is_empty() {
-                    SvType { kind: NetKind::String, signed: false, dims: vec![], fields: None, int_kind: false, enum_names: None, unpacked: vec![], param: None }
+                    SvType { kind: NetKind::String, signed: false, dims: vec![], fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None }
                 } else {
                     match self.data_type(ty)? {
                         Some(t) => t,
@@ -451,10 +472,16 @@ impl Lower {
                 };
                 let name = self.name(name, *loc);
                 self.qualify_type(&mut t);
-                for d in dims {
-                    if matches!(d, t::Dim::Unsized | t::Dim::Queue(_) | t::Dim::Assoc(_)) {
-                        return self.err(*loc, "dynamic arrays and queues in typedefs are not supported");
+                let (_, heap) = self.unpacked_dims(dims, *loc)?;
+                if heap.is_some() {
+                    if !t.unpacked.is_empty() || t.heap.is_some() {
+                        return self.unsupported(*loc, "an array of queues or dynamic arrays");
                     }
+                    t.heap = heap;
+                    self.types.insert(name, Rc::new(t));
+                    return Ok(());
+                }
+                for d in dims {
                     let mut r = self.dim(d, *loc)?;
                     if let Some((scope, names)) = &self.type_scope {
                         qualify_expr(&mut r.0, scope, names);
@@ -666,19 +693,44 @@ impl Lower {
         let mut out = Vec::new();
         for d in v {
             let name = self.name(&d.name, d.loc);
-            let mut dims = self.dims(&d.dims, d.loc)?;
-            // an array typedef: its dimensions come before the declaration's own
-            if let Some(t) = &self.decl_type {
-                dims.splice(0..0, t.unpacked.iter().cloned());
-            }
+            let (dims, heap) = self.declarator_dims(&d.dims, d.loc)?;
             let init = match &d.init {
                 Some(e) => Some(self.expr(e)?),
                 None => None,
             };
-            self.declare_var(&name, &dims);
-            out.push(Declarator { name, dims, init, line: d.loc.line });
+            self.declare_var_heap(&name, &dims, heap.as_ref());
+            out.push(Declarator { name, dims, heap, init, line: d.loc.line });
         }
         Ok(out)
+    }
+
+    /// The unpacked dimensions of a declarator with those of an array typedef before them, or
+    /// the declarator's (or the typedef's) queue or dynamic dimension.
+    pub(crate) fn declarator_dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Option<HeapKind>)> {
+        let (mut dims, mut heap) = self.unpacked_dims(v, loc)?;
+        if let Some(t) = &self.decl_type {
+            if let Some(h) = &t.heap {
+                if !dims.is_empty() || heap.is_some() {
+                    return self.unsupported(loc, "an array of queues or dynamic arrays");
+                }
+                heap = Some(h.clone());
+            }
+            if heap.is_some() && !t.unpacked.is_empty() {
+                return self.unsupported(loc, "a queue or dynamic array of unpacked arrays");
+            }
+            dims.splice(0..0, t.unpacked.iter().cloned());
+        }
+        Ok((dims, heap))
+    }
+
+    /// `declare_var` of a queue or dynamic array (`heap`).
+    pub(crate) fn declare_var_heap(&mut self, name: &str, unpacked: &[Range], heap: Option<&HeapKind>) {
+        self.declare_var(name, unpacked);
+        if let (Some(h), Some(v)) = (heap, self.vars.get_mut(name)) {
+            let mut t = (*v.0).clone();
+            t.heap = Some(h.clone());
+            v.0 = Rc::new(t);
+        }
     }
 
     /// Note the type of a declared name (struct members are resolved through it).

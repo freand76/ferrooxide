@@ -61,6 +61,12 @@ impl<'a> Compiler<'a> {
     /// A select chain in the form the code generation knows: struct members, several
     /// unpacked or packed dimensions and `.triggered` resolved.
     fn norm(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<Expr> {
+        // `q.size` of a queue: a call
+        if self.sigs.has_dyn {
+            if let Some(c) = self.dyn_hier_call(e, sid) {
+                return Some(c);
+            }
+        }
         if self.sigs.has_structs && matches!(e, Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..) | Expr::Member(..)) {
             if let Some(Ok(w)) = self.struct_walk(e, sid, lvalue) {
                 return Some(w.expr);
@@ -356,7 +362,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
         match e {
-            Expr::Type(_) | Expr::Pattern(..) => false,
+            Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last => false,
             // a member of a struct parameter
             Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
@@ -503,6 +509,12 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::RToI { d, s: v, w, trunc: false });
             return Ok(d);
         }
+        // an element or a method call of a queue or dynamic array
+        if self.sigs.has_dyn {
+            if let Some((v, t)) = self.dyn_value(e, sid)? {
+                return self.dyn_to_vec(v, t, w, s);
+            }
+        }
         // constant folding
         if !self.code.pb.last().map(|p| p.proc == NONE).unwrap_or(true) && self.is_const(e, sid) {
             if !matches!(e, Expr::Num(_) | Expr::Ident(_)) {
@@ -527,6 +539,7 @@ impl<'a> Compiler<'a> {
                 let r = self.typed_pattern(e, sid)?;
                 self.expr(&r, sid, w, s)
             }
+            Expr::NewArray(..) | Expr::Last => self.type_of(e, sid).map(|_| NONE),
             Expr::Num(n) => {
                 let c = Const::number_in(n, w, s).or_else(|m| self.err(m))?;
                 Ok(self.const_slot(&c))
@@ -838,6 +851,13 @@ impl<'a> Compiler<'a> {
             _ => {
                 // comparisons
                 let (ta, tb) = (self.type_of(a, sid)?, self.type_of(b, sid)?);
+                if let (Type::Dyn { elem, .. }, _) | (_, Type::Dyn { elem, .. }) = (ta, tb) {
+                    if !matches!(op, B::Eq | B::Ne | B::CaseEq | B::CaseNe) {
+                        return self.err("queues and dynamic arrays can only be compared with == and !=");
+                    }
+                    let d = self.dyn_compare(matches!(op, B::Ne | B::CaseNe), a, b, elem, sid)?;
+                    return Ok(self.resize(d, 1, w, false));
+                }
                 if ta.is_str() || tb.is_str() {
                     let cop = match op {
                         B::Eq | B::CaseEq | B::WildEq => CmpOp::Eq,
@@ -1153,6 +1173,9 @@ impl<'a> Compiler<'a> {
         let fs = self.new_scope(path.clone(), Some(def_scope), file);
         let ret = if f.is_task || f.ret_kind == NetKind::Int(0) {
             None
+        } else if let Type::Dyn { queue, elem } = self.func_ret_type(f, def_scope)? {
+            // a function returning a queue or dynamic array
+            Some(self.new_dyn(path.clone(), &f.name, elem, queue, fs))
         } else {
             let (w, s) = self.func_ret_type(f, def_scope)?.ws();
             let (m, l) = match f.ret_kind {
@@ -1201,6 +1224,15 @@ impl<'a> Compiler<'a> {
             let w = ((m - l).abs() + 1) as u32;
             let layout = self.layout_for(d.ty.as_ref(), fs)?;
             for dl in &d.names {
+                if let Some(h) = &dl.heap {
+                    // a queue or dynamic array argument or variable
+                    let elem = Self::elem_of(d.kind, w, signed);
+                    let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, matches!(h, HeapKind::Queue(_)), fs);
+                    if let Some(dir) = d.dir {
+                        ports.push((dir, sg));
+                    }
+                    continue;
+                }
                 let (depth, lo) = if let Some((a, b)) = dl.dims.first() {
                     let (a, b) = (self.const_int(a, fs)?, self.const_int(b, fs)?);
                     (((a - b).abs() + 1) as u32, a.min(b))
@@ -1286,6 +1318,13 @@ impl<'a> Compiler<'a> {
         };
         if args.len() > ports.len() {
             return self.err(format!("too many arguments to '{name}'"));
+        }
+        // an automatic function's queue result starts empty on each call
+        if let (true, Some(r)) = (f.automatic, ret) {
+            if let Type::Dyn { .. } = self.sig_type(r) {
+                let z = self.const_slot(&Const::zero(64));
+                self.emit(Instr::Store { t: Target::Whole { sig: r }, s: z, mode: rt::StoreMode::Blocking });
+            }
         }
         // inputs
         for (i, a) in args.iter().enumerate() {
@@ -1488,7 +1527,13 @@ impl<'a> Compiler<'a> {
             return self.reads_expr(&n, sid, out);
         }
         match e {
-            Expr::Type(_) => {}
+            Expr::Type(_) | Expr::Last => {}
+            Expr::NewArray(n, init) => {
+                self.reads_expr(n, sid, out);
+                if let Some(i) = init {
+                    self.reads_expr(i, sid, out);
+                }
+            }
             Expr::Member(a, _) => self.reads_expr(a, sid, out),
             Expr::Pattern(_, items) => {
                 for it in items {
@@ -1536,6 +1581,12 @@ impl<'a> Compiler<'a> {
             Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => {
                 for x in v {
                     self.reads_expr(x, sid, out);
+                }
+                // a method of a queue reads the queue
+                if let Expr::Call(name, _) = e {
+                    if let Some((_, s, _, _)) = self.dyn_method(name, sid) {
+                        out.push((s, NONE));
+                    }
                 }
                 // default values of missing arguments are evaluated at the call
                 if let Expr::Call(name, args) = e {
@@ -1625,6 +1676,12 @@ impl<'a> Compiler<'a> {
             let d = self.tmp(64);
             self.emit(Instr::IToR { d, s, w, signed });
             return Ok(d);
+        }
+        // a real element of a queue or dynamic array
+        if self.sigs.has_dyn {
+            if let Some((v, _)) = self.dyn_value(e, sid)? {
+                return Ok(v);
+            }
         }
         let rconst = |c: &mut Self, r: f64| c.const_slot(&Const { w: 64, signed: false, a: vec![r.to_bits()], b: vec![0] });
         if let Expr::Call(name, args) = e {
@@ -1780,6 +1837,7 @@ impl<'a> Compiler<'a> {
         match ty {
             Type::Real => self.rexpr(rhs, sid),
             Type::Str => self.str_expr(rhs, sid),
+            Type::Dyn { elem, .. } => self.dyn_owned(rhs, elem, sid),
             Type::Vec { .. } => self.rhs_value(rhs, sid, lw),
         }
     }

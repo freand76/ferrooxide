@@ -259,7 +259,9 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         | Instr::Kick { .. }
         | Instr::Touch { .. } => vec![],
         Instr::Udp { ins, prev, q, .. } => ins.iter().chain(prev.iter()).copied().chain(std::iter::once(*q)).collect(),
-        Instr::Str { d, a, b, c, .. } => [*d, *a, *b, *c].into_iter().filter(|&x| x != NONE).collect(),
+        Instr::Str { d, a, b, c, .. } | Instr::Heap { d, a, b, c, .. } | Instr::Assoc { d, a, b, c, .. } => {
+            [*d, *a, *b, *c].into_iter().filter(|&x| x != NONE).collect()
+        }
         Instr::Unforce { t } => match t {
             Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
             Target::ElemDynPart { ix, bix, .. } => vec![ix.slot, bix.slot],
@@ -556,6 +558,43 @@ pub enum RealOp {
     Sqrt, Ln, Log10, Exp, Floor, Ceil, Sin, Cos, Tan, Asin, Acos, Atan, Sinh, Cosh, Tanh, Asinh, Acosh, Atanh, Atan2, Hypot,
 }
 
+/// Operations on queues and dynamic arrays in `Instr::Heap`. Such an array is an object on the
+/// simulator's heap; a variable holds its 64-bit handle, 0 being the empty array. `a` is the
+/// slot of a handle: the operations that change the array change the object in place (an
+/// empty array gets a new object, whose handle is written to `a`). Indexes are 32-bit signed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeapOp {
+    /// d (32 bits) = the number of elements of a
+    Size,
+    /// d = a[b]; outside the array or for an unknown index the default value
+    Get,
+    /// a[b] = c; b == size appends; outside: no change
+    Set,
+    /// d = a new array of b elements: those of array c (NONE: none) as far as it has them,
+    /// the rest default values (`new[b](c)`)
+    New,
+    /// d = a copy of array a
+    Copy,
+    /// the array of handle a is no longer used
+    Free,
+    /// append element c / put it in front
+    PushBack,
+    PushFront,
+    /// d = the last / first element of a, removed (the default value when a is empty)
+    PopBack,
+    PopFront,
+    /// insert element c before index b (b == size appends)
+    Insert,
+    /// remove element b (NONE: all elements)
+    Delete,
+    /// d = a new array of the elements b..=c of a (those inside it)
+    Slice,
+    /// append the elements of array c
+    Append,
+    /// d (1 bit) = arrays a and b have the same size and elements
+    Eq,
+}
+
 /// Operations on strings (handles, `Program::strings`) in `Instr::Str`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrOp {
@@ -666,4 +705,42 @@ pub enum Instr {
     Sys(Box<SysTask>),
     /// a string operation; unused operands are NONE
     Str { op: StrOp, d: u32, a: u32, b: u32, c: u32, w: u32 },
+    /// an operation on a queue or dynamic array of `w`-bit elements; unused operands are NONE.
+    /// `x`: an element outside the array reads as x (4-state vectors), else as 0
+    Heap { op: HeapOp, d: u32, a: u32, b: u32, c: u32, w: u32, x: bool },
+    /// an operation on an associative array of `w`-bit elements with keys of type `key`
+    /// (slot `b`); `x` as for `Heap`
+    Assoc { op: AssocOp, d: u32, a: u32, b: u32, c: u32, w: u32, key: KeyKind, x: bool },
+}
+
+/// Operations on associative arrays in `Instr::Assoc` (objects on the heap as for
+/// `HeapOp`; `HeapOp::Copy` and `Free` work on them too). `a` is the slot of a handle, `b`
+/// of a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssocOp {
+    /// d (32 bits) = the number of entries
+    Num,
+    /// d = a[b]; the default value for a key without an entry
+    Get,
+    /// a[b] = c
+    Set,
+    /// d (32 bits) = 1 if key b has an entry, else 0
+    Exists,
+    /// remove the entry of key b (NONE: all entries)
+    Delete,
+    /// c = the first / last key (d (32 bits) = 1), or c = b when there is none (d = 0)
+    First,
+    Last,
+    /// c = the key after / before b (d = 1), or c = b when there is none (d = 0)
+    Next,
+    Prev,
+}
+
+/// The key type of an associative array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyKind {
+    /// a string (handle)
+    Str,
+    /// an integer of `w` (at most 64) bits
+    Int { w: u32, signed: bool },
 }

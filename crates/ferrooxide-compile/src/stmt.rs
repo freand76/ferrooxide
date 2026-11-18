@@ -1,5 +1,6 @@
 //! Statement code generation.
 
+use crate::types::Type;
 use crate::*;
 use ferrooxide_rt::{CmpOp, Edge as REdge, FmtArg, StoreMode, SysTask, Target};
 
@@ -422,6 +423,17 @@ impl<'a> Compiler<'a> {
                         let w = ((m - l).abs() + 1) as u32;
                         let layout = self.layout_for(d.ty.as_ref(), b)?;
                         for dl in &d.names {
+                            if let Some(h) = &dl.heap {
+                                // a queue or dynamic array
+                                let elem = Self::elem_of(d.kind, w, signed);
+                                let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, matches!(h, HeapKind::Queue(_)), b);
+                                if let Some(init) = &dl.init {
+                                    let ty = self.sig_type(s);
+                                    let v = self.value_for(init, b, 64, ty, None)?;
+                                    self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
+                                }
+                                continue;
+                            }
                             let (depth, lo) = if let Some((a, b2)) = dl.dims.first() {
                                 let (a, b2) = (self.const_int(a, b)?, self.const_int(b2, b)?);
                                 (((a - b2).abs() + 1) as u32, a.min(b2))
@@ -504,10 +516,18 @@ impl<'a> Compiler<'a> {
                 if !*nonblocking && timing.is_none() && !self.code.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
+                // an element of a queue or dynamic array (also `<=`: applied at once)
+                if self.sigs.has_dyn && timing.is_none() && self.dyn_elem_assign(lhs, rhs, sid)? {
+                    return Ok(());
+                }
                 let lt = self.type_of(lhs, sid)?;
                 let lw = lt.width();
                 let tl = self.target_layout(lhs, sid);
                 let v = self.value_for(rhs, sid, lw, lt, tl.as_ref())?;
+                // the target's old array goes (the new one is a copy or a new array)
+                if let (Type::Dyn { .. }, false, None) = (lt, *nonblocking, timing) {
+                    self.dyn_free_target(lhs, sid);
+                }
                 let lv = Lhs::Expr(lhs, sid);
                 match timing {
                     None => {
@@ -705,6 +725,9 @@ impl<'a> Compiler<'a> {
             }
             Stmt::TaskCall { name, args, line } => {
                 self.line = *line;
+                if self.sigs.has_dyn && self.dyn_task(name, args, sid)? {
+                    return Ok(());
+                }
                 if self.code.str_ids.is_empty() || !self.str_task(name, args, sid)? {
                     self.call(name, args, sid, true)?;
                 }

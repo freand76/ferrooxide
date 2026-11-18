@@ -454,19 +454,16 @@ impl Lower {
                 _ => {}
             }
             let pname = self.name(&p.name, p.loc);
-            let mut dims = self.dims(&p.dims, p.loc)?;
-            if let Some(t) = &self.decl_type {
-                dims.splice(0..0, t.unpacked.iter().cloned());
-            }
+            let (dims, heap) = self.declarator_dims(&p.dims, p.loc)?;
             let init = match &p.default {
                 Some(e) => Some(self.expr(e)?),
                 None => None,
             };
-            self.declare_var(&pname, &dims);
+            self.declare_var_heap(&pname, &dims, heap.as_ref());
             items.append(&mut self.pending);
             let mut d = cur.clone().unwrap();
             d.line = pline;
-            d.names = vec![Declarator { name: pname.clone(), dims, init, line: pline }];
+            d.names = vec![Declarator { name: pname.clone(), dims, heap, init, line: pline }];
             items.push(Item::Decl(d));
             ports.push(pname);
         }
@@ -513,7 +510,7 @@ impl Lower {
                         init = Some(v);
                     }
                 }
-                names.push(Declarator { name: n, dims: vec![], init: None, line: x.loc.line });
+                names.push(Declarator { name: n, dims: vec![], heap: None, init: None, line: x.loc.line });
             }
             d.names = names;
             items.push(Item::Decl(d));

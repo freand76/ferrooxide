@@ -53,6 +53,8 @@ impl<'a> Compiler<'a> {
             tparam: Option<&'d str>,
             /// the declared data type
             ty: Option<&'d Rc<SvType>>,
+            /// a queue or dynamic array
+            heap: Option<&'d HeapKind>,
             line: u32,
         }
         let mut order: Vec<String> = Vec::new();
@@ -98,6 +100,9 @@ impl<'a> Compiler<'a> {
                             if d.ty.is_some() {
                                 mg.ty = d.ty.as_ref();
                             }
+                            if dl.heap.is_some() {
+                                mg.heap = dl.heap.as_ref();
+                            }
                         }
                         None => {
                             order.push(dl.name.clone());
@@ -117,6 +122,7 @@ impl<'a> Compiler<'a> {
                                     init: dl.init.as_ref(),
                                     tparam: d.type_param.as_deref(),
                                     ty: d.ty.as_ref(),
+                                    heap: dl.heap.as_ref(),
                                     line: dl.line,
                                 },
                             );
@@ -227,6 +233,19 @@ impl<'a> Compiler<'a> {
                 }
             };
             let full = format!("{}.{}", self.scopes[sid].name, name);
+            // a queue or dynamic array: a handle
+            if let Some(h) = mg.heap {
+                if mg.dir.is_some() && module_level {
+                    return self.err(format!("port '{name}': a queue or dynamic array port is not supported"));
+                }
+                let elem = Self::elem_of(mg.kind, width, signed);
+                self.new_dyn(full, &name, elem, matches!(h, HeapKind::Queue(_)), sid);
+                if let Some(init) = mg.init {
+                    let line = self.line;
+                    self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.clone()), rhs: init.clone(), scope: sid, line });
+                }
+                continue;
+            }
             // port aliasing
             if let (Some(dir), Some(ps)) = (mg.dir, parent_scope) {
                 if module_level {

@@ -1,0 +1,24 @@
+module top ();
+  // imports $unit
+  int(32) signed q[$], b[$:3];
+  bit [3:0] d[];
+  int(32) signed t[$];
+  function automatic integer signed f[$];
+    input int(32) signed a[$];
+    f = a[1:$];
+  endfunction
+  initial begin
+    d = new[4];
+    d = new[8](d);
+    q = {};
+    q = {q, 1};
+    q[$] = q[($ - 1)];
+    q.push_back(2);
+    t = f(q);
+    begin
+      int(32) signed i;
+      for (i = 0; (i < q.size()); i = (i + 1))
+        b.push_front(q[i]);
+    end
+  end
+endmodule

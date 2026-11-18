@@ -89,8 +89,21 @@ pub type Range = (Expr, Expr);
 pub struct Declarator {
     pub name: String,
     pub dims: Vec<Range>,
+    /// a queue or dynamic array (then `dims` is empty)
+    pub heap: Option<HeapKind>,
     pub init: Option<Expr>,
     pub line: Line,
+}
+
+/// The unpacked dimension of a queue or dynamic array (its only one).
+#[derive(Debug, Clone)]
+pub enum HeapKind {
+    /// `[$]`, `[$:max]`
+    Queue(Option<Expr>),
+    /// `[]`
+    Dynamic,
+    /// `[key_type]` associative array (`string` keys: kind `String`); None: `[*]`
+    Assoc(Option<std::rc::Rc<crate::lower::SvType>>),
 }
 
 #[derive(Debug, Clone)]
@@ -342,6 +355,10 @@ pub enum Expr {
     /// an assignment pattern `'{...}` / `T'{...}`: resolved against its type, or without one
     /// against the type of the target it is assigned to
     Pattern(Option<std::rc::Rc<crate::lower::SvType>>, Vec<PatItem>),
+    /// `new[size]`, `new[size](init)`: a dynamic array
+    NewArray(Box<Expr>, Option<Box<Expr>>),
+    /// `$` in an index of a queue: its last index
+    Last,
 }
 
 /// An item of an assignment pattern.

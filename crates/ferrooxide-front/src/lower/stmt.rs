@@ -198,7 +198,7 @@ impl Lower {
                             let name = self.name(name, *loc);
                             let v = self.expr(init)?;
                             let Some(d) = decls.last_mut() else { return self.unsupported(*loc, "this for-loop initialization") };
-                            d.names.push(Declarator { name: name.clone(), dims: vec![], init: None, line: loc.line });
+                            d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, init: None, line: loc.line });
                             inits.push(Stmt::Assign { lhs: Expr::Ident(name), rhs: v, nonblocking: false, timing: None, line: loc.line });
                         }
                         t::ForInit::Assign(st) => inits.push(self.simple_assign(st)?),
@@ -462,12 +462,58 @@ impl Lower {
 
     /// foreach (a[i, , k]) body: nested loops from the left to the right bound of each named
     /// dimension, with int loop variables.
+    /// `foreach (q[i])` of a queue or dynamic array: `i` from 0 to `q.size() - 1`.
+    fn foreach_heap(&mut self, name: &str, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
+        let line = loc.line;
+        let body = self.stmt(body)?;
+        let v = match vars {
+            [Some(v)] => self.name(v, loc),
+            [None] | [] => return Ok(Stmt::Null),
+            _ => return self.err(loc, format!("foreach: '{name}' has only 1 dimension")),
+        };
+        let var = || Box::new(Expr::Ident(v.clone()));
+        let size = Box::new(Expr::Call(format!("{name}.size"), vec![]));
+        let lp = Stmt::For {
+            init: Box::new(Stmt::Assign { lhs: Expr::Ident(v.clone()), rhs: Expr::Num(dec(0)), nonblocking: false, timing: None, line }),
+            cond: Expr::Binary(BinOp::Lt, var(), size),
+            step: Box::new(Stmt::Assign {
+                lhs: Expr::Ident(v.clone()),
+                rhs: Expr::Binary(BinOp::Add, var(), Box::new(Expr::Num(dec(1)))),
+                nonblocking: false,
+                timing: None,
+                line,
+            }),
+            body: Box::new(body),
+            line,
+        };
+        let d = Decl {
+            dir: None,
+            kind: NetKind::Int(32),
+            net: NetType::Wire,
+            explicit_kind: true,
+            real_net: false,
+            strength: None,
+            delay: None,
+            signed: true,
+            range: None,
+            packed: vec![],
+            type_param: None,
+            ty: None,
+            names: vec![Declarator { name: v.clone(), dims: vec![], heap: None, init: None, line }],
+            line,
+        };
+        Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![lp], fork: None })
+    }
+
     fn foreach(&mut self, array: &t::Expr, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
         let line = loc.line;
         let t::ExprKind::Ident(name) = &array.kind else {
             return self.err(loc, "foreach over a hierarchical name is not supported");
         };
         let name = self.name(name, array.loc);
+        if self.vars.get(&name).is_some_and(|v| v.0.heap.is_some()) {
+            return self.foreach_heap(&name, vars, body, loc);
+        }
         let Some(dims) = self.var_dims(&name) else {
             return self.err(loc, format!("foreach: '{name}' is not an array declared here"));
         };
@@ -503,7 +549,7 @@ impl Lower {
                 body: Box::new(body),
                 line,
             };
-            names.push(Declarator { name: v.clone(), dims: vec![], init: None, line });
+            names.push(Declarator { name: v.clone(), dims: vec![], heap: None, init: None, line });
         }
         let d = Decl {
             dir: None,
