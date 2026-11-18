@@ -159,6 +159,48 @@ impl<'a> Compiler<'a> {
 
     /// Assignment targets go to the job's driver signal when the net has several drivers.
     /// A view of a redirected net becomes a view of the job's driver signal.
+    /// A whole one-dimensional unpacked array named by `e`: the signal and its indexes from
+    /// left to right (the order elements pair up in an array assignment, IEEE 1800-2017
+    /// 7.6). None for anything else.
+    pub(crate) fn whole_array(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Vec<i64>)>> {
+        if !matches!(e, Expr::Ident(_) | Expr::Hier(_)) {
+            return Ok(None);
+        }
+        let Some(crate::expr::Base::Sig(s)) = self.resolve_base(e, sid)? else { return Ok(None) };
+        let i = self.sig(s);
+        if i.depth == 0 || self.sigs.md_dims.contains_key(&s) || i.real || i.string {
+            return Ok(None);
+        }
+        let (lo, n) = (i.arr_lo, i.depth as i64);
+        let idx = if self.sigs.desc_arrays.contains(&s) { (0..n).map(|k| lo + n - 1 - k).collect() } else { (0..n).map(|k| lo + k).collect() };
+        Ok(Some((s, idx)))
+    }
+
+    /// `lhs = rhs` of two whole unpacked arrays as one assignment per element pair (None if
+    /// `lhs` is not a whole array).
+    pub(crate) fn array_pairs(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<Option<Vec<(Expr, Expr)>>> {
+        let Some((ls, li)) = self.whole_array(lhs, sid)? else { return Ok(None) };
+        let Some((rs, ri)) = self.whole_array(rhs, sid)? else {
+            return self.err(format!("array '{}' assigned from something that is not an array of the same shape", self.sig(ls).name));
+        };
+        let (lw, rw) = (self.sig(ls).width, self.sig(rs).width);
+        if li.len() != ri.len() || lw != rw {
+            return self.err(format!(
+                "array '{}' ({} elements of {lw} bits) assigned from '{}' ({} elements of {rw} bits)",
+                self.sig(ls).name,
+                li.len(),
+                self.sig(rs).name,
+                ri.len()
+            ));
+        }
+        let ix = |e: &Expr, k: i64| {
+            let n = Expr::Num(ferrooxide_front::ast::dec(k.unsigned_abs()));
+            let n = if k < 0 { Expr::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(n)) } else { n };
+            Expr::Index(Box::new(e.clone()), Box::new(n))
+        };
+        Ok(Some(li.iter().zip(&ri).map(|(&a, &b)| (ix(lhs, a), ix(rhs, b))).collect()))
+    }
+
     pub(crate) fn redir(&mut self, s: u32) -> u32 {
         let c = self.canon(s);
         let Some(&d) = self.nets.redirect.get(&c) else { return s };
@@ -247,7 +289,7 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn codegen_jobs(&mut self) -> R<()> {
         let jobs = std::mem::take(&mut self.code.jobs);
-        let jobs = self.alias_assigns(jobs);
+        let jobs = self.alias_assigns(jobs)?;
         // nets with more than one continuous driver are resolved from per-driver signals
         let mut count: HashMap<u32, u32> = HashMap::new();
         for job in &jobs {

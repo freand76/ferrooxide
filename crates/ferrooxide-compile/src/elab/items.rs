@@ -298,6 +298,27 @@ impl<'a> Compiler<'a> {
                         if depth == 0 && aliased.is_none() {
                             aliased = self.elem_port_alias(conn, ps, width, &full);
                         }
+                        // an unpacked array port: another name for a connected array of the
+                        // same shape (element type, index range and direction)
+                        if depth > 0 {
+                            let typed = mg.ty.is_some_and(|t| t.has_struct() || t.param.is_some());
+                            let same = match self.whole_array(conn, ps)? {
+                                Some((a, _)) => {
+                                    let ai = self.sig(a);
+                                    md.is_none()
+                                        && pk.is_none()
+                                        && !typed
+                                        && !is_real
+                                        && (ai.depth, ai.arr_lo, ai.width, ai.msb, ai.lsb, ai.signed) == (depth, arr_lo, width, msb, lsb, signed)
+                                        && self.sigs.desc_arrays.contains(&a) == desc
+                                }
+                                None => false,
+                            };
+                            if !same {
+                                return self.err(format!("array port '{name}' must be connected to an array of the same shape (others are not supported)"));
+                            }
+                            aliased = self.whole_array(conn, ps)?.map(|x| x.0);
+                        }
                         if let Some(s) = aliased {
                             let si = self.sig(s);
                             let typed = mg.ty.is_some_and(|t| t.has_struct() || t.param.is_some());
@@ -473,13 +494,9 @@ impl<'a> Compiler<'a> {
                 | Item::SpecPath { .. } => {}
                 Item::ContAssign { delay, lhs, rhs, strength, line } => {
                     self.nets.cur_strength = *strength;
-                    self.push_job(Job::Assign {
-                        lhs: lhs.clone(),
-                        rhs: rhs.clone(),
-                        delay: delay.clone(),
-                        scope: sid,
-                        line: *line,
-                    });
+                    // (a whole unpacked array becomes an alias or one assignment per element in
+                    // `alias_assigns`)
+                    self.push_job(Job::Assign { lhs: lhs.clone(), rhs: rhs.clone(), delay: delay.clone(), scope: sid, line: *line });
                     self.nets.cur_strength = None;
                 }
                 Item::Process { kind, body, line } => {

@@ -266,8 +266,10 @@ impl<'a> Compiler<'a> {
     /// a;`, `wire z = a;`, also `{a}`, a constant-index array element, a zero delay) makes the
     /// net another name for the source, as in the reference: `z` changes together with `a`,
     /// inside the process that writes `a`. Not for nets with other drivers, special net types,
-    /// strengths, links or forces (a forced alias would force its source).
-    pub(crate) fn alias_assigns(&mut self, jobs: Vec<Job<'a>>) -> Vec<Job<'a>> {
+    /// strengths, links or forces (a forced alias would force its source). The same for a
+    /// whole unpacked array assigned from one of the same shape; other whole-array
+    /// assignments become one assignment per element.
+    pub(crate) fn alias_assigns(&mut self, jobs: Vec<Job<'a>>) -> R<Vec<Job<'a>>> {
         let mut count: HashMap<u32, u32> = HashMap::new();
         for job in &jobs {
             for s in self.job_targets(job) {
@@ -296,7 +298,7 @@ impl<'a> Compiler<'a> {
                         let i = self.sig(z);
                         let ok = count.get(&z) == Some(&1)
                             && i.kind != SigKind::Integer
-                            && i.depth == 0
+                            && (i.depth == 0 || !self.sigs.md_dims.contains_key(&z))
                             && i.alias_of.is_none()
                             && !self.sig_type(z).is_real()
                             && !self.nets.net_types.contains_key(&z)
@@ -315,6 +317,18 @@ impl<'a> Compiler<'a> {
                     }
                 }
             }
+            if let Job::Assign { lhs, rhs, delay, scope, line } = &job {
+                self.line = *line;
+                if let Some(pairs) = self.array_pairs(lhs, rhs, *scope)? {
+                    for (l, r) in pairs {
+                        if let Some(st) = old_strength.get(&k) {
+                            self.code.job_strength.insert(kept.len(), *st);
+                        }
+                        kept.push(Job::Assign { lhs: l, rhs: r, delay: delay.clone(), scope: *scope, line: *line });
+                    }
+                    continue;
+                }
+            }
             if let Some(st) = old_strength.get(&k) {
                 self.code.job_strength.insert(kept.len(), *st);
             }
@@ -328,7 +342,7 @@ impl<'a> Compiler<'a> {
                 self.prog.signals[v as usize].slot = self.prog.signals[b as usize].slot;
             }
         }
-        kept
+        Ok(kept)
     }
 
     /// For `assign z = a` with a whole-signal source of the same width: (net, source), both
@@ -352,12 +366,15 @@ impl<'a> Compiler<'a> {
             rhs = &v[0];
         }
         let width = self.sig(z).width;
+        let zdepth = self.sig(z).depth;
+        let shape = |c: &Self, s: u32| (c.sig(s).depth, c.sig(s).arr_lo, c.sigs.desc_arrays.contains(&s), c.sigs.md_dims.contains_key(&s));
         let a = match rhs {
+            // (a whole array: from one of the same shape)
             Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(rhs, sid) {
-                Ok(Some(expr::Base::Sig(a))) if self.sig(a).depth == 0 => a,
+                Ok(Some(expr::Base::Sig(a))) if self.sig(a).depth == zdepth && (zdepth == 0 || shape(self, a) == shape(self, z)) => a,
                 _ => return None,
             },
-            Expr::Index(..) => {
+            Expr::Index(..) if zdepth == 0 => {
                 let name = format!("{}$alias", self.sig(z).name);
                 let a = self.elem_port_alias(rhs, sid, width, &name)?;
                 self.prog.names.retain(|n| n.1 != a);

@@ -138,7 +138,9 @@ enclosing instance), the checks on `final` procedures (no NBAs, delays, event or
 controls, task calls), immediate `assert`/`assume` (default `$error`; `cover` does nothing,
 as in the reference), `$error`/`$warning`/`$info`/`$fatal` with file, line, time and scope,
 initial values of variables in functions and tasks (static: once; automatic: per call;
-constant calls start afresh), `module automatic`, `void'(f())`, `->`/`<->`, enum name ranges (`N[3]`, `M[5:3]`), `$countbits`, array
+constant calls start afresh), `module automatic`, whole unpacked array assignments (continuous: an alias for the same shape, else per
+element; procedural: per element) and array ports (an alias of an array of the same shape),
+`void'(f())`, `->`/`<->`, enum name ranges (`N[3]`, `M[5:3]`), `$countbits`, array
 queries of parameters, expressions and queues, `wire integer`/`wire time`, `++`/`--` inside
 expressions (with short-circuit `&&`/`||`/`?:` when the
 right side has side effects).
@@ -670,7 +672,9 @@ Verilog / scheduling:
 - `$dist_*` and `$q_*` system functions.
 - a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
   `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
-- multi-dimensional arrays as ports, whole-array assignments; fork/join_none restarting a
+- multi-dimensional arrays as ports and in whole-array assignments, array ports connected
+  to arrays of another shape (index range, direction), assignment patterns for unpacked
+  arrays, a timing control in a whole-array assignment; fork/join_none restarting a
   running branch (A3); VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
   `` `uselib ``).
 - recursion copies frames (fine for testbench code, slow for deep recursion).

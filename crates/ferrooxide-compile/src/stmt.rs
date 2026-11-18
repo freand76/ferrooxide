@@ -539,6 +539,17 @@ impl<'a> Compiler<'a> {
                 if self.sigs.has_dyn && timing.is_none() && self.dyn_elem_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
+                // a whole unpacked array: element by element
+                if let Some(pairs) = self.array_pairs(lhs, rhs, sid)? {
+                    if timing.is_some() {
+                        return self.err("a timing control in an assignment of a whole array is not supported");
+                    }
+                    for (l, r) in pairs {
+                        let st = Stmt::Assign { lhs: l, rhs: r, nonblocking: *nonblocking, timing: None, line: *line };
+                        self.stmt(&st, sid)?;
+                    }
+                    return Ok(());
+                }
                 let lt = self.type_of(lhs, sid)?;
                 let lw = lt.width();
                 let tl = self.target_layout(lhs, sid);
