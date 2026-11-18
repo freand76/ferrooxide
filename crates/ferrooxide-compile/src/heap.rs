@@ -1,16 +1,22 @@
-//! Queues and dynamic arrays (IEEE 1800 7.5, 7.10): a variable holds the 64-bit handle of an
-//! object on the simulator's heap (0: the empty array). Each variable owns its object: an
+//! Queues, dynamic and associative arrays (IEEE 1800 7.5, 7.8, 7.10): a variable holds the
+//! 64-bit handle of an object on the simulator's heap (0: the empty array). Each variable owns its object: an
 //! assignment of another variable's array copies it, one of a new array (`new[n]`, a
 //! concatenation, a slice) takes it over, and the target's old object is freed. Element
 //! writes and the methods change the object in place (`Instr::Heap`) and wake the waiters on
 //! the variable.
 
-use crate::types::{Elem, Leaf, Type};
+use crate::types::{DynKind, Elem, Leaf, Type};
 use crate::*;
-use ferrooxide_rt::{HeapOp, StrOp};
+use ferrooxide_rt::{AssocOp, HeapOp, KeyKind, StrOp};
 
-/// Methods of queues and dynamic arrays.
-const METHODS: &[&str] = &["size", "push_back", "push_front", "pop_back", "pop_front", "insert", "delete"];
+/// Methods of queues, dynamic and associative arrays.
+const METHODS: &[&str] = &[
+    "size", "push_back", "push_front", "pop_back", "pop_front", "insert", "delete", "num", "exists", "first", "last", "next",
+    "prev",
+];
+
+/// Methods of associative arrays that step through the keys.
+const KEY_STEPS: &[&str] = &["first", "last", "next", "prev"];
 
 impl<'a> Compiler<'a> {
     /// The element type of a declaration of kind `kind`, `w` bits wide.
@@ -27,12 +33,39 @@ impl<'a> Compiler<'a> {
 
     /// Declare `name` in scope `sid` as a queue (or dynamic array) of `elem` (full name
     /// `full`): a 64-bit handle, the empty array.
-    pub(crate) fn new_dyn(&mut self, full: String, name: &str, elem: Elem, queue: bool, sid: usize) -> u32 {
+    pub(crate) fn new_dyn(&mut self, full: String, name: &str, elem: Elem, h: &HeapKind, sid: usize) -> R<u32> {
+        let kind = self.dyn_kind(h, sid)?;
+        Ok(self.new_dyn_kind(full, name, elem, kind, sid))
+    }
+
+    /// The kind of an array dimension (an associative array's key type evaluated in `sid`).
+    pub(crate) fn dyn_kind(&mut self, h: &HeapKind, sid: usize) -> R<DynKind> {
+        Ok(match h {
+            HeapKind::Queue(_) => DynKind::Queue,
+            HeapKind::Dynamic => DynKind::Darray,
+            // `[*]`: integer keys
+            HeapKind::Assoc(None) => DynKind::Assoc(KeyKind::Int { w: 64, signed: false }),
+            HeapKind::Assoc(Some(k)) if k.kind == NetKind::String => DynKind::Assoc(KeyKind::Str),
+            HeapKind::Assoc(Some(k)) => {
+                let w = self.const_int(&k.width(), sid)?;
+                if !(1..=64).contains(&w) {
+                    return self.err("associative array keys wider than 64 bits are not supported");
+                }
+                DynKind::Assoc(KeyKind::Int { w: w as u32, signed: k.signed })
+            }
+        })
+    }
+
+    /// `new_dyn` of a known kind.
+    pub(crate) fn new_dyn_kind(&mut self, full: String, name: &str, elem: Elem, kind: DynKind, sid: usize) -> u32 {
         let s = self.new_signal(full, 64, false, 0, 63, 0, 0, SigKind::Reg);
         let slot = self.sig(s).slot as usize;
         self.prog.mem[slot] = 0;
         self.prog.mem[slot + 1] = 0;
-        self.sigs.types[s as usize] = Type::Dyn { queue, elem };
+        self.sigs.types[s as usize] = Type::Dyn { kind, elem };
+        if let DynKind::Assoc(KeyKind::Str) = kind {
+            self.intern(b"");
+        }
         self.sigs.has_dyn = true;
         if elem.leaf == Leaf::Str {
             self.intern(b"");
@@ -43,6 +76,33 @@ impl<'a> Compiler<'a> {
 
     fn heap_op(&mut self, op: HeapOp, d: u32, a: u32, b: u32, c: u32, elem: Elem) {
         self.emit(Instr::Heap { op, d, a, b, c, w: elem.w, x: elem.x() });
+    }
+
+    fn assoc_op(&mut self, op: AssocOp, d: u32, a: u32, b: u32, c: u32, elem: Elem, key: KeyKind) {
+        self.emit(Instr::Assoc { op, d, a, b, c, w: elem.w, key, x: elem.x() });
+    }
+
+    /// The key type of associative array `s` (None: not one).
+    fn assoc_key(&self, s: u32) -> Option<KeyKind> {
+        match self.sig_type(s) {
+            Type::Dyn { kind: DynKind::Assoc(k), .. } => Some(k),
+            _ => None,
+        }
+    }
+
+    /// A key of an associative array: the slot of its value.
+    fn key_value(&mut self, e: &Expr, key: KeyKind, sid: usize) -> R<u32> {
+        match key {
+            KeyKind::Str => self.str_expr(e, sid),
+            KeyKind::Int { w, signed } => self.expr(e, sid, w, signed),
+        }
+    }
+
+    fn key_width(key: KeyKind) -> u32 {
+        match key {
+            KeyKind::Str => 64,
+            KeyKind::Int { w, .. } => w,
+        }
     }
 
     /// The queue or dynamic array variable a name refers to: (signal, element type).
@@ -93,7 +153,8 @@ impl<'a> Compiler<'a> {
             Expr::Call(name, _) => {
                 let (_, _, elem, m) = self.dyn_method(name, sid)?;
                 Some(match m {
-                    "size" => Ok(Type::vec(32, true)),
+                    "size" | "num" | "exists" => Ok(Type::vec(32, true)),
+                    m if KEY_STEPS.contains(&m) => Ok(Type::vec(32, true)),
                     "pop_back" | "pop_front" => Ok(elem.ty()),
                     _ => self.err(format!("'{m}' gives no value")),
                 })
@@ -134,15 +195,23 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Index(a, i) => {
                 let Some((s, elem)) = self.dyn_var(a, sid) else { return Ok(None) };
-                let ix = self.dyn_index(a, i, sid)?;
                 let d = self.tmp(elem.w);
                 let slot = self.sig(s).slot;
+                if let Some(key) = self.assoc_key(s) {
+                    let k = self.key_value(i, key, sid)?;
+                    self.assoc_op(AssocOp::Get, d, slot, k, NONE, elem, key);
+                    return Ok(Some((d, elem.ty())));
+                }
+                let ix = self.dyn_index(a, i, sid)?;
                 self.heap_op(HeapOp::Get, d, slot, ix, NONE, elem);
                 Ok(Some((d, elem.ty())))
             }
             Expr::Call(name, args) => {
                 let Some((_, s, elem, m)) = self.dyn_method(name, sid) else { return Ok(None) };
                 let slot = self.sig(s).slot;
+                if let Some(key) = self.assoc_key(s) {
+                    return self.assoc_value(s, m, args, elem, key, sid).map(Some);
+                }
                 match m {
                     "size" => {
                         let d = self.tmp(32);
@@ -166,6 +235,49 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// A method of associative array `s` that gives a value: (slot, type).
+    fn assoc_value(&mut self, s: u32, m: &str, args: &[Expr], elem: Elem, key: KeyKind, sid: usize) -> R<(u32, Type)> {
+        let slot = self.sig(s).slot;
+        let d = self.tmp(32);
+        match m {
+            "num" | "size" => self.assoc_op(AssocOp::Num, d, slot, NONE, NONE, elem, key),
+            "exists" => {
+                let [k] = args else { return self.err("exists() takes 1 argument") };
+                let k = self.key_value(k, key, sid)?;
+                self.assoc_op(AssocOp::Exists, d, slot, k, NONE, elem, key);
+            }
+            m if KEY_STEPS.contains(&m) => {
+                // the key variable (a `ref` argument) gets the key found
+                let [kv] = args else { return self.err(format!("{m}() takes 1 argument")) };
+                let cur = match m {
+                    "next" | "prev" => self.key_value(kv, key, sid)?,
+                    _ => NONE,
+                };
+                let kw = Self::key_width(key);
+                let out = self.tmp(kw);
+                if cur != NONE {
+                    self.emit(Instr::Copy { d: out, s: cur, w: kw });
+                }
+                let op = match m {
+                    "first" => AssocOp::First,
+                    "last" => AssocOp::Last,
+                    "next" => AssocOp::Next,
+                    _ => AssocOp::Prev,
+                };
+                self.assoc_op(op, d, slot, cur, out, elem, key);
+                // (unchanged when there is no such key)
+                let found = self.tmp(1);
+                self.emit(Instr::Red { op: rt::RedOp::Bool, d: found, s: d, w: 32 });
+                let j = self.emit(Instr::Jz { c: found, w: 1, to: 0 });
+                self.store_value(&stmt::Lhs::Expr(kv, sid), out, kw, rt::StoreMode::Blocking)?;
+                let h = self.here();
+                self.patch(j, h);
+            }
+            _ => return self.err(format!("'{m}' gives no value")),
+        }
+        Ok((d, Type::vec(32, true)))
+    }
+
     /// An element value (`e` of the element type) for storing into an array of `elem`.
     fn elem_value(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<u32> {
         self.value_for(e, sid, elem.w, elem.ty(), None)
@@ -174,6 +286,11 @@ impl<'a> Compiler<'a> {
     /// A queue or dynamic array value: the slot of its handle and whether the array is new
     /// (else it belongs to a variable and is copied where it is stored).
     fn dyn_rhs(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<(u32, bool)> {
+        self.dyn_rhs_k(e, elem, false, sid)
+    }
+
+    /// `dyn_rhs` for a target that is an associative array (`assoc`) or not.
+    fn dyn_rhs_k(&mut self, e: &Expr, elem: Elem, assoc: bool, sid: usize) -> R<(u32, bool)> {
         if let Some((s, el)) = self.dyn_var(e, sid) {
             if el != elem && (el.w != elem.w || el.leaf != elem.leaf) {
                 return self.err("the arrays have different element types");
@@ -181,6 +298,9 @@ impl<'a> Compiler<'a> {
             return Ok((self.sig(s).slot, false));
         }
         match e {
+            Expr::NewArray(..) | Expr::Concat(_) | Expr::Pattern(..) | Expr::Range(..) if assoc => {
+                self.err("expected an associative array value")
+            }
             Expr::NewArray(n, init) => {
                 let size = self.expr(n, sid, 32, true)?;
                 let src = match init {
@@ -231,8 +351,9 @@ impl<'a> Compiler<'a> {
             }
             Expr::Cond(c, x, y) => {
                 // (both arrays are made; the condition picks one)
-                let x = self.dyn_owned(x, elem, sid)?;
-                let y = self.dyn_owned(y, elem, sid)?;
+                let k = if assoc { DynKind::Assoc(KeyKind::Str) } else { DynKind::Queue };
+                let x = self.dyn_owned(x, k, elem, sid)?;
+                let y = self.dyn_owned(y, k, elem, sid)?;
                 let (cv, cw) = self.truth(c, sid)?;
                 let b = self.tmp(1);
                 self.emit(Instr::Red { op: rt::RedOp::Bool, d: b, s: cv, w: cw });
@@ -252,8 +373,8 @@ impl<'a> Compiler<'a> {
     }
 
     /// A queue or dynamic array value as a new array (a variable's array copied).
-    pub(crate) fn dyn_owned(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<u32> {
-        let (h, fresh) = self.dyn_rhs(e, elem, sid)?;
+    pub(crate) fn dyn_owned(&mut self, e: &Expr, kind: DynKind, elem: Elem, sid: usize) -> R<u32> {
+        let (h, fresh) = self.dyn_rhs_k(e, elem, matches!(kind, DynKind::Assoc(_)), sid)?;
         if fresh {
             return Ok(h);
         }
@@ -276,8 +397,14 @@ impl<'a> Compiler<'a> {
         let Expr::Index(a, i) = lhs else { return Ok(false) };
         let Some((s, elem)) = self.dyn_var(a, sid) else { return Ok(false) };
         let v = self.elem_value(rhs, elem, sid)?;
-        let ix = self.dyn_index(a, i, sid)?;
         let slot = self.sig(s).slot;
+        if let Some(key) = self.assoc_key(s) {
+            let k = self.key_value(i, key, sid)?;
+            self.assoc_op(AssocOp::Set, NONE, slot, k, v, elem, key);
+            self.emit(Instr::Touch { sig: s });
+            return Ok(true);
+        }
+        let ix = self.dyn_index(a, i, sid)?;
         self.heap_op(HeapOp::Set, NONE, slot, ix, v, elem);
         self.emit(Instr::Touch { sig: s });
         Ok(true)
@@ -288,6 +415,21 @@ impl<'a> Compiler<'a> {
     pub(crate) fn dyn_task(&mut self, name: &str, args: &[Expr], sid: usize) -> R<bool> {
         let Some((base, s, elem, m)) = self.dyn_method(name, sid) else { return Ok(false) };
         let slot = self.sig(s).slot;
+        if let Some(key) = self.assoc_key(s) {
+            if m == "delete" {
+                let k = match args {
+                    [] => NONE,
+                    [k] => self.key_value(k, key, sid)?,
+                    _ => return self.err("delete() takes at most 1 argument"),
+                };
+                self.assoc_op(AssocOp::Delete, NONE, slot, k, NONE, elem, key);
+                self.emit(Instr::Touch { sig: s });
+            } else {
+                // a value method called as a statement (`aa.first(k);`)
+                self.assoc_value(s, m, args, elem, key, sid)?;
+            }
+            return Ok(true);
+        }
         let nargs = |c: &Self, n: usize| -> R<()> {
             if args.len() != n {
                 return c.err(format!("{m}() takes {n} argument{}", if n == 1 { "" } else { "s" }));
@@ -327,6 +469,10 @@ impl<'a> Compiler<'a> {
 
     /// `a == b` / `a != b` of queues or dynamic arrays (1 bit).
     pub(crate) fn dyn_compare(&mut self, ne: bool, a: &Expr, b: &Expr, elem: Elem, sid: usize) -> R<u32> {
+        let assoc = |c: &Self, e: &Expr| c.dyn_var(e, sid).is_some_and(|(s, _)| c.assoc_key(s).is_some());
+        if assoc(self, a) || assoc(self, b) {
+            return self.err("associative arrays cannot be compared");
+        }
         let (x, _) = self.dyn_rhs(a, elem, sid)?;
         let (y, _) = self.dyn_rhs(b, elem, sid)?;
         let d = self.tmp(1);

@@ -2,6 +2,8 @@ module top ();
   // imports $unit
   int(32) signed q[$], b[$:3];
   bit [3:0] d[];
+  int(32) signed aa[string], w[*];
+  reg [7:0] m[bit [3:0]];
   int(32) signed t[$];
   function automatic integer signed f[$];
     input int(32) signed a[$];
@@ -19,6 +21,12 @@ module top ();
       int(32) signed i;
       for (i = 0; (i < q.size()); i = (i + 1))
         b.push_front(q[i]);
+    end
+    begin
+      string k;
+      int(32) signed k$ok;
+      for (k$ok = aa.first(k); k$ok; k$ok = aa.next(k))
+        aa[k] = aa.num();
     end
   end
 endmodule

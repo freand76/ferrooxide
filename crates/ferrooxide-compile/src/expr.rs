@@ -1173,9 +1173,9 @@ impl<'a> Compiler<'a> {
         let fs = self.new_scope(path.clone(), Some(def_scope), file);
         let ret = if f.is_task || f.ret_kind == NetKind::Int(0) {
             None
-        } else if let Type::Dyn { queue, elem } = self.func_ret_type(f, def_scope)? {
-            // a function returning a queue or dynamic array
-            Some(self.new_dyn(path.clone(), &f.name, elem, queue, fs))
+        } else if let Type::Dyn { kind, elem } = self.func_ret_type(f, def_scope)? {
+            // a function returning a queue, dynamic or associative array
+            Some(self.new_dyn_kind(path.clone(), &f.name, elem, kind, fs))
         } else {
             let (w, s) = self.func_ret_type(f, def_scope)?.ws();
             let (m, l) = match f.ret_kind {
@@ -1227,7 +1227,7 @@ impl<'a> Compiler<'a> {
                 if let Some(h) = &dl.heap {
                     // a queue or dynamic array argument or variable
                     let elem = Self::elem_of(d.kind, w, signed);
-                    let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, matches!(h, HeapKind::Queue(_)), fs);
+                    let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, fs)?;
                     if let Some(dir) = d.dir {
                         ports.push((dir, sg));
                     }
@@ -1837,7 +1837,7 @@ impl<'a> Compiler<'a> {
         match ty {
             Type::Real => self.rexpr(rhs, sid),
             Type::Str => self.str_expr(rhs, sid),
-            Type::Dyn { elem, .. } => self.dyn_owned(rhs, elem, sid),
+            Type::Dyn { kind, elem } => self.dyn_owned(rhs, kind, elem, sid),
             Type::Vec { .. } => self.rhs_value(rhs, sid, lw),
         }
     }

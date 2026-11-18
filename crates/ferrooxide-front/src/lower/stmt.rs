@@ -462,6 +462,48 @@ impl Lower {
 
     /// foreach (a[i, , k]) body: nested loops from the left to the right bound of each named
     /// dimension, with int loop variables.
+    /// `foreach (aa[k])` of an associative array: `k` of the key type through the keys in
+    /// order (`for (ok = aa.first(k); ok; ok = aa.next(k))`).
+    fn foreach_assoc(&mut self, name: &str, v: &str, key: Option<&super::SvType>, body: Stmt, line: u32) -> Stmt {
+        let ok = format!("{v}$ok");
+        let call = |m: &str| Expr::Call(format!("{name}.{m}"), vec![Expr::Ident(v.to_string())]);
+        let set = |rhs: Expr| Stmt::Assign { lhs: Expr::Ident(ok.clone()), rhs, nonblocking: false, timing: None, line };
+        let lp = Stmt::For {
+            init: Box::new(set(call("first"))),
+            cond: Expr::Ident(ok.clone()),
+            step: Box::new(set(call("next"))),
+            body: Box::new(body),
+            line,
+        };
+        let decl = |kind: NetKind, signed: bool, range: Option<Range>, n: &str| Decl {
+            dir: None,
+            kind,
+            net: NetType::Wire,
+            explicit_kind: true,
+            real_net: false,
+            strength: None,
+            delay: None,
+            signed,
+            range,
+            packed: vec![],
+            type_param: None,
+            ty: None,
+            names: vec![Declarator { name: n.to_string(), dims: vec![], heap: None, init: None, line }],
+            line,
+        };
+        // the loop variable: of the key type (`[*]`: 64-bit)
+        let kd = match key {
+            Some(k) if k.kind == NetKind::String => decl(NetKind::String, false, None, v),
+            Some(k) => {
+                let (kind, signed, range, _) = k.decl_parts();
+                let range = range.or_else(|| Some((super::types::minus_one(k.width()), Expr::Num(dec(0)))));
+                decl(if kind == NetKind::Bit { NetKind::Bit } else { NetKind::Reg }, signed, range, v)
+            }
+            None => decl(NetKind::Reg, false, Some((Expr::Num(dec(63)), Expr::Num(dec(0)))), v),
+        };
+        Stmt::Block { name: None, decls: vec![kd, decl(NetKind::Int(32), true, None, &ok)], stmts: vec![lp], fork: None }
+    }
+
     /// `foreach (q[i])` of a queue or dynamic array: `i` from 0 to `q.size() - 1`.
     fn foreach_heap(&mut self, name: &str, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
         let line = loc.line;
@@ -471,6 +513,10 @@ impl Lower {
             [None] | [] => return Ok(Stmt::Null),
             _ => return self.err(loc, format!("foreach: '{name}' has only 1 dimension")),
         };
+        let heap = self.vars[name].0.heap.clone();
+        if let Some(HeapKind::Assoc(key)) = heap {
+            return Ok(self.foreach_assoc(name, &v, key.as_deref(), body, line));
+        }
         let var = || Box::new(Expr::Ident(v.clone()));
         let size = Box::new(Expr::Call(format!("{name}.size"), vec![]));
         let lp = Stmt::For {

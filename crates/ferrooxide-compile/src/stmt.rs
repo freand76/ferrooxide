@@ -426,7 +426,7 @@ impl<'a> Compiler<'a> {
                             if let Some(h) = &dl.heap {
                                 // a queue or dynamic array
                                 let elem = Self::elem_of(d.kind, w, signed);
-                                let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, matches!(h, HeapKind::Queue(_)), b);
+                                let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
                                 if let Some(init) = &dl.init {
                                     let ty = self.sig_type(s);
                                     let v = self.value_for(init, b, 64, ty, None)?;

@@ -13,8 +13,16 @@ pub(crate) enum Type {
     Real,
     /// `string`: a 64-bit handle of an interned text
     Str,
-    /// a queue or dynamic array: a 64-bit handle of a heap object (`heap.rs`)
-    Dyn { queue: bool, elem: Elem },
+    /// a queue, dynamic or associative array: a 64-bit handle of a heap object (`heap.rs`)
+    Dyn { kind: DynKind, elem: Elem },
+}
+
+/// The kind of a `Type::Dyn`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DynKind {
+    Queue,
+    Darray,
+    Assoc(rt::KeyKind),
 }
 
 /// The element type of a queue or dynamic array.
@@ -297,7 +305,8 @@ impl<'a> Compiler<'a> {
         if let Some(t) = f.ret_ty.as_ref().filter(|t| t.heap.is_some()) {
             let w = self.const_int(&t.width(), fs)? as u32;
             let elem = Self::elem_of(t.kind, w, t.signed);
-            return Ok(Type::Dyn { queue: matches!(t.heap, Some(HeapKind::Queue(_))), elem });
+            let kind = self.dyn_kind(t.heap.as_ref().unwrap(), fs)?;
+            return Ok(Type::Dyn { kind, elem });
         }
         Ok(match f.ret_kind {
             NetKind::Integer => Type::vec(32, true),

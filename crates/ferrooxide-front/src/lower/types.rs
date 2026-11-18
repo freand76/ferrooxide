@@ -273,7 +273,19 @@ impl Lower {
                 };
                 Ok((vec![], Some(HeapKind::Queue(max))))
             }
-            [t::Dim::Assoc(_)] => self.unsupported(loc, "an associative array"),
+            [t::Dim::Assoc(None)] => Ok((vec![], Some(HeapKind::Assoc(None)))),
+            [t::Dim::Assoc(Some(k))] => {
+                let kt = if matches!(k.kind, t::TypeKind::String) && k.packed.is_empty() {
+                    SvType { int_kind: true, ..SvType::vector(NetKind::String, false, vec![(num(63), num(0))]) }
+                } else {
+                    let kt = self.data_type_req(k)?;
+                    if kt.has_struct() || kt.kind == NetKind::Real || kt.heap.is_some() {
+                        return self.unsupported(loc, "this associative array key type");
+                    }
+                    kt
+                };
+                Ok((vec![], Some(HeapKind::Assoc(Some(Rc::new(kt))))))
+            }
             v if v.iter().any(heap) => self.unsupported(loc, "an array of queues or dynamic arrays"),
             v => Ok((self.dims(v, loc)?, None)),
         }

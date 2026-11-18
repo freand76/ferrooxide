@@ -498,7 +498,11 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
      the old one is freed on blocking assignments), elements and methods change it in place
      and give the variable a change event (`Touch`). `Type::Dyn`, `compile/heap.rs`; front end: `Declarator::heap`,
      `SvType::heap` (typedefs, return types), `Expr::NewArray`, `Expr::Last` (`$`), `{}`,
-     foreach. Left: 4b associative arrays; 4c bounded queues (`[$:N]`) and the reference's
+     foreach.
+     *4b done 2026-11-18*: associative arrays (`[string]`, integer keys up to 64 bits, `[*]`):
+     a map on the same heap (`Instr::Assoc`), num/size/exists/delete/first/last/next/prev,
+     missing keys read as the default, copies, foreach in key order (`first`/`next`).
+     Left: keyed patterns (`'{"a": 1, default: 0}`), class or wider keys. Left from 4a: 4c bounded queues (`[$:N]`) and the reference's
      run-time warnings (out of range, empty pop); queues of structs, arrays of queues,
      queue ports, `%p`, array methods (`sort`, `find`, ... `with`), element writes with
      `<=` (done at once).

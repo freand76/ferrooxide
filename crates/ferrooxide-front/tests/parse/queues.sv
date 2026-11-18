@@ -2,6 +2,8 @@ typedef int iq_t[$];
 module top;
   int q[$], b[$:3];
   bit [3:0] d[];
+  int aa[string], w[*];
+  logic [7:0] m[bit [3:0]];
   iq_t t;
   function automatic iq_t f(int a[$]);
     f = a[1:$];
@@ -15,5 +17,6 @@ module top;
     q.push_back(2);
     t = f(q);
     foreach (q[i]) b.push_front(q[i]);
+    foreach (aa[k]) aa[k] = aa.num();
   end
 endmodule

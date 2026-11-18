@@ -239,7 +239,7 @@ impl<'a> Compiler<'a> {
                     return self.err(format!("port '{name}': a queue or dynamic array port is not supported"));
                 }
                 let elem = Self::elem_of(mg.kind, width, signed);
-                self.new_dyn(full, &name, elem, matches!(h, HeapKind::Queue(_)), sid);
+                self.new_dyn(full, &name, elem, h, sid)?;
                 if let Some(init) = mg.init {
                     let line = self.line;
                     self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.clone()), rhs: init.clone(), scope: sid, line });
