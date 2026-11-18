@@ -1,0 +1,16 @@
+module m ();
+  // imports $unit
+  function automatic integer signed f;
+    input integer signed v;
+    integer signed acc = 1;
+    return (acc + v);
+  endfunction
+  function integer signed g;
+    input integer signed v;
+    integer signed acc = 1;
+    begin
+      acc = (acc + v);
+      return acc;
+    end
+  endfunction
+endmodule

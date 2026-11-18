@@ -137,7 +137,8 @@ instantiated once under their own name; names not found inside are looked up in 
 enclosing instance), the checks on `final` procedures (no NBAs, delays, event or wait
 controls, task calls), immediate `assert`/`assume` (default `$error`; `cover` does nothing,
 as in the reference), `$error`/`$warning`/`$info`/`$fatal` with file, line, time and scope,
-`void'(f())`, `++`/`--` inside expressions (with short-circuit `&&`/`||`/`?:` when the
+initial values of variables in functions and tasks (static: once; automatic: per call;
+constant calls start afresh), `module automatic`, `void'(f())`, `++`/`--` inside expressions (with short-circuit `&&`/`||`/`?:` when the
 right side has side effects).
 
 *A1, first part (types in elaboration).* Packages and `$unit` are scopes of their own,
@@ -625,9 +626,9 @@ SystemVerilog data types and testbench features:
 - programs: processes run in the Active region, not the Reactive one (as the reference,
   which warns about assignments to module variables), no implicit `$finish` when all
   program `initial` blocks end, no `program` limits on what a module may reference.
-- initial values of variables declared in functions and tasks are not applied; the front
-  ends reject explicit lifetimes there (`static int acc = 1;`) and `module automatic`
-  [func_init_var*, task_init_var*].
+- explicit lifetimes on variables in blocks inside functions and tasks, and a lifetime
+  other than the subroutine's (`static` in an automatic function) [func_init_var2,
+  task_init_var2].
 - struct members of variables whose type is a type parameter; unpacked structs (struct
   layout is still resolved in the parser, A1); struct-typed function arguments with patterns.
 - nested modules with ports instantiated from outside their module; multi-dimensional

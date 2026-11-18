@@ -395,7 +395,11 @@ impl Lower {
             return self.unsupported(s.loc, "a subroutine prototype");
         };
         let is_task = s.is_task;
-        let automatic = s.lifetime == Some(t::Lifetime::Automatic);
+        // without its own lifetime: the module's or package's default (IEEE 1800-2017 6.21)
+        let automatic = match s.lifetime {
+            Some(l) => l == t::Lifetime::Automatic,
+            None => self.default_automatic,
+        };
         let mut signed = false;
         let mut range = None;
         let mut ret_kind = NetKind::Reg;
@@ -493,9 +497,14 @@ impl Lower {
                     if v.const_ {
                         return self.unsupported(v.loc, "a const variable");
                     }
-                    if v.lifetime.is_some() {
-                        // (their initial values are not applied yet)
-                        return self.unsupported(v.loc, "an explicit variable lifetime in a subroutine");
+                    match v.lifetime {
+                        Some(t::Lifetime::Static) if automatic => {
+                            return self.unsupported(v.loc, "a static variable in an automatic subroutine")
+                        }
+                        Some(t::Lifetime::Automatic) if !automatic => {
+                            return self.unsupported(v.loc, "an automatic variable in a static subroutine")
+                        }
+                        _ => {}
                     }
                     (None, None, v.var, &v.ty, &v.decls, v.loc)
                 }

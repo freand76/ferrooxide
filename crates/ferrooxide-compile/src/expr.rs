@@ -1340,6 +1340,11 @@ impl<'a> Compiler<'a> {
                 self.set_layout(sg, &dl.name, layout.clone(), fs)?;
                 if let Some(dir) = d.dir {
                     ports.push((dir, sg));
+                } else if let (Some(init), false) = (&dl.init, f.automatic || key.1.ends_with("$const")) {
+                    // a static variable: its initial value once, as for a module variable
+                    // (automatic ones get it on each call, `auto_inits`)
+                    let real = d.kind == NetKind::Real;
+                    self.decl_init(init, sg, SigKind::Reg, d.kind, real, depth, w, None, None, &dl.name, fs)?;
                 }
             }
         }
@@ -1413,9 +1418,14 @@ impl<'a> Compiler<'a> {
         if self.subr.call_depth > 32 {
             return self.err(format!("calls nested too deeply in '{name}'"));
         }
+        // a constant function call (elaboration): every call starts afresh, also for a static
+        // function, and leaves its run-time variables alone
+        let fresh = f.automatic || self.code.pb.last().is_none_or(|p| p.proc == NONE);
         let kname = if f.automatic {
             self.subr.auto_count += 1;
             format!("{}#{}", f.name, self.subr.auto_count)
+        } else if fresh {
+            format!("{}$const", f.name)
         } else {
             f.name.clone()
         };
@@ -1463,7 +1473,7 @@ impl<'a> Compiler<'a> {
         // the body is a block `disable <task>` can end
         let bpath = format!("{}.{}", self.scopes[fs_def].name, f.name);
         let reg = self.open_block(bpath);
-        let r = self.auto_inits(f, fscope).and_then(|_| self.stmt(&f.body, fscope));
+        let r = self.auto_inits(f, fscope, fresh).and_then(|_| self.stmt(&f.body, fscope));
         self.close_block(reg);
         self.file = saved_file;
         let (_, patches) = self.code.pb.last_mut().unwrap().rets.pop().unwrap();
@@ -1491,9 +1501,10 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    /// The initializers of an automatic subroutine's variables, applied on each call.
-    fn auto_inits(&mut self, f: &'a SubroutineDecl, fscope: usize) -> R<()> {
-        if !f.automatic {
+    /// The initializers of an automatic subroutine's variables (`fresh`: also of a static
+    /// one called in a constant expression), applied on each call.
+    fn auto_inits(&mut self, f: &'a SubroutineDecl, fscope: usize, fresh: bool) -> R<()> {
+        if !fresh {
             return Ok(());
         }
         for d in f.decls.iter().filter(|d| d.dir.is_none()) {
@@ -1618,7 +1629,7 @@ impl<'a> Compiler<'a> {
             self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
             let bpath = format!("{}.{}", self.scopes[key.0].name, f.name);
             let reg = self.open_block(bpath);
-            self.auto_inits(f, fscope)?;
+            self.auto_inits(f, fscope, f.automatic)?;
             let r = self.stmt(&f.body, fscope);
             // (on an error the compilation stops: the state is not cleaned up)
             r?;

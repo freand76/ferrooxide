@@ -62,6 +62,8 @@ pub(crate) struct Lower {
     modports: Vec<String>,
     /// lowering a function or task body
     in_subroutine: bool,
+    /// in a `module automatic` / `package automatic`: subroutines are automatic by default
+    default_automatic: bool,
     /// lowering the items of a program
     in_program: bool,
     /// classes declared so far: the names their methods reach through `this`
@@ -140,6 +142,7 @@ impl Lower {
             pkg_ctx: None,
             modports: Vec::new(),
             in_subroutine: false,
+            default_automatic: false,
             in_program: false,
             classes: HashMap::new(),
         }
@@ -341,11 +344,14 @@ impl Lower {
     /// A module, interface or program; `nested`: declared inside another one, whose names
     /// (types, variables, imports, time unit) it sees.
     fn module(&mut self, m: &t::ModuleDecl, nested: bool) -> Result<Module> {
+        let saved_auto = std::mem::replace(&mut self.default_automatic, m.lifetime == Some(t::Lifetime::Automatic));
+        let r = self.module_inner(m, nested);
+        self.default_automatic = saved_auto;
+        r
+    }
+
+    fn module_inner(&mut self, m: &t::ModuleDecl, nested: bool) -> Result<Module> {
         let line = m.loc.line;
-        if m.lifetime == Some(t::Lifetime::Automatic) {
-            // (initial values of subroutine variables would be lost)
-            return self.unsupported(m.loc, "an automatic default lifetime");
-        }
         let interface = m.kind == t::ModuleKind::Interface;
         let program = m.kind == t::ModuleKind::Program;
         let saved_program = std::mem::replace(&mut self.in_program, program);
@@ -631,9 +637,13 @@ impl Lower {
 
     /// `package name; items endpackage`
     fn package(&mut self, p: &t::PackageDecl) -> Result<()> {
-        if p.lifetime == Some(t::Lifetime::Automatic) {
-            return self.unsupported(p.loc, "an automatic default lifetime");
-        }
+        let saved_auto = std::mem::replace(&mut self.default_automatic, p.lifetime == Some(t::Lifetime::Automatic));
+        let r = self.package_inner(p);
+        self.default_automatic = saved_auto;
+        r
+    }
+
+    fn package_inner(&mut self, p: &t::PackageDecl) -> Result<()> {
         let name = self.name(&p.name, p.loc);
         let saved_types = self.types.clone();
         let saved_pkgs = std::mem::take(&mut self.mod_pkgs);
