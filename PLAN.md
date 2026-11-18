@@ -485,6 +485,12 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
      patterns as function arguments. Left: members through hierarchical names
      (`inst.v.f`); patterns for unpacked arrays.
   3. Unpacked structs (and structs with reals or strings).
+     *Done 2026-11-18*: an unpacked struct is stored flat like a packed one, but its members
+     may be `real` (f64 bits) or `string` (a handle) at their offsets: they start as 0.0
+     and "", read and write as real / string (`member_type`; patterns convert per member).
+     A packed struct with a non-integral or unpacked-struct member is an error (7.2.1).
+     Left: unpacked array members, member defaults, method calls on members
+     (`s.name.len()`), `%p` of a whole struct.
   4. Then A2 (queues, dynamic and associative arrays) builds on the same `Type`.
 - **R5. Split the compiler**: `elab/{params,hier,decls,generate,nets,udp,specify}.rs` plus
   codegen; `Compiler` fields grouped into sub-structs. Move first, regroup after.

@@ -273,6 +273,8 @@ pub(crate) struct Sigs {
     pub(crate) layout: HashMap<u32, Rc<types::Packed>>,
     /// some signal has a struct type (member chains need the rewrite in `md_norm`)
     pub(crate) has_structs: bool,
+    /// some struct has real or string members
+    pub(crate) has_struct_values: bool,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).

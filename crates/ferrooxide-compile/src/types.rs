@@ -84,6 +84,9 @@ impl<'a> Compiler<'a> {
     /// string where an operand of a concatenation, replication or condition is one; a real
     /// where an operand of an arithmetic operator or a condition is real; otherwise a vector.
     pub(crate) fn type_of(&mut self, e: &Expr, sid: usize) -> R<Type> {
+        if let Some(t) = self.member_type(e, sid) {
+            return Ok(t);
+        }
         if let Some(n) = self.md_norm(e, sid) {
             return self.type_of(&n, sid);
         }
@@ -235,7 +238,7 @@ impl<'a> Compiler<'a> {
                     v(32, true)
                 }
                 "$rtoi" => v(32, true),
-                "$realtobits" | "$__ticks" => v(64, false),
+                "$realtobits" | "$__ticks" | "$__strbits" => v(64, false),
                 "$countones" => v(32, false),
                 "$onehot" | "$onehot0" | "$isunknown" => v(1, false),
                 _ => return self.err(format!("unsupported system function '{name}'")),
@@ -266,8 +269,17 @@ pub(crate) struct Packed {
     pub(crate) signed: bool,
     /// `int`, `integer`, `byte`, ...: declared without a range (a pattern gives it one value)
     pub(crate) int_kind: bool,
-    /// the element is a packed struct / union
+    /// the element is a struct / union
     pub(crate) fields: Option<Rc<Fields>>,
+    /// a real or string member of an unpacked struct (64 bits: f64 bits / a string handle)
+    pub(crate) leaf: Leaf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Leaf {
+    Bits,
+    Real,
+    Str,
 }
 
 #[derive(Clone, Debug)]
@@ -306,7 +318,32 @@ pub(crate) fn packed_of(t: &SvType) -> Packed {
     let fields = t.fields.as_ref().map(|f| {
         Rc::new(Fields { union: f.union, fields: f.fields.iter().map(|(n, ft)| (n.clone(), packed_of(ft))).collect() })
     });
-    Packed { dims, signed: t.signed, int_kind: t.int_kind, fields }
+    let leaf = match t.kind {
+        NetKind::Real => Leaf::Real,
+        NetKind::String => Leaf::Str,
+        _ => Leaf::Bits,
+    };
+    Packed { dims, signed: t.signed, int_kind: t.int_kind, fields, leaf }
+}
+
+/// The bit offsets of the real and string members in a value of type `t` at `off`.
+fn value_members(t: &Packed, off: i64, out: &mut Vec<i64>) {
+    if t.leaf != Leaf::Bits {
+        out.push(off);
+        return;
+    }
+    let Some(f) = &t.fields else { return };
+    let n: i64 = t.dims.iter().map(|&d| dim_size(d)).product();
+    let el = t.leaf_width();
+    for k in 0..n {
+        let mut o = off + k * el;
+        for (_, ft) in f.fields.iter().rev() {
+            value_members(ft, o, out);
+            if !f.union {
+                o += ft.width();
+            }
+        }
+    }
 }
 
 /// One select of a chain: `[i]`, `[m:l]`, `[b +: w]` / `[b -: w]`, `.m`.
@@ -408,6 +445,8 @@ pub(crate) struct Walk {
     pub(crate) expr: Expr,
     /// the type selected, where the chain selects a whole member or element
     pub(crate) ty: Option<Packed>,
+    /// a whole real or string member
+    pub(crate) leaf: Leaf,
 }
 
 impl<'a> Compiler<'a> {
@@ -432,6 +471,25 @@ impl<'a> Compiler<'a> {
             // member chains name the flat storage
             self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));
             self.sigs.has_structs = true;
+            // real and string members start as 0.0 and the empty string (handle 0)
+            let mut zero = Vec::new();
+            value_members(&p, 0, &mut zero);
+            if !zero.is_empty() {
+                self.sigs.has_struct_values = true;
+                self.intern(b"");
+                let info = self.sig(s);
+                let (slot, n) = (info.slot as usize, rt::nw(info.width) as usize);
+                for e in 0..info.depth.max(1) as usize {
+                    let base = slot + 2 * n * e;
+                    for &off in &zero {
+                        for b in off..off + 64 {
+                            let (w, m) = (b / 64, 1u64 << (b % 64));
+                            self.prog.mem[base + w as usize] &= !m;
+                            self.prog.mem[base + n + w as usize] &= !m;
+                        }
+                    }
+                }
+            }
         }
         self.sigs.layout.insert(s, Rc::new(p));
         Ok(())
@@ -585,14 +643,45 @@ impl<'a> Compiler<'a> {
             return None;
         }
         let mut out = Expr::IndexedRange(Box::new(elem), Box::new(off), Box::new(width), true);
-        // a whole signed member reads as signed
-        if !lvalue && whole && cur.signed && di == 0 {
-            out = Expr::SysCall("$signed".into(), vec![out]);
+        let leaf = if whole && di == 0 { cur.leaf } else { Leaf::Bits };
+        if !lvalue && whole && di == 0 {
+            match cur.leaf {
+                // a real member read: its bits as a real
+                Leaf::Real => out = Expr::SysCall("$bitstoreal".into(), vec![out]),
+                // (a string member: see `member_type`)
+                Leaf::Str => {}
+                // a whole signed member reads as signed
+                Leaf::Bits if cur.signed => out = Expr::SysCall("$signed".into(), vec![out]),
+                Leaf::Bits => {}
+            }
         }
         for &op in &ops[k..] {
             out = apply(out, op);
         }
-        Some(Ok(Walk { expr: out, ty: if k == ops.len() { ty } else { None } }))
+        let whole_chain = k == ops.len();
+        Some(Ok(Walk { expr: out, ty: if whole_chain { ty } else { None }, leaf: if whole_chain { leaf } else { Leaf::Bits } }))
+    }
+
+    /// The type of a member chain that selects a whole real or string member of an unpacked
+    /// struct.
+    pub(crate) fn member_type(&self, e: &Expr, sid: usize) -> Option<Type> {
+        if !self.sigs.has_struct_values || !matches!(e, Expr::Member(..) | Expr::Index(..)) {
+            return None;
+        }
+        match self.struct_walk(e, sid, true)?.ok()?.leaf {
+            Leaf::Real => Some(Type::Real),
+            Leaf::Str => Some(Type::Str),
+            Leaf::Bits => None,
+        }
+    }
+
+    /// A string member of a struct as the slot of its handle.
+    pub(crate) fn str_member(&mut self, e: &Expr, sid: usize) -> R<Option<u32>> {
+        if self.member_type(e, sid) != Some(Type::Str) {
+            return Ok(None);
+        }
+        let n = self.lv_norm(e, sid).unwrap();
+        Ok(Some(self.expr(&n, sid, 64, false)?))
     }
 
     /// The error for a member select that names no member.
@@ -692,9 +781,11 @@ impl<'a> Compiler<'a> {
                 return self.err(format!("assignment pattern has no value for member {}", name.unwrap_or_default()));
             };
             let v = self.with_target(v, Some(pt), sid)?.unwrap_or_else(|| v.clone());
-            out.push(match v {
-                Expr::Concat(_) => v,
-                v => cast(pt.width(), v),
+            out.push(match (pt.leaf, v) {
+                (Leaf::Real, v) => Expr::SysCall("$realtobits".into(), vec![v]),
+                (Leaf::Str, v) => Expr::SysCall("$__strbits".into(), vec![v]),
+                (_, v @ Expr::Concat(_)) => v,
+                (_, v) => cast(pt.width(), v),
             });
         }
         Ok(Expr::Concat(out))

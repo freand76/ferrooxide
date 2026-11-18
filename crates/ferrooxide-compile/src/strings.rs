@@ -64,6 +64,9 @@ impl<'a> Compiler<'a> {
 
     /// Compile `e` as a string: the slot of its handle.
     pub(crate) fn str_expr(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        if let Some(h) = self.str_member(e, sid)? {
+            return Ok(h);
+        }
         match e {
             Expr::Str(t) => {
                 // (the lexer keeps one char per byte of the literal)

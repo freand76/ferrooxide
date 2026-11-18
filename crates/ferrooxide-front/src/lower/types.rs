@@ -45,6 +45,9 @@ pub struct Package {
 #[derive(Debug, Clone)]
 pub struct Struct {
     pub union: bool,
+    /// `struct packed`: integral members only, the whole is a vector; an unpacked struct is
+    /// stored flat as well, but its members may be real or string
+    pub packed: bool,
     pub fields: Vec<(String, SvType)>,
 }
 
@@ -285,9 +288,21 @@ impl Lower {
                     if m.rand.is_some() {
                         return self.unsupported(m.loc, "a rand struct member");
                     }
-                    let Some(ft) = self.data_type(&m.ty)? else {
-                        return self.err(m.loc, "expected a member type");
+                    let ft = match self.data_type(&m.ty)? {
+                        Some(ft) => ft,
+                        // a string member: a 64-bit handle
+                        None if matches!(m.ty.kind, t::TypeKind::String) && m.ty.packed.is_empty() => {
+                            SvType { int_kind: true, ..SvType::vector(NetKind::String, false, vec![(num(63), num(0))]) }
+                        }
+                        None => return self.err(m.loc, "expected a member type"),
                     };
+                    // IEEE 1800 7.2.1: the members of a packed struct are integral
+                    if st.packed && matches!(ft.kind, NetKind::Real | NetKind::String) {
+                        return self.err(m.loc, "a member of a packed struct or union must be of an integral type");
+                    }
+                    if st.packed && ft.fields.as_ref().is_some_and(|f| !f.packed) {
+                        return self.err(m.loc, "a member of a packed struct or union cannot be an unpacked struct");
+                    }
                     for d in &m.decls {
                         if !d.dims.is_empty() {
                             return self.unsupported(d.loc, "an unpacked struct member array");
@@ -301,7 +316,7 @@ impl Lower {
                 }
                 let dims = self.dims(&ty.packed, ty.loc)?;
                 let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, fields })), int_kind: false, enum_names: None, unpacked: vec![], param: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], param: None }))
             }
             t::TypeKind::Enum(et) => {
                 if !ty.packed.is_empty() {

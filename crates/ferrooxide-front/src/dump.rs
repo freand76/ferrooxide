@@ -142,6 +142,9 @@ pub fn sv_type(t: &SvType) -> String {
         let _ = write!(s, " param {p}");
     }
     if let Some(f) = &t.fields {
+        if !f.packed {
+            s.push_str(" unpacked");
+        }
         s.push_str(if f.union { " union {" } else { " struct {" });
         for (n, ft) in &f.fields {
             let _ = write!(s, " {} {n};", sv_type(ft));

@@ -465,6 +465,10 @@ impl<'a> Compiler<'a> {
 
     /// Compile `e` to a value of width `w`, with expression signedness `s` (IEEE context propagation).
     pub(crate) fn expr(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
+        // a string member of a struct where a vector is needed: its characters
+        if !self.code.str_raw && self.member_type(e, sid) == Some(Type::Str) {
+            return self.str_to_vec(e, sid, w);
+        }
         if let Some(n) = self.md_norm(e, sid) {
             return self.expr(&n, sid, w, s);
         }
@@ -1125,6 +1129,11 @@ impl<'a> Compiler<'a> {
                 let d = self.tmp(64);
                 self.emit(Instr::Copy { d, s: v, w: 64 });
                 Ok(self.resize(d, 64, w, false))
+            }
+            // (internal: a string's handle, for a string member in an assignment pattern)
+            "$__strbits" => {
+                let h = self.str_expr(&args[0], sid)?;
+                Ok(self.resize(h, 64, w, false))
             }
             _ => self.err(format!("unsupported system function '{name}'")),
         }
