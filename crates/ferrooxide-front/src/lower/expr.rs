@@ -182,14 +182,12 @@ impl Lower {
                 acc.unwrap()
             }
             t::ExprKind::Pattern { ty, items } => {
-                let p = self.pattern(items, loc)?;
-                match ty {
-                    None => p,
-                    Some(dt) => {
-                        let t = self.data_type_req(dt)?;
-                        self.resolve_pattern(p, &t, loc)?
-                    }
-                }
+                let items = self.pattern(items, loc)?;
+                let ty = match ty {
+                    Some(dt) => Some(Rc::new(self.data_type_req(dt)?)),
+                    None => None,
+                };
+                Expr::Pattern(ty, items)
             }
             t::ExprKind::Cast(target, x) => match target {
                 t::CastTarget::Size(s) => {
@@ -212,9 +210,8 @@ impl Lower {
                     if matches!(dt.kind, t::TypeKind::Real(_)) {
                         return self.unsupported(loc, "a cast to a real type");
                     }
-                    let t = self.data_type_req(dt)?;
-                    let x = self.expr(x)?;
-                    let x = self.resolve_pattern(x, &t, loc)?;
+                    let t = Rc::new(self.data_type_req(dt)?);
+                    let x = typed_patterns(self.expr(x)?, &t);
                     cast(t.width(), x, if t.signed { 1 } else { 0 })
                 }
             },
@@ -240,7 +237,7 @@ impl Lower {
         })
     }
 
-    /// An assignment target (records the selected type in `last_type`).
+    /// An assignment target.
     pub(crate) fn lvalue(&mut self, e: &t::Expr) -> Result<Expr> {
         if let t::ExprKind::Concat(v) = &e.kind {
             let mut out = Vec::new();
@@ -285,30 +282,28 @@ impl Lower {
         }
     }
 
-    /// `'{...}` as `$__pattern(items)` with `$__named(key, v)` items (resolved against the
-    /// target type where one is known).
-    fn pattern(&mut self, items: &t::PatternItems, loc: t::Loc) -> Result<Expr> {
+    /// The items of `'{...}` (resolved in elaboration against the target type).
+    fn pattern(&mut self, items: &t::PatternItems, loc: t::Loc) -> Result<Vec<PatItem>> {
         let mut out = Vec::new();
         match items {
             t::PatternItems::Positional(v) => {
                 for x in v {
-                    out.push(self.expr(x)?);
+                    out.push(PatItem::Pos(self.expr(x)?));
                 }
             }
             t::PatternItems::Keyed(v) => {
                 for (k, x) in v {
-                    let key = match &k.kind {
-                        t::ExprKind::Ident(n) => n.clone(),
-                        t::ExprKind::Default => "default".into(),
-                        _ => return self.unsupported(k.loc, "this assignment pattern key"),
-                    };
                     let x = self.expr(x)?;
-                    out.push(Expr::SysCall("$__named".into(), vec![Expr::Str(key), x]));
+                    out.push(match &k.kind {
+                        t::ExprKind::Ident(n) => PatItem::Key(n.clone(), x),
+                        t::ExprKind::Default => PatItem::Default(x),
+                        _ => return self.unsupported(k.loc, "this assignment pattern key"),
+                    });
                 }
             }
             t::PatternItems::Repl(..) => return self.unsupported(loc, "a replication in an assignment pattern"),
         }
-        Ok(Expr::SysCall("$__pattern".into(), out))
+        Ok(out)
     }
 
     /// Positional arguments of a call.
@@ -363,6 +358,17 @@ impl Lower {
         }
         let args = self.call_args(args, loc)?;
         Ok(Expr::SysCall(name.to_string(), args))
+    }
+
+    /// Selects and members after a variable whose type has members.
+    fn members(&mut self, mut e: Expr, ops: &[Op]) -> Result<Expr> {
+        for (k, op) in ops.iter().enumerate() {
+            e = match op {
+                Op::Member(m, _) => Expr::Member(Box::new(e), m.to_string()),
+                _ => self.selects(e, &ops[k..k + 1])?,
+            };
+        }
+        Ok(e)
     }
 
     /// Generic selects after a name.
@@ -460,22 +466,17 @@ impl Lower {
             Base::Name(n, loc) => (n, loc),
         };
         let name = self.name(name, loc);
+        let var = self.vars.get(&name).map(|v| v.0.clone());
+        // a variable whose type has members (a struct, or a type parameter): members are
+        // resolved in elaboration
+        if var.as_ref().is_some_and(|t| t.has_struct() || t.param.is_some()) && !matches!(ops.first(), Some(Op::Call(..))) {
+            return self.members(Expr::Ident(name), ops);
+        }
         if lvalue {
-            self.last_type = None;
-            if let Some((t, unpacked)) = self.vars.get(&name).cloned() {
-                if t.has_struct() {
-                    let (e, rest) = self.struct_access(name, ops, true, loc)?;
-                    return self.selects(e, rest);
-                }
-                if unpacked.is_empty() && !matches!(ops.first(), Some(Op::Index(_) | Op::Range(..))) {
-                    self.last_type = Some((*t).clone());
-                }
-            }
             let (parts, k) = self.hier_tail(&name, ops)?;
             let base = if parts.len() == 1 { Expr::Ident(name) } else { Expr::Hier(parts) };
             return self.selects(base, &ops[k..]);
         }
-        let var = self.vars.get(&name).map(|v| v.0.clone());
         if let (Some(t), Some(Op::Member(m, mloc))) = (&var, ops.first()) {
             if t.enum_names.is_some() && ENUM_METHODS.contains(m) {
                 let (arg, used) = match ops.get(1) {
@@ -491,10 +492,6 @@ impl Lower {
                 }
                 return self.enum_method(name, m, arg, *mloc);
             }
-        }
-        if var.as_ref().is_some_and(|t| t.has_struct()) && !matches!(ops.first(), Some(Op::Call(..))) {
-            let (e, rest) = self.struct_access(name, ops, false, loc)?;
-            return self.selects(e, rest);
         }
         if let Some((Op::Call(a, l), rest)) = ops.split_first() {
             let args = self.call_args(a, *l)?;
@@ -516,5 +513,15 @@ impl Lower {
             return self.selects(Expr::Hier(parts), &ops[k..]);
         }
         self.selects(Expr::Ident(name), &ops[k..])
+    }
+}
+
+/// `T'(e)` of an assignment pattern: the pattern gets type `T` (also in a conditional's
+/// branches).
+fn typed_patterns(e: Expr, t: &Rc<super::SvType>) -> Expr {
+    match e {
+        Expr::Pattern(None, items) => Expr::Pattern(Some(t.clone()), items),
+        Expr::Cond(c, a, b) => Expr::Cond(c, Box::new(typed_patterns(*a, t)), Box::new(typed_patterns(*b, t))),
+        e => e,
     }
 }

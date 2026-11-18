@@ -106,6 +106,10 @@ impl<'a> Compiler<'a> {
             if depth == 0 {
                 self.code.init_touch.push(s);
             }
+            // an assignment pattern for the variable's type
+            let layout = if depth == 0 { self.layout(s) } else { None };
+            let r = self.with_target(init, layout.as_deref(), sid)?;
+            let init = r.as_ref().unwrap_or(init);
             let c = self.const_eval(init, sid)?;
             let c = c.resize(width, c.signed);
             let slot = self.sig(s).slot as usize;

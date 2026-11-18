@@ -27,7 +27,7 @@ impl<'a> Compiler<'a> {
                 if let Item::Param(p) = it {
                     self.line = p.line;
                     let v = self.param_value(p, None, sid)?;
-                    self.scopes[sid].syms.insert(p.name.clone(), v);
+                    self.insert_param(p, v, sid)?;
                 if p.range.is_some() && !p.real {
                     let r = self.range_vals(&p.range, sid)?;
                     self.scopes[sid].param_ranges.insert(p.name.clone(), r);
@@ -51,6 +51,8 @@ impl<'a> Compiler<'a> {
             init: Option<&'d Expr>,
             /// declared with this type parameter
             tparam: Option<&'d str>,
+            /// the declared data type
+            ty: Option<&'d Rc<SvType>>,
             line: u32,
         }
         let mut order: Vec<String> = Vec::new();
@@ -93,6 +95,9 @@ impl<'a> Compiler<'a> {
                             if d.type_param.is_some() {
                                 mg.tparam = d.type_param.as_deref();
                             }
+                            if d.ty.is_some() {
+                                mg.ty = d.ty.as_ref();
+                            }
                         }
                         None => {
                             order.push(dl.name.clone());
@@ -111,6 +116,7 @@ impl<'a> Compiler<'a> {
                                     dims: &dl.dims,
                                     init: dl.init.as_ref(),
                                     tparam: d.type_param.as_deref(),
+                                    ty: d.ty.as_ref(),
                                     line: dl.line,
                                 },
                             );
@@ -161,6 +167,7 @@ impl<'a> Compiler<'a> {
                 (msb, lsb) = (w - 1, 0);
                 pk = Some(dims);
             }
+            let layout = self.layout_for(mg.ty, sid)?;
             let mut signed = mg.signed;
             let kind = match mg.kind {
                 NetKind::Wire => SigKind::Wire,
@@ -249,7 +256,9 @@ impl<'a> Compiler<'a> {
                         }
                         if let Some(s) = aliased {
                             let si = self.sig(s);
-                            let s = if (si.msb, si.lsb, si.signed) != (msb, lsb, signed) || pk.is_some() {
+                            let typed = mg.ty.is_some_and(|t| t.has_struct() || t.param.is_some());
+                            let view = (si.msb, si.lsb, si.signed) != (msb, lsb, signed) || pk.is_some() || typed;
+                            let s = if view {
                                 // own range / sign / packed dimensions: a view
                                 let v = self.new_view(s, full.clone(), msb, lsb, signed);
                                 self.prog.names.pop();
@@ -274,6 +283,10 @@ impl<'a> Compiler<'a> {
                             }
                             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
                             self.prog.names.push((full, s));
+                            // (a layout belongs to this name: only on a view of its own)
+                            if view {
+                                self.set_layout(s, &name, layout, sid)?;
+                            }
                             if let Some(init) = mg.init {
                                 self.decl_init(init, s, kind, mg.kind, is_real, depth, width, mg.strength, mg.delay, &name, sid)?;
                             }
@@ -290,6 +303,7 @@ impl<'a> Compiler<'a> {
                             self.mark_string(s);
                         }
                         self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
+                        self.set_layout(s, &name, layout, sid)?;
                         let line = self.line;
                         match dir {
                             Dir::Input => {
@@ -354,6 +368,7 @@ impl<'a> Compiler<'a> {
                 }
             }
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
+            self.set_layout(s, &name, layout, sid)?;
             // `unconnected_drive: an unconnected input port is pulled
             if let (Some(Dir::Input), true, Some(up)) = (mg.dir, module_level, self.scopes[sid].uncdrive) {
                 if parent_scope.is_some() && !matches!(port_conns.get(&name), Some(Some(_))) && depth == 0 {

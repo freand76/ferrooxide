@@ -242,7 +242,6 @@ impl Lower {
             }
             t::StmtKind::ProcCont { kw, lhs, rhs } => {
                 let lhs = self.lvalue(lhs)?;
-                self.last_type = None;
                 let rhs = match rhs {
                     Some(r) if matches!(kw, Kw::Force | Kw::Assign) => Some(self.expr(r)?),
                     _ => None,
@@ -255,13 +254,10 @@ impl Lower {
             }
             t::StmtKind::DisableFork => Stmt::Disable { name: "fork".into(), line },
             t::StmtKind::Return(v) => {
-                let mut value = match v {
+                let value = match v {
                     Some(e) => Some(self.expr(e)?),
                     None => None,
                 };
-                if let (Some(v), Some(t)) = (&value, self.ret_type.clone()) {
-                    value = Some(self.resolve_pattern(v.clone(), &t, s.loc)?);
-                }
                 Stmt::Return { value, line }
             }
             t::StmtKind::Break => Stmt::Break { line },
@@ -384,7 +380,6 @@ impl Lower {
         match &s.kind {
             t::StmtKind::Expr(t::Expr { kind: t::ExprKind::IncDec { inc, e, .. }, .. }) => {
                 let lhs = self.lvalue(e)?;
-                self.last_type = None;
                 let op = if *inc { BinOp::Add } else { BinOp::Sub };
                 let rhs = Expr::Binary(op, Box::new(lhs.clone()), Box::new(Expr::Num(dec(1))));
                 Ok(Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line })
@@ -394,7 +389,6 @@ impl Lower {
                     return self.unsupported(s.loc, "a timing control in a compound assignment");
                 }
                 let lhs = self.lvalue(lhs)?;
-                self.last_type = None;
                 let r = self.expr(rhs)?;
                 let rhs = Expr::Binary(assign_binop(*op).unwrap(), Box::new(lhs.clone()), Box::new(r));
                 Ok(Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line })
@@ -402,16 +396,11 @@ impl Lower {
             t::StmtKind::Assign { lhs, timing, rhs, .. } | t::StmtKind::NonBlocking { lhs, timing, rhs } => {
                 let nonblocking = matches!(s.kind, t::StmtKind::NonBlocking { .. });
                 let lhs = self.lvalue(lhs)?;
-                let lt = self.last_type.take();
                 let timing = match timing {
                     Some(tm) => Some(self.assign_timing(tm, s.loc)?),
                     None => None,
                 };
                 let rhs = self.expr(rhs)?;
-                let rhs = match &lt {
-                    Some(t) => self.resolve_pattern(rhs, t, s.loc)?,
-                    None => rhs,
-                };
                 Ok(Stmt::Assign { lhs, rhs, nonblocking, timing, line })
             }
             _ => self.unsupported(s.loc, "this statement here"),
@@ -528,6 +517,7 @@ impl Lower {
             range: None,
             packed: vec![],
             type_param: None,
+            ty: None,
             names,
             line,
         };

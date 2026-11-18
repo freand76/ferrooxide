@@ -93,12 +93,7 @@ impl Lower {
                 };
                 for (l, r, loc) in &c.assigns {
                     let lhs = self.lvalue(l)?;
-                    let lt = self.last_type.take();
                     let rhs = self.expr(r)?;
-                    let rhs = match &lt {
-                        Some(t) => self.resolve_pattern(rhs, t, *loc)?,
-                        None => rhs,
-                    };
                     items.push(Item::ContAssign { delay: delay.clone(), lhs, rhs, strength, line: loc.line });
                 }
             }
@@ -218,6 +213,7 @@ impl Lower {
                     range: None,
                     packed: vec![],
                     type_param: None,
+                    ty: None,
                     names,
                     line,
                 };
@@ -433,8 +429,7 @@ impl Lower {
         }
         let name = self.name(&s.name.name, s.name.loc);
         // the function's own name is its result variable
-        self.ret_type = ret_type.clone();
-        self.decl_type = ret_type;
+        self.decl_type = ret_type.clone();
         self.declare_var(&name, &[]);
         let mut decls = Vec::new();
         if let Some(ports) = &s.ports {
@@ -500,8 +495,7 @@ impl Lower {
         r?;
         let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], stmts, fork: None } };
         let decls = super::merge_port_types(decls);
-        self.ret_type = None;
-        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, decls, body, line })
+        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, body, line })
     }
 }
 

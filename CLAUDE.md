@@ -7,12 +7,13 @@ Goal: output identical to Icarus Verilog, ≥10x its speed. Plan and status: `PL
 ## Layout
 - `crates/ferrooxide-front`: preprocessor, lexer, parser, AST (UDP tables are lexed as raw text).
   `syntax/`: the IEEE 1800 parser (keywords, tokens, syntax tree; it knows nothing but type
-  names); `lower/`: syntax tree -> AST (type tables, struct layouts, patterns, enums,
-  packages, expansions), reporting what it cannot do at its line.
+  names); `lower/`: syntax tree -> AST (type tables, enums, packages, expansions), reporting
+  what it cannot do at its line.
 - `crates/ferrooxide-compile`: `lib.rs` (compiler state in sub-structs, scopes, name lookup,
-  constant evaluation), `types.rs` (`Type` per signal, `type_of(expr)`), `elab/` (hierarchy,
-  params, declarations, the item walk, nets with several drivers and links, UDPs, specify),
-  codegen to `Instr` bytecode (`codegen.rs`, `expr.rs`, `stmt.rs`, `strings.rs`), `lint.rs`.
+  constant evaluation), `types.rs` (`Type` per signal, `type_of(expr)`, packed layouts,
+  struct member chains, assignment patterns), `elab/` (hierarchy, params, declarations, the
+  item walk, nets with several drivers and links, UDPs, specify), codegen to `Instr` bytecode
+  (`codegen.rs`, `expr.rs`, `stmt.rs`, `strings.rs`), `lint.rs`.
 - `crates/ferrooxide-rt`: `vm.rs` (scheduler + interpreter), `fast.rs` (lowering to `Op`),
   `jit.rs` (Cranelift, one function per process *shape*), `fuse.rs`, `ops.rs`, `fmt.rs`, `vcd.rs`.
 - `crates/ferrooxide`: CLI. `tests/verilog/*.v`: Icarus diff tests. `bench/`: benchmarks.

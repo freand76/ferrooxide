@@ -1,15 +1,11 @@
-//! Data types: typedefs, declaration heads, parameter types, struct member chains, enum
-//! methods, array queries, assignment patterns and casts (what `svtypes.rs` does in the old
-//! parser).
-
+//! Data types: typedefs, declaration heads, parameter types, enum methods, array queries
+//! and casts.
 //!
-//! Types are resolved here, so elaboration only sees vectors: a type without a struct
-//! becomes the declaration's kind, sign and packed ranges; a type containing a struct is
-//! declared as one flat vector `[W-1:0]`, and every access chain (`v[i].f.g[3:0]`) becomes
-//! one select `v[off +: w]` (offsets are expressions, so parameterized widths and run-time
-//! indexes work); enum constants become `localparam`s of the base type; `T'(e)`, `N'(e)` are
-//! `$__cast(width, sign, e)` (sign 0, 1 or 2: keep); `'{...}` is resolved against the target
-//! type into a concatenation of casts.
+//! A type without a struct becomes the declaration's kind, sign and packed ranges; a type
+//! containing a struct is declared as one flat vector `[W-1:0]`. Declarations keep their type
+//! (`Decl::ty`): struct members (`Expr::Member`) and assignment patterns (`Expr::Pattern`)
+//! are resolved against it in elaboration. Enum constants become `localparam`s of the base
+//! type; `T'(e)`, `N'(e)` are `$__cast(width, sign, e)` (sign 0, 1 or 2: keep).
 
 use super::Lower;
 use crate::ast::*;
@@ -108,23 +104,6 @@ pub(crate) fn dim_size(r: &Range) -> Expr {
     let ge = Expr::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
     let d = Expr::Cond(Box::new(ge), Box::new(sub(r.0.clone(), r.1.clone())), Box::new(sub(r.1.clone(), r.0.clone())));
     add(d, num(1))
-}
-
-/// Position of index `k` in dimension [msb:lsb], counted from the lsb side.
-pub(crate) fn dim_pos(r: &Range, k: Expr) -> Expr {
-    if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
-        return if a >= b { sub(k, num(b)) } else { sub(num(b), k) };
-    }
-    let ge = Expr::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
-    Expr::Cond(Box::new(ge), Box::new(sub(k.clone(), r.1.clone())), Box::new(sub(r.1.clone(), k)))
-}
-
-/// Whether a dimension counts down ([7:0]); unknown (parameterized) ones are assumed to.
-pub(crate) fn descending(r: &Range) -> bool {
-    match (lit(&r.0), lit(&r.1)) {
-        (Some(a), Some(b)) => a >= b,
-        _ => true,
-    }
 }
 
 impl SvType {
@@ -353,7 +332,7 @@ impl Lower {
                             None => num(0),
                         },
                     };
-                    self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, name: name.clone(), value, line: it.loc.line }));
+                    self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value, line: it.loc.line }));
                     names.push(name.clone());
                     prev = Some(name);
                 }
@@ -555,13 +534,10 @@ impl Lower {
             return self.unsupported(d.loc, "a parameter without a value");
         };
         let value = self.expr(v)?;
-        let value = match &pt.sv {
-            Some(t) => self.resolve_pattern(value, t, d.loc)?,
-            None => value,
-        };
         self.decl_type = pt.sv.clone().map(Rc::new);
         self.declare_var(&name, &[]);
-        Ok(ParamDecl { local, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, name, value, line: d.loc.line })
+        let ty = self.decl_type.clone();
+        Ok(ParamDecl { local, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, ty, name, value, line: d.loc.line })
     }
 
     /// A declaration head: direction, net type, `var`, data type, strength and delay.
@@ -588,9 +564,10 @@ impl Lower {
             let t = self.data_type_req(ty)?;
             let (kind, signed, range, packed) = t.decl_parts();
             let type_param = t.param.clone();
-            self.decl_type = Some(Rc::new(t));
+            let ty = Rc::new(t);
+            self.decl_type = Some(ty.clone());
             let netk = net.map(net_type).unwrap_or_default();
-            return Ok(Decl { dir, kind, net: netk, explicit_kind: true, real_net: false, strength, delay, signed, range, packed, type_param, names: vec![], line });
+            return Ok(Decl { dir, kind, net: netk, explicit_kind: true, real_net: false, strength, delay, signed, range, packed, type_param, ty: Some(ty), names: vec![], line });
         }
         let mut kind = NetKind::Wire;
         let mut explicit_kind = false;
@@ -665,7 +642,8 @@ impl Lower {
             kind = NetKind::Reg;
             explicit_kind = true;
         }
-        Ok(Decl { dir, kind, net: netk, explicit_kind, real_net, strength, delay, signed, range, packed, type_param: None, names: Vec::new(), line })
+        let ty = self.decl_type.clone();
+        Ok(Decl { dir, kind, net: netk, explicit_kind, real_net, strength, delay, signed, range, packed, type_param: None, ty, names: Vec::new(), line })
     }
 
     /// The declarators of a declaration (after `decl_head`).
@@ -678,15 +656,10 @@ impl Lower {
             if let Some(t) = &self.decl_type {
                 dims.splice(0..0, t.unpacked.iter().cloned());
             }
-            let mut init = match &d.init {
+            let init = match &d.init {
                 Some(e) => Some(self.expr(e)?),
                 None => None,
             };
-            if let (Some(e), Some(t)) = (&init, self.decl_type.clone()) {
-                if t.unpacked.is_empty() {
-                    init = Some(self.resolve_pattern(e.clone(), &t, d.loc)?);
-                }
-            }
             self.declare_var(&name, &dims);
             out.push(Declarator { name, dims, init, line: d.loc.line });
         }
@@ -703,113 +676,6 @@ impl Lower {
                 self.vars.remove(name);
             }
         }
-    }
-
-    /// A reference to a variable with a struct type: indexes, members and selects become one
-    /// `[off +: w]` select of the flat vector. Returns the expression and the ops left over.
-    pub(crate) fn struct_access<'a>(&mut self, name: String, ops: &'a [Op<'a>], lvalue: bool, loc: t::Loc) -> Result<(Expr, &'a [Op<'a>])> {
-        let (t, unpacked) = self.vars[&name].clone();
-        let mut base = Expr::Ident(name);
-        let mut k = 0;
-        for _ in 0..unpacked.len() {
-            match ops.get(k) {
-                Some(Op::Index(i)) => {
-                    let i = self.expr(i)?;
-                    base = Expr::Index(Box::new(base), Box::new(i));
-                    k += 1;
-                }
-                Some(Op::Range(..)) => return self.unsupported(loc, "a slice of an unpacked struct array"),
-                _ => {
-                    self.last_type = None;
-                    return Ok((base, &ops[k..]));
-                }
-            }
-        }
-        let mut cur: SvType = (*t).clone();
-        let mut di = 0;
-        let mut off = num(0);
-        let mut width = cur.width();
-        let mut touched = false;
-        let mut whole = true;
-        loop {
-            match ops.get(k) {
-                Some(op @ (Op::Index(_) | Op::Range(..))) if di < cur.dims.len() => {
-                    let r = cur.dims[di].clone();
-                    let elem = cur.width_from(di + 1);
-                    k += 1;
-                    match op {
-                        Op::Index(a) => {
-                            let a = self.expr(a)?;
-                            off = add(off, mul(dim_pos(&r, a), elem.clone()));
-                            width = elem;
-                            di += 1;
-                            touched = true;
-                            continue;
-                        }
-                        Op::Range(t::RangeKind::Colon, a, b) => {
-                            let a = self.expr(a)?;
-                            let b = self.expr(b)?;
-                            off = add(off, mul(dim_pos(&r, b.clone()), elem.clone()));
-                            width = mul(dim_size(&(a, b)), elem);
-                            whole = false;
-                        }
-                        Op::Range(kind, a, n) => {
-                            let up = *kind == t::RangeKind::Plus;
-                            let a = self.expr(a)?;
-                            let n = self.expr(n)?;
-                            let low = match (up, descending(&r)) {
-                                (true, true) | (false, false) => a,
-                                (true, false) => sub(add(a, n.clone()), num(1)),
-                                (false, true) => add(sub(a, n.clone()), num(1)),
-                            };
-                            off = add(off, mul(dim_pos(&r, low), elem.clone()));
-                            width = mul(n, elem);
-                            whole = false;
-                        }
-                        _ => unreachable!(),
-                    }
-                    touched = true;
-                    break;
-                }
-                Some(Op::Member(m, mloc)) if di == cur.dims.len() && cur.fields.is_some() => {
-                    let st = cur.fields.clone().unwrap();
-                    let Some(fk) = st.fields.iter().position(|f| f.0 == *m) else {
-                        return self.err(*mloc, format!("no member '{m}' in the struct"));
-                    };
-                    k += 1;
-                    if !st.union {
-                        for f in &st.fields[fk + 1..] {
-                            off = add(off, f.1.width());
-                        }
-                    }
-                    cur = st.fields[fk].1.clone();
-                    di = 0;
-                    width = cur.width();
-                    touched = true;
-                    continue;
-                }
-                _ => break,
-            }
-        }
-        self.last_type = if whole {
-            let mut rest = cur.clone();
-            rest.dims.drain(..di);
-            if di > 0 {
-                rest.int_kind = false;
-            }
-            Some(rest)
-        } else {
-            None
-        };
-        if !touched {
-            return Ok((base, &ops[k..]));
-        }
-        let e = Expr::IndexedRange(Box::new(base), Box::new(off), Box::new(width), true);
-        // a whole signed member reads as signed
-        if !lvalue && whole && cur.signed && di == 0 {
-            return Ok((Expr::SysCall("$signed".into(), vec![e]), &ops[k..]));
-        }
-        Ok((e, &ops[k..]))
     }
 
     /// `v.first()`, `.last()`, `.num()`, `.next(N)`, `.prev(N)`, `.name()` of an enum variable.
@@ -906,77 +772,6 @@ impl Lower {
             "$size" => dim_size(&(l, r)),
             _ => cmp(BinOp::Ge, &l, &r, num(1), num(-1)),
         })
-    }
-
-    /// Replace assignment patterns in `e` (at its top, or in a conditional's branches) by
-    /// concatenations for type `t`.
-    pub(crate) fn resolve_pattern(&self, e: Expr, t: &SvType, loc: t::Loc) -> Result<Expr> {
-        match e {
-            Expr::SysCall(n, items) if n == "$__pattern" => self.build_pattern(items, t, loc),
-            Expr::Cond(c, a, b) => Ok(Expr::Cond(c, Box::new(self.resolve_pattern(*a, t, loc)?), Box::new(self.resolve_pattern(*b, t, loc)?))),
-            e => Ok(e),
-        }
-    }
-
-    fn build_pattern(&self, items: Vec<Expr>, t: &SvType, loc: t::Loc) -> Result<Expr> {
-        let mut pos = Vec::new();
-        let mut named = Vec::new();
-        let mut default = None;
-        for it in items {
-            match it {
-                Expr::SysCall(n, mut kv) if n == "$__named" => {
-                    let v = kv.pop().unwrap();
-                    let Some(Expr::Str(k)) = kv.pop() else { unreachable!() };
-                    if k == "default" {
-                        default = Some(v);
-                    } else {
-                        named.push((k, v));
-                    }
-                }
-                v => pos.push(v),
-            }
-        }
-        let parts: Vec<(Option<String>, SvType)> = if !t.dims.is_empty() && !t.int_kind {
-            let r = &t.dims[0];
-            let n = match (lit(&r.0), lit(&r.1)) {
-                (Some(a), Some(b)) => (a - b).unsigned_abs() as usize + 1,
-                _ => return self.err(loc, "an assignment pattern needs constant dimensions"),
-            };
-            let mut el = t.clone();
-            el.dims.remove(0);
-            (0..n).map(|_| (None, el.clone())).collect()
-        } else if let Some(s) = &t.fields {
-            if s.union {
-                return self.err(loc, "assignment patterns for unions are not supported");
-            }
-            s.fields.iter().map(|(n, ft)| (Some(n.clone()), ft.clone())).collect()
-        } else {
-            return match default {
-                Some(v) => Ok(cast(t.width(), v, 0)),
-                None => Ok(Expr::Concat(pos.into_iter().map(|v| cast(num(1), v, 0)).collect())),
-            };
-        };
-        if !pos.is_empty() && pos.len() != parts.len() {
-            return self.err(loc, format!("assignment pattern has {} values for {} elements", pos.len(), parts.len()));
-        }
-        let mut out = Vec::new();
-        for (k, (name, pt)) in parts.iter().enumerate() {
-            let v = if let Some(v) = pos.get(k) {
-                v.clone()
-            } else if let Some((_, v)) = named.iter().find(|(n, _)| Some(n) == name.as_ref()) {
-                v.clone()
-            } else if let Some(v) = &default {
-                v.clone()
-            } else {
-                return self.err(loc, format!("assignment pattern has no value for member {}", name.clone().unwrap_or_default()));
-            };
-            let v = self.resolve_pattern(v, pt, loc)?;
-            out.push(match v {
-                Expr::Concat(_) => v,
-                v => cast(pt.width(), v, 0),
-            });
-        }
-        Ok(Expr::Concat(out))
     }
 }
 

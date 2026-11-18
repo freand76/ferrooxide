@@ -1,6 +1,6 @@
 //! Expression typing (IEEE 1364 self-/context-determined widths) and code generation.
 
-use crate::types::Type;
+use crate::types::{Packed, Type};
 use crate::*;
 use ferrooxide_front::ast::BinOp as B;
 use ferrooxide_rt::{BinOp as RB, CmpOp, Index, RedOp, ShOp, SysFn, Target, UnOp as RU};
@@ -50,6 +50,22 @@ impl<'a> Compiler<'a> {
     /// An index chain on a multi-dimensional array (`m[i][j]`, also with selects after it) as
     /// one index into the flat storage: `m[(i - lo0) * n1 + (j - lo1)]`.
     pub(crate) fn md_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        self.norm(e, sid, false)
+    }
+
+    /// `md_norm` of an assignment target (a signed struct member stays a plain select).
+    pub(crate) fn lv_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        self.norm(e, sid, true)
+    }
+
+    /// A select chain in the form the code generation knows: struct members, several
+    /// unpacked or packed dimensions and `.triggered` resolved.
+    fn norm(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<Expr> {
+        if self.sigs.has_structs && matches!(e, Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..) | Expr::Member(..)) {
+            if let Some(Ok(w)) = self.struct_walk(e, sid, lvalue) {
+                return Some(w.expr);
+            }
+        }
         // `ev.triggered` (IEEE 1800 15.5.3): the event was triggered in this time step
         if self.sigs.has_events {
             if let Expr::Hier(p) = e {
@@ -340,7 +356,9 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
         match e {
-            Expr::Type(_) => false,
+            Expr::Type(_) | Expr::Pattern(..) => false,
+            // a member of a struct parameter
+            Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
             Expr::Ident(n) => matches!(self.lookup(n, sid), Some(Sym::Const(_))),
             Expr::Hier(_) => false,
@@ -500,6 +518,11 @@ impl<'a> Compiler<'a> {
         }
         match e {
             Expr::Type(_) => self.err("a data type is not a value"),
+            Expr::Member(..) => self.member_error(e, sid),
+            Expr::Pattern(..) => {
+                let r = self.typed_pattern(e, sid)?;
+                self.expr(&r, sid, w, s)
+            }
             Expr::Num(n) => {
                 let c = Const::number_in(n, w, s).or_else(|m| self.err(m))?;
                 Ok(self.const_slot(&c))
@@ -1128,6 +1151,7 @@ impl<'a> Compiler<'a> {
                 NetKind::Real | NetKind::String => (63, 0),
                 _ => self.range_vals(&f.range, def_scope)?,
             };
+            let layout = self.layout_for(f.ret_ty.as_ref(), fs)?;
             let sg = self.new_signal(path.clone(), w, s, 0, m, l, 0, SigKind::Reg);
             if f.ret_kind == NetKind::Real {
                 self.mark_real(sg);
@@ -1136,6 +1160,7 @@ impl<'a> Compiler<'a> {
                 self.mark_string(sg);
             }
             self.scopes[fs].syms.insert(f.name.clone(), Sym::Sig(sg));
+            self.set_layout(sg, &f.name, layout, fs)?;
             Some(sg)
         };
         let mut ports = Vec::new();
@@ -1165,6 +1190,7 @@ impl<'a> Compiler<'a> {
                 pk = Some(dims);
             }
             let w = ((m - l).abs() + 1) as u32;
+            let layout = self.layout_for(d.ty.as_ref(), fs)?;
             for dl in &d.names {
                 let (depth, lo) = if let Some((a, b)) = dl.dims.first() {
                     let (a, b) = (self.const_int(a, fs)?, self.const_int(b, fs)?);
@@ -1188,6 +1214,7 @@ impl<'a> Compiler<'a> {
                 }
                 self.mark_two_state(sg, d.kind);
                 self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
+                self.set_layout(sg, &dl.name, layout.clone(), fs)?;
                 if let Some(dir) = d.dir {
                     ports.push((dir, sg));
                 }
@@ -1257,7 +1284,8 @@ impl<'a> Compiler<'a> {
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
                 let real = self.sig_type(ps);
-                let v = self.value_for(a, sid, pw, real)?;
+                let pl = self.layout(ps);
+                let v = self.value_for(a, sid, pw, real, pl.as_deref())?;
                 self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
             }
         }
@@ -1313,7 +1341,8 @@ impl<'a> Compiler<'a> {
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
                 let real = self.sig_type(ps);
-                let v = self.value_for(a, sid, pw, real)?;
+                let pl = self.layout(ps);
+                let v = self.value_for(a, sid, pw, real, pl.as_deref())?;
                 let k = self.tmp(pw);
                 self.emit(Instr::Copy { d: k, s: v, w: pw });
                 vals.push((ps, k));
@@ -1451,6 +1480,13 @@ impl<'a> Compiler<'a> {
         }
         match e {
             Expr::Type(_) => {}
+            Expr::Member(a, _) => self.reads_expr(a, sid, out),
+            Expr::Pattern(_, items) => {
+                for it in items {
+                    let (PatItem::Pos(v) | PatItem::Key(_, v) | PatItem::Default(v)) = it;
+                    self.reads_expr(v, sid, out);
+                }
+            }
             Expr::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
                     out.push((s, NONE))
@@ -1545,7 +1581,7 @@ impl<'a> Compiler<'a> {
 
     /// Signals read by an lvalue's index expressions.
     pub(crate) fn reads_lvalue(&self, e: &Expr, sid: usize, out: &mut Vec<(u32, u32)>) {
-        if let Some(n) = self.md_norm(e, sid) {
+        if let Some(n) = self.lv_norm(e, sid) {
             return self.reads_lvalue(&n, sid, out);
         }
         match e {
@@ -1727,8 +1763,11 @@ impl<'a> Compiler<'a> {
         Ok(f64::from_bits(self.prog.mem[slot as usize]))
     }
 
-    /// The value for an assignment to a target that is real or `lw` bits wide.
-    pub(crate) fn value_for(&mut self, rhs: &Expr, sid: usize, lw: u32, ty: Type) -> R<u32> {
+    /// The value for an assignment to a target of type `ty`, `lw` bits wide, with layout
+    /// `layout` (for an assignment pattern).
+    pub(crate) fn value_for(&mut self, rhs: &Expr, sid: usize, lw: u32, ty: Type, layout: Option<&Packed>) -> R<u32> {
+        let r = self.with_target(rhs, layout, sid)?;
+        let rhs = r.as_ref().unwrap_or(rhs);
         match ty {
             Type::Real => self.rexpr(rhs, sid),
             Type::Str => self.str_expr(rhs, sid),

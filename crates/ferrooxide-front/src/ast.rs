@@ -113,6 +113,9 @@ pub struct Decl {
     pub packed: Vec<Range>,
     /// declared with a type parameter: its type (per instance) replaces kind, sign and ranges
     pub type_param: Option<String>,
+    /// the declared data type, where there is one (struct members and assignment patterns are
+    /// resolved against it); kind, sign and ranges above are its flat form
+    pub ty: Option<std::rc::Rc<crate::lower::SvType>>,
     pub names: Vec<Declarator>,
     pub line: Line,
 }
@@ -125,6 +128,8 @@ pub struct ParamDecl {
     /// `integer` type
     pub integer: bool,
     pub real: bool,
+    /// the declared data type of a parameter with a struct or enum type (as `Decl::ty`)
+    pub ty: Option<std::rc::Rc<crate::lower::SvType>>,
     pub name: String,
     pub value: Expr,
     pub line: Line,
@@ -155,6 +160,8 @@ pub struct SubroutineDecl {
     pub signed: bool,
     pub range: Option<Range>,
     pub ret_kind: NetKind,
+    /// the declared return type, where there is one (as `Decl::ty`)
+    pub ret_ty: Option<std::rc::Rc<crate::lower::SvType>>,
     /// ports in order + local declarations
     pub decls: Vec<Decl>,
     pub body: Stmt,
@@ -330,6 +337,21 @@ pub enum Expr {
     SysCall(String, Vec<Expr>),
     /// a data type where a value can be a type (a type parameter's value)
     Type(std::rc::Rc<crate::lower::SvType>),
+    /// a member of a struct value: `v.f`
+    Member(Box<Expr>, String),
+    /// an assignment pattern `'{...}` / `T'{...}`: resolved against its type, or without one
+    /// against the type of the target it is assigned to
+    Pattern(Option<std::rc::Rc<crate::lower::SvType>>, Vec<PatItem>),
+}
+
+/// An item of an assignment pattern.
+#[derive(Debug, Clone)]
+pub enum PatItem {
+    Pos(Expr),
+    /// `member: value`
+    Key(String, Expr),
+    /// `default: value`
+    Default(Expr),
 }
 
 /// An unsized decimal number.

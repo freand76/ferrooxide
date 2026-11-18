@@ -6,10 +6,10 @@ module top ();
   // timescale 1e-9 / 1e-9
   // default_nettype none
   // imports q, $unit
-  reg [((((((6 - 1) >= 0) ? (6 - 1) : (0 - (6 - 1))) + 1) + 1) - 1):0] r;
+  reg type(reg struct { reg [(6 - 1):0] w; reg f; }) [((((((6 - 1) >= 0) ? (6 - 1) : (0 - (6 - 1))) + 1) + 1) - 1):0] r;
   reg [(6 - 1):0] w2;
   initial begin
-    r[1 +: ((((6 - 1) >= 0) ? (6 - 1) : (0 - (6 - 1))) + 1)] = 6'd5;
+    r.w = 6'd5;
     w2 = N;
     counter = inc(counter);
   end

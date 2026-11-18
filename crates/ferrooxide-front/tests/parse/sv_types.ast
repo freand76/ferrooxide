@@ -2,18 +2,18 @@ module top (clk);
   // imports p, $unit
   parameter type T = reg [3:0];
   input wire clk;
-  reg [5:0] s;
-  reg [5:0] u;
-  reg [5:0] arr[0:(2 - 1)];
+  reg type(reg struct { reg [3:0] hi; reg enum {A, B, C} [1:0] lo; }) [5:0] s;
+  reg type(reg union { reg [5:0] v; reg struct { reg [3:0] hi; reg enum {A, B, C} [1:0] lo; } s; }) [5:0] u;
+  reg type(reg struct { reg [3:0] hi; reg enum {A, B, C} [1:0] lo; }) [5:0] arr[0:(2 - 1)];
   reg type T tp;
   int(32) signed i;
   bit [(W - 1):0] bv;
   reg [1:0] e;
   string str;
   always_comb begin
-    s = {$__cast(4, 0, 4'h3), $__cast(2, 0, B)};
-    u[2 +: 4] = s[2 +: 4];
-    arr[1][0 +: 2] = e;
+    s = '{hi: 4'h3, lo: B};
+    u.s.hi = s.hi;
+    arr[1].lo = e;
     i = ($__cast(32, 1, s) + p.dbl(3));
     bv = $__cast(8, 2, i);
     e = $__cast(2, 0, ((e === A) ? B : ((e === B) ? C : ((e === C) ? A : 'x))));

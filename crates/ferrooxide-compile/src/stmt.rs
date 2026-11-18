@@ -24,7 +24,7 @@ impl<'a> Compiler<'a> {
 
     /// Store targets of an lvalue, msb-first, with widths.
     fn targets(&mut self, e: &Expr, sid: usize, out: &mut Vec<(Option<Target>, u32)>) -> R<()> {
-        if let Some(n) = self.md_norm(e, sid) {
+        if let Some(n) = self.lv_norm(e, sid) {
             return self.targets(&n, sid, out);
         }
         match e {
@@ -170,6 +170,7 @@ impl<'a> Compiler<'a> {
                 out.push((Some(Target::DynPart { sig: s, ix, w: pw }), pw));
                 Ok(())
             }
+            Expr::Member(..) => self.member_error(e, sid),
             _ => self.err("invalid assignment target"),
         }
     }
@@ -238,11 +239,11 @@ impl<'a> Compiler<'a> {
         let mut reads = Vec::new();
         let v = match &rhs {
             Rhs::Expr(e, sid) => {
-                let real = match &lhs {
-                    Lhs::Expr(l, ls) => self.type_of(l, *ls)?,
-                    Lhs::Sig(s) => self.sig_type(*s),
+                let (real, layout) = match &lhs {
+                    Lhs::Expr(l, ls) => (self.type_of(l, *ls)?, self.target_layout(l, *ls)),
+                    Lhs::Sig(s) => (self.sig_type(*s), self.layout(*s).map(|l| (*l).clone())),
                 };
-                let v = self.value_for(e, *sid, lw, real)?;
+                let v = self.value_for(e, *sid, lw, real, layout.as_ref())?;
                 self.reads_expr(e, *sid, &mut reads);
                 v
             }
@@ -419,6 +420,7 @@ impl<'a> Compiler<'a> {
                             pk = Some(dims);
                         }
                         let w = ((m - l).abs() + 1) as u32;
+                        let layout = self.layout_for(d.ty.as_ref(), b)?;
                         for dl in &d.names {
                             let (depth, lo) = if let Some((a, b2)) = dl.dims.first() {
                                 let (a, b2) = (self.const_int(a, b)?, self.const_int(b2, b)?);
@@ -443,9 +445,11 @@ impl<'a> Compiler<'a> {
                             }
                             self.mark_two_state(s, d.kind);
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
+                            self.set_layout(s, &dl.name, layout.clone(), b)?;
                             if let Some(init) = &dl.init {
                                 let ty = self.sig_type(s);
-                                let v = self.value_for(init, b, w, ty)?;
+                                let l = self.layout(s);
+                                let v = self.value_for(init, b, w, ty, l.as_deref())?;
                                 self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
                             }
                         }
@@ -502,7 +506,8 @@ impl<'a> Compiler<'a> {
                 }
                 let lt = self.type_of(lhs, sid)?;
                 let lw = lt.width();
-                let v = self.value_for(rhs, sid, lw, lt)?;
+                let tl = self.target_layout(lhs, sid);
+                let v = self.value_for(rhs, sid, lw, lt, tl.as_ref())?;
                 let lv = Lhs::Expr(lhs, sid);
                 match timing {
                     None => {
@@ -736,7 +741,8 @@ impl<'a> Compiler<'a> {
                     // the forced value applies at once ...
                     let lt = self.type_of(lhs, sid)?;
                     let lw = lt.width();
-                    let v = self.value_for(rhs, sid, lw, lt)?;
+                    let tl = self.target_layout(lhs, sid);
+                    let v = self.value_for(rhs, sid, lw, lt, tl.as_ref())?;
                     self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
                     let parent = self.code.pb.last().unwrap().proc;
                     let name = self.scopes[sid].name.clone();
@@ -748,7 +754,8 @@ impl<'a> Compiler<'a> {
                     }
                     let top = self.here();
                     // ... and is kept up to date by the spawned process
-                    let v = self.value_for(rhs, sid, lw, lt)?;
+                    let tl = self.target_layout(lhs, sid);
+                    let v = self.value_for(rhs, sid, lw, lt, tl.as_ref())?;
                     self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
                     let mut reads = Vec::new();
                     self.reads_expr(rhs, sid, &mut reads);
@@ -825,7 +832,8 @@ impl<'a> Compiler<'a> {
                 if let (Some(v), Some(r)) = (value, ret) {
                     let w = self.sig(r).width;
                     let real = self.sig_type(r);
-                    let val = self.value_for(v, sid, w, real)?;
+                    let l = self.layout(r);
+                    let val = self.value_for(v, sid, w, real, l.as_deref())?;
                     self.emit(Instr::Store { t: Target::Whole { sig: r }, s: val, mode: StoreMode::Blocking });
                 }
                 let j = self.emit(Instr::Jmp { to: 0 });

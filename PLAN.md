@@ -475,6 +475,15 @@ Steps (each ends with all tests in all three modes and unchanged regression coun
   2. Struct member access and assignment patterns resolved in elaboration from the `Type`;
      the lowering's `struct_access` and pattern code go; members of variables of a type
      parameter work.
+     *Done 2026-11-18*: declarations, parameters and function results keep their data type
+     (`Decl::ty`, `ParamDecl::ty`, `SubroutineDecl::ret_ty`); the AST has `Expr::Member` and
+     `Expr::Pattern`. The compiler gives each typed signal a `Packed` layout
+     (`sigs.layout`; struct parameters `$type:p`), turns member chains into a part select
+     of the flat storage in `md_norm` (as for several packed dimensions) and resolves
+     patterns against the target's layout (assignments, declarations, parameters, `return`,
+     function arguments, `T'{...}`). New: members and patterns of type-parameter variables,
+     patterns as function arguments. Left: members through hierarchical names
+     (`inst.v.f`); patterns for unpacked arrays.
   3. Unpacked structs (and structs with reals or strings).
   4. Then A2 (queues, dynamic and associative arrays) builds on the same `Type`.
 - **R5. Split the compiler**: `elab/{params,hier,decls,generate,nets,udp,specify}.rs` plus

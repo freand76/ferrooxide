@@ -90,6 +90,11 @@ impl<'a> Compiler<'a> {
         let v = Type::vec;
         Ok(match e {
             Expr::Type(_) => return self.err("a data type is not a value"),
+            Expr::Member(..) => return self.member_error(e, sid),
+            Expr::Pattern(..) => {
+                let r = self.typed_pattern(e, sid)?;
+                return self.type_of(&r, sid);
+            }
             Expr::Num(n) => {
                 if n.fill {
                     v(1, false)
@@ -249,5 +254,457 @@ impl<'a> Compiler<'a> {
                 Type::vec(((m - l).abs() + 1) as u32, f.signed)
             }
         })
+    }
+}
+
+/// A packed type with its layout, for struct members and assignment patterns: dimensions
+/// evaluated, type parameters replaced.
+#[derive(Clone, Debug)]
+pub(crate) struct Packed {
+    /// packed dimensions (left, right), outermost first
+    pub(crate) dims: Vec<(i64, i64)>,
+    pub(crate) signed: bool,
+    /// `int`, `integer`, `byte`, ...: declared without a range (a pattern gives it one value)
+    pub(crate) int_kind: bool,
+    /// the element is a packed struct / union
+    pub(crate) fields: Option<Rc<Fields>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Fields {
+    pub(crate) union: bool,
+    pub(crate) fields: Vec<(String, Packed)>,
+}
+
+fn dim_size(d: (i64, i64)) -> i64 {
+    (d.0 - d.1).abs() + 1
+}
+
+impl Packed {
+    /// Width of one element after the packed dimensions.
+    fn leaf_width(&self) -> i64 {
+        match &self.fields {
+            None => 1,
+            Some(f) if f.union => f.fields.first().map_or(0, |x| x.1.width()),
+            Some(f) => f.fields.iter().map(|x| x.1.width()).sum(),
+        }
+    }
+
+    /// Width of the dimensions from `from` on, times the element width.
+    fn width_from(&self, from: usize) -> i64 {
+        self.dims[from..].iter().map(|&d| dim_size(d)).product::<i64>() * self.leaf_width()
+    }
+
+    pub(crate) fn width(&self) -> i64 {
+        self.width_from(0)
+    }
+}
+
+/// The layout of a type from `resolve_type` (its dimensions are numbers).
+pub(crate) fn packed_of(t: &SvType) -> Packed {
+    let dims = t.dims.iter().map(|(a, b)| (lit(a).unwrap_or(0), lit(b).unwrap_or(0))).collect();
+    let fields = t.fields.as_ref().map(|f| {
+        Rc::new(Fields { union: f.union, fields: f.fields.iter().map(|(n, ft)| (n.clone(), packed_of(ft))).collect() })
+    });
+    Packed { dims, signed: t.signed, int_kind: t.int_kind, fields }
+}
+
+/// One select of a chain: `[i]`, `[m:l]`, `[b +: w]` / `[b -: w]`, `.m`.
+#[derive(Clone, Copy)]
+enum Sel<'e> {
+    Index(&'e Expr),
+    Range(&'e Expr, &'e Expr),
+    Part(&'e Expr, &'e Expr, bool),
+    Member(&'e str),
+}
+
+/// A chain of selects as its base and the selects, innermost first.
+fn chain(e: &Expr) -> (&Expr, Vec<Sel<'_>>) {
+    let mut ops = Vec::new();
+    let mut cur = e;
+    loop {
+        match cur {
+            Expr::Index(a, i) => {
+                ops.push(Sel::Index(i));
+                cur = a;
+            }
+            Expr::Range(a, m, l) => {
+                ops.push(Sel::Range(m, l));
+                cur = a;
+            }
+            Expr::IndexedRange(a, b, w, up) => {
+                ops.push(Sel::Part(b, w, *up));
+                cur = a;
+            }
+            Expr::Member(a, m) => {
+                ops.push(Sel::Member(m));
+                cur = a;
+            }
+            _ => break,
+        }
+    }
+    ops.reverse();
+    (cur, ops)
+}
+
+fn apply(e: Expr, op: Sel) -> Expr {
+    let b = Box::new;
+    match op {
+        Sel::Index(i) => Expr::Index(b(e), b(i.clone())),
+        Sel::Range(m, l) => Expr::Range(b(e), b(m.clone()), b(l.clone())),
+        Sel::Part(x, w, up) => Expr::IndexedRange(b(e), b(x.clone()), b(w.clone()), up),
+        Sel::Member(m) => Expr::Member(b(e), m.to_string()),
+    }
+}
+
+fn num(v: i64) -> Expr {
+    let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+    if v < 0 {
+        Expr::Unary(UnOp::Neg, Box::new(n))
+    } else {
+        n
+    }
+}
+
+fn lit(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
+            i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok()
+        }
+        Expr::Unary(UnOp::Neg, a) => lit(a).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// `a op b`, folded where both are plain numbers.
+fn arith(op: B, a: Expr, b: Expr) -> Expr {
+    match (op, lit(&a), lit(&b)) {
+        (B::Add, Some(x), Some(y)) => num(x + y),
+        (B::Sub, Some(x), Some(y)) => num(x - y),
+        (B::Mul, Some(x), Some(y)) => num(x * y),
+        (B::Add, Some(0), _) | (B::Mul, Some(1), _) => b,
+        (B::Add | B::Sub, _, Some(0)) | (B::Mul, _, Some(1)) => a,
+        _ => Expr::Binary(op, Box::new(a), Box::new(b)),
+    }
+}
+
+/// Position of index `k` in dimension `d`, counted from its right end.
+fn dim_pos(d: (i64, i64), k: Expr) -> Expr {
+    if d.0 >= d.1 {
+        arith(B::Sub, k, num(d.1))
+    } else {
+        arith(B::Sub, num(d.1), k)
+    }
+}
+
+/// `$__cast(width, unsigned, v)`: `v` as a value of `w` bits.
+fn cast(w: i64, v: Expr) -> Expr {
+    Expr::SysCall("$__cast".into(), vec![num(w), num(0), v])
+}
+
+/// A member chain of a signal with a struct type in its flat form.
+pub(crate) struct Walk {
+    /// the flat expression
+    pub(crate) expr: Expr,
+    /// the type selected, where the chain selects a whole member or element
+    pub(crate) ty: Option<Packed>,
+}
+
+impl<'a> Compiler<'a> {
+    /// The layout of a data type in scope `sid`.
+    pub(crate) fn packed(&mut self, t: &SvType, sid: usize) -> R<Packed> {
+        Ok(packed_of(&self.resolve_type(t, sid)?))
+    }
+
+    /// The layout of a declared type (none for real, string and event), evaluated in scope
+    /// `sid` before the declared name is in it (`input [w-1:0] w` uses an outer `w`).
+    pub(crate) fn layout_for(&mut self, t: Option<&Rc<SvType>>, sid: usize) -> R<Option<Packed>> {
+        match t {
+            Some(t) if !matches!(t.kind, NetKind::Real | NetKind::String | NetKind::Event) => Ok(Some(self.packed(t, sid)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Give signal `s` (declared as `name` in scope `sid`) the layout of its declared type.
+    pub(crate) fn set_layout(&mut self, s: u32, name: &str, p: Option<Packed>, sid: usize) -> R<()> {
+        let Some(p) = p else { return Ok(()) };
+        if p.fields.is_some() {
+            // member chains name the flat storage
+            self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));
+            self.sigs.has_structs = true;
+        }
+        self.sigs.layout.insert(s, Rc::new(p));
+        Ok(())
+    }
+
+    /// The layout of signal `s`, if its declaration has a type.
+    pub(crate) fn layout(&self, s: u32) -> Option<Rc<Packed>> {
+        self.sigs.layout.get(&s).cloned()
+    }
+
+    /// A member chain of a signal with a struct type (`v[i].f.g[3:0]`) as one part select of
+    /// its flat storage (`$flat:v[i][off +: w]`; offsets are expressions, so run-time
+    /// indexes work); a whole signed member read is `$signed` unless `lvalue`. None where `e`
+    /// is no such chain, an error message where it is a wrong one.
+    pub(crate) fn struct_walk(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<Result<Walk, String>> {
+        let (base, ops) = chain(e);
+        // `base` with its last name prefixed (`$flat:v`, `$type:p`)
+        let renamed = |pre: &str| match base {
+            Expr::Ident(n) => Expr::Ident(format!("{pre}{n}")),
+            Expr::Hier(p) => {
+                let mut p = p.clone();
+                let l = p.last_mut().unwrap();
+                *l = format!("{pre}{l}");
+                Expr::Hier(p)
+            }
+            _ => unreachable!(),
+        };
+        let sym = match base {
+            Expr::Ident(n) if !n.starts_with("$flat:") => self.lookup(n, sid)?,
+            Expr::Hier(p) if !p.last()?.starts_with("$flat:") => self.lookup_hier(p, sid)?,
+            _ => return None,
+        };
+        let (layout, nun) = match sym {
+            Sym::Sig(s) => {
+                let info = self.sig(s);
+                // (an array: the unpacked dimensions come first)
+                let nun = if info.depth > 0 { self.sigs.md_dims.get(&s).map_or(1, |d| d.len()) } else { 0 };
+                ((**self.sigs.layout.get(&s)?).clone(), nun)
+            }
+            // a parameter with a struct type
+            Sym::Const(_) => {
+                let t = match renamed("$type:") {
+                    Expr::Ident(n) => self.lookup(&n, sid)?,
+                    Expr::Hier(p) => self.lookup_hier(&p, sid)?,
+                    _ => unreachable!(),
+                };
+                let Sym::Type(t) = t else { return None };
+                (packed_of(&t), 0)
+            }
+            _ => return None,
+        };
+        layout.fields.as_ref()?;
+        let flat_base = renamed("$flat:");
+        let mut k = 0;
+        let mut elem = base.clone();
+        while k < nun {
+            match ops.get(k) {
+                Some(&op @ Sel::Index(_)) => elem = apply(elem, op),
+                Some(Sel::Range(..) | Sel::Part(..)) => return Some(Err("a slice of an unpacked struct array is not supported".into())),
+                _ => return None,
+            }
+            k += 1;
+        }
+        let elem = match nun {
+            0 => flat_base,
+            1 => match elem {
+                Expr::Index(_, i) => Expr::Index(Box::new(flat_base), i),
+                _ => unreachable!(),
+            },
+            _ => self.md_norm(&elem, sid)?,
+        };
+        let mut cur: Packed = layout;
+        let mut di = 0;
+        let mut off = num(0);
+        let mut width = num(cur.width());
+        let mut touched = false;
+        let mut whole = true;
+        loop {
+            match ops.get(k) {
+                Some(&op @ (Sel::Index(_) | Sel::Range(..) | Sel::Part(..))) if di < cur.dims.len() => {
+                    let r = cur.dims[di];
+                    let el = cur.width_from(di + 1);
+                    k += 1;
+                    touched = true;
+                    match op {
+                        Sel::Index(a) => {
+                            off = arith(B::Add, off, arith(B::Mul, dim_pos(r, a.clone()), num(el)));
+                            width = num(el);
+                            di += 1;
+                            continue;
+                        }
+                        Sel::Range(a, b) => {
+                            off = arith(B::Add, off, arith(B::Mul, dim_pos(r, b.clone()), num(el)));
+                            let n = match (lit(a), lit(b)) {
+                                (Some(a), Some(b)) => num(dim_size((a, b))),
+                                _ => {
+                                    let ge = Expr::Binary(B::Ge, Box::new(a.clone()), Box::new(b.clone()));
+                                    let d = Expr::Cond(
+                                        Box::new(ge),
+                                        Box::new(arith(B::Sub, a.clone(), b.clone())),
+                                        Box::new(arith(B::Sub, b.clone(), a.clone())),
+                                    );
+                                    arith(B::Add, d, num(1))
+                                }
+                            };
+                            width = arith(B::Mul, n, num(el));
+                        }
+                        Sel::Part(a, n, up) => {
+                            let (a, n) = (a.clone(), n.clone());
+                            let low = match (up, r.0 >= r.1) {
+                                (true, true) | (false, false) => a,
+                                (true, false) => arith(B::Sub, arith(B::Add, a, n.clone()), num(1)),
+                                (false, true) => arith(B::Add, arith(B::Sub, a, n.clone()), num(1)),
+                            };
+                            off = arith(B::Add, off, arith(B::Mul, dim_pos(r, low), num(el)));
+                            width = arith(B::Mul, n, num(el));
+                        }
+                        Sel::Member(_) => unreachable!(),
+                    }
+                    whole = false;
+                    break;
+                }
+                Some(Sel::Member(m)) if di == cur.dims.len() && cur.fields.is_some() => {
+                    let st = cur.fields.clone().unwrap();
+                    let Some(fk) = st.fields.iter().position(|f| f.0 == *m) else {
+                        return Some(Err(format!("no member '{m}' in the struct")));
+                    };
+                    k += 1;
+                    if !st.union {
+                        let after: i64 = st.fields[fk + 1..].iter().map(|f| f.1.width()).sum();
+                        off = arith(B::Add, off, num(after));
+                    }
+                    cur = st.fields[fk].1.clone();
+                    di = 0;
+                    width = num(cur.width());
+                    touched = true;
+                    continue;
+                }
+                _ => break,
+            }
+        }
+        let ty = whole.then(|| {
+            let mut t = cur.clone();
+            t.dims.drain(..di);
+            if di > 0 {
+                t.int_kind = false;
+            }
+            t
+        });
+        if !touched {
+            return None;
+        }
+        let mut out = Expr::IndexedRange(Box::new(elem), Box::new(off), Box::new(width), true);
+        // a whole signed member reads as signed
+        if !lvalue && whole && cur.signed && di == 0 {
+            out = Expr::SysCall("$signed".into(), vec![out]);
+        }
+        for &op in &ops[k..] {
+            out = apply(out, op);
+        }
+        Some(Ok(Walk { expr: out, ty: if k == ops.len() { ty } else { None } }))
+    }
+
+    /// The error for a member select that names no member.
+    pub(crate) fn member_error<T>(&self, e: &Expr, sid: usize) -> R<T> {
+        match self.struct_walk(e, sid, false) {
+            Some(Err(m)) => self.err(m),
+            _ => {
+                let Expr::Member(_, m) = e else { unreachable!() };
+                self.err(format!("'.{m}' selects a member of a value without members"))
+            }
+        }
+    }
+
+    /// The type an assignment to `e` gives a pattern on its right.
+    pub(crate) fn target_layout(&self, e: &Expr, sid: usize) -> Option<Packed> {
+        let (base, ops) = chain(e);
+        let sym = match base {
+            Expr::Ident(n) => self.lookup(n, sid)?,
+            Expr::Hier(p) => self.lookup_hier(p, sid)?,
+            _ => return None,
+        };
+        let Sym::Sig(s) = sym else { return None };
+        // the whole variable, or a whole element of an array
+        let info = self.sig(s);
+        let nun = if info.depth > 0 { self.sigs.md_dims.get(&s).map_or(1, |d| d.len()) } else { 0 };
+        if ops.len() == nun && ops.iter().all(|o| matches!(o, Sel::Index(_))) {
+            return self.layout(s).map(|l| (*l).clone());
+        }
+        self.struct_walk(e, sid, true)?.ok()?.ty
+    }
+
+    /// `e` with the assignment patterns at its top (or in a conditional's branches) resolved
+    /// against `t` (a typed pattern against its own type); None where there are none.
+    pub(crate) fn with_target(&mut self, e: &Expr, t: Option<&Packed>, sid: usize) -> R<Option<Expr>> {
+        match e {
+            Expr::Pattern(Some(pt), items) => {
+                let pt = self.packed(pt, sid)?;
+                Ok(Some(self.build_pattern(items, &pt, sid)?))
+            }
+            Expr::Pattern(None, items) => match t {
+                Some(t) => Ok(Some(self.build_pattern(items, t, sid)?)),
+                None => Ok(None),
+            },
+            Expr::Cond(c, a, b) => {
+                let (ra, rb) = (self.with_target(a, t, sid)?, self.with_target(b, t, sid)?);
+                if ra.is_none() && rb.is_none() {
+                    return Ok(None);
+                }
+                let a = ra.unwrap_or_else(|| (**a).clone());
+                let b = rb.unwrap_or_else(|| (**b).clone());
+                Ok(Some(Expr::Cond(c.clone(), Box::new(a), Box::new(b))))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// An assignment pattern for type `t` as a concatenation of its elements or members,
+    /// each cast to its width (IEEE 1800 10.9).
+    fn build_pattern(&mut self, items: &[PatItem], t: &Packed, sid: usize) -> R<Expr> {
+        let mut pos = Vec::new();
+        let mut named = Vec::new();
+        let mut default = None;
+        for it in items {
+            match it {
+                PatItem::Pos(v) => pos.push(v),
+                PatItem::Key(k, v) => named.push((k, v)),
+                PatItem::Default(v) => default = Some(v),
+            }
+        }
+        let parts: Vec<(Option<&str>, Packed)> = if !t.dims.is_empty() && !t.int_kind {
+            let mut el = t.clone();
+            el.dims.remove(0);
+            (0..dim_size(t.dims[0])).map(|_| (None, el.clone())).collect()
+        } else if let Some(s) = &t.fields {
+            if s.union {
+                return self.err("assignment patterns for unions are not supported");
+            }
+            s.fields.iter().map(|(n, ft)| (Some(n.as_str()), ft.clone())).collect()
+        } else {
+            return Ok(match default {
+                Some(v) => cast(t.width(), v.clone()),
+                None => Expr::Concat(pos.into_iter().map(|v| cast(1, v.clone())).collect()),
+            });
+        };
+        if !pos.is_empty() && pos.len() != parts.len() {
+            return self.err(format!("assignment pattern has {} values for {} elements", pos.len(), parts.len()));
+        }
+        let mut out = Vec::new();
+        for (k, (name, pt)) in parts.iter().enumerate() {
+            let v = if let Some(v) = pos.get(k) {
+                *v
+            } else if let Some((_, v)) = named.iter().find(|(n, _)| Some(n.as_str()) == *name) {
+                *v
+            } else if let Some(v) = default {
+                v
+            } else {
+                return self.err(format!("assignment pattern has no value for member {}", name.unwrap_or_default()));
+            };
+            let v = self.with_target(v, Some(pt), sid)?.unwrap_or_else(|| v.clone());
+            out.push(match v {
+                Expr::Concat(_) => v,
+                v => cast(pt.width(), v),
+            });
+        }
+        Ok(Expr::Concat(out))
+    }
+
+    /// A pattern in a place without a target type: one with its own type.
+    pub(crate) fn typed_pattern(&mut self, e: &Expr, sid: usize) -> R<Expr> {
+        match self.with_target(e, None, sid)? {
+            Some(r) => Ok(r),
+            None => self.err("an assignment pattern needs a known target type here"),
+        }
     }
 }

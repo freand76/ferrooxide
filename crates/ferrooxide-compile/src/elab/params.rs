@@ -51,7 +51,7 @@ impl<'a> Compiler<'a> {
                     self.hier.params_done.insert(key);
                 }
                 let v = self.param_value(p, ov, sid)?;
-                self.scopes[sid].syms.insert(p.name.clone(), v);
+                self.insert_param(p, v, sid)?;
                 if p.range.is_some() && !p.real {
                     let r = self.range_vals(&p.range, sid)?;
                     self.scopes[sid].param_ranges.insert(p.name.clone(), r);
@@ -138,10 +138,16 @@ impl<'a> Compiler<'a> {
         let v = match ov {
             Some(v) => v,
             None => {
-                if self.type_of(&p.value, sid)?.is_real() {
-                    PVal::Real(self.const_real(&p.value, sid)?)
+                let layout = match &p.ty {
+                    Some(t) => Some(self.packed(t, sid)?),
+                    None => None,
+                };
+                let r = self.with_target(&p.value, layout.as_ref(), sid)?;
+                let value = r.as_ref().unwrap_or(&p.value);
+                if self.type_of(value, sid)?.is_real() {
+                    PVal::Real(self.const_real(value, sid)?)
                 } else {
-                    PVal::Int(self.const_eval(&p.value, sid)?)
+                    PVal::Int(self.const_eval(value, sid)?)
                 }
             }
         };
@@ -162,6 +168,19 @@ impl<'a> Compiler<'a> {
             PVal::Type(_) => unreachable!(),
         };
         Ok(Sym::Const(self.param_type(p, c, sid)?))
+    }
+
+    /// Declare parameter `p` with value `v` in scope `sid`; one with a struct type also gets
+    /// its type (`$type:p`, for member selects) and its flat name.
+    pub(crate) fn insert_param(&mut self, p: &ParamDecl, v: Sym, sid: usize) -> R<()> {
+        if let Some(t) = p.ty.as_ref().filter(|t| t.has_struct()) {
+            let t = self.resolve_type(t, sid)?;
+            self.scopes[sid].syms.insert(format!("$type:{}", p.name), Sym::Type(Rc::new(t)));
+            self.scopes[sid].syms.insert(format!("$flat:{}", p.name), v.clone());
+            self.sigs.has_structs = true;
+        }
+        self.scopes[sid].syms.insert(p.name.clone(), v);
+        Ok(())
     }
 
     /// evaluate a parameter override in the instantiating scope

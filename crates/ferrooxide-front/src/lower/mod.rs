@@ -31,8 +31,6 @@ pub(crate) struct Lower {
     vars: HashMap<String, (Rc<SvType>, Vec<Range>)>,
     /// the data type of the declaration being lowered
     decl_type: Option<Rc<SvType>>,
-    /// the type selected by the last lvalue (for an assignment pattern on the right)
-    last_type: Option<SvType>,
     /// items produced while lowering a declaration (enum constants)
     pending: Vec<Item>,
     /// typedefs lowered ahead of their place for a forward declaration (node addresses)
@@ -58,7 +56,6 @@ pub(crate) struct Lower {
     /// packages the current module (or package) imports or refers to
     mod_pkgs: Vec<String>,
     /// the return type of the function being lowered (for `return '{...}`)
-    ret_type: Option<Rc<SvType>>,
     modports: Vec<String>,
     /// lowering a function or task body
     in_subroutine: bool,
@@ -104,7 +101,6 @@ impl Lower {
             types: HashMap::new(),
             vars: HashMap::new(),
             decl_type: None,
-            last_type: None,
             pending: Vec::new(),
             early: HashSet::new(),
             unit_items: Vec::new(),
@@ -119,7 +115,6 @@ impl Lower {
             kw_names: Vec::new(),
             packages: HashMap::new(),
             mod_pkgs: Vec::new(),
-            ret_type: None,
             modports: Vec::new(),
             in_subroutine: false,
         }
@@ -803,6 +798,9 @@ pub(crate) fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
                     }
                     if t.type_param.is_some() {
                         nd.type_param = t.type_param.clone();
+                    }
+                    if t.ty.is_some() {
+                        nd.ty = t.ty.clone();
                     }
                 }
                 out.push(nd);

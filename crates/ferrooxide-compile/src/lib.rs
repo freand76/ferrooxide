@@ -269,6 +269,10 @@ pub(crate) struct Sigs {
     pub(crate) has_events: bool,
     /// the type of each signal (of its elements for an array), by signal id
     pub(crate) types: Vec<types::Type>,
+    /// the layout of signals declared with a data type (struct members, assignment patterns)
+    pub(crate) layout: HashMap<u32, Rc<types::Packed>>,
+    /// some signal has a struct type (member chains need the rewrite in `md_norm`)
+    pub(crate) has_structs: bool,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).

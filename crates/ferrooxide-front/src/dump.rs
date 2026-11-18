@@ -109,6 +109,19 @@ pub fn expr(e: &Expr) -> String {
         Expr::Call(n, args) => format!("{n}({})", list(args)),
         Expr::SysCall(n, args) => format!("{n}({})", list(args)),
         Expr::Type(t) => format!("type({})", sv_type(t)),
+        Expr::Member(a, m) => format!("{}.{m}", expr(a)),
+        Expr::Pattern(t, items) => {
+            let items: Vec<String> = items
+                .iter()
+                .map(|it| match it {
+                    PatItem::Pos(v) => expr(v),
+                    PatItem::Key(k, v) => format!("{k}: {}", expr(v)),
+                    PatItem::Default(v) => format!("default: {}", expr(v)),
+                })
+                .collect();
+            let t = t.as_ref().map(|t| format!("type({})", sv_type(t))).unwrap_or_default();
+            format!("{t}'{{{}}}", items.join(", "))
+        }
     }
 }
 
@@ -307,6 +320,9 @@ impl Printer {
         }
         if let Some(t) = &d.type_param {
             let _ = write!(s, " type {t}");
+        }
+        if let Some(t) = d.ty.as_ref().filter(|t| t.has_struct()) {
+            let _ = write!(s, " type({})", sv_type(t));
         }
         s.push_str(&strength(&d.strength));
         s.push_str(&delay(&d.delay));
