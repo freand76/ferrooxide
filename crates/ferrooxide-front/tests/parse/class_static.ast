@@ -1,0 +1,21 @@
+module m ();
+  // imports $unit
+  class C c;
+  initial begin
+    C$n = 5;
+    c = new();
+    $display(C$n, C$n);
+  end
+endmodule
+package $unit ();
+  class C;
+    int(32) signed id;
+    function automatic reg new;
+      begin
+        C$n = (C$n + 1);
+        this.id = C$n;
+      end
+    endfunction
+  endclass
+  int(32) signed C$n = 1;
+endpackage

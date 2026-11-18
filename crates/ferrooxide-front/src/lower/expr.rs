@@ -293,6 +293,13 @@ impl Lower {
             Base::Other(t::Expr { kind: t::ExprKind::New { size: None, args: None, copy: None }, loc }) if self.vars.contains_key("new") => {
                 self.chain(Base::Name("new", *loc), &ops, true)
             }
+            // `C::p = ...`: a static property
+            Base::Other(t::Expr { kind: t::ExprKind::Scoped(n), loc }) if n.scopes.len() == 1 && n.params.is_none() && n.scopes[0].params.is_none() => {
+                match self.static_prop(&Expr::Ident(n.scopes[0].name.clone()), &n.name) {
+                    Some(v) => self.selects(Expr::Ident(v), &ops),
+                    None => self.unsupported(*loc, "this assignment target"),
+                }
+            }
             Base::Other(x) => self.unsupported(x.loc, "this assignment target"),
         }
     }
@@ -423,7 +430,10 @@ impl Lower {
                     k += 1;
                     Expr::MethodCall(Box::new(e), m.to_string(), args)
                 }
-                (Op::Member(m, _), _) => Expr::Member(Box::new(e), m.to_string()),
+                (Op::Member(m, _), _) => match self.static_prop(&e, m) {
+                    Some(v) => Expr::Ident(v),
+                    None => Expr::Member(Box::new(e), m.to_string()),
+                },
                 (Op::Call(_, l), _) => return self.unsupported(*l, "a call here"),
                 _ => self.selects(e, &ops[k..k + 1])?,
             };
@@ -500,6 +510,10 @@ impl Lower {
                     return self.unsupported(e.loc, "this scoped name");
                 }
                 let mut p = n.scopes[0].name.clone();
+                // `C::p`: a static property of class C
+                if let Some(v) = self.static_prop(&Expr::Ident(p.clone()), &n.name) {
+                    return self.selects(Expr::Ident(v), ops);
+                }
                 let Some(mut pk) = self.packages.get(&p).cloned() else {
                     return self.err(e.loc, format!("unknown package '{p}'"));
                 };

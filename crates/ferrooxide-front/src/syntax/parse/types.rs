@@ -118,6 +118,13 @@ impl Parser {
             T::Kw(kw) if is_type_kw(*kw) => true,
             T::Ident(n) => {
                 if self.is_type_name(n) {
+                    // `C::T x`: a type only if T is one of class C's types (`C::p = 1` is a
+                    // static property)
+                    if self.is_p_at(k + 1, "::") {
+                        if let (Some(c), T::Ident(t)) = (self.classes.get(n.as_str()), self.peek_at(k + 2)) {
+                            return c.contains(t.as_str());
+                        }
+                    }
                     // `C #(...) x`: a parameterized class; `M #(...) u (...)` is an instance
                     if self.is_p_at(k + 1, "#") {
                         return self.classes.contains_key(n.as_str());

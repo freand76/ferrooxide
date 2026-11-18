@@ -4,13 +4,16 @@
 //! object is reached through `this`: after lowering a method body, such names become
 //! `this.p` / `this.m(...)` unless a local declaration (an argument, a variable, a block
 //! variable) hides them.
+//!
+//! A static property is one variable `C$p` next to the class (in the module, package or
+//! `$unit` declaring it); `p` in a method, `obj.p` and `C::p` all name it.
 
 use super::{Lower, SvType};
 use crate::ast::*;
 use crate::syntax::kw::Kw;
 use crate::syntax::tree as t;
 use crate::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// The names a class's methods reach through `this` (with those of its base classes).
@@ -18,6 +21,8 @@ use std::rc::Rc;
 pub(crate) struct ClassNames {
     pub props: HashSet<String>,
     pub methods: HashSet<String>,
+    /// static properties: name -> the variable holding it
+    pub statics: HashMap<String, String>,
 }
 
 impl Lower {
@@ -46,6 +51,7 @@ impl Lower {
                 };
                 names.props.extend(b.props.iter().cloned());
                 names.methods.extend(b.methods.iter().cloned());
+                names.statics.extend(b.statics.iter().map(|(k, v)| (k.clone(), v.clone())));
                 let args = match args {
                     Some(a) => Some(self.call_args(a, c.loc)?),
                     None => None,
@@ -61,11 +67,10 @@ impl Lower {
         // properties are names in the methods (their types for member chains)
         let saved_vars = self.vars.clone();
         let mut props = Vec::new();
+        let mut statics = Vec::new();
         for it in &c.items {
             let t::ClassItem::Property { quals, decl } = it else { continue };
-            if quals.contains(&Kw::Static) {
-                return self.unsupported(super::item_loc(decl), "a static class property");
-            }
+            let is_static = quals.contains(&Kw::Static);
             let t::Item::Var(v) = decl else {
                 return self.unsupported(super::item_loc(decl), &format!("{} in a class", super::item_what(decl)));
             };
@@ -79,6 +84,15 @@ impl Lower {
             d.names = self.declarators(&v.decls)?;
             if d.names.iter().any(|n| n.heap.is_some() || !n.dims.is_empty()) {
                 return self.unsupported(v.loc, "an array as a class property");
+            }
+            if is_static {
+                for n in &mut d.names {
+                    let var = format!("{name}${}", n.name);
+                    names.statics.insert(n.name.clone(), var.clone());
+                    n.name = var;
+                }
+                statics.push(d);
+                continue;
             }
             for n in &d.names {
                 names.props.insert(n.name.clone());
@@ -97,7 +111,7 @@ impl Lower {
         // (the class's names are known before its methods, which may call each other)
         let names = Rc::new(names);
         self.classes.insert(name.clone(), names.clone());
-        for d in &mut props {
+        for d in props.iter_mut().chain(statics.iter_mut()) {
             for n in &mut d.names {
                 if let Some(e) = &mut n.init {
                     this_expr(e, &names, &[]);
@@ -136,7 +150,16 @@ impl Lower {
                 t::ClassItem::Item(i) => return self.unsupported(super::item_loc(i), &format!("{} in a class", super::item_what(i))),
             }
         }
+        // the static properties' variables, with their types, for the declaring scope
+        let types: Vec<(String, Option<(Rc<SvType>, Vec<Range>)>)> =
+            names.statics.iter().filter(|(_, v)| v.starts_with(&format!("{name}$"))).map(|(p, v)| (v.clone(), self.vars.get(p).cloned())).collect();
         self.vars = saved_vars;
+        for (v, t) in types {
+            if let Some(t) = t {
+                self.vars.insert(v, t);
+            }
+        }
+        self.class_statics = statics.into_iter().map(Item::Decl).collect();
         Ok(ClassDecl { name, base, base_args, props, methods, virtuals, abstract_: c.virtual_, line })
     }
 
@@ -144,6 +167,22 @@ impl Lower {
     pub(crate) fn is_class_var(&self, n: &str) -> bool {
         n == "this" || n == "super" || self.vars.get(n).is_some_and(|v| v.0.class.is_some() && v.1.is_empty())
     }
+}
+
+impl Lower {
+    /// The variable of static property `m` of the class of `e` (a class variable or `C`).
+    pub(crate) fn static_prop(&self, e: &Expr, m: &str) -> Option<String> {
+        let class = match e {
+            Expr::Ident(v) => self.vars.get(v).and_then(|t| t.0.class.clone()).or_else(|| self.classes.contains_key(v).then(|| v.clone()))?,
+            _ => return None,
+        };
+        self.classes.get(&class)?.statics.get(m).cloned()
+    }
+}
+
+/// A static property of the class, unless a local hides it: its variable.
+fn static_name<'c>(n: &str, c: &'c ClassNames, locals: &[String]) -> Option<&'c String> {
+    c.statics.get(n).filter(|_| !locals.iter().any(|l| l == n))
 }
 
 /// A name of the class reached through `this`, unless a local hides it.
@@ -158,6 +197,11 @@ fn this() -> Box<Expr> {
 /// `this.` before the class's names in an expression.
 fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
     match e {
+        Expr::Ident(n) if static_name(n, c, locals).is_some() => *e = Expr::Ident(static_name(n, c, locals).unwrap().clone()),
+        Expr::Hier(p) if static_name(&p[0], c, locals).is_some() => p[0] = static_name(&p[0], c, locals).unwrap().clone(),
+        Expr::Member(o, n) if matches!(&**o, Expr::Ident(t) if t == "this") && c.statics.contains_key(n.as_str()) => {
+            *e = Expr::Ident(c.statics[n.as_str()].clone())
+        }
         Expr::Ident(n) if this_name(n, c, locals) => *e = Expr::Member(this(), n.clone()),
         Expr::Hier(p) if this_name(&p[0], c, locals) => {
             let mut x = Expr::Member(this(), p[0].clone());
@@ -308,7 +352,7 @@ fn this_stmt(s: &mut Stmt, c: &ClassNames, locals: &mut Vec<String>) {
                 ex(r, locals);
             }
         }
-        Stmt::Return { value: Some(v), .. } => ex(v, locals),
+        Stmt::Return { value: Some(v), .. } | Stmt::Discard { e: v, .. } => ex(v, locals),
         _ => {}
     }
 }

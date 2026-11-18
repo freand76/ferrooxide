@@ -620,8 +620,9 @@ SystemVerilog data types and testbench features:
   `with`), queue element writes with `<=` (done at once), keyed patterns for associative
   arrays, class or wider keys (see R4 slice 4).
 - classes (first part done 2026-11-18: properties, constructors, methods inlined with
-  `this`, `extends`/`super`, virtual dispatch, file-scope and package classes; objects never
-  freed). Left: static properties and methods, `C::new`/`C::f()`, typedefs, parameters
+  `this`, `extends`/`super`, virtual dispatch, file-scope and package classes, static
+  properties (2026-11-19: a variable `C$p` beside the class); objects never freed). Left:
+  static methods, `C::new`/`C::f()`, typedefs, parameters
   and enums in classes, parameterized classes, forward `typedef class`, arrays of handles
   and array properties, class handle ports, string methods on properties, NBAs to
   properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.

@@ -129,6 +129,7 @@ impl Lower {
             t::Item::Class(c) => {
                 let c = self.class_decl(c)?;
                 items.push(Item::Class(std::rc::Rc::new(c)));
+                items.append(&mut self.class_statics);
             }
             t::Item::Subroutine(s) => {
                 let s = self.subroutine_in(s, false)?;

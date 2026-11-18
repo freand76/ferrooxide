@@ -68,6 +68,8 @@ pub(crate) struct Lower {
     in_program: bool,
     /// classes declared so far: the names their methods reach through `this`
     classes: HashMap<String, Rc<class::ClassNames>>,
+    /// the variables of the static properties of the class just lowered
+    class_statics: Vec<Item>,
 }
 
 /// While lowering a package: what its `export` items need.
@@ -145,6 +147,7 @@ impl Lower {
             default_automatic: false,
             in_program: false,
             classes: HashMap::new(),
+            class_statics: Vec::new(),
         }
     }
 
@@ -226,6 +229,16 @@ impl Lower {
                 // in the `$unit` scope, as file-scope functions
                 let c = self.class_decl(c)?;
                 self.unit_vars.push(Item::Class(Rc::new(c)));
+                for it in std::mem::take(&mut self.class_statics) {
+                    if let Item::Decl(d) = &it {
+                        for n in &d.names {
+                            if let Some(t) = self.vars.get(&n.name) {
+                                self.unit_var_types.insert(n.name.clone(), t.clone());
+                            }
+                        }
+                    }
+                    self.unit_vars.push(it);
+                }
                 Ok(())
             }
             t::Item::Param(p) if matches!(p.kw, Some(crate::syntax::kw::Kw::Parameter | crate::syntax::kw::Kw::Localparam)) => {
