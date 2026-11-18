@@ -1,0 +1,12 @@
+module m ();
+  // imports p1, p2, $unit
+  reg [3:0] n;
+  initial
+    n = x;
+endmodule
+package p1 ();
+  integer signed x = 1;
+endpackage
+package p2 ();
+  // imports p1
+endpackage

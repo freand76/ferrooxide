@@ -22,6 +22,8 @@ impl Parser {
             // `return -x;`: an operator after return; only an assignment makes it a name
             Kw::Return => return matches!(self.peek_at(1), T::Punct("=" | "<=")),
             Kw::Break | Kw::Continue if self.is_p_at(1, ";") => return false,
+            // `export *::*;`
+            Kw::Export if self.is_p_at(1, "*") => return false,
             Kw::This | Kw::Super | Kw::Null | Kw::New | Kw::Local => return false,
             _ => {}
         }

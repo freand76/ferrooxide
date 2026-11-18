@@ -486,10 +486,15 @@ impl Lower {
                 if lvalue || n.scopes.len() != 1 || n.params.is_some() || n.scopes[0].params.is_some() || n.scopes[0].name == "$unit" {
                     return self.unsupported(e.loc, "this scoped name");
                 }
-                let p = n.scopes[0].name.clone();
-                let Some(pk) = self.packages.get(&p).cloned() else {
+                let mut p = n.scopes[0].name.clone();
+                let Some(mut pk) = self.packages.get(&p).cloned() else {
                     return self.err(e.loc, format!("unknown package '{p}'"));
                 };
+                // a name the package exports: the package that declares it
+                if let Some(o) = pk.exports.get(&n.name) {
+                    p = o.clone();
+                    pk = self.packages[&p].clone();
+                }
                 let call = matches!(ops.first(), Some(Op::Call(..)));
                 if pk.vars.contains_key(&n.name) && !call {
                     return self.selects(Expr::Hier(vec![p, n.name.clone()]), ops);

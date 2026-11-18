@@ -118,7 +118,8 @@ dimensions: the type's first, ICARUS_NOTES 9, forward typedefs, array typedefs),
 `struct`/`union` (flat vectors; member/index/select chains become one `[off +: w]` select, also
 at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`, `$bits(T)`,
 assignment patterns (positional, and beyond the reference: named and `default:`), packages
-with `import p::*` / `import p::x` (module, header, file scope), `pkg::name`, `P::x`/`P::f()`.
+with `import p::*` / `import p::x` (module, header, file scope), `pkg::name`, `P::x`/`P::f()`,
+`export p::x` / `p::*` / `*::*` (names resolve to the package that declares them).
 Lint reports names that are SystemVerilog keywords.
 
 Also done: interfaces and modports (interface ports alias the connected instance's scope),
@@ -327,8 +328,8 @@ deterministic, long runs cancellable, a memory budget for history.
 2. **Types in elaboration** (rest of A1, = R4): a type per signal in the compiler (string,
    queue, ...) and expression typing that uses it; then struct layout and member access move
    out of the parser.
-3. **SystemVerilog RTL items**: struct-typed function arguments with patterns, `export` in
-   packages.
+3. **SystemVerilog RTL items**: struct-typed function arguments with patterns (`export` in
+   packages done 2026-11-18).
 4. **Heap objects** (A2): queues, dynamic and associative arrays (mutable objects: handles to
    a separate heap with copy on assignment).
 5. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
@@ -618,7 +619,6 @@ SystemVerilog data types and testbench features:
   and enums in classes, parameterized classes, forward `typedef class`, arrays of handles
   and array properties, class handle ports, string methods on properties, NBAs to
   properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.
-- `export` in packages [sv_export*].
 - programs: processes run in the Active region, not the Reactive one (as the reference,
   which warns about assignments to module variables), no implicit `$finish` when all
   program `initial` blocks end, no `program` limits on what a module may reference.

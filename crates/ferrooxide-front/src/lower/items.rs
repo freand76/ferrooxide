@@ -92,6 +92,10 @@ impl Lower {
                 items.append(&mut self.pending);
             }
             t::Item::Import(v, _) => self.import(v, false)?,
+            t::Item::Export(v, loc) => match &mut self.pkg_ctx {
+                Some(c) => c.exports.extend(v.iter().map(|(p, n)| (p.clone(), n.clone(), *loc))),
+                None => return self.err(*loc, "an export is only allowed in a package"),
+            },
             t::Item::Modport(v, _) => {
                 for m in v {
                     let n = self.name(&m.name, m.loc);

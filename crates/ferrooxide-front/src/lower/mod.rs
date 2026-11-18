@@ -56,6 +56,8 @@ pub(crate) struct Lower {
     packages: HashMap<String, Rc<Package>>,
     /// packages the current module (or package) imports or refers to
     mod_pkgs: Vec<String>,
+    /// lowering a package: its imports, exports and the names it refers to
+    pkg_ctx: Option<PkgCtx>,
     /// the return type of the function being lowered (for `return '{...}`)
     modports: Vec<String>,
     /// lowering a function or task body
@@ -64,6 +66,21 @@ pub(crate) struct Lower {
     in_program: bool,
     /// classes declared so far: the names their methods reach through `this`
     classes: HashMap<String, Rc<class::ClassNames>>,
+}
+
+/// While lowering a package: what its `export` items need.
+#[derive(Default)]
+struct PkgCtx {
+    /// `import p::n`: (p, n, the package declaring n)
+    explicit: Vec<(String, String, String)>,
+    /// `import p::*`
+    wildcard: Vec<String>,
+    /// type names that came in through imports (not declared in the package)
+    imported_types: HashSet<String>,
+    /// names the package refers to
+    refs: HashSet<String>,
+    /// `export p::n` items, `*` for wildcards
+    exports: Vec<(String, String, t::Loc)>,
 }
 
 /// Lower the parsed files (one compilation unit unless `separate_units`).
@@ -120,6 +137,7 @@ impl Lower {
             kw_names: Vec::new(),
             packages: HashMap::new(),
             mod_pkgs: Vec::new(),
+            pkg_ctx: None,
             modports: Vec::new(),
             in_subroutine: false,
             in_program: false,
@@ -137,6 +155,7 @@ impl Lower {
 
     /// A name read from the source: SystemVerilog keywords used as names are noted (lint).
     pub(crate) fn name(&mut self, n: &str, loc: t::Loc) -> String {
+        self.note_ref(n);
         if SV_RESERVED.contains(&n) {
             self.kw_names.push((n.to_string(), loc.line));
         }
@@ -621,6 +640,7 @@ impl Lower {
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_tu = std::mem::take(&mut self.local_tu);
         let saved_scope = self.type_scope.replace((name.clone(), Default::default()));
+        let saved_ctx = self.pkg_ctx.replace(PkgCtx::default());
         let mut own = Vec::new();
         let refs: Vec<&t::Item> = p.items.iter().collect();
         for (k, it) in refs.iter().enumerate() {
@@ -632,13 +652,31 @@ impl Lower {
             }
         }
         self.type_scope = saved_scope;
+        let ctx = std::mem::replace(&mut self.pkg_ctx, saved_ctx).unwrap_or_default();
         // the package's typedefs: those added while lowering it
         let mut types = HashMap::new();
+        let mut names = HashSet::new();
         for (k, v) in &self.types {
             if saved_types.get(k).is_none_or(|o| !Rc::ptr_eq(o, v)) {
                 types.insert(k.clone(), v.clone());
+                if !ctx.imported_types.contains(k) {
+                    names.insert(k.clone());
+                }
             }
         }
+        for it in &own {
+            match it {
+                Item::Param(p) => {
+                    names.insert(p.name.clone());
+                }
+                Item::Decl(d) => names.extend(d.names.iter().map(|n| n.name.clone())),
+                Item::Subroutine(f) => {
+                    names.insert(f.name.clone());
+                }
+                _ => {}
+            }
+        }
+        let exports = self.exports(&ctx, &names)?;
         // (the packages it imports are found through its scope's imports)
         let used = std::mem::replace(&mut self.mod_pkgs, saved_pkgs);
         let mut items = Vec::new();
@@ -669,17 +707,110 @@ impl Lower {
         self.pkg_modules.push(m);
         self.local_tu = saved_tu;
         self.types = saved_types;
-        self.packages.insert(name, Rc::new(Package { types, vars, funcs }));
+        self.packages.insert(name, Rc::new(Package { types, vars, funcs, names, exports }));
         Ok(())
+    }
+
+    /// The package that declares `name` as seen through package `pkg` (itself, or the
+    /// package it exports the name from).
+    fn origin(&self, pkg: &str, name: &str) -> Option<String> {
+        let p = self.packages.get(pkg)?;
+        if p.names.contains(name) {
+            return Some(pkg.to_string());
+        }
+        p.exports.get(name).cloned()
+    }
+
+    /// A package's `export` items (26.6): name -> declaring package. An exported name must
+    /// be imported into the package: explicitly, or through a wildcard import and then not
+    /// declared in the package itself; `p::*` and `*::*` export the names imported
+    /// explicitly and those of wildcard imports the package refers to.
+    fn exports(&self, ctx: &PkgCtx, own: &HashSet<String>) -> Result<HashMap<String, String>> {
+        let mut out = HashMap::new();
+        for (pkg, name, loc) in &ctx.exports {
+            let all_pkgs = pkg == "*";
+            if name == "*" {
+                if !all_pkgs && !ctx.explicit.iter().any(|e| &e.0 == pkg) && !ctx.wildcard.contains(pkg) {
+                    return self.err(*loc, format!("package '{pkg}' is not imported here"));
+                }
+                for (via, n, o) in &ctx.explicit {
+                    if all_pkgs || via == pkg {
+                        out.insert(n.clone(), o.clone());
+                    }
+                }
+                for via in ctx.wildcard.iter().filter(|w| all_pkgs || *w == pkg) {
+                    for n in ctx.refs.iter().filter(|n| !own.contains(*n)) {
+                        if let Some(o) = self.origin(via, n) {
+                            out.entry(n.clone()).or_insert(o);
+                        }
+                    }
+                }
+                continue;
+            }
+            if all_pkgs {
+                return self.err(*loc, "`*::name` is not a valid export");
+            }
+            let o = match ctx.explicit.iter().find(|e| &e.0 == pkg && &e.1 == name) {
+                Some(e) => Some(e.2.clone()),
+                None if ctx.wildcard.contains(pkg) && !own.contains(name) => self.origin(pkg, name),
+                None => None,
+            };
+            let Some(o) = o else {
+                return self.err(*loc, format!("'{pkg}::{name}' is not imported into this package"));
+            };
+            out.insert(name.clone(), o);
+        }
+        Ok(out)
+    }
+
+    /// Notes a name the package being lowered refers to (wildcard exports).
+    pub(crate) fn note_ref(&mut self, n: &str) {
+        if let Some(c) = &mut self.pkg_ctx {
+            if !c.refs.contains(n) {
+                c.refs.insert(n.to_string());
+            }
+        }
     }
 
     /// `import p::*, q::name;` (in a module, a package, or at file scope).
     pub(crate) fn import(&mut self, v: &[t::Import], file_scope: bool) -> Result<()> {
         for im in v {
-            let pkg = im.package.clone();
-            let Some(p) = self.packages.get(&pkg).cloned() else {
-                return self.err(im.loc, format!("unknown package '{pkg}'"));
+            let via = im.package.clone();
+            let Some(vp) = self.packages.get(&via).cloned() else {
+                return self.err(im.loc, format!("unknown package '{via}'"));
             };
+            // a name the package exports comes from the package that declares it
+            let mut pkg = via.clone();
+            let mut p = vp.clone();
+            if let Some(n) = &im.name {
+                let known = vp.names.contains(n) || vp.exports.contains_key(n) || vp.types.contains_key(n) || vp.vars.contains_key(n) || vp.funcs.contains(n);
+                if !known {
+                    return self.err(im.loc, format!("'{n}' is not declared in or exported by package '{via}'"));
+                }
+                let o = self.origin(&via, n).unwrap_or(via.clone());
+                if o != via {
+                    p = self.packages[&o].clone();
+                    pkg = o;
+                }
+                if let Some(c) = &mut self.pkg_ctx {
+                    c.explicit.push((via.clone(), n.clone(), pkg.clone()));
+                    if p.types.contains_key(n) {
+                        c.imported_types.insert(n.clone());
+                    }
+                }
+            } else {
+                if let Some(c) = &mut self.pkg_ctx {
+                    c.wildcard.push(via.clone());
+                    c.imported_types.extend(p.types.keys().cloned());
+                }
+                // and a wildcard import includes what the package exports
+                let ex: Vec<t::Import> = vp.exports.keys().map(|n| t::Import { package: via.clone(), name: Some(n.clone()), loc: im.loc }).collect();
+                if !ex.is_empty() {
+                    let saved = self.pkg_ctx.take();
+                    self.import(&ex, file_scope)?;
+                    self.pkg_ctx = saved;
+                }
+            }
             match &im.name {
                 None => {
                     for (k, v) in &p.types {

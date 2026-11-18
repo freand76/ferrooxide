@@ -44,6 +44,10 @@ pub struct Package {
     /// its functions and tasks (in the package's own module)
     pub funcs: std::collections::HashSet<String>,
     pub types: std::collections::HashMap<String, Rc<SvType>>,
+    /// the names it declares (parameters, enum constants, variables, subroutines, types)
+    pub names: std::collections::HashSet<String>,
+    /// `export`ed names: name -> the package that declares it
+    pub exports: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -417,6 +421,7 @@ impl Lower {
                     self.types.insert(n.name.clone(), t.clone());
                     self.use_package(&s.name);
                 }
+                self.note_ref(&n.name);
                 let Some(t) = self.types.get(&n.name).cloned() else { return Ok(None) };
                 let mut t = (*t).clone();
                 t.signed = ty.signed.unwrap_or(t.signed);
