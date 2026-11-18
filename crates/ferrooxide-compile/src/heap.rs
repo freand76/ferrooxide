@@ -572,6 +572,7 @@ impl<'a> Compiler<'a> {
             }
             Type::Str => self.str_op(StrOp::ToVec, v, NONE, NONE, w),
             Type::Dyn { .. } => return self.err("a queue or dynamic array is not a vector"),
+            Type::Class(_) => self.resize(v, 64, w, false),
         })
     }
 }

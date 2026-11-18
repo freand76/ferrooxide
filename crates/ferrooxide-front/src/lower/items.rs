@@ -122,8 +122,12 @@ impl Lower {
                 let body = self.stmt(&p.body)?;
                 items.push(Item::Process { kind, body, line: p.loc.line });
             }
+            t::Item::Class(c) => {
+                let c = self.class_decl(c)?;
+                items.push(Item::Class(std::rc::Rc::new(c)));
+            }
             t::Item::Subroutine(s) => {
-                let s = self.subroutine(s)?;
+                let s = self.subroutine_in(s, false)?;
                 items.push(Item::Subroutine(s));
             }
             t::Item::Generate(v, _) => {
@@ -374,9 +378,10 @@ impl Lower {
     }
 
     /// A function or task.
-    fn subroutine(&mut self, s: &t::Subroutine) -> Result<SubroutineDecl> {
+    /// A function or task; `method`: of a class (its qualifiers are the class's business).
+    pub(crate) fn subroutine_in(&mut self, s: &t::Subroutine, method: bool) -> Result<SubroutineDecl> {
         let line = s.loc.line;
-        if !s.quals.is_empty() {
+        if !s.quals.is_empty() && !method {
             return self.unsupported(s.loc, "a qualified subroutine (class method)");
         }
         if !s.name.scopes.is_empty() {
@@ -399,6 +404,7 @@ impl Lower {
                 range = if !packed.is_empty() { Some((super::types::minus_one(t.width()), Expr::Num(dec(0)))) } else { r };
                 signed = sg;
                 ret_kind = match k {
+                    NetKind::Class => NetKind::Class,
                     NetKind::Int(_) | NetKind::Integer if range.is_none() => NetKind::Integer,
                     _ => NetKind::Reg,
                 };
@@ -440,7 +446,7 @@ impl Lower {
                 }
             }
         }
-        let name = self.name(&s.name.name, s.name.loc);
+        let name = if method && s.name.name == "new" { s.name.name.clone() } else { self.name(&s.name.name, s.name.loc) };
         // the function's own name is its result variable
         self.decl_type = ret_type.clone();
         self.declare_var(&name, &[]);

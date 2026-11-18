@@ -312,6 +312,11 @@ impl Lower {
                 }
                 self.simple_assign(&t::Stmt { kind: t::StmtKind::Expr(e.clone()), label: None, loc })
             }
+            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Member(..) if self.class_call(e) => match self.expr(e)? {
+                Expr::MethodCall(obj, name, args) => Ok(Stmt::MethodCall { obj: *obj, name, args, line }),
+                Expr::Member(obj, name) => Ok(Stmt::MethodCall { obj: *obj, name, args: vec![], line }),
+                _ => self.unsupported(loc, "this expression as a statement"),
+            },
             t::ExprKind::Call { func, args, with_: None, .. } => {
                 let name = self.task_name(func, loc)?;
                 let args = self.call_args(args, loc)?;
@@ -322,6 +327,20 @@ impl Lower {
                 Ok(Stmt::TaskCall { name, args: vec![], line })
             }
             _ => self.unsupported(loc, "this expression as a statement"),
+        }
+    }
+
+    /// A call through a class handle (`obj.m(..)`, `this.m`, `super.new(..)`).
+    fn class_call(&self, e: &t::Expr) -> bool {
+        let mut cur = e;
+        loop {
+            match &cur.kind {
+                t::ExprKind::Call { func, .. } => cur = func,
+                t::ExprKind::Member(a, _) | t::ExprKind::Index(a, _) => cur = a,
+                t::ExprKind::This | t::ExprKind::Super => return true,
+                t::ExprKind::Ident(n) => return !std::ptr::eq(cur, e) && self.is_class_var(n),
+                _ => return false,
+            }
         }
     }
 

@@ -3,6 +3,7 @@
 //! ferrooxide-rt bytecode. This file: the compiler state, scopes and name lookup, constant
 //! evaluation.
 
+mod class;
 mod codegen;
 mod elab;
 mod expr;
@@ -108,6 +109,8 @@ pub(crate) struct FuncInst {
     pub ports: Vec<(Dir, u32)>,
     /// the memory words of its variables (lo, hi)
     pub mem: (u32, u32),
+    /// a method: its `this` (the object's handle)
+    pub this: Option<u32>,
 }
 
 /// A recursive function compiled as a subroutine of a process: its body is placed after the
@@ -140,6 +143,7 @@ pub struct Compiler<'a> {
     pub(crate) subr: Subr<'a>,
     pub(crate) nets: Nets,
     pub(crate) sigs: Sigs,
+    pub(crate) classes: class::Classes<'a>,
 }
 
 /// The module hierarchy: modules, instance scopes, packages, defparams.
@@ -466,6 +470,7 @@ impl<'a> Compiler<'a> {
                 ..Default::default()
             },
             subr: Subr::default(),
+            classes: Default::default(),
             nets: Nets::default(),
             sigs: Sigs {
                 mem_limit_words: std::env::var("FX_MAX_MEM_MB")

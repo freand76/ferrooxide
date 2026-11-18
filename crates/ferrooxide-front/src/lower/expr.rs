@@ -49,6 +49,11 @@ fn flatten(e: &t::Expr) -> (Base<'_>, Vec<Op<'_>>) {
                 ops.reverse();
                 return (Base::Name(n, cur.loc), ops);
             }
+            t::ExprKind::This | t::ExprKind::Super => {
+                ops.reverse();
+                let n = if matches!(cur.kind, t::ExprKind::This) { "this" } else { "super" };
+                return (Base::Name(n, cur.loc), ops);
+            }
             _ => {
                 ops.reverse();
                 return (Base::Other(cur), ops);
@@ -129,7 +134,13 @@ impl Lower {
             t::ExprKind::Real(r) => Expr::Real(*r),
             t::ExprKind::Time(v, u) => self.time_literal(*v, *u),
             t::ExprKind::Str(s) => Expr::Str(s.clone()),
-            t::ExprKind::Ident(_) | t::ExprKind::Member(..) | t::ExprKind::Index(..) | t::ExprKind::Range(..) | t::ExprKind::Scoped(_) => {
+            t::ExprKind::Ident(_)
+            | t::ExprKind::Member(..)
+            | t::ExprKind::Index(..)
+            | t::ExprKind::Range(..)
+            | t::ExprKind::Scoped(_)
+            | t::ExprKind::This
+            | t::ExprKind::Super => {
                 let (b, ops) = flatten(e);
                 self.chain(b, &ops, false)?
             }
@@ -219,8 +230,7 @@ impl Lower {
             // `{}`: an empty queue
             t::ExprKind::Concat(_) => Expr::Concat(vec![]),
             t::ExprKind::Repl(..) => return self.unsupported(loc, "an empty replication"),
-            t::ExprKind::Null => return self.unsupported(loc, "null"),
-            t::ExprKind::This | t::ExprKind::Super => return self.unsupported(loc, "this / super"),
+            t::ExprKind::Null => Expr::Null,
             // (the last index of a queue; elsewhere an error in elaboration)
             t::ExprKind::Dollar => Expr::Last,
             t::ExprKind::Step => return self.unsupported(loc, "1step"),
@@ -243,6 +253,11 @@ impl Lower {
                 };
                 Expr::NewArray(Box::new(n), init)
             }
+            t::ExprKind::New { size: None, args, copy: None } => Expr::New(match args {
+                Some(a) => self.call_args(a, loc)?,
+                None => vec![],
+            }),
+            t::ExprKind::New { size: None, args: None, copy: Some(x) } => Expr::NewCopy(Box::new(self.expr(x)?)),
             t::ExprKind::New { .. } => return self.unsupported(loc, "new"),
             t::ExprKind::Prop(_) => return self.unsupported(loc, "a property expression"),
         })
@@ -323,7 +338,7 @@ impl Lower {
         for a in args {
             match a {
                 t::Arg::Pos(Some(e)) => v.push(self.arg(e)?),
-                t::Arg::Pos(None) => return self.unsupported(loc, "an empty argument"),
+                t::Arg::Pos(None) => v.push(Expr::EmptyArg),
                 t::Arg::Named(..) => return self.unsupported(loc, "a named argument"),
             }
         }
@@ -378,6 +393,28 @@ impl Lower {
                 Op::Member(m, _) => Expr::Member(Box::new(e), m.to_string()),
                 _ => self.selects(e, &ops[k..k + 1])?,
             };
+        }
+        Ok(e)
+    }
+
+    /// Members, method calls and selects after a class handle.
+    fn class_chain(&mut self, mut e: Expr, ops: &[Op], lvalue: bool) -> Result<Expr> {
+        let mut k = 0;
+        while k < ops.len() {
+            e = match (&ops[k], ops.get(k + 1)) {
+                (Op::Member(m, _), Some(Op::Call(a, l))) => {
+                    if lvalue {
+                        return self.unsupported(*l, "a method call as an assignment target");
+                    }
+                    let args = self.call_args(a, *l)?;
+                    k += 1;
+                    Expr::MethodCall(Box::new(e), m.to_string(), args)
+                }
+                (Op::Member(m, _), _) => Expr::Member(Box::new(e), m.to_string()),
+                (Op::Call(_, l), _) => return self.unsupported(*l, "a call here"),
+                _ => self.selects(e, &ops[k..k + 1])?,
+            };
+            k += 1;
         }
         Ok(e)
     }
@@ -478,9 +515,13 @@ impl Lower {
                     (format!("{p}::{}", n.name), e.loc)
                 }
             }
+            Base::Name(n @ ("this" | "super"), loc) => (n.to_string(), loc),
             Base::Name(n, loc) => (self.name(n, loc), loc),
         };
         let _ = loc;
+        if self.is_class_var(&name) {
+            return self.class_chain(Expr::Ident(name), ops, lvalue);
+        }
         let var = self.vars.get(&name).map(|v| v.0.clone());
         // a variable whose type has members (a struct, or a type parameter): members are
         // resolved in elaboration

@@ -89,6 +89,8 @@ pub enum NetKind {
     /// SystemVerilog `string` (a handle of an interned string)
     String,
     Bit,
+    /// a class handle (64 bits; `Decl::ty` names the class)
+    Class,
 }
 
 pub type Range = (Expr, Expr);
@@ -214,6 +216,7 @@ pub enum Item {
     Process { kind: ProcKind, body: Stmt, line: Line },
     Instances { module: String, params: Vec<Conn>, insts: Vec<Instance>, line: Line },
     Subroutine(SubroutineDecl),
+    Class(std::rc::Rc<ClassDecl>),
     GenFor { init_var: String, init: Expr, cond: Expr, step_var: String, step: Expr, name: Option<String>, items: Vec<Item>, line: Line },
     GenIf { cond: Expr, then_items: Vec<Item>, then_name: Option<String>, else_items: Vec<Item>, else_name: Option<String>, line: Line },
     GenCase { expr: Expr, arms: Vec<(Vec<Expr>, Option<String>, Vec<Item>)>, line: Line },
@@ -229,6 +232,26 @@ pub enum Item {
         delay: Option<Expr>,
         line: Line,
     },
+}
+
+/// A class declaration. Inside its methods, the class's properties and methods (also
+/// inherited ones) are reached through `this` (`Expr::Member(this, p)`,
+/// `Expr::MethodCall(this, m, ..)`); `super` names `this` as the base class.
+#[derive(Debug, Clone)]
+pub struct ClassDecl {
+    pub name: String,
+    /// `extends B` and the arguments of `extends B(args)` (for B's constructor)
+    pub base: Option<String>,
+    pub base_args: Option<Vec<Expr>>,
+    /// properties (each object has its own), with their initializers
+    pub props: Vec<Decl>,
+    /// methods; a constructor is named `new`. Methods are automatic.
+    pub methods: Vec<SubroutineDecl>,
+    /// the methods declared `virtual`
+    pub virtuals: Vec<String>,
+    /// `virtual class`: no objects of its own
+    pub abstract_: bool,
+    pub line: Line,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +306,8 @@ pub enum Stmt {
     Wait { cond: Expr, body: Box<Stmt>, line: Line },
     SysTask { name: String, args: Vec<Option<Expr>>, line: Line },
     TaskCall { name: String, args: Vec<Expr>, line: Line },
+    /// a method call as a statement (a task, or a function whose result is not used)
+    MethodCall { obj: Expr, name: String, args: Vec<Expr>, line: Line },
     Disable { name: String, line: Line },
     /// `force lhs = rhs` (`rhs` None: `release lhs`)
     Force { lhs: Expr, rhs: Option<Expr>, line: Line },
@@ -365,6 +390,16 @@ pub enum Expr {
     Pattern(Option<std::rc::Rc<crate::lower::SvType>>, Vec<PatItem>),
     /// `new[size]`, `new[size](init)`: a dynamic array
     NewArray(Box<Expr>, Option<Box<Expr>>),
+    /// `null`
+    Null,
+    /// an empty argument of a call (`f(a, , c)`): the argument's default value
+    EmptyArg,
+    /// `new` / `new(args)`: an object of the class the target's type names
+    New(Vec<Expr>),
+    /// `new obj`: a shallow copy of an object
+    NewCopy(Box<Expr>),
+    /// `obj.m(args)` (`this.m`, `super.m`): a method call
+    MethodCall(Box<Expr>, String, Vec<Expr>),
     /// `$` in an index of a queue: its last index
     Last,
 }

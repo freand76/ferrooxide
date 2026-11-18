@@ -142,6 +142,18 @@ pub struct Program {
     pub disables: Vec<Vec<u32>>,
     /// user-defined primitive tables (Instr::Udp)
     pub udps: Vec<UdpTable>,
+    /// classes (`Instr::Obj`): the words of a new object (its properties' start values)
+    pub classes: Vec<ClassDef>,
+}
+
+/// A class: an object holds its properties flat, `nw(width)` value words then as many
+/// unknown words (as a vector of `width` bits); reals and strings take 64 bits each.
+#[derive(Clone, Debug, Default)]
+pub struct ClassDef {
+    pub name: String,
+    pub width: u32,
+    /// the words of a new object
+    pub init: Vec<u64>,
 }
 
 /// Value masks of UDP table symbols: bit 0 = 0, bit 1 = 1, bit 2 = x (z reads as x).
@@ -264,6 +276,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Str { d, a, b, c, .. } | Instr::Heap { d, a, b, c, .. } | Instr::Assoc { d, a, b, c, .. } => {
             [*d, *a, *b, *c].into_iter().filter(|&x| x != NONE).collect()
         }
+        Instr::Obj { d, a, b, .. } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
         Instr::Unforce { t } => match t {
             Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
             Target::ElemDynPart { ix, bix, .. } => vec![ix.slot, bix.slot],
@@ -715,6 +728,24 @@ pub enum Instr {
     /// an operation on an associative array of `w`-bit elements with keys of type `key`
     /// (slot `b`); `x` as for `Heap`
     Assoc { op: AssocOp, d: u32, a: u32, b: u32, c: u32, w: u32, key: KeyKind, x: bool },
+    /// an operation on class objects; unused operands are NONE
+    Obj { op: ObjOp, d: u32, a: u32, b: u32, off: u32, w: u32 },
+}
+
+/// Operations on class objects in `Instr::Obj`. An object is on the simulator's heap; a
+/// handle (64 bits) refers to it, 0 being `null`. Objects are shared, never freed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjOp {
+    /// d = a new object of class `w` (`Program::classes`)
+    New,
+    /// d (`w` bits) = bits `off..off + w` of object a (x when a is null)
+    Get,
+    /// bits `off..off + w` of object a = b (no change when a is null)
+    Set,
+    /// d = a new object with the class and properties of object a (null: null)
+    Copy,
+    /// d (32 bits) = the class of object a (all ones for null)
+    Class,
 }
 
 /// The array of an `Instr::Heap`.

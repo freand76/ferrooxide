@@ -214,7 +214,7 @@ impl<'a> Compiler<'a> {
     /// A final procedure runs in zero time: no nonblocking assignments, delays, event or
     /// wait controls, task calls (IEEE 1800-2017 9.2.3).
     fn check_final(&mut self, s: &Stmt, sid: usize) -> R<()> {
-        let mut err = |c: &mut Self, line: u32, what: &str| -> R<()> {
+        let err = |c: &mut Self, line: u32, what: &str| -> R<()> {
             c.line = line;
             c.err(format!("final procedures cannot {what}."))
         };

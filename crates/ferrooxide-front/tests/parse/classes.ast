@@ -1,0 +1,43 @@
+module m ();
+  // imports $unit
+  class Derived d;
+  class Base b;
+  initial begin
+    d = new();
+    b = new d;
+    d.run(3);
+    if (((d != null) && (d.get() == 1)))
+      d.n = d.s.len();
+    d.void_call();
+    b = null;
+  end
+endmodule
+package $unit ();
+  class Base;
+    int(32) signed n = 1;
+    function automatic reg new;
+      input int(32) signed k = 2;
+      this.n = k;
+    endfunction
+    // virtual
+    function automatic integer signed get;
+      return this.n;
+    endfunction
+  endclass
+  class Derived extends Base(5);
+    string s;
+    task automatic run;
+      input int(32) signed n;
+      begin
+        this.s = "x";
+        this.n = (n + this.get());
+        super.n = 0;
+        this.void_call();
+      end
+    endtask
+    function automatic int(0) void_call;
+      begin
+      end
+    endfunction
+  endclass
+endpackage

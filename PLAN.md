@@ -612,8 +612,13 @@ SystemVerilog data types and testbench features:
 - queues of structs, arrays of queues, queue ports, `%p`, array methods (`sort`, `find`, ...
   `with`), queue element writes with `<=` (done at once), keyed patterns for associative
   arrays, class or wider keys (see R4 slice 4).
-- classes, `export` in packages, forward `typedef class`
-  [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd_class*].
+- classes (first part done 2026-11-18: properties, constructors, methods inlined with
+  `this`, `extends`/`super`, virtual dispatch, file-scope and package classes; objects never
+  freed). Left: static properties and methods, `C::new`/`C::f()`, typedefs, parameters
+  and enums in classes, parameterized classes, forward `typedef class`, arrays of handles
+  and array properties, class handle ports, string methods on properties, NBAs to
+  properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.
+- `export` in packages [sv_export*].
 - programs: processes run in the Active region, not the Reactive one (as the reference,
   which warns about assignments to module variables), no implicit `$finish` when all
   program `initial` blocks end, no `program` limits on what a module may reference.

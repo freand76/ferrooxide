@@ -1967,6 +1967,10 @@ impl Sim {
             self.exec_assoc(*op, *d, *a, *b, *c, *w, *key, *x);
             return false;
         }
+        if let Instr::Obj { op, d, a, b, off, w } = ins {
+            self.exec_obj(*op, *d, *a, *b, *off, *w);
+            return false;
+        }
         {
             let m = &mut self.mem;
             match ins {
@@ -2214,7 +2218,7 @@ impl Sim {
                 | Instr::RToTicks { .. } => {
                     ops::exec_real(ins, m);
                 }
-                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } => unreachable!("handled before"),
+                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } => unreachable!("handled before"),
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -2635,6 +2639,77 @@ impl Sim {
             let word = if k == 0 { v as u64 } else if v < 0 { !0 } else { 0 };
             self.mem[d + k] = if k == n - 1 { word & ops::mask(w - 64 * k as u32) } else { word };
             self.mem[d + n + k] = 0;
+        }
+    }
+
+    /// A class object operation (`Instr::Obj`).
+    fn exec_obj(&mut self, op: ObjOp, d: u32, a: u32, b: u32, off: u32, w: u32) {
+        let (d, a, b) = (d as usize, a as usize, b as usize);
+        // the object of the handle at slot a
+        let obj = |s: &Self| -> Option<usize> {
+            let h = s.mem[a];
+            (h != 0 && s.mem[a + 1] == 0).then(|| h as usize - 1).filter(|&i| s.heap.get(i).is_some_and(|o| o.is_some()))
+        };
+        match op {
+            ObjOp::New => {
+                let c = &self.prog.classes[w as usize];
+                let o = HObj { data: c.init.clone(), class: w, ..Default::default() };
+                let h = self.alloc_obj(o);
+                self.mem[d] = h;
+                self.mem[d + 1] = 0;
+            }
+            ObjOp::Copy => {
+                let h = match obj(self) {
+                    Some(i) => {
+                        let o = self.heap[i].as_ref().unwrap();
+                        let o = HObj { data: o.data.clone(), class: o.class, ..Default::default() };
+                        self.alloc_obj(o)
+                    }
+                    None => 0,
+                };
+                self.mem[d] = h;
+                self.mem[d + 1] = 0;
+            }
+            ObjOp::Class => {
+                let c = obj(self).map_or(u32::MAX, |i| self.heap[i].as_ref().unwrap().class);
+                self.mem[d] = c as u64;
+                self.mem[d + 1] = 0;
+            }
+            ObjOp::Get => {
+                let n = nw(w);
+                let Some(i) = obj(self) else {
+                    for k in 0..n {
+                        let full = if k == n - 1 { ops::mask(w - 64 * k as u32) } else { !0 };
+                        self.mem[d + k] = full;
+                        self.mem[d + n + k] = full;
+                    }
+                    return;
+                };
+                let o = self.heap[i].as_ref().unwrap();
+                let width = self.prog.classes[o.class as usize].width;
+                let on = nw(width);
+                for k in 0..n {
+                    let len = (w - 64 * k as u32).min(64);
+                    let bit = off + 64 * k as u32;
+                    let (v, x) = (ops::get_bits(&o.data, 0, bit, len), ops::get_bits(&o.data, on, bit, len));
+                    self.mem[d + k] = v;
+                    self.mem[d + n + k] = x;
+                }
+            }
+            ObjOp::Set => {
+                let Some(i) = obj(self) else { return };
+                let n = nw(w);
+                let vals: Vec<(u64, u64)> = (0..n).map(|k| (self.mem[b + k], self.mem[b + n + k])).collect();
+                let o = self.heap[i].as_mut().unwrap();
+                let width = self.prog.classes[o.class as usize].width;
+                let on = nw(width);
+                for (k, (v, x)) in vals.into_iter().enumerate() {
+                    let len = (w - 64 * k as u32).min(64);
+                    let bit = off + 64 * k as u32;
+                    ops::set_bits(&mut o.data, 0, bit, len, v);
+                    ops::set_bits(&mut o.data, on, bit, len, x);
+                }
+            }
         }
     }
 
@@ -4201,6 +4276,8 @@ fn udp_eval(t: &UdpTable, cur: &[u8], prev: &[u8], q: u8) -> u8 {
 struct HObj {
     data: Vec<u64>,
     map: BTreeMap<AKey, Vec<u64>>,
+    /// a class object: its class (`Program::classes`)
+    class: u32,
 }
 
 /// A key of an associative array (integer keys in numeric order, strings lexicographic).

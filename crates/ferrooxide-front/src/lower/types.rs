@@ -32,6 +32,8 @@ pub struct SvType {
     pub heap: Option<HeapKind>,
     /// a type parameter of this name (resolved per instance; `dims` are outer to it)
     pub param: Option<String>,
+    /// a class: its name (the value is a 64-bit handle)
+    pub class: Option<String>,
 }
 
 /// A package: its items (with those of the packages it imports) and its typedefs.
@@ -113,7 +115,7 @@ pub(crate) fn dim_size(r: &Range) -> Expr {
 
 impl SvType {
     pub fn vector(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
-        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None }
+        SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }
     }
 
     /// Width of one element after the packed dimensions.
@@ -349,13 +351,13 @@ impl Lower {
                 }
                 let dims = self.dims(&ty.packed, ty.loc)?;
                 let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
             t::TypeKind::Enum(et) => {
                 if !ty.packed.is_empty() {
                     return self.unsupported(ty.loc, "packed dimensions after an enum");
                 }
-                let int32 = |signed: bool| SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None };
+                let int32 = |signed: bool| SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None, class: None };
                 let base = match &et.base {
                     None => int32(true),
                     Some(b) => match self.data_type(b)? {
@@ -396,13 +398,13 @@ impl Lower {
                     dims.push((num(w as i64 - 1), num(0)));
                 }
                 dims.extend(self.dims(&ty.packed, ty.loc)?);
-                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![], heap: None, param: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
             t::TypeKind::Real(t::RealKw::Real | t::RealKw::Realtime) => {
                 let (kind, signed, iw) = builtin("real").unwrap();
                 let mut dims = vec![(num(iw.unwrap() as i64 - 1), num(0))];
                 dims.extend(self.dims(&ty.packed, ty.loc)?);
-                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
             t::TypeKind::Named(n) => {
                 if n.params.is_some() || n.scopes.iter().any(|s| s.params.is_some()) || n.scopes.len() > 1 {
@@ -475,7 +477,7 @@ impl Lower {
                     return Ok(());
                 }
                 let mut t = if matches!(ty.kind, t::TypeKind::String) && ty.packed.is_empty() {
-                    SvType { kind: NetKind::String, signed: false, dims: vec![], fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None }
+                    SvType { kind: NetKind::String, signed: false, dims: vec![], fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }
                 } else {
                     match self.data_type(ty)? {
                         Some(t) => t,

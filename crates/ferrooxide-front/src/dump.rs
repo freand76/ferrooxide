@@ -115,6 +115,11 @@ pub fn expr(e: &Expr) -> String {
             None => format!("new[{}]", expr(n)),
         },
         Expr::Last => "$".into(),
+        Expr::Null => "null".into(),
+        Expr::EmptyArg => String::new(),
+        Expr::New(args) => format!("new({})", list(args)),
+        Expr::NewCopy(x) => format!("new {}", expr(x)),
+        Expr::MethodCall(o, m, args) => format!("{}.{m}({})", expr(o), list(args)),
         Expr::Pattern(t, items) => {
             let items: Vec<String> = items
                 .iter()
@@ -322,6 +327,8 @@ impl Printer {
         }
         if d.kind == NetKind::Wire {
             s.push_str(&format!("{:?}", d.net).to_lowercase());
+        } else if let Some(c) = d.ty.as_ref().and_then(|t| t.class.as_ref()) {
+            let _ = write!(s, "class {c}");
         } else {
             s.push_str(&format!("{:?}", d.kind).to_lowercase());
         }
@@ -407,6 +414,28 @@ impl Printer {
                 }
             }
             Item::Subroutine(f) => self.subroutine(f),
+            Item::Class(c) => {
+                let mut head = format!("{}class {}", if c.abstract_ { "virtual " } else { "" }, c.name);
+                if let Some(b) = &c.base {
+                    let _ = write!(head, " extends {b}");
+                    if let Some(a) = &c.base_args {
+                        let _ = write!(head, "({})", list(a));
+                    }
+                }
+                self.line(format!("{head};"));
+                self.ind += 1;
+                for d in &c.props {
+                    self.line(Self::decl_text(d));
+                }
+                for f in &c.methods {
+                    if c.virtuals.contains(&f.name) {
+                        self.line("// virtual");
+                    }
+                    self.subroutine(f);
+                }
+                self.ind -= 1;
+                self.line("endclass");
+            }
             Item::GenFor { init_var, init, cond, step_var, step, name: n, items, .. } => {
                 self.line(format!(
                     "for ({init_var} = {}; {}; {step_var} = {}) begin{}",
@@ -606,6 +635,7 @@ impl Printer {
                 self.line(format!("{n}({});", a.join(", ")));
             }
             Stmt::TaskCall { name: n, args, .. } => self.line(format!("{n}({});", list(args))),
+            Stmt::MethodCall { obj, name: n, args, .. } => self.line(format!("{}.{n}({});", expr(obj), list(args))),
             Stmt::Disable { name: n, .. } => self.line(format!("disable {n};")),
             Stmt::Force { lhs, rhs: Some(r), .. } => self.line(format!("force {} = {};", expr(lhs), expr(r))),
             Stmt::Force { lhs, rhs: None, .. } => self.line(format!("release {};", expr(lhs))),

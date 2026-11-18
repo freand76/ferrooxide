@@ -6,6 +6,7 @@
 //! unnamed instances. What has nothing behind it fails with "... is not supported" at its
 //! line. `FX_FRONT=new` selects it (see `crate::parse_files`).
 
+mod class;
 mod expr;
 mod items;
 mod stmt;
@@ -61,6 +62,8 @@ pub(crate) struct Lower {
     in_subroutine: bool,
     /// lowering the items of a program
     in_program: bool,
+    /// classes declared so far: the names their methods reach through `this`
+    classes: HashMap<String, Rc<class::ClassNames>>,
 }
 
 /// Lower the parsed files (one compilation unit unless `separate_units`).
@@ -120,6 +123,7 @@ impl Lower {
             modports: Vec::new(),
             in_subroutine: false,
             in_program: false,
+            classes: HashMap::new(),
         }
     }
 
@@ -196,6 +200,12 @@ impl Lower {
                 Ok(())
             }
             t::Item::Typedef(_) | t::Item::Subroutine(_) => self.unit_scoped(it, rest),
+            t::Item::Class(c) => {
+                // in the `$unit` scope, as file-scope functions
+                let c = self.class_decl(c)?;
+                self.unit_vars.push(Item::Class(Rc::new(c)));
+                Ok(())
+            }
             t::Item::Param(p) if matches!(p.kw, Some(crate::syntax::kw::Kw::Parameter | crate::syntax::kw::Kw::Localparam)) => {
                 self.unit_scoped(it, rest)
             }

@@ -363,6 +363,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
         match e {
             Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last => false,
+            Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::EmptyArg => false,
             // a member of a struct parameter
             Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
@@ -471,6 +472,12 @@ impl<'a> Compiler<'a> {
 
     /// Compile `e` to a value of width `w`, with expression signedness `s` (IEEE context propagation).
     pub(crate) fn expr(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
+        // a property of an object, a method's result, null
+        if !self.classes.list.is_empty() || matches!(e, Expr::Null | Expr::New(_)) {
+            if let Some((v, t)) = self.obj_value(e, sid)? {
+                return self.dyn_to_vec(v, t, w, s);
+            }
+        }
         // a string member of a struct where a vector is needed: its characters
         if !self.code.str_raw && self.member_type(e, sid) == Some(Type::Str) {
             return self.str_to_vec(e, sid, w);
@@ -540,6 +547,8 @@ impl<'a> Compiler<'a> {
                 self.expr(&r, sid, w, s)
             }
             Expr::NewArray(..) | Expr::Last => self.type_of(e, sid).map(|_| NONE),
+            Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..) => self.err("no classes are declared"),
+            Expr::EmptyArg => self.err("an empty argument is allowed only in a call of a function or task"),
             Expr::Num(n) => {
                 let c = Const::number_in(n, w, s).or_else(|m| self.err(m))?;
                 Ok(self.const_slot(&c))
@@ -1171,6 +1180,16 @@ impl<'a> Compiler<'a> {
         let path = format!("{}.{}", self.scopes[def_scope].name, f.name);
         let file = self.file.clone();
         let fs = self.new_scope(path.clone(), Some(def_scope), file);
+        // a method: `this`, the object's handle
+        let this = match self.classes.of_scope.get(&def_scope) {
+            Some(&c) => {
+                let t = self.new_signal(format!("{path}.this"), 64, false, 0, 63, 0, 0, SigKind::Reg);
+                self.sigs.types[t as usize] = Type::Class(c);
+                self.scopes[fs].syms.insert("this".into(), Sym::Sig(t));
+                Some(t)
+            }
+            None => None,
+        };
         let ret = if f.is_task || f.ret_kind == NetKind::Int(0) {
             None
         } else if let Type::Dyn { kind, elem } = self.func_ret_type(f, def_scope)? {
@@ -1180,11 +1199,14 @@ impl<'a> Compiler<'a> {
             let (w, s) = self.func_ret_type(f, def_scope)?.ws();
             let (m, l) = match f.ret_kind {
                 NetKind::Integer => (31, 0),
-                NetKind::Real | NetKind::String => (63, 0),
+                NetKind::Real | NetKind::String | NetKind::Class => (63, 0),
                 _ => self.range_vals(&f.range, def_scope)?,
             };
             let layout = self.layout_for(f.ret_ty.as_ref(), fs)?;
             let sg = self.new_signal(path.clone(), w, s, 0, m, l, 0, SigKind::Reg);
+            if let t @ Type::Class(_) = self.func_ret_type(f, def_scope)? {
+                self.sigs.types[sg as usize] = t;
+            }
             if f.ret_kind == NetKind::Real {
                 self.mark_real(sg);
             }
@@ -1207,7 +1229,7 @@ impl<'a> Compiler<'a> {
                 NetKind::Int(n) if d.range.is_none() => {
                     (m, l) = (n as i64 - 1, 0);
                 }
-                NetKind::Time | NetKind::Real | NetKind::String => (m, l) = (63, 0),
+                NetKind::Time | NetKind::Real | NetKind::String | NetKind::Class => (m, l) = (63, 0),
                 _ => {}
             }
             // packed dimensions: one flat vector [W-1:0], the dimensions kept for selects
@@ -1253,6 +1275,11 @@ impl<'a> Compiler<'a> {
                 if d.kind == NetKind::Event {
                     self.zero_init(sg);
                 }
+                if d.kind == NetKind::Class {
+                    let c = self.class_of_decl(d, fs)?;
+                    self.sigs.types[sg as usize] = Type::Class(c);
+                    self.zero_init(sg);
+                }
                 self.mark_two_state(sg, d.kind);
                 self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
                 self.set_layout(sg, &dl.name, layout.clone(), fs)?;
@@ -1266,7 +1293,7 @@ impl<'a> Compiler<'a> {
             self.scopes[def_scope].children.entry(f.name.clone()).or_insert(fs);
         }
         let mem = (mem_lo, self.prog.mem.len() as u32);
-        self.subr.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem });
+        self.subr.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem, this });
         Ok(())
     }
 
@@ -1281,17 +1308,44 @@ impl<'a> Compiler<'a> {
         let Some((f, fs_def)) = self.lookup_func(name, sid) else {
             return self.err(format!("unknown {} '{name}'", if as_task { "task" } else { "function" }));
         };
-        // missing trailing arguments take their default values (IEEE 1800 13.5.3)
+        self.call_resolved(f, fs_def, name, None, args, sid)
+    }
+
+    /// Inline a call of `f` (declared in scope `fs_def`); `this`: the slot of the object's
+    /// handle for a method.
+    pub(crate) fn call_resolved(
+        &mut self,
+        f: &'a SubroutineDecl,
+        fs_def: usize,
+        name: &str,
+        this: Option<u32>,
+        args: &[Expr],
+        sid: usize,
+    ) -> R<(Option<u32>, u32, bool)> {
+        // missing trailing arguments and empty ones take their default values (IEEE 1800
+        // 13.5.3)
         let filled: Vec<Expr>;
         let args: &[Expr] = {
             let defaults: Vec<Option<&Expr>> =
                 f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|n| n.init.as_ref())).collect();
-            if args.len() < defaults.len() {
-                if let Some(k) = defaults[args.len()..].iter().position(|d| d.is_none()) {
-                    let missing = &f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter()).nth(args.len() + k).unwrap().name;
-                    return self.err(format!("argument '{missing}' of '{name}' has no default value"));
+            // (`f()` of a function with one argument: no argument)
+            let args = if let [Expr::EmptyArg] = args { &[][..] } else { args };
+            if args.len() < defaults.len() || args.iter().any(|a| matches!(a, Expr::EmptyArg)) {
+                let mut v = Vec::new();
+                for k in 0..defaults.len().max(args.len()) {
+                    match (args.get(k), defaults.get(k)) {
+                        (Some(Expr::EmptyArg) | None, Some(Some(d))) => v.push((*d).clone()),
+                        (Some(Expr::EmptyArg) | None, _) => {
+                            let missing = f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter()).nth(k).map(|n| n.name.clone());
+                            return self.err(match missing {
+                                Some(m) => format!("argument '{m}' of '{name}' has no default value"),
+                                None => format!("too many arguments to '{name}'"),
+                            });
+                        }
+                        (Some(a), _) => v.push(a.clone()),
+                    }
                 }
-                filled = args.iter().cloned().chain(defaults[args.len()..].iter().map(|d| d.unwrap().clone())).collect();
+                filled = v;
                 &filled
             } else {
                 args
@@ -1299,7 +1353,7 @@ impl<'a> Compiler<'a> {
         };
         // a call of a function that is being inlined: recursion, through a subroutine
         if let Some(k) = self.subr.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
-            return self.recursive_call(f, k, args, sid);
+            return self.recursive_call(f, k, this, args, sid);
         }
         if self.subr.call_depth > 32 {
             return self.err(format!("calls nested too deeply in '{name}'"));
@@ -1312,9 +1366,9 @@ impl<'a> Compiler<'a> {
         };
         self.func_instance(f, fs_def, &kname)?;
         let key = (fs_def, kname);
-        let (fscope, ret, ports) = {
+        let (fscope, ret, ports, this_sig) = {
             let fi = &self.subr.func_inst[&key];
-            (fi.scope, fi.ret, fi.ports.clone())
+            (fi.scope, fi.ret, fi.ports.clone(), fi.this)
         };
         if args.len() > ports.len() {
             return self.err(format!("too many arguments to '{name}'"));
@@ -1337,6 +1391,16 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
             }
         }
+        if let (Some(h), Some(t)) = (this, this_sig) {
+            let ts = self.sig(t).slot;
+            self.emit(Instr::Copy { d: ts, s: h, w: 64 });
+            // a constructor: the base class's constructor and the property initializers
+            // first, unless the body starts with `super.new(..)`
+            if f.name == "new" && !crate::Compiler::calls_super_new(f) {
+                let c = self.classes.of_scope[&fs_def];
+                self.ctor_prologue(c, ts, None, fscope)?;
+            }
+        }
         self.subr.call_depth += 1;
         self.subr.inline_stack.push((fs_def, f.name.clone(), key.clone()));
         self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
@@ -1344,7 +1408,7 @@ impl<'a> Compiler<'a> {
         // the body is a block `disable <task>` can end
         let bpath = format!("{}.{}", self.scopes[fs_def].name, f.name);
         let reg = self.open_block(bpath);
-        let r = self.stmt(&f.body, fscope);
+        let r = self.auto_inits(f, fscope).and_then(|_| self.stmt(&f.body, fscope));
         self.close_block(reg);
         self.file = saved_file;
         let (_, patches) = self.code.pb.last_mut().unwrap().rets.pop().unwrap();
@@ -1372,18 +1436,46 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    /// The initializers of an automatic subroutine's variables, applied on each call.
+    fn auto_inits(&mut self, f: &'a SubroutineDecl, fscope: usize) -> R<()> {
+        if !f.automatic {
+            return Ok(());
+        }
+        for d in f.decls.iter().filter(|d| d.dir.is_none()) {
+            for n in &d.names {
+                if let Some(init) = &n.init {
+                    let st = Stmt::Assign { lhs: Expr::Ident(n.name.clone()), rhs: init.clone(), nonblocking: false, timing: None, line: n.line };
+                    self.stmt(&st, fscope)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A recursive call: save the function's variables (and temporaries), pass the arguments,
     /// jump to the function's subroutine; results come back in fresh temporaries.
-    fn recursive_call(&mut self, f: &'a SubroutineDecl, key: (usize, String), args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
-        let (ret, ports) = {
+    fn recursive_call(
+        &mut self,
+        f: &'a SubroutineDecl,
+        key: (usize, String),
+        this: Option<u32>,
+        args: &[Expr],
+        sid: usize,
+    ) -> R<(Option<u32>, u32, bool)> {
+        let (ret, ports, this_sig) = {
             let fi = &self.subr.func_inst[&key];
-            (fi.ret, fi.ports.clone())
+            (fi.ret, fi.ports.clone(), fi.this)
         };
         if args.len() > ports.len() {
             return self.err(format!("too many arguments to '{}'", f.name));
         }
         // argument values first (they may read the current frame)
         let mut vals = Vec::new();
+        if let (Some(h), Some(t)) = (this, this_sig) {
+            let k = self.tmp(64);
+            self.emit(Instr::Copy { d: k, s: h, w: 64 });
+            vals.push((t, k));
+        }
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
             if dir == Dir::Input || dir == Dir::Inout {
@@ -1471,6 +1563,7 @@ impl<'a> Compiler<'a> {
             self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
             let bpath = format!("{}.{}", self.scopes[key.0].name, f.name);
             let reg = self.open_block(bpath);
+            self.auto_inits(f, fscope)?;
             let r = self.stmt(&f.body, fscope);
             // (on an error the compilation stops: the state is not cleaned up)
             r?;
@@ -1527,7 +1620,13 @@ impl<'a> Compiler<'a> {
             return self.reads_expr(&n, sid, out);
         }
         match e {
-            Expr::Type(_) | Expr::Last => {}
+            Expr::Type(_) | Expr::Last | Expr::Null | Expr::EmptyArg => {}
+            Expr::New(v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
+            Expr::NewCopy(x) => self.reads_expr(x, sid, out),
+            Expr::MethodCall(o, _, args) => {
+                self.reads_expr(o, sid, out);
+                args.iter().for_each(|x| self.reads_expr(x, sid, out));
+            }
             Expr::NewArray(n, init) => {
                 self.reads_expr(n, sid, out);
                 if let Some(i) = init {
@@ -1677,9 +1776,14 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::IToR { d, s, w, signed });
             return Ok(d);
         }
-        // a real element of a queue or dynamic array
+        // a real element of a queue or dynamic array, a real property of an object
         if self.sigs.has_dyn {
             if let Some((v, _)) = self.dyn_value(e, sid)? {
+                return Ok(v);
+            }
+        }
+        if !self.classes.list.is_empty() {
+            if let Some((v, _)) = self.obj_value(e, sid)? {
                 return Ok(v);
             }
         }
@@ -1838,6 +1942,7 @@ impl<'a> Compiler<'a> {
             Type::Real => self.rexpr(rhs, sid),
             Type::Str => self.str_expr(rhs, sid),
             Type::Dyn { kind, elem } => self.dyn_owned(rhs, kind, elem, sid),
+            Type::Class(c) => self.handle_for(rhs, c, sid),
             Type::Vec { .. } => self.rhs_value(rhs, sid, lw),
         }
     }

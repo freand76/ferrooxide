@@ -402,7 +402,7 @@ impl<'a> Compiler<'a> {
                                 }
                                 SigKind::Integer
                             }
-                            NetKind::Time | NetKind::Real | NetKind::String => {
+                            NetKind::Time | NetKind::Real | NetKind::String | NetKind::Class => {
                                 (m, l) = (63, 0);
                                 SigKind::Reg
                             }
@@ -453,6 +453,11 @@ impl<'a> Compiler<'a> {
                                 self.mark_string(s);
                             }
                             if d.kind == NetKind::Event {
+                                self.zero_init(s);
+                            }
+                            if d.kind == NetKind::Class {
+                                let c = self.class_of_decl(d, b)?;
+                                self.sigs.types[s as usize] = Type::Class(c);
                                 self.zero_init(s);
                             }
                             self.mark_two_state(s, d.kind);
@@ -518,6 +523,16 @@ impl<'a> Compiler<'a> {
                     self.warn(format!("Program {kind} assignments are not currently scheduled in the {region} region."));
                 }
                 if !*nonblocking && timing.is_none() && !self.code.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
+                    return Ok(());
+                }
+                // a property of an object
+                if !self.classes.list.is_empty() && self.has_prop(lhs, sid)? {
+                    if *nonblocking || timing.is_some() {
+                        return self.err("a nonblocking or delayed assignment to a class property is not supported");
+                    }
+                    if !self.prop_assign(lhs, rhs, sid)? {
+                        return self.err("an assignment to a part of a class property is not supported");
+                    }
                     return Ok(());
                 }
                 // an element of a queue or dynamic array (also `<=`: applied at once)
@@ -727,6 +742,10 @@ impl<'a> Compiler<'a> {
             Stmt::SysTask { name, args, line } => {
                 self.line = *line;
                 self.sys_task(name, args, sid)?;
+            }
+            Stmt::MethodCall { obj, name, args, line } => {
+                self.line = *line;
+                self.method_call(obj, name, args, sid)?;
             }
             Stmt::TaskCall { name, args, line } => {
                 self.line = *line;
@@ -1275,6 +1294,12 @@ impl<'a> Compiler<'a> {
             Stmt::Forever { body, .. } | Stmt::Timed { body, .. } => self.reads_stmt_inner(body, sid, out, locals),
             Stmt::SysTask { args, .. } => {
                 for a in args.iter().flatten() {
+                    self.reads_expr(a, sid, out);
+                }
+            }
+            Stmt::MethodCall { obj, args, .. } => {
+                self.reads_expr(obj, sid, out);
+                for a in args {
                     self.reads_expr(a, sid, out);
                 }
             }

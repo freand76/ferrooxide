@@ -11,7 +11,7 @@ impl<'a> Compiler<'a> {
         port_conns: &HashMap<String, Option<Expr>>,
         parent_scope: Option<usize>,
     ) -> R<()> {
-        // 1. subroutines and local parameters of generate scopes
+        // 1. subroutines, classes and local parameters of generate scopes
         for it in items {
             if let Item::Subroutine(f) = it {
                 self.scopes[sid].funcs.insert(f.name.clone(), f);
@@ -36,6 +36,12 @@ impl<'a> Compiler<'a> {
             }
         }
         self.register_defparams(items, sid)?;
+        // (after the parameters, which property types may use)
+        for it in items {
+            if let Item::Class(c) = it {
+                self.declare_class(c, sid)?;
+            }
+        }
         // 2. declarations (merged by name: `output [3:0] q; reg [3:0] q;`)
         struct Merged<'d> {
             dir: Option<Dir>,
@@ -191,7 +197,7 @@ impl<'a> Compiler<'a> {
                     SigKind::Reg
                 }
                 NetKind::Event => SigKind::Reg,
-                NetKind::String => {
+                NetKind::String | NetKind::Class => {
                     (msb, lsb) = (63, 0);
                     SigKind::Reg
                 }
@@ -240,6 +246,25 @@ impl<'a> Compiler<'a> {
                 }
                 let elem = Self::elem_of(mg.kind, width, signed);
                 self.new_dyn(full, &name, elem, h, sid)?;
+                if let Some(init) = mg.init {
+                    let line = self.line;
+                    self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.clone()), rhs: init.clone(), scope: sid, line });
+                }
+                continue;
+            }
+            if mg.kind == NetKind::Class {
+                // a class handle: starts as null; an initializer is assigned at time 0
+                if mg.dir.is_some() || depth > 0 {
+                    return self.err(format!("'{name}': class handle ports and arrays are not supported"));
+                }
+                let c = match mg.ty.and_then(|t| t.class.clone()) {
+                    Some(n) => self.find_class(&n, sid).ok_or_else(|| self.mkerr(format!("unknown class '{n}'")))?,
+                    None => return self.err(format!("'{name}': a class handle without its class")),
+                };
+                let s = self.new_signal(full, 64, false, 0, 63, 0, 0, SigKind::Reg);
+                self.sigs.types[s as usize] = types::Type::Class(c);
+                self.zero_init(s);
+                self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
                 if let Some(init) = mg.init {
                     let line = self.line;
                     self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.clone()), rhs: init.clone(), scope: sid, line });
@@ -439,7 +464,13 @@ impl<'a> Compiler<'a> {
         let order: Vec<&'a Item> = items.iter().filter(|it| is_iface(it)).chain(items.iter().filter(|it| !is_iface(it))).collect();
         for it in order {
             match it {
-                Item::Decl(_) | Item::Param(_) | Item::TypeParam { .. } | Item::Subroutine(_) | Item::Defparam { .. } | Item::SpecPath { .. } => {}
+                Item::Decl(_)
+                | Item::Param(_)
+                | Item::TypeParam { .. }
+                | Item::Subroutine(_)
+                | Item::Class(_)
+                | Item::Defparam { .. }
+                | Item::SpecPath { .. } => {}
                 Item::ContAssign { delay, lhs, rhs, strength, line } => {
                     self.nets.cur_strength = *strength;
                     self.push_job(Job::Assign {

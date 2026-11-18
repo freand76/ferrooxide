@@ -15,6 +15,8 @@ pub(crate) enum Type {
     Str,
     /// a queue, dynamic or associative array: a 64-bit handle of a heap object (`heap.rs`)
     Dyn { kind: DynKind, elem: Elem },
+    /// a handle of an object of this class (`classes.list`; NONE: `null`, `new`)
+    Class(u32),
 }
 
 /// The kind of a `Type::Dyn`.
@@ -62,7 +64,7 @@ impl Type {
     pub(crate) fn width(self) -> u32 {
         match self {
             Type::Vec { w, .. } => w,
-            Type::Real | Type::Str | Type::Dyn { .. } => 64,
+            Type::Real | Type::Str | Type::Dyn { .. } | Type::Class(_) => 64,
         }
     }
 
@@ -71,7 +73,7 @@ impl Type {
         match self {
             Type::Vec { signed, .. } => signed,
             Type::Real => true,
-            Type::Str | Type::Dyn { .. } => false,
+            Type::Str | Type::Dyn { .. } | Type::Class(_) => false,
         }
     }
 
@@ -121,6 +123,11 @@ impl<'a> Compiler<'a> {
     /// string where an operand of a concatenation, replication or condition is one; a real
     /// where an operand of an arithmetic operator or a condition is real; otherwise a vector.
     pub(crate) fn type_of(&mut self, e: &Expr, sid: usize) -> R<Type> {
+        if !self.classes.list.is_empty() || matches!(e, Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..)) {
+            if let Some(t) = self.obj_type_of(e, sid)? {
+                return Ok(t);
+            }
+        }
         if let Some(t) = self.member_type(e, sid) {
             return Ok(t);
         }
@@ -137,6 +144,8 @@ impl<'a> Compiler<'a> {
             Expr::Type(_) => return self.err("a data type is not a value"),
             Expr::Member(..) => return self.member_error(e, sid),
             Expr::NewArray(..) => return self.err("new[] needs a dynamic array to assign to"),
+            Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..) => return self.err("no classes are declared"),
+            Expr::EmptyArg => return self.err("an empty argument is allowed only in a call of a function or task"),
             Expr::Last => return self.err("`$` outside an index of a queue"),
             Expr::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
@@ -310,6 +319,10 @@ impl<'a> Compiler<'a> {
             return Ok(Type::Dyn { kind, elem });
         }
         Ok(match f.ret_kind {
+            NetKind::Class => match f.ret_ty.as_ref().and_then(|t| t.class.as_ref()) {
+                Some(n) => Type::Class(self.find_class(n, fs).ok_or_else(|| self.mkerr(format!("unknown class '{n}'")))?),
+                None => return self.err("a function returning a class handle without its class"),
+            },
             NetKind::Integer => Type::vec(32, true),
             NetKind::Real => Type::Real,
             NetKind::String => Type::Str,
