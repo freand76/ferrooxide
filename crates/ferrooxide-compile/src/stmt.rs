@@ -513,6 +513,10 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
+                if self.in_program(sid) && self.lvalue_outside_program(lhs, sid) {
+                    let (kind, region) = if *nonblocking { ("non-blocking", "Reactive-NBA") } else { ("blocking", "Reactive") };
+                    self.warn(format!("Program {kind} assignments are not currently scheduled in the {region} region."));
+                }
                 if !*nonblocking && timing.is_none() && !self.code.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
@@ -1087,11 +1091,7 @@ impl<'a> Compiler<'a> {
                     }
                     _ => {
                         // the enclosing module instance
-                        let mut t = sid;
-                        while let Some(p) = self.scopes[t].parent {
-                            t = p;
-                        }
-                        (t, None)
+                        (self.instance_scope(sid), None)
                     }
                 };
                 let unit = |e: i32| -> String {

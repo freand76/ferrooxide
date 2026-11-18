@@ -211,6 +211,40 @@ impl<'a> Compiler<'a> {
         v
     }
 
+    /// A final procedure runs in zero time: no nonblocking assignments, delays, event or
+    /// wait controls, task calls (IEEE 1800-2017 9.2.3).
+    fn check_final(&mut self, s: &Stmt, sid: usize) -> R<()> {
+        let mut err = |c: &mut Self, line: u32, what: &str| -> R<()> {
+            c.line = line;
+            c.err(format!("final procedures cannot {what}."))
+        };
+        match s {
+            Stmt::Assign { nonblocking: true, line, .. } => err(self, *line, "have non blocking assignment statements"),
+            Stmt::Assign { timing: Some(_), line, .. } => err(self, *line, "have delay statements"),
+            Stmt::Timed { timing: Timing::Delay(_), line, .. } => err(self, *line, "have delay statements"),
+            Stmt::Timed { line, .. } => err(self, *line, "have event statements"),
+            Stmt::Wait { line, .. } => err(self, *line, "have wait statements"),
+            Stmt::TaskCall { name, line, .. } if self.lookup_func(name, sid).is_some_and(|(f, _)| f.is_task) => {
+                err(self, *line, "enable/call tasks")
+            }
+            Stmt::Block { stmts, .. } => stmts.iter().try_for_each(|x| self.check_final(x, sid)),
+            Stmt::If { then_s, else_s, .. } => {
+                self.check_final(then_s, sid)?;
+                else_s.iter().try_for_each(|x| self.check_final(x, sid))
+            }
+            Stmt::Case { arms, default, .. } => {
+                arms.iter().try_for_each(|a| self.check_final(&a.1, sid))?;
+                default.iter().try_for_each(|x| self.check_final(x, sid))
+            }
+            Stmt::For { body, .. }
+            | Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Repeat { body, .. }
+            | Stmt::Forever { body, .. } => self.check_final(body, sid),
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn codegen_jobs(&mut self) -> R<()> {
         let jobs = std::mem::take(&mut self.code.jobs);
         let jobs = self.alias_assigns(jobs);
@@ -407,6 +441,9 @@ impl<'a> Compiler<'a> {
                     self.begin_proc(name, class);
                     match kind {
                         ProcKind::Initial | ProcKind::Final => {
+                            if *kind == ProcKind::Final {
+                                self.check_final(body, *scope)?;
+                            }
                             self.stmt(body, *scope)?;
                             self.emit(Instr::Halt);
                         }

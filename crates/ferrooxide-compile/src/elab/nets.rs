@@ -252,8 +252,12 @@ impl<'a> Compiler<'a> {
             }
         }
         let mut out = HashSet::new();
+        fn module(m: &Module, out: &mut HashSet<String>) {
+            items(&m.items, out);
+            m.nested.iter().for_each(|n| module(n, out));
+        }
         for m in self.hier.mods.values() {
-            items(&m.items, &mut out);
+            module(m, &mut out);
         }
         out
     }

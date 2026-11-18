@@ -1,0 +1,36 @@
+program top_prog ();
+  // imports pk, $unit
+  int(32) signed n;
+  initial
+    n = pk::W;
+  final
+    $display(n);
+endprogram
+program chk (a);
+  // imports $unit
+  input wire(implicit) [7:0] a;
+  final
+    $display(a);
+endprogram
+module outer ();
+  // timescale 1e-9 / 1e0
+  // imports $unit
+  reg [7:0] s;
+  chk c(s);
+  program setter ();
+    // timescale 1e-9 / 1e0
+    // imports $unit
+    initial
+      s <= 8'h55;
+  endprogram
+  module inner ();
+    // timescale 1e-8 / 1e0
+    // imports $unit
+    reg r;
+    initial
+      r = s[0];
+  endmodule
+endmodule
+package pk ();
+  localparam integer signed W = 4;
+endpackage

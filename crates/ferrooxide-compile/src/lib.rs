@@ -330,8 +330,12 @@ pub fn compile_dialect(
                 }
             }
         }
+        fn scan_mod<'b>(m: &'b Module, used: &mut HashSet<&'b str>) {
+            scan(&m.items, used);
+            m.nested.iter().for_each(|n| scan_mod(n, used));
+        }
         for m in modules {
-            scan(&m.items, &mut used);
+            scan_mod(m, &mut used);
         }
         modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none() && !m.interface && !m.package).collect()
     } else {
@@ -655,6 +659,9 @@ impl<'a> Compiler<'a> {
 
     /// Declared range of a parameter named `name` visible from `sid`.
     pub(crate) fn param_range(&self, name: &str, mut sid: usize) -> Option<(i64, i64)> {
+        if let Some((p, n)) = name.split_once("::") {
+            return self.scopes[*self.hier.pkg_scopes.get(p)?].param_ranges.get(n).copied();
+        }
         loop {
             if self.scopes[sid].syms.contains_key(name) {
                 return self.scopes[sid].param_ranges.get(name).copied();
@@ -669,6 +676,10 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn lookup(&self, name: &str, mut sid: usize) -> Option<Sym> {
+        if let Some((p, n)) = name.split_once("::") {
+            // `pkg::name`: in the package's scope only
+            return self.scopes[*self.hier.pkg_scopes.get(p)?].syms.get(n).cloned();
+        }
         loop {
             if let Some(s) = self.scopes[sid].syms.get(name) {
                 return Some(s.clone());

@@ -59,6 +59,8 @@ pub(crate) struct Lower {
     modports: Vec<String>,
     /// lowering a function or task body
     in_subroutine: bool,
+    /// lowering the items of a program
+    in_program: bool,
 }
 
 /// Lower the parsed files (one compilation unit unless `separate_units`).
@@ -117,6 +119,7 @@ impl Lower {
             mod_pkgs: Vec::new(),
             modports: Vec::new(),
             in_subroutine: false,
+            in_program: false,
         }
     }
 
@@ -156,8 +159,9 @@ impl Lower {
                 t::Description::Directive(d, _) => self.directive(d),
                 t::Description::Module(m) => match m.kind {
                     _ if m.extern_ => return self.unsupported(m.loc, "an extern module declaration"),
-                    t::ModuleKind::Module | t::ModuleKind::Macromodule | t::ModuleKind::Interface => mods.push(self.module(m)?),
-                    t::ModuleKind::Program => return self.unsupported(m.loc, "a program"),
+                    t::ModuleKind::Module | t::ModuleKind::Macromodule | t::ModuleKind::Interface | t::ModuleKind::Program => {
+                        mods.push(self.module(m, false)?)
+                    }
                     t::ModuleKind::Checker => return self.unsupported(m.loc, "a checker"),
                 },
                 t::Description::Udp(u) => mods.push(self.primitive(u)?),
@@ -297,26 +301,35 @@ impl Lower {
             modports: vec![],
             package: true,
             imports,
+            program: false,
+            nested: vec![],
+            is_nested: false,
         }
     }
 
     // ---------------------------------------------------------------- modules
 
-    fn module(&mut self, m: &t::ModuleDecl) -> Result<Module> {
+    /// A module, interface or program; `nested`: declared inside another one, whose names
+    /// (types, variables, imports, time unit) it sees.
+    fn module(&mut self, m: &t::ModuleDecl, nested: bool) -> Result<Module> {
         let line = m.loc.line;
         if m.lifetime == Some(t::Lifetime::Automatic) {
             // (initial values of subroutine variables would be lost)
             return self.unsupported(m.loc, "an automatic default lifetime");
         }
         let interface = m.kind == t::ModuleKind::Interface;
+        let program = m.kind == t::ModuleKind::Program;
+        let saved_program = std::mem::replace(&mut self.in_program, program);
         let mname = self.name(&m.name, m.loc);
         let mut iface_ports = Vec::new();
         self.modports.clear();
         let saved_types = self.types.clone();
         self.local_tu = (None, None);
-        self.vars.clear();
-        self.vars.extend(self.unit_var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
-        self.mod_pkgs.clear();
+        if !nested {
+            self.vars.clear();
+            self.vars.extend(self.unit_var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+            self.mod_pkgs.clear();
+        }
         let mut items = Vec::new();
         self.import(&m.imports, false)?;
         let mut ports = Vec::new();
@@ -337,8 +350,15 @@ impl Lower {
             }
             t::Ports::Ansi(v) => self.ansi_ports(v, &mut ports, &mut iface_ports, &mut items)?,
         }
-        let refs: Vec<&t::Item> = m.items.iter().collect();
+        let refs: Vec<&t::Item> = m.items.iter().filter(|i| !matches!(i, t::Item::Module(_))).collect();
         self.item_list(&refs, &mut items)?;
+        let mut nested_mods = Vec::new();
+        for it in &m.items {
+            if let t::Item::Module(n) = it {
+                nested_mods.push(self.nested_module(m, n)?);
+            }
+        }
+        self.in_program = saved_program;
         self.types = saved_types;
         // names of the packages it uses and of the file scope are found in their scopes
         let pkgs = std::mem::take(&mut self.mod_pkgs);
@@ -361,7 +381,43 @@ impl Lower {
             modports: std::mem::take(&mut self.modports),
             package: false,
             imports,
+            program,
+            nested: nested_mods,
+            is_nested: nested,
         })
+    }
+
+    /// A module or program declared in module `outer`: lowered with the enclosing module's
+    /// names in scope, which are restored afterwards.
+    fn nested_module(&mut self, outer: &t::ModuleDecl, n: &t::ModuleDecl) -> Result<Module> {
+        if n.extern_ {
+            return self.unsupported(n.loc, "an extern module declaration");
+        }
+        if n.kind == t::ModuleKind::Checker {
+            return self.unsupported(n.loc, "a checker");
+        }
+        if outer.kind == t::ModuleKind::Program {
+            return self.err(n.loc, "module, program, or interface declarations are not allowed in program blocks");
+        }
+        if outer.kind == t::ModuleKind::Interface && !matches!(n.kind, t::ModuleKind::Program | t::ModuleKind::Interface) {
+            return self.err(n.loc, "module declarations are not allowed in interfaces");
+        }
+        // the enclosing module's time unit and precision apply unless it declares its own
+        let eff = self.eff_timescale();
+        let saved_ts = std::mem::replace(&mut self.timescale, eff);
+        let saved_tu = self.local_tu;
+        let saved_vars = self.vars.clone();
+        let saved_pkgs = self.mod_pkgs.clone();
+        let saved_modports = std::mem::take(&mut self.modports);
+        let saved_kw = std::mem::take(&mut self.kw_names);
+        let r = self.module(n, true);
+        self.timescale = saved_ts;
+        self.local_tu = saved_tu;
+        self.vars = saved_vars;
+        self.mod_pkgs = saved_pkgs;
+        self.modports = saved_modports;
+        self.kw_names = saved_kw;
+        r
     }
 
     /// The `#(...)` parameter port list of a module.
@@ -536,6 +592,9 @@ impl Lower {
             modports: vec![],
             package: false,
             imports: vec![],
+            program: false,
+            nested: vec![],
+            is_nested: false,
         })
     }
 

@@ -468,15 +468,19 @@ impl Lower {
                     }
                     return Ok(Expr::Call(format!("{p}.{}", n.name), args));
                 }
+                self.use_package(&p);
                 if let Some(t) = pk.types.get(&n.name) {
                     self.types.insert(n.name.clone(), t.clone());
+                    (n.name.clone(), e.loc)
+                } else {
+                    // a parameter (or enum constant) of the package: looked up in its scope,
+                    // not through the imports (another package may have the same name)
+                    (format!("{p}::{}", n.name), e.loc)
                 }
-                self.use_package(&p);
-                (n.name.as_str(), e.loc)
             }
-            Base::Name(n, loc) => (n, loc),
+            Base::Name(n, loc) => (self.name(n, loc), loc),
         };
-        let name = self.name(name, loc);
+        let _ = loc;
         let var = self.vars.get(&name).map(|v| v.0.clone());
         // a variable whose type has members (a struct, or a type parameter): members are
         // resolved in elaboration

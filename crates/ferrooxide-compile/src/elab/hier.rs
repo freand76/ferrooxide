@@ -91,7 +91,9 @@ impl<'a> Compiler<'a> {
         conns: Option<(&'a [Conn], usize)>,
     ) -> R<usize> {
         let saved_file = std::mem::replace(&mut self.file, m.file.clone());
-        let sid = self.new_scope(path.clone(), None, m.file.clone());
+        // a nested module looks up what it does not declare in the enclosing instance
+        let outer = if m.is_nested { conns.map(|c| c.1) } else { None };
+        let sid = self.new_scope(path.clone(), outer, m.file.clone());
         self.hier.scope_module.insert(sid, m);
         self.scopes[sid].imports = m.imports.iter().filter_map(|n| self.hier.pkg_scopes.get(n).copied()).collect();
         self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
@@ -237,6 +239,16 @@ impl<'a> Compiler<'a> {
             self.scopes[sid].children.insert(pn.clone(), target);
         }
         self.elab_items(&m.items, sid, true, &port_conns, parent_scope)?;
+        // nested modules without ports that are not instantiated explicitly: one instance
+        // each, named after the module (IEEE 1800-2017 23.4)
+        for n in &m.nested {
+            if n.ports.is_empty() && n.iface_ports.is_empty() && !Self::instantiates(&m.items, &n.name) {
+                self.line = n.line;
+                let path = format!("{path}.{}", n.name);
+                let child = self.instantiate(n, path, &[], Some((&[], sid)))?;
+                self.scopes[sid].children.insert(n.name.clone(), child);
+            }
+        }
         if let Some(ps) = parent_scope {
             // after the instance's own children, as Icarus orders them
             self.port_width_warnings(m, sid, ps, &port_conns, &saved_file, inst_line)?;
@@ -244,6 +256,73 @@ impl<'a> Compiler<'a> {
         self.file = saved_file;
         self.line = inst_line;
         Ok(sid)
+    }
+
+    /// Whether `items` (with generate constructs) instantiate module `name`.
+    fn instantiates(items: &[Item], name: &str) -> bool {
+        items.iter().any(|it| match it {
+            Item::Instances { module, .. } => module == name,
+            Item::GenFor { items, .. } | Item::GenBlock { items, .. } => Self::instantiates(items, name),
+            Item::GenIf { then_items, else_items, .. } => {
+                Self::instantiates(then_items, name) || Self::instantiates(else_items, name)
+            }
+            Item::GenCase { arms, .. } => arms.iter().any(|a| Self::instantiates(&a.2, name)),
+            _ => false,
+        })
+    }
+
+    /// The module `name` instantiated in scope `sid`: one declared in an enclosing module
+    /// instance (innermost first), else a top-level one.
+    pub(crate) fn find_module(&self, name: &str, sid: usize) -> Option<&'a Module> {
+        let mut x = Some(sid);
+        while let Some(s) = x {
+            if let Some(m) = self.hier.scope_module.get(&s) {
+                if let Some(n) = m.nested.iter().find(|n| n.name == name) {
+                    return Some(n);
+                }
+            }
+            x = self.scopes[s].parent;
+        }
+        self.hier.mods.get(name).copied()
+    }
+
+    /// The module instance scope that `sid` (a block or generate scope) belongs to.
+    pub(crate) fn instance_scope(&self, mut sid: usize) -> usize {
+        while !self.hier.scope_module.contains_key(&sid) {
+            match self.scopes[sid].parent {
+                Some(p) => sid = p,
+                None => break,
+            }
+        }
+        sid
+    }
+
+    /// Whether scope `sid` is in a program instance.
+    pub(crate) fn in_program(&self, sid: usize) -> bool {
+        self.hier.scope_module.get(&self.instance_scope(sid)).is_some_and(|m| m.program)
+    }
+
+    /// Whether an assignment target names a variable declared outside programs (programs
+    /// should update those in the Reactive region, which is not modelled).
+    pub(crate) fn lvalue_outside_program(&self, e: &Expr, sid: usize) -> bool {
+        match e {
+            Expr::Ident(n) => {
+                let mut x = Some(sid);
+                while let Some(s) = x {
+                    if self.scopes[s].syms.contains_key(n) {
+                        return !self.in_program(s);
+                    }
+                    x = self.scopes[s].parent;
+                }
+                false
+            }
+            Expr::Hier(p) => self.hier_scope(&p[..p.len() - 1], sid).is_some_and(|s| !self.in_program(s)),
+            Expr::Index(b, _) | Expr::Range(b, ..) | Expr::IndexedRange(b, ..) | Expr::Member(b, _) => {
+                self.lvalue_outside_program(b, sid)
+            }
+            Expr::Concat(v) => v.iter().any(|x| self.lvalue_outside_program(x, sid)),
+            _ => false,
+        }
     }
 
     pub(crate) fn push_job(&mut self, j: Job<'a>) {

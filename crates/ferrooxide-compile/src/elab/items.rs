@@ -435,7 +435,7 @@ impl<'a> Compiler<'a> {
         // 4. everything else; interface instances first, so that modules can be connected to
         // interfaces declared after them
         let mut genblk = 0;
-        let is_iface = |it: &Item| matches!(it, Item::Instances { module, .. } if self.hier.mods.get(module.as_str()).is_some_and(|m| m.interface));
+        let is_iface = |it: &Item| matches!(it, Item::Instances { module, .. } if self.find_module(module, sid).is_some_and(|m| m.interface));
         let order: Vec<&'a Item> = items.iter().filter(|it| is_iface(it)).chain(items.iter().filter(|it| !is_iface(it))).collect();
         for it in order {
             match it {
@@ -456,8 +456,8 @@ impl<'a> Compiler<'a> {
                 }
                 Item::Instances { module, params, insts, line } => {
                     self.line = *line;
-                    let m = match self.hier.mods.get(module.as_str()) {
-                        Some(m) => *m,
+                    let m = match self.find_module(module, sid) {
+                        Some(m) => m,
                         None => return self.err(format!("unknown module '{module}'")),
                     };
                     if m.udp.is_some() {

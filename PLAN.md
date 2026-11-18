@@ -130,7 +130,11 @@ instance, shared), `timeunit`/`timeprecision` (module and file scope), time lite
 `input var`/`input logic` port kinds, `-u` (separate compilation units), `unique`/`priority`
 case and if warnings for unmatched values, `break;`/`continue;`, prefix `++a;`/`--a;`,
 `inside` and `case ... inside`, `foreach`, several variables and steps in a `for` header,
-`iff`, `.triggered`.
+`iff`, `.triggered`, `program` blocks (also nested in modules; no `always`, instances,
+gates or nested declarations in them), nested module declarations (23.4: without ports
+instantiated once under their own name; names not found inside are looked up in the
+enclosing instance), the checks on `final` procedures (no NBAs, delays, event or wait
+controls, task calls).
 
 *A1, first part (types in elaboration).* Packages and `$unit` are scopes of their own,
 elaborated once (`Module::package`; `Scope::imports` for lookups after a module's own names).
@@ -323,12 +327,12 @@ deterministic, long runs cancellable, a memory budget for history.
 2. **Types in elaboration** (rest of A1, = R4): a type per signal in the compiler (string,
    queue, ...) and expression typing that uses it; then struct layout and member access move
    out of the parser.
-3. **SystemVerilog RTL items**: struct-typed function arguments with patterns, nested module
-   declarations (`sv_timeunit_prec3b`), `export` in packages.
+3. **SystemVerilog RTL items**: struct-typed function arguments with patterns, `export` in
+   packages.
 4. **Heap objects** (A2): queues, dynamic and associative arrays (mutable objects: handles to
    a separate heap with copy on assignment).
 5. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
-   loop. Then classes and `program`; VPI (A4) on the same base. (First SV measurement, as a
+   loop. Then classes (programs done 2026-11-18); VPI (A4) on the same base. (First SV measurement, as a
    size hint: queues/dynamic arrays ~76 failing tests, `program` 49, classes 19.)
 6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them): the
    Verilog items under "Unsupported (known)", from compiler warnings and `%v` (needs strength
@@ -605,17 +609,21 @@ standard that we match are in `ICARUS_NOTES.md`):
 Kept up to date as features stop short; regression-suite test names in brackets.
 
 SystemVerilog data types and testbench features:
-- queues `[$]`, dynamic arrays `[]`, associative arrays (also in typedefs) [sv_queue*,
-  sv_darray*]: need heap objects beyond strings (A2).
-- classes, `program` blocks, `export` in packages, forward `typedef class`
+- queues of structs, arrays of queues, queue ports, `%p`, array methods (`sort`, `find`, ...
+  `with`), queue element writes with `<=` (done at once), keyed patterns for associative
+  arrays, class or wider keys (see R4 slice 4).
+- classes, `export` in packages, forward `typedef class`
   [sv_class*, sv_port_default*, sv_export*, sv_typedef_fwd_class*].
+- programs: processes run in the Active region, not the Reactive one (as the reference,
+  which warns about assignments to module variables), no implicit `$finish` when all
+  program `initial` blocks end, no `program` limits on what a module may reference.
 - initial values of variables declared in functions and tasks are not applied; the front
   ends reject explicit lifetimes there (`static int acc = 1;`) and `module automatic`
   [func_init_var*, task_init_var*].
 - struct members of variables whose type is a type parameter; unpacked structs (struct
   layout is still resolved in the parser, A1); struct-typed function arguments with patterns.
-- nested module declarations [sv_timeunit_prec3b]; multi-dimensional interface port
-  arrays; modport directions are not enforced (writing an input of a modport, members not
+- nested modules with ports instantiated from outside their module; multi-dimensional
+  interface port arrays; modport directions are not enforced (writing an input of a modport, members not
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
   a forward typedef defined in another scope than its declaration.
 - `.triggered` only on events declared in a module (not in tasks, functions or blocks).

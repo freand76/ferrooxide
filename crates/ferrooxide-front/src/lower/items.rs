@@ -49,6 +49,19 @@ impl Lower {
     }
 
     pub(crate) fn module_item(&mut self, it: &t::Item, rest: &[&t::Item], items: &mut Vec<Item>) -> Result<()> {
+        if self.in_program {
+            // (IEEE 1800-2017 24.3)
+            match it {
+                t::Item::Process(p) if !matches!(p.kind, t::ProcKind::Initial | t::ProcKind::Final) => {
+                    return self.err(p.loc, "Always statements are not allowed in program blocks.");
+                }
+                t::Item::Instances(_) => return self.err(item_loc(it), "Module instantiations are not allowed in program blocks."),
+                t::Item::Gates(_) => {
+                    return self.err(item_loc(it), "Gates and switches may not be instantiated in program blocks.");
+                }
+                _ => {}
+            }
+        }
         match it {
             t::Item::Empty(_) => {}
             t::Item::Directive(d, _) => self.directive(d),

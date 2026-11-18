@@ -32,6 +32,14 @@ pub struct Module {
     pub package: bool,
     /// packages (and `$unit`) whose variables the module sees after its own names
     pub imports: Vec<String>,
+    /// a `program ... endprogram`
+    pub program: bool,
+    /// modules and programs declared inside this one (visible only here; those without
+    /// ports are instantiated once, under their own name)
+    pub nested: Vec<Module>,
+    /// declared inside another module: names not found in it are looked up in the enclosing
+    /// instance
+    pub is_nested: bool,
 }
 
 /// A UDP table. Each row: input symbols ("0", "1", "x", "?", "b", "r", "f", "p", "n", "*" or an

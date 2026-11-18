@@ -10,7 +10,7 @@ module top ();
   reg [(6 - 1):0] w2;
   initial begin
     r.w = 6'd5;
-    w2 = N;
+    w2 = q::N;
     counter = inc(counter);
   end
 endmodule

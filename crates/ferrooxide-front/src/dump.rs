@@ -249,6 +249,8 @@ impl Printer {
             "package"
         } else if m.interface {
             "interface"
+        } else if m.program {
+            "program"
         } else {
             "module"
         };
@@ -296,6 +298,9 @@ impl Printer {
             self.line("endtable");
         }
         self.items(&m.items);
+        for n in &m.nested {
+            self.module(n);
+        }
         self.ind -= 1;
         self.line(format!("end{kind}"));
     }
