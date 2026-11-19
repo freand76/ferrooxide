@@ -3,8 +3,9 @@
 Results of ferrooxide on [chipsalliance/sv-tests](https://github.com/chipsalliance/sv-tests)
 with the ferrooxide runner (`tools/runners/ferrooxide.py`), run on 2026-11-19 at a5d09e5.
 
-A snapshot: the priorities are in PLAN.md ("Next steps"). To be replaced by a script that
-reruns the tests and regenerates these tables.
+A snapshot: the priorities are in PLAN.md ("Next steps"). `tests/svtests.py` reruns the
+tests the same way (with a baseline, `--tags` for pass rates per tag); 4370 of 5112 pass at
+the commit that added it, after priorities 2, 3 and 5 below.
 
 The runner maps the sv-tests modes to ferrooxide options:
 
@@ -52,10 +53,10 @@ PLAN.md refers to them.
 | # | Gap | Tests | Why here |
 |---:|---|---:|---|
 | 1 | ~~Preprocessor bugs 1-3 above~~ | done | Fixed in 19dec15 and 5500bb2 |
-| 2 | Parameters with several packed dimensions (`localparam bit [1:0][4:0][4:0] X = ...`), also as a function return type (rggen) and after an enum | 368 | One construct in one package blocks all 360 basejump tests and the black-parrot ones; packed multi-dimensional vectors already exist for variables |
-| 3 | Reject SystemVerilog keywords used as identifiers (in SV mode; keep `-g2005` permissive) | 184 | `--lint` already detects it, so this is mostly turning a finding into an error |
+| 2 | ~~Parameters with several packed dimensions (`localparam bit [1:0][4:0][4:0] X = ...`), also as a function return type (rggen) and after an enum~~ done | 368 | One construct in one package blocks all 360 basejump tests and the black-parrot ones; packed multi-dimensional vectors already exist for variables |
+| 3 | ~~Reject SystemVerilog keywords used as identifiers (in SV mode; keep `-g2005` permissive)~~ done | 184 | `--lint` already detects it, so this is mostly turning a finding into an error |
 | 4 | ~~Bugs 4-6 above~~ | done | Fixed in edafe75, 4abd645, cdd81aa and a5d09e5 |
-| 5 | Named arguments in calls (`f(.clear(x), .set(y))`) | 2 | Blocks two real cores (TNoC, RSD); a contained change in call lowering |
+| 5 | ~~Named arguments in calls (`f(.clear(x), .set(y))`)~~ done | 2 | Blocks two real cores (TNoC, RSD); a contained change in call lowering |
 | 6 | Checks that reject invalid code: conflicting non-ANSI port declarations, enum base/compatibility rules, `automatic` misuse, constant-expression checks, lvalue selects, real as index or in a concatenation, multiple continuous drivers of a variable, procedural assignment to a net, `local`/`protected` access, macro argument count and `` `line `` arguments | 228 | The other half of "elaboration mode for sv-tests" in PLAN.md. Many small checks; take the largest families first (non-ANSI ports 37, enums 21, automatic 13, constants 11) |
 | 7 | Array methods with `with`, locator and ordering methods (`find*`, `sort`, `rsort`, `shuffle`, `reverse`, `unique*`), reduction methods (`sum`, `product`, `and`, `or`, `xor`) | 25 | Already listed as "not yet" in the README; common in testbenches |
 | 8 | Concurrent assertions, `sequence`, `property`, `expect`, and clocking blocks | 58 | Used by real cores (ariane) and many §14/§16/§20 tests; large but well-bounded area |

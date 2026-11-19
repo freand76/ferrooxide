@@ -32,6 +32,8 @@ tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: test
 tests/regress.sh [--baseline]        # both regression lists, per-test changes vs the baseline
 tests/parsecheck.py [--baseline]     # parser (--parse-only) over sv-tests, the regression
                                      # suite, tests/ and real designs; changes vs the baseline
+tests/svtests.py [--baseline] [--tags]  # sv-tests as its ferrooxide runner runs them (all
+                                     # modes, :assert: checks); changes vs the baseline
 cargo build --profile speed          # with LTO, for speed measurements only (target/speed/)
 perf stat -e cycles target/speed/ferrooxide bench/cpuish.v   # perf works on this machine
 ```

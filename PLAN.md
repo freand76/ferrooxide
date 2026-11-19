@@ -381,8 +381,11 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    tests pass. Named arguments in calls (`f(.clear(x), .set(y))`) done; TNoC now stops at
    a typedef of an interface port's type, RSD (after a fix for package types whose
    dimensions use names the package imported) at a struct member through an interface
-   port (`cacheSystem.icMemAccessResult.data`, step 4). Next: a script like `parsecheck.py` over the elaboration and simulation tests with a
-   baseline, so the pass rate per tag can be tracked.
+   port (`cacheSystem.icMemAccessResult.data`, step 4). `tests/svtests.py` runs sv-tests as the runner does
+   (modes, `:assert:` checks; 3845 of 5112 at a5d09e5, matching the official run) with a
+   baseline and pass rates per tag (`--tags`): 4370 of 5112 (85.5%) at the end of this step.
+   Left from the run: 2 crashes (stack overflow in regress-vlg_pr2728812b/c), 3 failed
+   `:assert:` checks; then priorities 6-11 of `SV_TESTS.md`.
 2. **Dynamic processes, subroutine calls, dynamic waiters** (A3). *First part done
    2026-11-19*: a fork branch started again while it still runs (fork/join_none in a loop)
    becomes another instance of the branch: a process id from `Sim::inst_base` on, running
