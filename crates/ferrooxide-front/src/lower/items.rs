@@ -237,6 +237,7 @@ impl Lower {
                     type_param: None,
                     ty: None,
                     names,
+                    automatic: false,
                     line,
                 };
                 items.append(&mut self.pending);

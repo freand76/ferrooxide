@@ -1,0 +1,17 @@
+module m ();
+  // imports $unit
+  initial begin
+    begin
+      automatic int(32) signed i;
+      for (i = 0; (i < 2); i = (i + 1)) fork
+        automatic int(32) signed k = i;
+        begin
+          automatic int(32) signed n = k;
+          #(1)
+            $display(n);
+        end
+      join_none
+    end
+    wait fork;
+  end
+endmodule

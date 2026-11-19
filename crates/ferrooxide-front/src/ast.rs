@@ -140,6 +140,9 @@ pub struct Decl {
     /// resolved against it); kind, sign and ranges above are its flat form
     pub ty: Option<std::rc::Rc<crate::lower::SvType>>,
     pub names: Vec<Declarator>,
+    /// declared `automatic` in a block: each activation (each instance of a fork branch) has
+    /// its own copy
+    pub automatic: bool,
     pub line: Line,
 }
 

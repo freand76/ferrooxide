@@ -116,6 +116,9 @@ pub struct ProcDef {
     /// waits and the frames of automatic subroutines it calls. Several instances of the
     /// branch running at once take turns holding it.
     pub frame: Vec<(u32, u32)>,
+    /// the frame holds automatic variables of the fork block: their values when the branch
+    /// is started (set by the forking process) are its instance's own
+    pub capture: bool,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -275,6 +278,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         | Instr::Halt
         | Instr::Fork { .. }
         | Instr::WaitFork
+        | Instr::Evict { .. }
         | Instr::Disable { .. }
         | Instr::Kick { .. }
         | Instr::Touch { .. } => vec![],
@@ -698,6 +702,9 @@ pub enum Instr {
     Fork { children: Box<[u32]>, join: u8 },
     /// `wait fork`: suspend until the fork branches this process started have all ended
     WaitFork,
+    /// before a fork block sets its automatic variables: the branches' frames (holding them)
+    /// are saved, so that the new values do not overwrite a running instance's
+    Evict { defs: Box<[u32]> },
     /// disable the named blocks / tasks of `Program::disables[target]`
     Disable { target: u32 },
     /// re-evaluate the waiting processes that write `sig` (a released net takes its drivers'

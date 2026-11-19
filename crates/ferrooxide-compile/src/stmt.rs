@@ -377,6 +377,8 @@ impl<'a> Compiler<'a> {
         match st {
             Stmt::Null => {}
             Stmt::Block { name, decls, stmts, fork } => {
+                // a fork block's automatic variables belong to each branch (see below)
+                let evict = (fork.is_some() && decls.iter().any(|d| d.automatic)).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
                 let bsid = if name.is_some() || !decls.is_empty() {
                     let path = match name {
                         Some(n) => format!("{}.{}", self.scopes[sid].name, n),
@@ -475,6 +477,21 @@ impl<'a> Compiler<'a> {
                 } else {
                     sid
                 };
+                // the memory of the automatic variables: private to a fork branch running here
+                let mut auto_mem: Vec<(u32, u32)> = Vec::new();
+                for d in decls.iter().filter(|d| d.automatic) {
+                    for n in &d.names {
+                        if let Some(Sym::Sig(s)) = self.scopes[bsid].syms.get(&n.name).cloned() {
+                            let i = self.sig(s);
+                            auto_mem.push((i.slot, rt::words(i.width) * i.depth.max(1)));
+                        }
+                    }
+                }
+                if fork.is_none() {
+                    for &(lo, n) in &auto_mem {
+                        self.note_frame(lo, lo + n);
+                    }
+                }
                 let reg = match name {
                     Some(n) => {
                         let path = format!("{}.{}", self.scopes[sid].name, n);
@@ -509,6 +526,16 @@ impl<'a> Compiler<'a> {
                             Join::Any => 1,
                             Join::None => 2,
                         };
+                        if let Some(e) = evict {
+                            // each branch has the fork block's automatic variables of its own
+                            for &c in &children {
+                                let pd = &mut self.prog.procs[c as usize];
+                                pd.frame.extend(auto_mem.iter().copied());
+                                pd.frame = crate::codegen::merge_ranges(std::mem::take(&mut pd.frame));
+                                pd.capture = true;
+                            }
+                            self.code.pb.last_mut().unwrap().code[e] = Instr::Evict { defs: children.clone().into_boxed_slice() };
+                        }
                         if !children.is_empty() {
                             self.emit(Instr::Fork { children: children.into_boxed_slice(), join });
                         }

@@ -87,8 +87,10 @@ impl Lower {
                     if v.const_ {
                         return self.unsupported(v.loc, "a const variable");
                     }
-                    if v.lifetime == Some(t::Lifetime::Automatic) || (v.lifetime.is_some() && self.in_subroutine) {
-                        return self.unsupported(v.loc, "an automatic variable declaration");
+                    // (a static variable in a subroutine's block would need its initial value
+                    // once, not on each entry)
+                    if v.lifetime == Some(t::Lifetime::Static) && self.in_subroutine {
+                        return self.unsupported(v.loc, "a static variable in a block of a subroutine");
                     }
                     (None, v.var, &v.ty, &v.decls, None, None, v.loc)
                 }
@@ -101,6 +103,7 @@ impl Lower {
                 d.kind = NetKind::Reg;
             }
             d.names = self.declarators(dl)?;
+            d.automatic = matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
             decls.push(d);
         }
         Ok(decls)
@@ -230,14 +233,17 @@ impl Lower {
                 for fi in init {
                     match fi {
                         t::ForInit::Decl { var, ty, name, init, loc } => {
+                            // (loop variables are automatic, IEEE 1800-2017 12.7.1)
                             if let Some(ty) = ty {
                                 let mut d = self.decl_head(None, None, *var, ty, None, None, *loc)?;
                                 d.names.clear();
+                                d.automatic = true;
                                 decls.push(d);
                             } else if *var {
                                 let ty = t::DataType { kind: t::TypeKind::Implicit, signed: None, packed: vec![], loc: *loc };
                                 let mut d = self.decl_head(None, None, true, &ty, None, None, *loc)?;
                                 d.names.clear();
+                                d.automatic = true;
                                 decls.push(d);
                             }
                             let name = self.name(name, *loc);
@@ -565,6 +571,7 @@ impl Lower {
             type_param: None,
             ty: None,
             names: vec![Declarator { name: n.to_string(), dims: vec![], heap: None, init: None, line }],
+            automatic: true,
             line,
         };
         // the loop variable: of the key type (`[*]`: 64-bit)
@@ -622,6 +629,7 @@ impl Lower {
             type_param: None,
             ty: None,
             names: vec![Declarator { name: v.clone(), dims: vec![], heap: None, init: None, line }],
+            automatic: true,
             line,
         };
         Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![lp], fork: None })
@@ -687,6 +695,7 @@ impl Lower {
             type_param: None,
             ty: None,
             names,
+            automatic: true,
             line,
         };
         Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![body], fork: None })

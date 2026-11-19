@@ -322,6 +322,9 @@ impl Printer {
 
     fn decl_text(d: &Decl) -> String {
         let mut s = String::new();
+        if d.automatic {
+            s.push_str("automatic ");
+        }
         if let Some(dir) = d.dir {
             s.push_str(match dir {
                 Dir::Input => "input ",

@@ -18,13 +18,13 @@ module top ();
     q.push_back(2);
     t = f(q);
     begin
-      int(32) signed i;
+      automatic int(32) signed i;
       for (i = 0; (i < q.size()); i = (i + 1))
         b.push_front(q[i]);
     end
     begin
-      string k;
-      int(32) signed k$ok;
+      automatic string k;
+      automatic int(32) signed k$ok;
       for (k$ok = aa.first(k); k$ok; k$ok = aa.next(k))
         aa[k] = aa.num();
     end

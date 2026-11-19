@@ -32,12 +32,12 @@ module top (clk);
     end
   initial begin
     begin
-      int(32) signed k;
+      automatic int(32) signed k;
       for (k = 0; ((0 >= (2 - 1)) ? (k >= (2 - 1)) : (k <= (2 - 1))); k = ((0 >= (2 - 1)) ? (k - 1) : (k + 1)))
         arr[k] = '0;
     end
     begin
-      int(32) signed j;
+      automatic int(32) signed j;
       for (j = 0; (j < (((0 >= (2 - 1)) ? (0 - (2 - 1)) : (2 - 1)) + 1)); j = (j + 1)) begin
         if (((j ==? 0) || (j ==? 1)))
           continue;

@@ -346,8 +346,12 @@ deterministic, long runs cancellable, a memory budget for history.
    the branch's code (JIT: a copy of its table with the instance's id), woken through the
    branch's fan-out entries (`notify_insts`). The branch's private memory
    (`ProcDef::frame`: temporaries that live across waits, frames of automatic subroutines it
-   calls) is swapped between instances when another one runs. Left: automatic variables
-   declared in fork blocks (`fork automatic int k = i; ... join_none`), real subroutine
+   calls, automatic block and loop variables) is swapped between instances when another one
+   runs. Automatic variables of a fork block are part of each branch's frame and keep the
+   value the forking process gave them (`ProcDef::capture`, `Instr::Evict` before the
+   block sets them). Cost: about 3% more cycles on bench/cpuish (instance checks in
+   `exec`/`notify`). Left: the branches of one fork each get their own copy of the fork
+   block's automatic variables (the standard shares one between them), real subroutine
    calls, dynamic waiters for run-time targets. Then classes (programs done 2026-11-18); VPI (A4) on the same base. (First SV measurement, as a
    size hint: queues/dynamic arrays ~76 failing tests, `program` 49, classes 19.)
 6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them): the
@@ -639,8 +643,8 @@ SystemVerilog data types and testbench features:
 - programs: processes run in the Active region, not the Reactive one (as the reference,
   which warns about assignments to module variables), no implicit `$finish` when all
   program `initial` blocks end, no `program` limits on what a module may reference.
-- explicit lifetimes on variables in blocks inside functions and tasks, and a lifetime
-  other than the subroutine's (`static` in an automatic function) [func_init_var2,
+- `static` variables in blocks inside functions and tasks, and a variable lifetime other
+  than the subroutine's (`static` in an automatic function) [func_init_var2,
   task_init_var2].
 - struct members of variables whose type is a type parameter; unpacked structs (struct
   layout is still resolved in the parser, A1); struct-typed function arguments with patterns.
@@ -682,8 +686,7 @@ Verilog / scheduling:
   `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
 - multi-dimensional arrays as ports and in whole-array assignments, array ports connected
   to arrays of another shape (index range, direction), assignment patterns for unpacked
-  arrays, a timing control in a whole-array assignment; automatic variables in fork blocks
-  (each instance of a branch would need its own copy, A3); VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
+  arrays, a timing control in a whole-array assignment; VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
   `` `uselib ``).
 - recursion copies frames (fine for testbench code, slow for deep recursion).
 - interactive/MCP `force` of a net made an alias of its source (`assign z = a`) forces the

@@ -489,8 +489,9 @@ impl Sim {
             inst_free: Vec::new(),
             insts: vec![Vec::new(); nprocs as usize],
             any_insts: false,
-            resident: vec![FRAME_OFF; nprocs as usize],
-            any_swap: false,
+            // (branches with fork-block variables share their frame from the start)
+            resident: prog.procs.iter().map(|p| if p.capture { FRAME_FREE } else { FRAME_OFF }).collect(),
+            any_swap: prog.procs.iter().any(|p| p.capture),
             saved_frames: HashMap::new(),
             #[cfg(feature = "jit")]
             inst_entries: Vec::new(),
@@ -1053,14 +1054,11 @@ impl Sim {
         if r == q {
             return;
         }
-        let frame = std::mem::take(&mut self.prog.procs[d as usize].frame);
         if r != FRAME_FREE {
-            let mut v = Vec::new();
-            for &(lo, n) in &frame {
-                v.extend_from_slice(&self.mem[lo as usize..(lo + n) as usize]);
-            }
+            let v = self.frame_words(d);
             self.saved_frames.insert(r, v);
         }
+        let frame = std::mem::take(&mut self.prog.procs[d as usize].frame);
         match self.saved_frames.remove(&q) {
             Some(v) => {
                 let mut k = 0;
@@ -1078,6 +1076,15 @@ impl Sim {
         }
         self.prog.procs[d as usize].frame = frame;
         self.resident[d as usize] = q;
+    }
+
+    /// The current contents of branch `d`'s frame.
+    fn frame_words(&self, d: u32) -> Vec<u64> {
+        let mut v = Vec::new();
+        for &(lo, n) in &self.prog.procs[d as usize].frame {
+            v.extend_from_slice(&self.mem[lo as usize..(lo + n) as usize]);
+        }
+        v
     }
 
     /// Instance or branch `p` has ended: its frame is no longer needed; an extra instance's
@@ -1137,6 +1144,14 @@ impl Sim {
                     }
                 }
             };
+            // the fork block's automatic variables, as the forking process set them
+            if self.prog.procs[d as usize].capture {
+                let v = self.frame_words(d);
+                self.saved_frames.insert(c, v);
+                if self.resident[d as usize] == c {
+                    self.resident[d as usize] = FRAME_FREE;
+                }
+            }
             let ch = &mut self.procs[c as usize];
             ch.parent = p;
             ch.pc = 0;
@@ -1343,7 +1358,6 @@ impl Sim {
         }
     }
 
-    #[inline]
     /// Instances of fork branches wait on their branch's controls: those in fan-out entries
     /// [lo, hi) whose control fires join `wake_buf`.
     #[cold]
@@ -1365,6 +1379,7 @@ impl Sim {
         }
     }
 
+    #[inline]
     fn notify(&mut self, sig: u32, old: u8) {
         let r = self.sigs[sig as usize];
         if let Some(st) = &mut self.genstats {
@@ -2317,6 +2332,16 @@ impl Sim {
                         pr.pc = *pc as u32;
                         pr.wait = NONE;
                         return true;
+                    }
+                }
+                Instr::Evict { defs } => {
+                    for &d in defs.iter() {
+                        let r = self.resident[d as usize];
+                        if r != FRAME_OFF && r != FRAME_FREE {
+                            let v = self.frame_words(d);
+                            self.saved_frames.insert(r, v);
+                            self.resident[d as usize] = FRAME_FREE;
+                        }
                     }
                 }
                 Instr::WaitFork => {

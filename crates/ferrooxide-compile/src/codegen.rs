@@ -83,7 +83,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
         self.code.proc_scope.push(self.code.job_scope);
-        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false, kick0: false, frame: Vec::new() });
+        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false, kick0: false, frame: Vec::new(), capture: false });
         self.code.pb.push(PState { proc: id, ..Default::default() });
         self.code.scratch_saved.push(self.code.scratch_top);
         self.code.scratch_top = 0;
@@ -102,16 +102,7 @@ impl<'a> Compiler<'a> {
         let st = self.code.pb.pop().unwrap();
         self.prog.procs[st.proc as usize].code = st.code;
         if !st.frame.is_empty() {
-            let mut f = st.frame;
-            f.sort_unstable();
-            let mut merged: Vec<(u32, u32)> = Vec::new();
-            for (lo, n) in f {
-                match merged.last_mut() {
-                    Some(m) if m.0 + m.1 >= lo => m.1 = m.1.max(lo + n - m.0),
-                    _ => merged.push((lo, n)),
-                }
-            }
-            self.prog.procs[st.proc as usize].frame = merged;
+            self.prog.procs[st.proc as usize].frame = merge_ranges(st.frame);
         }
     }
 
@@ -576,4 +567,17 @@ impl<'a> Compiler<'a> {
         }
         Ok(())
     }
+}
+
+/// Memory ranges (start, words), sorted and with overlapping or adjacent ones merged.
+pub(crate) fn merge_ranges(mut f: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    f.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (lo, n) in f {
+        match merged.last_mut() {
+            Some(m) if m.0 + m.1 >= lo => m.1 = m.1.max(lo + n - m.0),
+            _ => merged.push((lo, n)),
+        }
+    }
+    merged
 }
