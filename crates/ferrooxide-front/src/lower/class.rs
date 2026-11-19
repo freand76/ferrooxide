@@ -23,6 +23,10 @@ pub(crate) struct ClassNames {
     pub methods: HashSet<String>,
     /// static properties: name -> the variable holding it
     pub statics: HashMap<String, String>,
+    /// typedefs declared in the class (`C::T`)
+    pub types: HashMap<String, Rc<SvType>>,
+    /// parameters and enum constants declared in the class (`C::P`, `obj.P`)
+    pub consts: HashSet<String>,
 }
 
 impl Lower {
@@ -52,6 +56,8 @@ impl Lower {
                 names.props.extend(b.props.iter().cloned());
                 names.methods.extend(b.methods.iter().cloned());
                 names.statics.extend(b.statics.iter().map(|(k, v)| (k.clone(), v.clone())));
+                names.types.extend(b.types.iter().map(|(k, v)| (k.clone(), v.clone())));
+                names.consts.extend(b.consts.iter().cloned());
                 let args = match args {
                     Some(a) => Some(self.call_args(a, c.loc)?),
                     None => None,
@@ -64,11 +70,42 @@ impl Lower {
         ct.int_kind = true;
         ct.class = Some(name.clone());
         self.types.insert(name.clone(), Rc::new(ct));
+        // (typedefs of a base class are visible in this one; its own stay inside)
+        let saved_types = self.types.clone();
+        for (k, v) in &names.types {
+            self.types.insert(k.clone(), v.clone());
+        }
         // properties are names in the methods (their types for member chains)
         let saved_vars = self.vars.clone();
         let mut props = Vec::new();
         let mut statics = Vec::new();
+        let mut consts = Vec::new();
+        let items: Vec<&t::Item> = c.items.iter().filter_map(|i| if let t::ClassItem::Item(x) = i { Some(x) } else { None }).collect();
         for it in &c.items {
+            // parameters and typedefs (enum constants are parameters) in source order with
+            // the properties that may use them
+            if let t::ClassItem::Item(i @ (t::Item::Param(_) | t::Item::Typedef(_))) = it {
+                let before = self.types.clone();
+                let mut v = Vec::new();
+                // constants in the class's types refer to the class's parameters (`C::W`)
+                let known: HashSet<String> = consts.iter().map(|p: &ParamDecl| p.name.clone()).chain(names.consts.iter().cloned()).collect();
+                let saved_scope = self.type_scope.replace((name.clone(), known));
+                let r = self.module_item(i, &items, &mut v);
+                self.type_scope = saved_scope;
+                r?;
+                for x in v.into_iter().chain(std::mem::take(&mut self.pending)) {
+                    match x {
+                        Item::Param(p) => consts.push(p),
+                        _ => return self.unsupported(super::item_loc(i), &format!("{} in a class", super::item_what(i))),
+                    }
+                }
+                for (k, t) in &self.types {
+                    if before.get(k).is_none_or(|o| !Rc::ptr_eq(o, t)) {
+                        names.types.insert(k.clone(), t.clone());
+                    }
+                }
+                continue;
+            }
             let t::ClassItem::Property { quals, decl } = it else { continue };
             let is_static = quals.contains(&Kw::Static);
             let t::Item::Var(v) = decl else {
@@ -78,8 +115,12 @@ impl Lower {
                 return self.unsupported(v.loc, "a class property lifetime");
             }
             let mut d = self.decl_head(None, None, v.var, &v.ty, None, None, v.loc)?;
-            if !self.pending.is_empty() {
-                return self.unsupported(v.loc, "an enum type declared in a class property");
+            // an enum type declared here: its constants belong to the class
+            for x in std::mem::take(&mut self.pending) {
+                match x {
+                    Item::Param(p) => consts.push(p),
+                    _ => return self.unsupported(v.loc, "this property type"),
+                }
             }
             d.names = self.declarators(&v.decls)?;
             if d.names.iter().any(|n| n.heap.is_some() || !n.dims.is_empty()) {
@@ -108,6 +149,7 @@ impl Lower {
                 }
             }
         }
+        names.consts.extend(consts.iter().map(|p| p.name.clone()));
         // (the class's names are known before its methods, which may call each other)
         let names = Rc::new(names);
         self.classes.insert(name.clone(), names.clone());
@@ -146,7 +188,7 @@ impl Lower {
                     methods.push(f);
                 }
                 t::ClassItem::Constraint(k) => return self.unsupported(k.loc, "a constraint"),
-                t::ClassItem::Item(t::Item::Empty(_)) => {}
+                t::ClassItem::Item(t::Item::Empty(_) | t::Item::Param(_) | t::Item::Typedef(_)) => {}
                 t::ClassItem::Item(i) => return self.unsupported(super::item_loc(i), &format!("{} in a class", super::item_what(i))),
             }
         }
@@ -154,13 +196,14 @@ impl Lower {
         let types: Vec<(String, Option<(Rc<SvType>, Vec<Range>)>)> =
             names.statics.iter().filter(|(_, v)| v.starts_with(&format!("{name}$"))).map(|(p, v)| (v.clone(), self.vars.get(p).cloned())).collect();
         self.vars = saved_vars;
+        self.types = saved_types;
         for (v, t) in types {
             if let Some(t) = t {
                 self.vars.insert(v, t);
             }
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
-        Ok(ClassDecl { name, base, base_args, props, methods, virtuals, abstract_: c.virtual_, line })
+        Ok(ClassDecl { name, base, base_args, props, consts, methods, virtuals, abstract_: c.virtual_, line })
     }
 
     /// The type of a variable named `n` is a class.

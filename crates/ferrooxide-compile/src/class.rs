@@ -52,13 +52,27 @@ impl<'a> Compiler<'a> {
         let path = format!("{}.{}", self.scopes[sid].name, c.name);
         let file = self.file.clone();
         let scope = self.new_scope(path.clone(), Some(sid), file.clone());
+        // parameters and enum constants: the base class's, then its own (in its scope, where
+        // the methods find them first); `C::P` reaches them like a package's
+        if let Some(b) = base {
+            let bs = self.classes.list[b as usize].scope;
+            let inherited: Vec<(String, Sym)> =
+                self.scopes[bs].syms.iter().filter(|(_, s)| matches!(s, Sym::Const(_) | Sym::Real(_))).map(|(k, s)| (k.clone(), s.clone())).collect();
+            self.scopes[scope].syms.extend(inherited);
+        }
+        for p in &c.consts {
+            self.line = p.line;
+            let v = self.param_value(p, None, scope)?;
+            self.insert_param(p, v, scope)?;
+        }
+        self.hier.pkg_scopes.entry(c.name.clone()).or_insert(scope);
         let mut props = base.map(|b| self.classes.list[b as usize].props.clone()).unwrap_or_default();
         let mut width = props.last().map(|p| p.off + p.ty.width()).unwrap_or(0);
         // (4-state properties start as x)
         let mut xs: Vec<(u32, u32)> = Vec::new();
         for d in &c.props {
             self.line = d.line;
-            let ty = self.prop_type(d, sid)?;
+            let ty = self.prop_type(d, scope)?;
             let four = !matches!(d.kind, NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class);
             for n in &d.names {
                 if four {
@@ -166,6 +180,15 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// A parameter or enum constant `name` of class `c` (or of a base class).
+    pub(crate) fn class_const(&self, c: u32, name: &str) -> Option<Sym> {
+        let s = self.classes.list[c as usize].scope;
+        match self.scopes[s].syms.get(name) {
+            Some(x @ (Sym::Const(_) | Sym::Real(_))) => Some(x.clone()),
+            _ => None,
+        }
+    }
+
     /// The property `name` of class `c`.
     fn prop(&self, c: u32, name: &str) -> R<Prop> {
         let ci = &self.classes.list[c as usize];
@@ -210,7 +233,11 @@ impl<'a> Compiler<'a> {
             Expr::Null | Expr::New(_) => Ok(Some(Type::Class(NONE))),
             Expr::NewCopy(x) => self.type_of(x, sid).map(Some),
             Expr::Member(b, m) => match self.handle_class(b, sid)? {
-                Some(c) => Ok(Some(self.prop(c, m)?.ty)),
+                Some(c) => Ok(Some(match self.class_const(c, m) {
+                    Some(Sym::Const(k)) => Type::vec(k.w, k.signed),
+                    Some(Sym::Real(_)) => Type::Real,
+                    _ => self.prop(c, m)?.ty,
+                })),
                 None => Ok(None),
             },
             Expr::MethodCall(o, m, _) => {
@@ -242,6 +269,12 @@ impl<'a> Compiler<'a> {
             }
             Expr::Member(b, m) => {
                 let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
+                // a parameter or enum constant of the class
+                match self.class_const(c, m) {
+                    Some(Sym::Const(k)) => return Ok(Some((self.const_slot(&k), Type::vec(k.w, k.signed)))),
+                    Some(Sym::Real(r)) => return Ok(Some((self.const_slot(&Const::from_i64(r.to_bits() as i64, 64, false)), Type::Real))),
+                    _ => {}
+                }
                 let p = self.prop(c, m)?;
                 let h = self.handle_value(b, sid)?;
                 let w = p.ty.width();

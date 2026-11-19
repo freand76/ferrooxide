@@ -901,6 +901,10 @@ impl<'a> Compiler<'a> {
                 self.line = *line;
                 self.self_expr(e, sid)?;
             }
+            Stmt::WaitFork { line } => {
+                self.line = *line;
+                self.emit(Instr::WaitFork);
+            }
             Stmt::Break { line } | Stmt::Continue { line } => {
                 self.line = *line;
                 let is_break = matches!(st, Stmt::Break { .. });
@@ -1248,7 +1252,7 @@ impl<'a> Compiler<'a> {
 
     fn reads_stmt_inner(&self, st: &Stmt, sid: usize, out: &mut Vec<(u32, u32)>, locals: &mut Vec<u32>) {
         match st {
-            Stmt::Null | Stmt::Disable { .. } | Stmt::Trigger { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Null | Stmt::Disable { .. } | Stmt::Trigger { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::WaitFork { .. } => {}
             Stmt::Discard { e, .. } => self.reads_expr(e, sid, out),
             Stmt::Force { lhs, rhs, .. } => {
                 if let Some(r) = rhs {

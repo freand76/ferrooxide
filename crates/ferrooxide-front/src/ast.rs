@@ -245,6 +245,8 @@ pub struct ClassDecl {
     pub base_args: Option<Vec<Expr>>,
     /// properties (each object has its own), with their initializers
     pub props: Vec<Decl>,
+    /// parameters, local parameters and enum constants declared in the class (in its scope)
+    pub consts: Vec<ParamDecl>,
     /// methods; a constructor is named `new`. Methods are automatic.
     pub methods: Vec<SubroutineDecl>,
     /// the methods declared `virtual`
@@ -317,6 +319,8 @@ pub enum Stmt {
     Continue { line: Line },
     /// `void'(f(...))`: a function call whose value is not used
     Discard { e: Expr, line: Line },
+    /// `wait fork`: until the fork branches the process started have ended
+    WaitFork { line: Line },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

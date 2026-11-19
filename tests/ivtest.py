@@ -128,6 +128,8 @@ def main():
     tmpdir = tempfile.mkdtemp(prefix="fx-ivtest-")
     shutil.copy2(FX, os.path.join(tmpdir, "ferrooxide"))
     FX = os.path.join(tmpdir, "ferrooxide")
+    # tests write files into work/, which the reference's runner creates
+    os.makedirs(os.path.join(a.ivtest, "work"), exist_ok=True)
     tests = [t for t in parse_list(os.path.join(a.ivtest, a.list)) if t["kind"] == "normal" and re.search(a.filter, t["name"])]
     res = {}
     with cf.ThreadPoolExecutor(a.j) as ex:

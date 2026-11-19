@@ -270,6 +270,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         | Instr::Wait { .. }
         | Instr::Halt
         | Instr::Fork { .. }
+        | Instr::WaitFork
         | Instr::Disable { .. }
         | Instr::Kick { .. }
         | Instr::Touch { .. } => vec![],
@@ -691,6 +692,8 @@ pub enum Instr {
     CountBits { d: u32, s: u32, w: u32, ctl: Box<[u32]> },
     /// start the fork branches; join: 0 = join (all), 1 = join_any, 2 = join_none
     Fork { children: Box<[u32]>, join: u8 },
+    /// `wait fork`: suspend until the fork branches this process started have all ended
+    WaitFork,
     /// disable the named blocks / tasks of `Program::disables[target]`
     Disable { target: u32 },
     /// re-evaluate the waiting processes that write `sig` (a released net takes its drivers'

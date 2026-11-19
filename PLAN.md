@@ -131,7 +131,7 @@ instance, shared), `timeunit`/`timeprecision` (module and file scope), time lite
 `input var`/`input logic` port kinds, `-u` (separate compilation units), `unique`/`priority`
 case and if warnings for unmatched values, `break;`/`continue;`, prefix `++a;`/`--a;`,
 `inside` and `case ... inside`, `foreach`, several variables and steps in a `for` header,
-`iff`, `.triggered`, `program` blocks (also nested in modules; no `always`, instances,
+`iff`, `.triggered`, `wait fork`, `program` blocks (also nested in modules; no `always`, instances,
 gates or nested declarations in them), nested module declarations (23.4: without ports
 instantiated once under their own name; names not found inside are looked up in the
 enclosing instance), the checks on `final` procedures (no NBAs, delays, event or wait
@@ -623,9 +623,10 @@ SystemVerilog data types and testbench features:
   arrays, class or wider keys (see R4 slice 4).
 - classes (first part done 2026-11-18: properties, constructors, methods inlined with
   `this`, `extends`/`super`, virtual dispatch, file-scope and package classes, static
-  properties (2026-11-19: a variable `C$p` beside the class); objects never freed). Left:
-  static methods, `C::new`/`C::f()`, typedefs, parameters
-  and enums in classes, parameterized classes, forward `typedef class`, arrays of handles
+  properties (2026-11-19: a variable `C$p` beside the class), parameters, typedefs and
+  enums in classes (constants in the class's scope, `C::P`, `obj.P`, `C::T`); objects never
+  freed). Left: static methods, `C::new`/`C::f()`, enum methods on an enum property from
+  outside the class, members through package variables (`P::c.X`) [sv_ps_member_sel3], parameterized classes, forward `typedef class`, arrays of handles
   and array properties, class handle ports, string methods on properties, NBAs to
   properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.
 - programs: processes run in the Active region, not the Reactive one (as the reference,

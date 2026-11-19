@@ -439,6 +439,15 @@ impl Lower {
                     return self.unsupported(ty.loc, "a parameterized class type");
                 }
                 if let Some(s) = n.scopes.first() {
+                    // `C::T`: a typedef of class C
+                    if let Some(t) = self.classes.get(&s.name).and_then(|c| c.types.get(&n.name)) {
+                        let mut t = (**t).clone();
+                        t.signed = ty.signed.unwrap_or(t.signed);
+                        if !ty.packed.is_empty() {
+                            return self.unsupported(ty.loc, "packed dimensions after a class type");
+                        }
+                        return Ok(Some(t));
+                    }
                     // `pkg::T`: the package's type becomes visible here
                     let Some(p) = self.packages.get(&s.name).cloned() else { return Ok(None) };
                     let Some(t) = p.types.get(&n.name) else { return Ok(None) };

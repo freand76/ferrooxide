@@ -319,7 +319,7 @@ impl Lower {
                 }
                 self.simple_assign(s)?
             }
-            t::StmtKind::WaitFork => return self.unsupported(s.loc, "wait fork"),
+            t::StmtKind::WaitFork => Stmt::WaitFork { line },
             t::StmtKind::WaitOrder { .. } => return self.unsupported(s.loc, "wait_order"),
             t::StmtKind::RandCase(_) => return self.unsupported(s.loc, "randcase"),
             t::StmtKind::RandSequence { .. } => return self.unsupported(s.loc, "randsequence"),

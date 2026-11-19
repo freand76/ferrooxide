@@ -2069,6 +2069,22 @@ impl Sim {
                         return true;
                     }
                 }
+                Instr::WaitFork => {
+                    // the branches still running count down `joining` as they end (proc_done)
+                    let running = (0..self.nprocs)
+                        .filter(|&c| {
+                            let ch = &self.procs[c as usize];
+                            ch.parent == p && ch.class == ProcClass::Spawned && !ch.done
+                        })
+                        .count() as u32;
+                    if running > 0 {
+                        let pr = &mut self.procs[p as usize];
+                        pr.joining = running;
+                        pr.pc = *pc as u32;
+                        pr.wait = NONE;
+                        return true;
+                    }
+                }
                 Instr::Udp { table, ins, prev, q } => {
                     let code = |m: &[u64], s: u32| -> u8 {
                         let s = s as usize;

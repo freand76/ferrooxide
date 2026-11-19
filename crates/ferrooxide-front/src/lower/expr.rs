@@ -514,6 +514,10 @@ impl Lower {
                 if let Some(v) = self.static_prop(&Expr::Ident(p.clone()), &n.name) {
                     return self.selects(Expr::Ident(v), ops);
                 }
+                // `C::P`: a parameter or enum constant of class C (in its scope)
+                if self.classes.get(&p).is_some_and(|c| c.consts.contains(&n.name)) && !matches!(ops.first(), Some(Op::Call(..))) {
+                    return self.selects(Expr::Ident(format!("{p}::{}", n.name)), ops);
+                }
                 let Some(mut pk) = self.packages.get(&p).cloned() else {
                     return self.err(e.loc, format!("unknown package '{p}'"));
                 };

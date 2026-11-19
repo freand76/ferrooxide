@@ -428,6 +428,9 @@ impl Printer {
                 }
                 self.line(format!("{head};"));
                 self.ind += 1;
+                for p in &c.consts {
+                    self.line(Self::param_text(p));
+                }
                 for d in &c.props {
                     self.line(Self::decl_text(d));
                 }
@@ -651,6 +654,7 @@ impl Printer {
             Stmt::Break { .. } => self.line("break;"),
             Stmt::Continue { .. } => self.line("continue;"),
             Stmt::Discard { e, .. } => self.line(format!("void'({});", expr(e))),
+            Stmt::WaitFork { .. } => self.line("wait fork;"),
         }
     }
 }
