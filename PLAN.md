@@ -628,8 +628,8 @@ SystemVerilog data types and testbench features:
   (`Scope::string_params`); constant comparisons of them are evaluated in the compiler
   (`const_str_cmp`), other string operations on them only at run time; implicit string ->
   vector assignment is
-  accepted (the reference rejects it); bytes above 127 of a `string` variable print as
-  U+FFFD (those of vectors, `%c` and `%u`/`%z` print as the bytes, 2026-11-19); `%v` in
+  accepted (the reference rejects it); bytes of a `string` variable that are not UTF-8
+  print as U+FFFD (those of vectors, `%c` and `%u`/`%z` print as the bytes, 2026-11-19); `%v` in
   `$sformatf` [sformatf].
 
 Verilog / scheduling:
