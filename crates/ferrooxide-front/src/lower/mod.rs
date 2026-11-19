@@ -4,7 +4,7 @@
 //! constants and methods, array queries, packages and `$unit`, time literals, the expansions
 //! of foreach, case-inside, unique/priority, `iff`, `++`, hierarchical-name segments and
 //! unnamed instances. What has nothing behind it fails with "... is not supported" at its
-//! line. `FX_FRONT=new` selects it (see `crate::parse_files`).
+//! line.
 
 mod class;
 mod expr;

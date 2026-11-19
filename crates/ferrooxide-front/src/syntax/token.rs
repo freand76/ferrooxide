@@ -1,5 +1,5 @@
-//! Tokens of the new parser: the old lexer's tokens with keywords classified and the
-//! SystemVerilog operators the old lexer splits joined again (only when the parts are
+//! Tokens of the parser: the lexer's tokens with keywords classified and the
+//! SystemVerilog operators the lexer splits joined again (only when the parts are
 //! adjacent in the source, so `# #` stays two tokens).
 
 use super::kw::Kw;
@@ -53,7 +53,7 @@ const JOINS: &[(&[&str], &str)] = &[
     (&["*", ">"], "*>"),
 ];
 
-/// Lex preprocessed text into the new parser's tokens.
+/// Lex preprocessed text into the parser's tokens.
 pub fn lex(text: &str, fname: &str) -> Result<Vec<Token>> {
     Ok(convert(lexer::lex(text, fname)?))
 }

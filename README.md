@@ -17,8 +17,8 @@ CPU cycles (`perf stat`) on the same machine, Icarus Verilog 14 (`iverilog` + `v
 
 | benchmark | Icarus | ferrooxide | speed-up |
 |-----------|-------:|-----------:|---------:|
-| [`bench/cpuish.v`](bench/cpuish.v): 32 lanes of LFSR + ALU + accumulator, 200k clock cycles | 33.6 G | 2.96 G | **11x** |
-| [`bench/mixed.v`](bench/mixed.v): combinational chain, 128-bit datapath, memory, FSM, 300k cycles | 13.5 G | 0.66 G | **20x** |
+| [`bench/cpuish.v`](bench/cpuish.v): 32 lanes of LFSR + ALU + accumulator, 200k clock cycles | 33.6 G | 2.82 G | **12x** |
+| [`bench/mixed.v`](bench/mixed.v): combinational chain, 128-bit datapath, memory, FSM, 300k cycles | 13.5 G | 0.68 G | **20x** |
 
 Both produce output identical to Icarus.
 
@@ -67,11 +67,17 @@ Verilog-2005 plus common SystemVerilog:
 - VCD output: `$dumpfile`, `$dumpvars`, `$dumpon`, `$dumpoff`; live waveforms over the CXXRTL
   debug server protocol (`--cdsp`, `--surfer`)
 - preprocessor: `` `define `` (with arguments), `` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``, `` `include ``
+- SystemVerilog testbench features: interfaces and modports, `program`, `string`, queues
+  (also bounded), dynamic and associative arrays, unpacked structs, classes (properties,
+  constructors, methods, `extends`/`super`, virtual methods, static properties), `fork`
+  in loops with `automatic` variables, `wait fork`, immediate assertions, `inside`,
+  `foreach`, `unique`/`priority`
 
-Not yet: SystemVerilog interfaces, classes, `string`, queues and dynamic arrays, `%v`
-strength display, SDF, arrays as ports. See "Road to full Verilog-2005" in
-[PLAN.md](PLAN.md). Icarus's regression suite (ivtest) passes at about 88%; places where
-Icarus seems to deviate from the standard (ferrooxide matches Icarus) are listed in
+Not yet: the rest of classes (static methods, parameterized classes, randomization),
+concurrent assertions, array methods (`sort`, `find`, ...), `%v` strength display, SDF, VPI.
+The full list is "Unsupported (known)" in [PLAN.md](PLAN.md). Icarus's regression suite
+(ivtest) passes at about 91% (its SystemVerilog list at 89%); places where Icarus seems to
+deviate from the standard (ferrooxide matches Icarus) are listed in
 [ICARUS_NOTES.md](ICARUS_NOTES.md).
 
 ## Usage
@@ -90,8 +96,12 @@ ferrooxide [options] <files...>
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
   -gspecify         apply specify path delays (ignored by default)
+  -P<top>.<p>=<v>   value of parameter p of top-level module top
+  -u                every file is a compilation unit of its own
+  -pfileline=1      run-time warnings (queue operations) start with the source location
   --vcd <file>      write a VCD without $dumpvars in the testbench (all signals, or --trace)
   --trace <regex>   trace only signals whose hierarchical name matches (repeatable)
+  --trace-all       trace every signal
   -i, --interactive interactive mode, see below
   --mcp             MCP server for AI agents (JSON-RPC on stdio), see below
   --cdsp [host:]port  live waveforms in a viewer (CXXRTL debug server protocol), see below
@@ -217,10 +227,10 @@ FX_FLAGS=--no-fuse tests/difftest.sh
 
 | crate | contents |
 |-------|----------|
-| `ferrooxide-front` | preprocessor, lexer, parser, AST |
-| `ferrooxide-compile` | elaboration (parameters, hierarchy, generate, port collapsing), code generation |
-| `ferrooxide-rt` | 4-state ops, scheduler, interpreter, Cranelift JIT, process fusion, VCD |
-| `ferrooxide` | command-line tool |
+| `ferrooxide-front` | preprocessor, lexer, IEEE 1800 parser (syntax tree), lowering to the AST |
+| `ferrooxide-compile` | elaboration (parameters, hierarchy, generate, port collapsing, types), code generation |
+| `ferrooxide-rt` | 4-state ops, scheduler, interpreter, Cranelift JIT, process fusion, VCD, value history |
+| `ferrooxide` | command-line tool, interactive mode, MCP and CXXRTL debug servers |
 
 ## License
 
