@@ -1043,9 +1043,10 @@ impl<'a> Compiler<'a> {
                 } else {
                     fd_at(self, 0)?
                 };
-                let Expr::Str(fmt) = &args[1] else {
-                    return self.err(format!("{name}: the format must be a string literal"));
+                let Some(f) = args.get(1) else {
+                    return self.err(format!("{name} needs a format"));
                 };
+                let fmt = self.file_name(f, sid)?;
                 let mut outs = Vec::new();
                 for v in &args[2..] {
                     let t = self.type_of(v, sid)?;
@@ -1054,7 +1055,7 @@ impl<'a> Compiler<'a> {
                     let ok = self.tmp(1);
                     outs.push(rt::ScanOut { val, w, real, ok });
                 }
-                self.emit(sys(F::Scan { string, fmt: fmt.clone(), outs: outs.clone() }, src));
+                self.emit(sys(F::Scan { string, fmt, outs: outs.clone() }, src));
                 // assign the variables that got a value
                 for (v, o) in args[2..].iter().zip(&outs) {
                     let jz = self.emit(Instr::Jz { c: o.ok, w: 1, to: 0 });
@@ -1242,27 +1243,27 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(d, 32, w, false))
             }
             "$test$plusargs" => {
-                let Some(Expr::Str(prefix)) = args.first() else {
+                let Some(p) = args.first() else {
                     return self.err("$test$plusargs needs a string");
                 };
+                let prefix = self.file_name(p, sid)?;
                 let d = self.tmp(1);
-                self.emit(Instr::Sys(Box::new(rt::SysTask::TestPlusargs { d, prefix: prefix.clone() })));
+                self.emit(Instr::Sys(Box::new(rt::SysTask::TestPlusargs { d, prefix })));
                 Ok(self.resize(d, 1, w, false))
             }
             "$value$plusargs" => {
-                let (Some(Expr::Str(f)), Some(var)) = (args.first(), args.get(1)) else {
+                let (Some(f), Some(var)) = (args.first(), args.get(1)) else {
                     return self.err("$value$plusargs needs a format string and a variable");
                 };
-                let Some(pct) = f.find('%') else {
+                if matches!(f, Expr::Str(s) if !s.contains('%')) {
                     return self.err("$value$plusargs format has no conversion");
-                };
-                let prefix = f[..pct].to_string();
-                let conv = f[pct + 1..].chars().find(|c| c.is_ascii_alphabetic()).unwrap_or('d').to_ascii_lowercase();
+                }
+                let fmt = self.file_name(f, sid)?;
                 let t = self.type_of(var, sid)?;
                 let (real, vw) = (t.is_real(), t.width());
                 let val = self.tmp(vw);
                 let d = self.tmp(1);
-                self.emit(Instr::Sys(Box::new(rt::SysTask::ValuePlusargs { d, prefix, conv, val, w: vw, real })));
+                self.emit(Instr::Sys(Box::new(rt::SysTask::ValuePlusargs { d, fmt, val, w: vw, real })));
                 // assign the variable only when the plusarg was found
                 let jz = self.emit(Instr::Jz { c: d, w: 1, to: 0 });
                 self.store_value(&stmt::Lhs::Expr(var, sid), val, vw, rt::StoreMode::Blocking)?;

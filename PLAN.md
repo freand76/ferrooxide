@@ -641,6 +641,9 @@ Verilog / scheduling:
 - compiler warnings the reference prints: port coercion to inout, constant out-of-range
   selects, `@*` without sensitivities.
 - `$dist_*` and `$q_*` system functions.
+- `$value$plusargs` prints no warning for an invalid value or extra characters after a real
+  (the value is still what the reference gives); `$sscanf` conversions differ in details
+  (x/z digits, `%t`, reals, a conversion that fails part way) [scanf4].
 - hierarchical names of variables in a named block of a later process (`always @(blk.x)`
   before `initial begin : blk`; the block's variables are made when its code is
   generated) [sv_var_init2].

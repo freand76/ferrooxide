@@ -327,8 +327,16 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                     }
                     v
                 }
-                SysTask::TestPlusargs { d, .. } => vec![*d],
-                SysTask::ValuePlusargs { d, val, .. } => vec![*d, *val],
+                SysTask::TestPlusargs { d, prefix: f } | SysTask::ValuePlusargs { d, fmt: f, .. } => {
+                    let mut v = vec![*d];
+                    if let SysTask::ValuePlusargs { val, .. } = &**t {
+                        v.push(*val);
+                    }
+                    if let FileName::Val { s, .. } | FileName::SVar { s } = f {
+                        v.push(*s);
+                    }
+                    v
+                }
                 SysTask::SFormat { d, args, .. } => {
                     let mut v = fa(args);
                     v.push(*d);
@@ -341,9 +349,12 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                         FileRead::Ungetc { c } => v.push(*c),
                         FileRead::Gets { val, .. } => v.push(*val),
                         FileRead::Seek { off, op } => v.extend([*off, *op]),
-                        FileRead::Scan { outs, .. } => {
+                        FileRead::Scan { outs, fmt, .. } => {
                             for o in outs {
                                 v.extend([o.val, o.ok]);
+                            }
+                            if let FileName::Val { s, .. } | FileName::SVar { s } = fmt {
+                                v.push(*s);
                             }
                         }
                         _ => {}
@@ -547,10 +558,11 @@ pub enum SysTask {
     /// `$timeformat(units, precision, suffix, min_width)`; None resets the default
     TimeFormat(Option<fmt::TimeFormat>),
     /// d (1 bit) = some plusarg starts with `prefix`
-    TestPlusargs { d: u32, prefix: String },
+    TestPlusargs { d: u32, prefix: FileName },
     /// d (1 bit) = a plusarg `<prefix><value>` exists; its value, converted by `conv`
     /// (d h o b s f e g), goes to `val` (`w` bits, or f64 bits if `real`)
-    ValuePlusargs { d: u32, prefix: String, conv: char, val: u32, w: u32, real: bool },
+    /// `fmt`: the prefix and a conversion (`"name=%d"`), read when the call runs
+    ValuePlusargs { d: u32, fmt: FileName, val: u32, w: u32, real: bool },
     /// format into the `w`-bit value at `d` (characters right-aligned)
     SFormat { d: u32, w: u32, args: Vec<FmtArg>, scope: String, texp: u8, radix: char },
     /// file input: the 32-bit result goes to `d`; `src` is the descriptor (or, for $sscanf,
@@ -569,7 +581,7 @@ pub enum FileRead {
     Seek { off: u32, op: u32 },
     Rewind,
     /// $fscanf / $sscanf (`string`): conversions go to `outs`
-    Scan { string: bool, fmt: String, outs: Vec<ScanOut> },
+    Scan { string: bool, fmt: FileName, outs: Vec<ScanOut> },
 }
 
 /// One $scanf output: the converted value (`w` bits, or f64 if `real`) and a 1-bit flag set

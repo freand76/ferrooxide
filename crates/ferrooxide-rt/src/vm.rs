@@ -2876,17 +2876,25 @@ impl Sim {
                 self.writemem(*hex, &file, *sig, start, end);
             }
             SysTask::TestPlusargs { d, prefix } => {
+                let prefix = self.file_name(prefix);
                 let found = self.plusargs.iter().any(|a| a.starts_with(prefix.as_str()));
                 self.mem[*d as usize] = found as u64;
                 self.mem[*d as usize + 1] = 0;
             }
-            SysTask::ValuePlusargs { d, prefix, conv, val, w, real } => {
-                let found = self.plusargs.iter().find(|a| a.starts_with(prefix.as_str())).cloned();
+            SysTask::ValuePlusargs { d, fmt, val, w, real } => {
+                // the text before the first `%` is the prefix, the letter after it the conversion
+                let f = self.file_name(fmt);
+                let found = f.find('%').and_then(|pct| {
+                    let prefix = &f[..pct];
+                    let conv = f[pct + 1..].chars().find(|c| c.is_ascii_alphabetic()).unwrap_or('d').to_ascii_lowercase();
+                    let a = self.plusargs.iter().find(|a| a.starts_with(prefix))?;
+                    Some((conv, a[prefix.len()..].to_string()))
+                });
                 let (d, val) = (*d as usize, *val as usize);
                 self.mem[d] = found.is_some() as u64;
                 self.mem[d + 1] = 0;
-                if let Some(a) = found {
-                    plusarg_value(&mut self.mem, val, *w, *real, *conv, &a[prefix.len()..]);
+                if let Some((conv, a)) = found {
+                    plusarg_value(&mut self.mem, val, *w, *real, conv, &a);
                 }
             }
             SysTask::SFormat { d, w, args, scope, texp, radix } => {
@@ -2962,7 +2970,14 @@ impl Sim {
     /// $fgetc & co.: the 32-bit result (-1 for EOF or errors).
     fn file_read(&mut self, kind: &FileRead, src: (u32, u32), scope: &str) -> i32 {
         let rd = |m: &[u64], s: u32| m[s as usize] as u32;
-        if let FileRead::Scan { string: true, fmt, outs } = kind {
+        // the format of $fscanf / $sscanf (-1 when it has x or z bits)
+        let fmt_text = match kind {
+            FileRead::Scan { fmt: FileName::Val { s, w }, .. } if (0..nw(*w)).any(|k| self.mem[*s as usize + nw(*w) + k] != 0) => return -1,
+            FileRead::Scan { fmt, .. } => self.file_name(fmt),
+            _ => String::new(),
+        };
+        let fmt = fmt_text.as_str();
+        if let FileRead::Scan { string: true, outs, .. } = kind {
             let s = fmt::value_string(&self.mem, src.0 as usize, src.1);
             let mut pos = 0;
             let mut eof = false;
@@ -3035,7 +3050,7 @@ impl Sim {
                 *eof = false;
                 0
             }
-            FileRead::Scan { fmt, outs, .. } => {
+            FileRead::Scan { outs, .. } => {
                 let data = std::mem::take(data);
                 let (mut p, mut e) = (*pos, *eof);
                 let r = scan(&mut self.mem, &data, &mut p, &mut e, fmt, outs, scope);
@@ -4634,7 +4649,8 @@ fn plusarg_value(m: &mut [u64], d: usize, w: u32, real: bool, conv: char, text: 
     let text = text.trim();
     match conv {
         'f' | 'e' | 'g' => {
-            let v: f64 = text.parse().unwrap_or(0.0);
+            // the longest prefix that is a real number (`9.825units` -> 9.825)
+            let v = (1..=text.len()).rev().filter(|&k| text.is_char_boundary(k)).find_map(|k| text[..k].parse::<f64>().ok()).unwrap_or(0.0);
             if real {
                 ops::wr_real(m, d, v);
             } else {
@@ -4649,22 +4665,106 @@ fn plusarg_value(m: &mut [u64], d: usize, w: u32, real: bool, conv: char, text: 
                 'b' => 2,
                 _ => 10,
             };
-            let (neg, digits) = match text.strip_prefix('-') {
-                Some(r) => (true, r),
-                None => (false, text),
-            };
-            let v = i128::from_str_radix(digits, radix).unwrap_or(0);
-            let v = if neg { -v } else { v };
             if real {
-                ops::wr_real(m, d, v as f64);
+                // (an integer into a real variable; x and z bits read as 0)
+                let n = nw(w.max(64));
+                let mut tmp = vec![0u64; 2 * n];
+                int_text_bits(&mut tmp, 0, 64, radix, text);
+                let v = if tmp[n] != 0 { 0.0 } else { tmp[0] as i64 as f64 };
+                ops::wr_real(m, d, v);
             } else {
-                ops::real_to_int(m, d, w, v as f64);
-                if w <= 64 {
-                    m[d] = (v as u64) & ops::mask(w);
-                }
+                int_text_bits(m, d, w, radix, text);
             }
         }
     }
+}
+
+/// An integer in text (`_` separators, a leading `-`; x/z digits in binary, octal and hex,
+/// a lone x or z in decimal) as a w-bit value; text that is no number gives x.
+fn int_text_bits(m: &mut [u64], d: usize, w: u32, radix: u32, text: &str) {
+    let n = nw(w);
+    let (neg, digits) = match text.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, text),
+    };
+    let digits: Vec<char> = digits.chars().filter(|&c| c != '_').collect();
+    let mut a = vec![0u64; n];
+    let mut b = vec![0u64; n];
+    let all = |v: &mut Vec<u64>| {
+        for x in v.iter_mut() {
+            *x = !0;
+        }
+    };
+    let ok = !digits.is_empty();
+    let mut bad = !ok;
+    if radix == 10 {
+        match digits.as_slice() {
+            [c] if matches!(c, 'x' | 'X') => {
+                all(&mut a);
+                all(&mut b);
+            }
+            [c] if matches!(c, 'z' | 'Z' | '?') => all(&mut b),
+            _ => {
+                for &c in &digits {
+                    let Some(v) = c.to_digit(10) else {
+                        bad = true;
+                        break;
+                    };
+                    // a = a * 10 + v
+                    let mut carry = v as u128;
+                    for x in a.iter_mut() {
+                        let t = *x as u128 * 10 + carry;
+                        *x = t as u64;
+                        carry = t >> 64;
+                    }
+                }
+            }
+        }
+    } else {
+        let bits = radix.trailing_zeros();
+        for &c in &digits {
+            // shift left by one digit
+            for v in [&mut a, &mut b] {
+                for k in (0..n).rev() {
+                    let lo = if k > 0 { v[k - 1] >> (64 - bits) } else { 0 };
+                    v[k] = (v[k] << bits) | lo;
+                }
+            }
+            let mask = (1u64 << bits) - 1;
+            match c {
+                'x' | 'X' => {
+                    a[0] |= mask;
+                    b[0] |= mask;
+                }
+                'z' | 'Z' | '?' => b[0] |= mask,
+                _ => match c.to_digit(radix) {
+                    Some(v) => a[0] |= v as u64,
+                    None => {
+                        bad = true;
+                        break;
+                    }
+                },
+            }
+        }
+    }
+    if bad {
+        all(&mut a);
+        all(&mut b);
+    } else if neg && b.iter().all(|&x| x == 0) {
+        // two's complement
+        let mut carry = 1u128;
+        for x in a.iter_mut() {
+            let t = (!*x) as u128 + carry;
+            *x = t as u64;
+            carry = t >> 64;
+        }
+    }
+    // the top word keeps only the bits of the width
+    let top = if w % 64 == 0 { !0 } else { ops::mask(w % 64) };
+    a[n - 1] &= top;
+    b[n - 1] &= top;
+    m[d..d + n].copy_from_slice(&a);
+    m[d + n..d + 2 * n].copy_from_slice(&b);
 }
 
 /// Store a string as Verilog characters (last character in the low byte) in a w-bit value.
