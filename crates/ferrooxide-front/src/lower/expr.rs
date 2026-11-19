@@ -271,6 +271,24 @@ impl Lower {
             }),
             t::ExprKind::New { size: None, args: None, copy: Some(x) } => Expr::NewCopy(Box::new(self.expr(x)?)),
             t::ExprKind::New { .. } => return self.unsupported(loc, "new"),
+            t::ExprKind::TypedNew { class, args } => {
+                if !class.scopes.is_empty() || class.params.is_some() {
+                    return self.unsupported(loc, "a constructor call of this class type");
+                }
+                let c = if self.classes.contains_key(&class.name) {
+                    class.name.clone()
+                } else {
+                    match self.types.get(&class.name).and_then(|t| t.class.clone()) {
+                        Some(c) => c,
+                        None => return self.err(loc, format!("'{}' is not a class", class.name)),
+                    }
+                };
+                let args = match args {
+                    Some(a) => self.call_args(a, loc)?,
+                    None => Vec::new(),
+                };
+                Expr::NewTyped(c, args)
+            }
             t::ExprKind::Prop(_) => return self.unsupported(loc, "a property expression"),
         })
     }

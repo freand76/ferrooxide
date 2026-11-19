@@ -637,7 +637,7 @@ SystemVerilog data types and testbench features:
   `this`, `extends`/`super`, virtual dispatch, file-scope and package classes, static
   properties (2026-11-19: a variable `C$p` beside the class), parameters, typedefs and
   enums in classes (constants in the class's scope, `C::P`, `obj.P`, `C::T`); objects never
-  freed). Left: static methods, `C::new`/`C::f()`, enum methods on an enum property from
+  freed). Typed constructor calls `C::new(args)` (2026-11-19). Left: static methods, `C::f()`, enum methods on an enum property from
   outside the class, parameterized classes, forward `typedef class`, arrays of handles
   and array properties, class handle ports, string methods on properties, NBAs to
   properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.

@@ -405,6 +405,8 @@ pub enum Expr {
     EmptyArg,
     /// `new` / `new(args)`: an object of the class the target's type names
     New(Vec<Expr>),
+    /// `C::new(args)`: an object of class C
+    NewTyped(String, Vec<Expr>),
     /// `new obj`: a shallow copy of an object
     NewCopy(Box<Expr>),
     /// `obj.m(args)` (`this.m`, `super.m`): a method call

@@ -232,6 +232,7 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Null | Expr::New(_) => Ok(Some(Type::Class(NONE))),
             Expr::NewCopy(x) => self.type_of(x, sid).map(Some),
+            Expr::NewTyped(c, _) => Ok(Some(Type::Class(self.named_class(c, sid)?))),
             Expr::Member(b, m) => match self.handle_class(b, sid)? {
                 Some(c) => Ok(Some(match self.class_const(c, m) {
                     Some(Sym::Const(k)) => Type::vec(k.w, k.signed),
@@ -260,6 +261,10 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Null => Ok(Some((self.const_slot(&Const::zero(64)), Type::Class(NONE)))),
             Expr::New(_) => self.err("`new` needs a class handle to assign to"),
+            Expr::NewTyped(c, args) => {
+                let c = self.named_class(c, sid)?;
+                Ok(Some((self.construct(c, args, sid)?, Type::Class(c))))
+            }
             Expr::NewCopy(x) => {
                 let Some(c) = self.handle_class(x, sid)? else { return self.err("`new` copies an object") };
                 let h = self.handle_value(x, sid)?;
@@ -304,6 +309,14 @@ impl<'a> Compiler<'a> {
                 )),
                 _ => self.err(format!("a value that is not an object cannot be assigned to a handle of class '{}'", self.classes.list[c as usize].name)),
             },
+        }
+    }
+
+    /// The class named `name` (of `C::new`).
+    fn named_class(&self, name: &str, sid: usize) -> R<u32> {
+        match self.find_class(name, sid) {
+            Some(c) => Ok(c),
+            None => self.err(format!("unknown class '{name}'")),
         }
     }
 

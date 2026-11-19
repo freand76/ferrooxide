@@ -1052,6 +1052,8 @@ pub enum ExprKind {
     Tagged(String, Option<Box<Expr>>),
     /// `new`, `new(args)`, `new[n]`, `new[n](init)`, `new obj` (copy)
     New { size: Option<Box<Expr>>, args: Option<Vec<Arg>>, copy: Option<Box<Expr>> },
+    /// `C::new`, `C::new(args)`: a constructor call of a named class type
+    TypedNew { class: Box<Name>, args: Option<Vec<Arg>> },
     /// a data type where an expression may be one (`$bits(T)`, parameter values, `type(T)`)
     Type(Box<DataType>),
     /// a property/sequence expression in an expression position (assertion arguments)

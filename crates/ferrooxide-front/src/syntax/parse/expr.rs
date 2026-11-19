@@ -379,10 +379,17 @@ impl Parser {
                     return self.cast_after_type(t);
                 }
                 if self.is_p_at(1, "::") || (self.is_p_at(1, "#") && self.is_p_at(2, "(") && self.is_type_name(&n)) {
-                    let name = self.scoped_name()?;
+                    let mut name = self.scoped_name()?;
                     if self.is_p("'") && (self.is_p_at(1, "(") || self.is_p_at(1, "{")) {
                         let t = DataType { kind: TypeKind::Named(Box::new(name)), signed: None, packed: vec![], loc };
                         return self.cast_after_type(t);
+                    }
+                    if name.name == "new" {
+                        // `C::new(args)`: the class is the name before `::new`
+                        let last = name.scopes.pop().unwrap();
+                        let class = Name { scopes: name.scopes, name: last.name, params: last.params, loc };
+                        let args = if self.is_p("(") { Some(self.args()?) } else { None };
+                        return Ok(Expr::new(ExprKind::TypedNew { class: Box::new(class), args }, loc));
                     }
                     Expr::new(ExprKind::Scoped(Box::new(name)), loc)
                 } else {

@@ -273,7 +273,7 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
             this_expr(a, c, locals);
             this_expr(b, c, locals);
         }
-        Expr::Concat(v) | Expr::SysCall(_, v) | Expr::New(v) => v.iter_mut().for_each(|a| this_expr(a, c, locals)),
+        Expr::Concat(v) | Expr::SysCall(_, v) | Expr::New(v) | Expr::NewTyped(_, v) => v.iter_mut().for_each(|a| this_expr(a, c, locals)),
         Expr::Repl(n, v) => {
             this_expr(n, c, locals);
             v.iter_mut().for_each(|a| this_expr(a, c, locals));
