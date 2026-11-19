@@ -223,8 +223,10 @@ impl Preprocessor {
                         // body until end of line, honoring backslash continuation
                         let mut body = String::new();
                         while i < s.len() && s[i] != '\n' {
+                            // (a continued line ends in a newline in the expansion, IEEE 1800
+                            // 22.5.1: directives in the macro text end there)
                             if s[i] == '\\' && i + 1 < s.len() && s[i + 1] == '\n' {
-                                body.push(' ');
+                                body.push('\n');
                                 out.push('\n');
                                 line += 1;
                                 i += 2;
@@ -236,7 +238,7 @@ impl Preprocessor {
                                 }
                                 // a line comment ending in a backslash: the macro continues
                                 if i < s.len() && i > 0 && s[i - 1] == '\\' {
-                                    body.push(' ');
+                                    body.push('\n');
                                     out.push('\n');
                                     line += 1;
                                     i += 1;
