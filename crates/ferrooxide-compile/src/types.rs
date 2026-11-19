@@ -258,7 +258,7 @@ impl<'a> Compiler<'a> {
                     v(w, false)
                 }
             }
-            Expr::Call(name, _) => {
+            Expr::Call(name, args) => {
                 if let Some((_, m)) = self.str_method(name, sid) {
                     if STR_METHODS.contains(&m) {
                         return Ok(Type::Str);
@@ -271,6 +271,9 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 let Some((f, fs)) = self.lookup_func(name, sid) else {
+                    if let Some((obj, m)) = self.hier_handle(name, sid) {
+                        return self.type_of(&Expr::MethodCall(Box::new(obj), m, args.clone()), sid);
+                    }
                     return self.err(format!("unknown function '{name}'"));
                 };
                 if f.is_task {

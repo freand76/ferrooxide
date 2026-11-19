@@ -590,6 +590,33 @@ impl<'a> Compiler<'a> {
         self.virtual_call(c, (f, owner), m, h, args, sid)
     }
 
+    /// A dotted name `a.b.c.m` whose prefix `a.b.c` is a class handle in another scope (the
+    /// front end knows only its own scope's handles): (the handle, `m`).
+    pub(crate) fn hier_handle(&self, name: &str, sid: usize) -> Option<(Expr, String)> {
+        if self.classes.list.is_empty() {
+            return None;
+        }
+        let (base, m) = name.rsplit_once('.')?;
+        let parts: Vec<String> = base.split('.').map(String::from).collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        match self.lookup_hier(&parts, sid)? {
+            Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) => Some((Expr::Hier(parts), m.to_string())),
+            _ => None,
+        }
+    }
+
+    /// `inst.obj.p` (a hierarchical name that resolves to nothing else) as a member access.
+    pub(crate) fn hier_member(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        let Expr::Hier(p) = e else { return None };
+        if self.lookup_hier(p, sid).is_some() {
+            return None;
+        }
+        let (obj, m) = self.hier_handle(&p.join("."), sid)?;
+        Some(Expr::Member(Box::new(obj), m))
+    }
+
     /// Static method `m` of the class named `cn` (or of a base class): (method, the class
     /// declaring it).
     fn static_method(&self, cn: &str, m: &str, sid: usize) -> R<(&'a SubroutineDecl, u32)> {
@@ -706,6 +733,10 @@ impl<'a> Compiler<'a> {
 
     /// `lhs = rhs` where lhs is a property (`obj.p`); false if it is not one.
     pub(crate) fn prop_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
+        // `inst.obj.p = v`
+        if let Some(m) = self.hier_member(lhs, sid) {
+            return self.prop_assign(&m, rhs, sid);
+        }
         // an element of an array property
         if let Some((b, p, idx)) = self.prop_elem(lhs, sid)? {
             let v = match p.ty {
@@ -732,6 +763,9 @@ impl<'a> Compiler<'a> {
     /// The assignment target `e` contains a property (`obj.p[3:0]`, ...), which is not
     /// supported as a part.
     pub(crate) fn has_prop(&mut self, e: &Expr, sid: usize) -> R<bool> {
+        if let Some(m) = self.hier_member(e, sid) {
+            return self.has_prop(&m, sid);
+        }
         Ok(match e {
             Expr::Member(b, _) => self.handle_class(b, sid)?.is_some() || self.has_prop(b, sid)?,
             Expr::Index(a, _) | Expr::Range(a, ..) | Expr::IndexedRange(a, ..) => self.has_prop(a, sid)?,

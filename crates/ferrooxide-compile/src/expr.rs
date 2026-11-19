@@ -68,6 +68,10 @@ impl<'a> Compiler<'a> {
                 return Some(c);
             }
         }
+        // `inst.obj.p`: a property through a handle in another scope
+        if let Some(m) = self.hier_member(e, sid) {
+            return Some(m);
+        }
         if self.sigs.has_structs && matches!(e, Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..) | Expr::Member(..)) {
             if let Some(Ok(w)) = self.struct_walk(e, sid, lvalue) {
                 return Some(w.expr);
@@ -1444,6 +1448,10 @@ impl<'a> Compiler<'a> {
         as_task: bool,
     ) -> R<(Option<u32>, u32, bool)> {
         let Some((f, fs_def)) = self.lookup_func(name, sid) else {
+            // a method through a handle in another scope (`inst.obj.m()`)
+            if let Some((obj, m)) = self.hier_handle(name, sid) {
+                return self.method_call(&obj, &m, args, sid);
+            }
             return self.err(format!("unknown {} '{name}'", if as_task { "task" } else { "function" }));
         };
         self.call_resolved(f, fs_def, name, None, args, sid)

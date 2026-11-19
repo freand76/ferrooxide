@@ -69,11 +69,13 @@ Verilog-2005 plus common SystemVerilog:
 - preprocessor: `` `define `` (with arguments), `` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``, `` `include ``
 - SystemVerilog testbench features: interfaces and modports, `program`, `string`, queues
   (also bounded), dynamic and associative arrays, unpacked structs, classes (properties,
-  constructors, methods, `extends`/`super`, virtual methods, static properties), `fork`
+  also arrays and queues, constructors, methods, `extends`/`super`, virtual methods,
+  static properties and methods, forward `typedef class`), arrays and queues of class
+  handles, `string` parameters, `fork`
   in loops with `automatic` variables, `wait fork`, immediate assertions, `inside`,
   `foreach`, `unique`/`priority`
 
-Not yet: the rest of classes (static methods, parameterized classes, randomization),
+Not yet: the rest of classes (parameterized classes, randomization),
 concurrent assertions, array methods (`sort`, `find`, ...), `%v` strength display, SDF, VPI.
 The full list is "Unsupported (known)" in [PLAN.md](PLAN.md). Icarus's regression suite
 (ivtest) passes at about 91% (its SystemVerilog list at 89%); places where Icarus seems to

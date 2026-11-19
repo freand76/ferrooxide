@@ -382,10 +382,10 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
 2. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
    `typedef class`, static methods, array arguments, string parameters and static
-   variables in subroutine blocks done 2026-11-19): class handle ports, parameterized
-   classes, members through hierarchical names (`m1.c.f`, `inst.v.f`)
-   [sv_class_in_module_decl, sv_unit3b/4b]; `static` variables at the top level of an
-   automatic subroutine; array methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
+   variables in subroutine blocks, class members through hierarchical names done
+   2026-11-19): class handle ports, parameterized classes, struct members through
+   hierarchical names (`inst.v.f`); `static` variables at the top level of an automatic
+   subroutine; array methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
 3. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
    spans on `Expr`/`Stmt` (R6); `elab_items` (`elab/items.rs`) is still one function, to be
    split per item kind; assignment patterns for unpacked arrays [sv_ap_parray2].
