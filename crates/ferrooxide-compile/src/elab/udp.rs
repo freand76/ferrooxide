@@ -108,6 +108,20 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        let mut reads = Vec::new();
+        for e in &terms[1..] {
+            self.reads_expr(e, sid, &mut reads);
+        }
+        let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect());
+        if def.init.is_some() {
+            // an `initial` output value: a change at time 0 after the other processes have
+            // started (as in the reference); the table is evaluated from the first input change
+            let p = self.code.pb.last().unwrap().proc;
+            self.prog.procs[p as usize].kick0 = true;
+            self.emit(Instr::Wait { ctl });
+            self.store_value(&stmt::Lhs::Expr(&terms[0], sid), q, 1, rt::StoreMode::Blocking)?;
+            self.emit(Instr::Wait { ctl });
+        }
         let top = self.here();
         let mut ins = Vec::new();
         for e in &terms[1..] {
@@ -124,11 +138,6 @@ impl<'a> Compiler<'a> {
         } else {
             self.store_value(&stmt::Lhs::Expr(&terms[0], sid), q, 1, rt::StoreMode::Blocking)?;
         }
-        let mut reads = Vec::new();
-        for e in &terms[1..] {
-            self.reads_expr(e, sid, &mut reads);
-        }
-        let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect());
         self.emit(Instr::Wait { ctl });
         self.emit(Instr::Jmp { to: top });
         self.end_proc();
