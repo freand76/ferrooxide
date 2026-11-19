@@ -292,7 +292,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// The kind and element type of the array `e` names, without code.
-    fn dyn_arr_type(&mut self, e: &Expr, sid: usize) -> R<Option<(DynKind, Elem)>> {
+    pub(crate) fn dyn_arr_type(&mut self, e: &Expr, sid: usize) -> R<Option<(DynKind, Elem)>> {
         if let Some((s, _)) = self.dyn_var(e, sid) {
             if let Type::Dyn { kind, elem } = self.sig_type(s) {
                 return Ok(Some((kind, elem)));

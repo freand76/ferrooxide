@@ -206,6 +206,17 @@ impl<'a> Compiler<'a> {
 
     /// Store a value (slot, width) into an lvalue.
     pub(crate) fn store_value(&mut self, lhs: &Lhs, slot: u32, w: u32, mode: StoreMode) -> R<()> {
+        // an element of a queue or dynamic array
+        if let Lhs::Expr(e @ Expr::Index(a, _), s) = lhs {
+            if self.sigs.has_dyn {
+                if let Some((_, elem)) = self.dyn_arr_type(a, *s)? {
+                    let v = if elem.leaf == crate::types::Leaf::Bits && elem.class == NONE { self.resize(slot, w, elem.w, false) } else { slot };
+                    if self.dyn_elem_store(e, v, *s)? {
+                        return Ok(());
+                    }
+                }
+            }
+        }
         let ts = self.lhs_targets(lhs)?;
         let total: u32 = ts.iter().map(|t| t.1).sum();
         let v = self.resize(slot, w, total, false);
@@ -1249,12 +1260,15 @@ impl<'a> Compiler<'a> {
                 let Some(Some(var)) = args.first() else {
                     return self.err(format!("{name} needs a variable"));
                 };
-                let vw = self.type_of(var, sid)?.width();
+                let ty = self.type_of(var, sid)?;
+                let vw = ty.width();
                 let fargs = self.fmt_args(&args[1..], sid)?;
                 let d = self.tmp(vw);
                 let texp = self.texp(sid);
                 let radix = if name == "$swrite" { radix } else { 'd' };
-                self.emit(sys(SysTask::SFormat { d, w: vw, args: fargs, scope, texp, radix }));
+                // (w 0: the handle of a string, for a string variable)
+                let w = if ty.is_str() { 0 } else { vw };
+                self.emit(sys(SysTask::SFormat { d, w, args: fargs, scope, texp, radix }));
                 self.store_value(&Lhs::Expr(var, sid), d, vw, StoreMode::Blocking)?;
             }
             "$timeformat" => {

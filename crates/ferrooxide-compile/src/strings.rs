@@ -372,9 +372,6 @@ impl<'a> Compiler<'a> {
             }
             _ => return Ok(false),
         };
-        if self.sigs.has_dyn && self.dyn_elem_store(&base, new, sid)? {
-            return Ok(true);
-        }
         let l = stmt::Lhs::Expr(&base, sid);
         self.store_value(&l, new, 64, rt::StoreMode::Blocking)?;
         Ok(true)
