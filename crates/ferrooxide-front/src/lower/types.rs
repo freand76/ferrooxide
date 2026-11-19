@@ -196,27 +196,27 @@ pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
 }
 
 /// `n` -> `scope.n` for the names in `names`.
-pub(crate) fn qualify_expr(e: &mut Expr, scope: &str, names: &std::collections::HashSet<String>) {
+pub(crate) fn qualify_expr(e: &mut Expr, names: &std::collections::HashMap<String, String>) {
     match e {
-        Expr::Ident(n) if names.contains(n.as_str()) => *e = Expr::Hier(vec![scope.to_string(), n.clone()]),
+        Expr::Ident(n) if names.contains_key(n.as_str()) => *e = Expr::Hier(vec![names[n.as_str()].clone(), n.clone()]),
         Expr::Index(a, b) => {
-            qualify_expr(a, scope, names);
-            qualify_expr(b, scope, names);
+            qualify_expr(a, names);
+            qualify_expr(b, names);
         }
         Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
-            qualify_expr(a, scope, names);
-            qualify_expr(b, scope, names);
-            qualify_expr(c, scope, names);
+            qualify_expr(a, names);
+            qualify_expr(b, names);
+            qualify_expr(c, names);
         }
-        Expr::Unary(_, a) | Expr::IncDec { e: a, .. } => qualify_expr(a, scope, names),
+        Expr::Unary(_, a) | Expr::IncDec { e: a, .. } => qualify_expr(a, names),
         Expr::Binary(_, a, b) => {
-            qualify_expr(a, scope, names);
-            qualify_expr(b, scope, names);
+            qualify_expr(a, names);
+            qualify_expr(b, names);
         }
-        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter_mut().for_each(|x| qualify_expr(x, scope, names)),
+        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter_mut().for_each(|x| qualify_expr(x, names)),
         Expr::Repl(a, v) => {
-            qualify_expr(a, scope, names);
-            v.iter_mut().for_each(|x| qualify_expr(x, scope, names));
+            qualify_expr(a, names);
+            v.iter_mut().for_each(|x| qualify_expr(x, names));
         }
         _ => {}
     }
@@ -545,9 +545,9 @@ impl Lower {
                 }
                 for d in dims {
                     let mut r = self.dim(d, *loc)?;
-                    if let Some((scope, names)) = &self.type_scope {
-                        qualify_expr(&mut r.0, scope, names);
-                        qualify_expr(&mut r.1, scope, names);
+                    if let Some(names) = &self.type_scope {
+                        qualify_expr(&mut r.0, names);
+                        qualify_expr(&mut r.1, names);
                     }
                     t.unpacked.push(r);
                 }
@@ -558,25 +558,26 @@ impl Lower {
     }
 
     /// Identifiers in the dimensions of a type declared in a package or at file scope that
-    /// name parameters of that scope refer to them there.
+    /// name parameters of that scope, or names it imported, refer to them where they are
+    /// declared.
     fn qualify_type(&self, t: &mut SvType) {
-        let Some((scope, names)) = &self.type_scope else { return };
+        let Some(names) = &self.type_scope else { return };
         if names.is_empty() {
             return;
         }
-        fn ty(t: &mut SvType, scope: &str, names: &std::collections::HashSet<String>) {
+        fn ty(t: &mut SvType, names: &std::collections::HashMap<String, String>) {
             for d in t.dims.iter_mut().chain(t.unpacked.iter_mut()) {
-                qualify_expr(&mut d.0, scope, names);
-                qualify_expr(&mut d.1, scope, names);
+                qualify_expr(&mut d.0, names);
+                qualify_expr(&mut d.1, names);
             }
             if let Some(f) = &mut t.fields {
                 let f = Rc::make_mut(f);
                 for (_, ft) in &mut f.fields {
-                    ty(ft, scope, names);
+                    ty(ft, names);
                 }
             }
         }
-        ty(t, scope, names);
+        ty(t, names);
     }
 
     /// `name [= data_type]` of a type parameter; the name is a type from here on.

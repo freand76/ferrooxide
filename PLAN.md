@@ -379,8 +379,9 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    Keywords used as names are an error in SV mode (`-g2005` stays permissive;
    `` `begin_keywords "1364-2005" `` frees the SV keywords in its region): all 248 keyword
    tests pass. Named arguments in calls (`f(.clear(x), .set(y))`) done; TNoC now stops at
-   a typedef of an interface port's type, RSD at a package type whose dimensions use a
-   parameter the package imported from another package. Next: a script like `parsecheck.py` over the elaboration and simulation tests with a
+   a typedef of an interface port's type, RSD (after a fix for package types whose
+   dimensions use names the package imported) at a struct member through an interface
+   port (`cacheSystem.icMemAccessResult.data`, step 4). Next: a script like `parsecheck.py` over the elaboration and simulation tests with a
    baseline, so the pass rate per tag can be tracked.
 2. **Dynamic processes, subroutine calls, dynamic waiters** (A3). *First part done
    2026-11-19*: a fork branch started again while it still runs (fork/join_none in a loop)

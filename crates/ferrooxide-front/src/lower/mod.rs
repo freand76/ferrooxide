@@ -49,7 +49,7 @@ pub(crate) struct Lower {
     file_tu: (Option<i32>, Option<i32>),
     local_tu: (Option<i32>, Option<i32>),
     /// in a package or file-scope items: the scope's name and its parameters
-    type_scope: Option<(String, HashSet<String>)>,
+    type_scope: Option<HashMap<String, String>>,
     /// modules made for packages (added after the file's modules)
     pkg_modules: Vec<Module>,
     /// names that are keywords of the active keyword set, until the next module ends
@@ -293,8 +293,8 @@ impl Lower {
     /// Typedefs, parameters, functions and tasks at file scope: types refer to the
     /// file scope's parameters; subroutines run in the `$unit` scope.
     fn unit_scoped(&mut self, it: &t::Item, rest: &[&t::Item]) -> Result<()> {
-        let names = self.unit_items.iter().filter_map(|i| if let Item::Param(p) = i { Some(p.name.clone()) } else { None }).collect();
-        self.type_scope = Some((self.unit_name.clone(), names));
+        let names = self.unit_items.iter().filter_map(|i| if let Item::Param(p) = i { Some((p.name.clone(), self.unit_name.clone())) } else { None }).collect();
+        self.type_scope = Some(names);
         let mut v = Vec::new();
         let r = self.module_item(it, rest, &mut v);
         self.type_scope = None;
@@ -774,7 +774,7 @@ impl Lower {
         let saved_pkgs = std::mem::take(&mut self.mod_pkgs);
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_tu = std::mem::take(&mut self.local_tu);
-        let saved_scope = self.type_scope.replace((name.clone(), Default::default()));
+        let saved_scope = self.type_scope.replace(Default::default());
         let saved_ctx = self.pkg_ctx.replace(PkgCtx::default());
         let saved_classes = self.classes.clone();
         let mut own = Vec::new();
@@ -783,8 +783,8 @@ impl Lower {
             let n = own.len();
             self.module_item(it, &refs[k + 1..], &mut own)?;
             let new_params: Vec<String> = own[n..].iter().filter_map(|i| if let Item::Param(p) = i { Some(p.name.clone()) } else { None }).collect();
-            if let Some((_, names)) = &mut self.type_scope {
-                names.extend(new_params);
+            if let Some(names) = &mut self.type_scope {
+                names.extend(new_params.into_iter().map(|p| (p, name.clone())));
             }
         }
         self.type_scope = saved_scope;
@@ -973,6 +973,19 @@ impl Lower {
                         self.vars.entry(n.clone()).or_insert_with(|| v.clone());
                         if file_scope {
                             self.unit_var_types.entry(n.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+            }
+            // (in a package: its types' dimensions may use the imported names)
+            if self.pkg_ctx.is_some() {
+                if let Some(names) = &mut self.type_scope {
+                    match &im.name {
+                        Some(n) => _ = names.insert(n.clone(), pkg.clone()),
+                        None => {
+                            for n in &p.names {
+                                names.entry(n.clone()).or_insert_with(|| pkg.clone());
+                            }
                         }
                     }
                 }

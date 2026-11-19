@@ -106,8 +106,8 @@ impl Lower {
                 let before = self.types.clone();
                 let mut v = Vec::new();
                 // constants in the class's types refer to the class's parameters (`C::W`)
-                let known: HashSet<String> = consts.iter().map(|p: &ParamDecl| p.name.clone()).chain(names.consts.iter().cloned()).collect();
-                let saved_scope = self.type_scope.replace((name.clone(), known));
+                let known: HashMap<String, String> = consts.iter().map(|p: &ParamDecl| p.name.clone()).chain(names.consts.iter().cloned()).map(|n| (n, name.clone())).collect();
+                let saved_scope = self.type_scope.replace(known);
                 let r = self.module_item(i, &items, &mut v);
                 self.type_scope = saved_scope;
                 r?;
