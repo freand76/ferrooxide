@@ -59,7 +59,32 @@ impl<'a> Compiler<'a> {
         let (base, m) = name.rsplit_once('.')?;
         let parts: Vec<String> = base.split('.').map(String::from).collect();
         let e = if parts.len() == 1 { Expr::Ident(parts[0].clone()) } else { Expr::Hier(parts) };
-        self.is_string_scalar(&e, sid).then_some((e, m))
+        if self.is_string_scalar(&e, sid) {
+            return Some((e, m));
+        }
+        // `a[i].m`: an element of an array, queue or dynamic array of strings
+        let (arr, idx) = base.strip_suffix(']')?.split_once('[')?;
+        if arr.contains(['.', '[']) {
+            return None;
+        }
+        let a = Expr::Ident(arr.to_string());
+        let strs = self.string_var(&a, sid).is_some_and(|s| self.sig(s).depth > 0)
+            || self.dyn_var(&a, sid).is_some_and(|(_, el)| el.leaf == crate::types::Leaf::Str && el.class == NONE);
+        if !strs {
+            return None;
+        }
+        let i = match idx.strip_prefix('@') {
+            Some(n) => ferrooxide_front::lower::hier_index_expr(n.parse().ok()?)?,
+            None => Expr::Num(ferrooxide_front::ast::Number {
+                size: None,
+                signed: true,
+                base: 10,
+                based: false,
+                digits: idx.parse::<u64>().ok()?.to_string(),
+                fill: false,
+            }),
+        };
+        Some((Expr::Index(Box::new(a), Box::new(i)), m))
     }
 
     /// The text of a constant string operand: a literal or a `string` parameter.
@@ -347,6 +372,9 @@ impl<'a> Compiler<'a> {
             }
             _ => return Ok(false),
         };
+        if self.sigs.has_dyn && self.dyn_elem_store(&base, new, sid)? {
+            return Ok(true);
+        }
         let l = stmt::Lhs::Expr(&base, sid);
         self.store_value(&l, new, 64, rt::StoreMode::Blocking)?;
         Ok(true)

@@ -591,8 +591,16 @@ impl<'a> Compiler<'a> {
     /// `q[i] = v` of a queue or dynamic array: returns false if `lhs` is no such element.
     pub(crate) fn dyn_elem_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
         let Expr::Index(a, i) = lhs else { return Ok(false) };
-        let Some((kind, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
+        let Some((_, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
         let v = self.elem_value(rhs, elem, sid)?;
+        self.dyn_elem_store(lhs, v, sid)
+    }
+
+    /// Store the element value in slot `v` to `q[i]` of a queue or dynamic array: returns
+    /// false if `lhs` is no such element.
+    pub(crate) fn dyn_elem_store(&mut self, lhs: &Expr, v: u32, sid: usize) -> R<bool> {
+        let Expr::Index(a, i) = lhs else { return Ok(false) };
+        let Some((kind, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
         let ix = match kind {
             DynKind::Assoc(key) => self.key_value(i, key, sid)?,
             _ => self.dyn_index(a, i, sid)?,
