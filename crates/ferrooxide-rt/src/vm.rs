@@ -679,6 +679,10 @@ impl Sim {
         self.finished = false;
         for p in finals {
             self.exec(p);
+            // `$finish` in a final block: the others do not run (as in the reference)
+            if self.finished {
+                break;
+            }
         }
         self.flush();
     }
