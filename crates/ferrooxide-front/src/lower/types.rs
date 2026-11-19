@@ -837,14 +837,37 @@ impl Lower {
                     None => 1,
                     Some(e) => match lit(e) {
                         Some(k) if k >= 0 => k as usize,
-                        _ => return self.err(loc, format!(".{m}() needs a constant count")),
+                        Some(_) => return self.err(loc, format!(".{m}() needs a count of at least 0")),
+                        // a count known only in elaboration or at run time: the constant `n`
+                        // steps from each value
+                        None => {
+                            if super::stmt::side_effects(e) || n > 64 {
+                                return self.unsupported(loc, &format!("this count of .{m}()"));
+                            }
+                            let bx = |e: Expr| Box::new(e);
+                            let r = Expr::Binary(BinOp::Mod, bx(e.clone()), bx(num(n as i64)));
+                            let t = self.vars[&name].0.clone();
+                            let val = |i: usize| {
+                                let pos = if m == "next" {
+                                    Expr::Binary(BinOp::Add, bx(num(i as i64)), bx(r.clone()))
+                                } else {
+                                    Expr::Binary(BinOp::Sub, bx(num((i + n) as i64)), bx(r.clone()))
+                                };
+                                let pos = Expr::Binary(BinOp::Mod, bx(pos), bx(num(n as i64)));
+                                (0..n).rev().fold(x.clone(), |acc, j| {
+                                    let c = Expr::Binary(BinOp::Eq, bx(pos.clone()), bx(num(j as i64)));
+                                    Expr::Cond(bx(c), bx(Expr::Ident(names[j].clone())), bx(acc))
+                                })
+                            };
+                            return Ok(cast(t.width(), chain(&val, x.clone()), u64::from(t.signed)));
+                        }
                     },
                 };
                 let step = if m == "next" { k % n } else { n - k % n };
                 let t = self.vars[&name].0.clone();
                 cast(t.width(), chain(&|i| Expr::Ident(names[(i + step) % n].clone()), x), u64::from(t.signed))
             }
-            _ => Expr::SysCall("$__str".into(), vec![chain(&|i| Expr::Str(names[i].clone()), Expr::Str(String::new()))]),
+            _ => Expr::SysCall("$__str".into(), vec![chain(&|i| Expr::Str(names[i].rsplit("::").next().unwrap().to_string()), Expr::Str(String::new()))]),
         })
     }
 

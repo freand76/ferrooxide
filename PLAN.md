@@ -119,7 +119,8 @@ dimensions: the type's first, ICARUS_NOTES 9, forward typedefs, array typedefs),
 at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`, `$bits(T)`,
 assignment patterns (positional, and beyond the reference: named and `default:`), packages
 with `import p::*` / `import p::x` (module, header, file scope), `pkg::name`, `P::x`/`P::f()`,
-`export p::x` / `p::*` / `*::*` (names resolve to the package that declares them).
+`export p::x` / `p::*` / `*::*` (names resolve to the package that declares them),
+members and methods of package variables (`P::s.x`, `P::e.next(N)`, `P::c.f()`; read only).
 Lint reports names that are SystemVerilog keywords.
 
 Also done: interfaces and modports (interface ports alias the connected instance's scope),
@@ -637,7 +638,7 @@ SystemVerilog data types and testbench features:
   properties (2026-11-19: a variable `C$p` beside the class), parameters, typedefs and
   enums in classes (constants in the class's scope, `C::P`, `obj.P`, `C::T`); objects never
   freed). Left: static methods, `C::new`/`C::f()`, enum methods on an enum property from
-  outside the class, members through package variables (`P::c.X`) [sv_ps_member_sel3], parameterized classes, forward `typedef class`, arrays of handles
+  outside the class, parameterized classes, forward `typedef class`, arrays of handles
   and array properties, class handle ports, string methods on properties, NBAs to
   properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.
 - programs: processes run in the Active region, not the Reactive one (as the reference,
@@ -652,6 +653,8 @@ SystemVerilog data types and testbench features:
   interface port arrays; modport directions are not enforced (writing an input of a modport, members not
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
   a forward typedef defined in another scope than its declaration.
+- assignments to members or selects of package variables by their scoped name
+  (`P::s.x = 1`, `P::v[2] = 1`).
 - `.triggered` only on events declared in a module (not in tasks, functions or blocks).
 - `iff` only when every item of an event control has the same condition, and only in an
   event control before a statement (not in intra-assignment controls).

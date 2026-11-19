@@ -527,8 +527,25 @@ impl Lower {
                     pk = self.packages[&p].clone();
                 }
                 let call = matches!(ops.first(), Some(Op::Call(..)));
-                if pk.vars.contains_key(&n.name) && !call {
-                    return self.selects(Expr::Hier(vec![p, n.name.clone()]), ops);
+                if let Some(v) = pk.vars.get(&n.name).filter(|_| !call) {
+                    let t = &v.0;
+                    if !matches!(ops.first(), Some(Op::Member(..))) || !(t.has_struct() || t.enum_names.is_some() || t.class.is_some()) {
+                        return self.selects(Expr::Hier(vec![p, n.name.clone()]), ops);
+                    }
+                    if t.has_struct() {
+                        return self.members(Expr::Hier(vec![p, n.name.clone()]), ops);
+                    }
+                    // `P::v.m`: members and methods as for a variable of this scope, under the
+                    // name `P::v` (its enum constants are the package's)
+                    let mut v = v.clone();
+                    if let Some(names) = &t.enum_names {
+                        let q = names.iter().map(|c| if c.contains("::") { c.clone() } else { format!("{p}::{c}") }).collect();
+                        Rc::make_mut(&mut v.0).enum_names = Some(Rc::new(q));
+                    }
+                    self.use_package(&p);
+                    let name = format!("{p}::{}", n.name);
+                    self.vars.insert(name.clone(), v);
+                    return self.chain(Base::Name(&name, e.loc), ops, lvalue);
                 }
                 if pk.funcs.contains(&n.name) {
                     self.use_package(&p);
