@@ -90,6 +90,9 @@ impl<'a> Compiler<'a> {
         overrides: &[(Option<String>, PVal)],
         conns: Option<(&'a [Conn], usize)>,
     ) -> R<usize> {
+        if let Some((_, parent)) = conns {
+            self.check_recursion(m, &path, parent)?;
+        }
         let saved_file = std::mem::replace(&mut self.file, m.file.clone());
         // a nested module looks up what it does not declare in the enclosing instance
         let outer = if m.is_nested { conns.map(|c| c.1) } else { None };
@@ -257,6 +260,38 @@ impl<'a> Compiler<'a> {
         self.file = saved_file;
         self.line = inst_line;
         Ok(sid)
+    }
+
+    /// Rejects an instance of `m` inside an instance of `m`: allowed only through a
+    /// generate block, and then at most `RECURSION_LIMIT` deep (as the reference does).
+    fn check_recursion(&self, m: &Module, path: &str, parent: usize) -> R<()> {
+        const RECURSION_LIMIT: u32 = 10;
+        let (mut count, mut in_gen) = (0, false);
+        let mut x = Some(parent);
+        while let Some(s) = x {
+            match self.hier.scope_module.get(&s) {
+                Some(pm) => {
+                    if pm.name == m.name {
+                        if !in_gen {
+                            return self.err(format!("module '{}' instantiates itself outside a generate block ('{path}')", m.name));
+                        }
+                        count += 1;
+                        if count > RECURSION_LIMIT {
+                            return self.err(format!(
+                                "instance '{path}' of module '{}' is nested too deep (more than {RECURSION_LIMIT} levels of recursion)",
+                                m.name
+                            ));
+                        }
+                    }
+                    x = self.scopes[s].inst_parent;
+                }
+                None => {
+                    in_gen = true;
+                    x = self.scopes[s].parent;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether `items` (with generate constructs) instantiate module `name`.
