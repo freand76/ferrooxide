@@ -186,6 +186,9 @@ pub struct Sim {
     force_bypass: bool,
     /// for the next `apply`: the bits that keep their value (instead of the forced ones)
     keep_override: Option<Vec<u64>>,
+    /// forced nets: the value their drivers give the forced bits (planes), which a release
+    /// restores at once (as the reference)
+    driven_shadow: HashMap<u32, Vec<u64>>,
     /// per group: run the members last to first next time
     group_rev: Vec<bool>,
     /// (array, element) -> virtual signal of that element
@@ -465,6 +468,7 @@ impl Sim {
             dump_pending: false,
             force_bypass: false,
             keep_override: None,
+            driven_shadow: HashMap::new(),
             writers: {
                 let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
                 for (p, pd) in prog.procs.iter().enumerate() {
@@ -1140,6 +1144,41 @@ impl Sim {
         self.resident[d as usize] = q;
     }
 
+    /// Bits [lsb, lsb + w) of `sig` are no longer forced; a net takes its drivers' value again
+    /// at once.
+    fn unforce(&mut self, sig: u32, lsb: u32, w: u32) {
+        let Some(m) = self.force_mask.get_mut(&sig) else { return };
+        let r = self.sigs[sig as usize];
+        let n = nw(r.width);
+        let mut rel = vec![0u64; n];
+        for b in lsb..lsb + w {
+            let k = 1 << (b % 64);
+            if m[(b / 64) as usize] & k != 0 {
+                rel[(b / 64) as usize] |= k;
+            }
+            m[(b / 64) as usize] &= !k;
+        }
+        let all_free = m.iter().all(|&x| x == 0);
+        if all_free {
+            self.force_mask.remove(&sig);
+        }
+        let Some(sh) = (if all_free { self.driven_shadow.remove(&sig) } else { self.driven_shadow.get(&sig).cloned() }) else { return };
+        let base = r.slot as usize;
+        let old = lsb_code(&self.mem, r.slot, r.width);
+        let mut changed = false;
+        for i in 0..n {
+            let k = rel[i];
+            for plane in [0, n] {
+                let v = (self.mem[base + plane + i] & !k) | (sh[plane + i] & k);
+                changed |= v != self.mem[base + plane + i];
+                self.mem[base + plane + i] = v;
+            }
+        }
+        if changed {
+            self.notify(sig, old);
+        }
+    }
+
     /// The current contents of branch `d`'s frame.
     fn frame_words(&self, d: u32) -> Vec<u64> {
         let mut v = Vec::new();
@@ -1594,6 +1633,14 @@ impl Sim {
         let changed = match snap {
             Some(old_words) => {
                 let m = keep.as_ref().unwrap();
+                // (a store to a forced net: what its drivers now give the forced bits)
+                if let Some(sh) = self.driven_shadow.get_mut(&sig) {
+                    for i in 0..n {
+                        let k = m[i];
+                        sh[i] = (sh[i] & !k) | (self.mem[base + i] & k);
+                        sh[n + i] = (sh[n + i] & !k) | (self.mem[base + n + i] & k);
+                    }
+                }
                 for i in 0..n {
                     let k = m[i];
                     self.mem[base + i] = (self.mem[base + i] & !k) | (old_words[i] & k);
@@ -1767,6 +1814,18 @@ impl Sim {
         let s = s as usize;
         match mode {
             StoreMode::Force => {
+                let r = self.sigs[sig as usize];
+                if r.depth == 0 && self.prog.signals[sig as usize].kind == SigKind::Wire {
+                    // the drivers' value of the bits not forced so far
+                    let n = nw(r.width);
+                    let cur = self.mem[r.slot as usize..r.slot as usize + 2 * n].to_vec();
+                    let old = self.force_mask.get(&sig).cloned().unwrap_or_else(|| vec![0; n]);
+                    let sh = self.driven_shadow.entry(sig).or_insert_with(|| cur.clone());
+                    for i in 0..n {
+                        sh[i] = (sh[i] & old[i]) | (cur[i] & !old[i]);
+                        sh[n + i] = (sh[n + i] & old[i]) | (cur[n + i] & !old[i]);
+                    }
+                }
                 if let Some((lsb, w)) = self.res_bits(sig, res) {
                     let words = nw(self.sigs[sig as usize].width);
                     let m = self.force_mask.entry(sig).or_insert_with(|| vec![0; words]);
@@ -2498,14 +2557,7 @@ impl Sim {
                 Instr::Unforce { t } => {
                     if let Some((sig, res, _)) = self.resolve(t) {
                         if let Some((lsb, w)) = self.res_bits(sig, res) {
-                            if let Some(m) = self.force_mask.get_mut(&sig) {
-                                for b in lsb..lsb + w {
-                                    m[(b / 64) as usize] &= !(1 << (b % 64));
-                                }
-                                if m.iter().all(|&x| x == 0) {
-                                    self.force_mask.remove(&sig);
-                                }
-                            }
+                            self.unforce(sig, lsb, w);
                         }
                     }
                 }
