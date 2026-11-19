@@ -123,7 +123,7 @@ impl Lower {
                 }
             }
             d.names = self.declarators(&v.decls)?;
-            if d.names.iter().any(|n| n.heap.is_some() || !n.dims.is_empty()) {
+            if d.names.iter().any(|n| !n.dims.is_empty()) {
                 return self.unsupported(v.loc, "an array as a class property");
             }
             if is_static {

@@ -380,8 +380,9 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    calls (also for recursion from a fork branch [recursive_task]), dynamic waiters for
    run-time targets. VPI (A4) on the same base.
 2. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
-   errors, 22 wrong outputs at ba4fb93): arrays as class properties and arrays of handles
-   [br1005, sv_class9, sv_foreach3/4], forward `typedef class` [sv_typedef_fwd_class*],
+   errors, 22 wrong outputs at ba4fb93): fixed-size arrays as class properties and arrays
+   of handles [sv_foreach3/4] (queue, dynamic and associative array properties done
+   2026-11-19), forward `typedef class` [sv_typedef_fwd_class*],
    static methods and `C::f()`, class handle ports, parameterized classes, members through
    hierarchical names (`m1.c.f`, `inst.v.f`) [sv_class_in_module_decl, sv_unit3b/4b];
    array and dynamic-array subroutine arguments [task_port_types1/2, br1015b,
@@ -574,9 +575,12 @@ SystemVerilog data types and testbench features:
   `this`, `extends`/`super`, virtual dispatch, file-scope and package classes, static
   properties (2026-11-19: a variable `C$p` beside the class), parameters, typedefs and
   enums in classes (constants in the class's scope, `C::P`, `obj.P`, `C::T`); objects never
-  freed). Typed constructor calls `C::new(args)` (2026-11-19). Left: static methods, `C::f()`, enum methods on an enum property from
-  outside the class, parameterized classes, forward `typedef class`, arrays of handles
-  and array properties, class handle ports, string methods on properties, NBAs to
+  freed). Typed constructor calls `C::new(args)` (2026-11-19). Queue, dynamic and
+  associative array properties (2026-11-19: the handle is read into a temporary, changed
+  and written back; shallow copies copy them). Left: static methods, `C::f()`, enum
+  methods on an enum property from outside the class, parameterized classes, forward
+  `typedef class`, arrays of handles (also as queue elements), fixed-size array
+  properties, `foreach` and array queries of array properties, class handle ports, string methods on properties, NBAs to
   properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.
 - programs: processes run in the Active region, not the Reactive one (as the reference,
   which warns about assignments to module variables), no implicit `$finish` when all

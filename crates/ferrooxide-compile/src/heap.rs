@@ -3,7 +3,8 @@
 //! assignment of another variable's array copies it, one of a new array (`new[n]`, a
 //! concatenation, a slice) takes it over, and the target's old object is freed. Element
 //! writes and the methods change the object in place (`Instr::Heap`) and wake the waiters on
-//! the variable.
+//! the variable. A class property can hold an array too: its handle is read into a temporary,
+//! changed there and written back to the object (`DynArr`).
 
 use crate::types::{DynKind, Elem, Leaf, Type};
 use crate::*;
@@ -17,6 +18,25 @@ const METHODS: &[&str] = &[
 
 /// Methods of associative arrays that step through the keys.
 const KEY_STEPS: &[&str] = &["first", "last", "next", "prev"];
+
+/// A queue, dynamic or associative array named by an expression, ready for `Instr::Heap` /
+/// `Instr::Assoc`: `slot` holds its handle.
+#[derive(Clone, Copy)]
+pub(crate) struct DynArr {
+    pub slot: u32,
+    pub kind: DynKind,
+    pub elem: Elem,
+    home: DynHome,
+}
+
+/// Where the handle of a `DynArr` lives.
+#[derive(Clone, Copy)]
+enum DynHome {
+    /// a variable
+    Sig(u32),
+    /// the property at bit `off` of the object whose handle is in slot `h`
+    Prop { h: u32, off: u32 },
+}
 
 impl<'a> Compiler<'a> {
     /// The element type of a declaration of kind `kind`, `w` bits wide.
@@ -106,14 +126,86 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::Heap { op, d, a, b, c, w: elem.w, t, at });
     }
 
-    /// A heap operation on the array of variable `s`.
-    fn var_op(&mut self, s: u32, op: HeapOp, d: u32, b: u32, c: u32, elem: Elem) {
-        let kind = match self.sig_type(s) {
-            Type::Dyn { kind, .. } => kind,
-            _ => DynKind::Darray,
+    /// A copy of the array whose handle is in slot `h`: the slot of the new handle.
+    pub(crate) fn dyn_copy(&mut self, h: u32, kind: DynKind, elem: Elem) -> u32 {
+        // (also for an associative array)
+        let d = self.tmp(64);
+        self.heap_op_t(HeapOp::Copy, d, h, NONE, NONE, elem, kind);
+        d
+    }
+
+    /// A heap operation on array `a`.
+    fn arr_op(&mut self, a: &DynArr, op: HeapOp, d: u32, b: u32, c: u32) {
+        self.heap_op_t(op, d, a.slot, b, c, a.elem, a.kind);
+    }
+
+    /// A property of a class object holding a queue, dynamic or associative array
+    /// (`obj.q`): (the handle expression, the property's offset, kind and element type).
+    fn dyn_prop<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(&'e Expr, u32, DynKind, Elem)>> {
+        if self.classes.list.is_empty() {
+            return Ok(None);
+        }
+        let Expr::Member(b, m) = e else { return Ok(None) };
+        let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
+        if self.class_const(c, m).is_some() {
+            return Ok(None);
+        }
+        let p = self.prop(c, m)?;
+        Ok(match p.ty {
+            Type::Dyn { kind, elem } => Some((&**b, p.off, kind, elem)),
+            _ => None,
+        })
+    }
+
+    /// The array `e` names (a variable or a property), None if it names none. A property's
+    /// handle is read into a temporary; `dyn_done` writes it back after a change.
+    pub(crate) fn dyn_arr(&mut self, e: &Expr, sid: usize) -> R<Option<DynArr>> {
+        if let Some((s, elem)) = self.dyn_var(e, sid) {
+            let kind = match self.sig_type(s) {
+                Type::Dyn { kind, .. } => kind,
+                _ => DynKind::Darray,
+            };
+            return Ok(Some(DynArr { slot: self.sig(s).slot, kind, elem, home: DynHome::Sig(s) }));
+        }
+        let Some((b, off, kind, elem)) = self.dyn_prop(e, sid)? else { return Ok(None) };
+        let h = self.handle_value(b, sid)?;
+        let slot = self.tmp(64);
+        self.emit(Instr::Obj { op: rt::ObjOp::Get, d: slot, a: h, b: NONE, off, w: 64 });
+        Ok(Some(DynArr { slot, kind, elem, home: DynHome::Prop { h, off } }))
+    }
+
+    /// After array `a` changed: wake the variable's waiters, or write the property's handle
+    /// back (an empty array gets an object when it changes).
+    fn dyn_done(&mut self, a: &DynArr) {
+        match a.home {
+            DynHome::Sig(s) => {
+                self.emit(Instr::Touch { sig: s });
+            }
+            DynHome::Prop { h, off } => {
+                self.emit(Instr::Obj { op: rt::ObjOp::Set, d: NONE, a: h, b: a.slot, off, w: 64 });
+            }
+        }
+    }
+
+    /// `base.m` / `base.m(args)` where `base` is an array and `m` one of its methods:
+    /// (base, method, arguments).
+    fn dyn_method_expr<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(Expr, &'e str, &'e [Expr])>> {
+        let (o, m, args): (&Expr, &str, &[Expr]) = match e {
+            Expr::MethodCall(o, m, args) => (o, m, args),
+            Expr::Member(o, m) => (o, m, &[]),
+            Expr::Call(name, args) => match self.dyn_method(name, sid) {
+                Some((base, _, _, m)) => {
+                    let m = &name[name.len() - m.len()..];
+                    return Ok(Some((base, m, args)));
+                }
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
         };
-        let slot = self.sig(s).slot;
-        self.heap_op_t(op, d, slot, b, c, elem, kind);
+        if !METHODS.contains(&m) || self.dyn_arr_type(o, sid)?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some((o.clone(), m, args)))
     }
 
     /// The current source location for run-time warnings (`Program::locs`).
@@ -129,10 +221,10 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::Assoc { op, d, a, b, c, w: elem.w, key, x: elem.x() });
     }
 
-    /// The key type of associative array `s` (None: not one).
-    fn assoc_key(&self, s: u32) -> Option<KeyKind> {
-        match self.sig_type(s) {
-            Type::Dyn { kind: DynKind::Assoc(k), .. } => Some(k),
+    /// The key type of associative array `a` (None: not one).
+    fn assoc_key(a: &DynArr) -> Option<KeyKind> {
+        match a.kind {
+            DynKind::Assoc(k) => Some(k),
             _ => None,
         }
     }
@@ -189,24 +281,31 @@ impl<'a> Compiler<'a> {
         Some(Expr::Call(name, vec![]))
     }
 
+    /// The kind and element type of the array `e` names, without code.
+    fn dyn_arr_type(&mut self, e: &Expr, sid: usize) -> R<Option<(DynKind, Elem)>> {
+        if let Some((s, _)) = self.dyn_var(e, sid) {
+            if let Type::Dyn { kind, elem } = self.sig_type(s) {
+                return Ok(Some((kind, elem)));
+            }
+        }
+        Ok(self.dyn_prop(e, sid)?.map(|(_, _, k, el)| (k, el)))
+    }
+
     /// The type of an element read, a method call or a slice of a queue or dynamic array.
-    pub(crate) fn dyn_type_of(&self, e: &Expr, sid: usize) -> Option<R<Type>> {
+    pub(crate) fn dyn_type_of(&mut self, e: &Expr, sid: usize) -> R<Option<Type>> {
         match e {
-            Expr::Index(a, _) => Some(Ok(self.dyn_var(a, sid)?.1.ty())),
-            Expr::Range(a, ..) => {
-                let (s, _) = self.dyn_var(a, sid)?;
-                Some(Ok(self.sig_type(s)))
+            Expr::Index(a, _) => Ok(self.dyn_arr_type(a, sid)?.map(|(_, el)| el.ty())),
+            Expr::Range(a, ..) => Ok(self.dyn_arr_type(a, sid)?.map(|(kind, elem)| Type::Dyn { kind, elem })),
+            _ => {
+                let Some((base, m, _)) = self.dyn_method_expr(e, sid)? else { return Ok(None) };
+                let Some((_, elem)) = self.dyn_arr_type(&base, sid)? else { return Ok(None) };
+                Ok(Some(match m {
+                    "size" | "num" | "exists" => Type::vec(32, true),
+                    m if KEY_STEPS.contains(&m) => Type::vec(32, true),
+                    "pop_back" | "pop_front" => elem.ty(),
+                    _ => return self.err(format!("'{m}' gives no value")),
+                }))
             }
-            Expr::Call(name, _) => {
-                let (_, _, elem, m) = self.dyn_method(name, sid)?;
-                Some(match m {
-                    "size" | "num" | "exists" => Ok(Type::vec(32, true)),
-                    m if KEY_STEPS.contains(&m) => Ok(Type::vec(32, true)),
-                    "pop_back" | "pop_front" => Ok(elem.ty()),
-                    _ => self.err(format!("'{m}' gives no value")),
-                })
-            }
-            _ => None,
         }
     }
 
@@ -215,12 +314,11 @@ impl<'a> Compiler<'a> {
         let b = |x: &Expr| Box::new(Self::subst_last(x, q));
         match e {
             Expr::Last => {
-                let name = match q {
-                    Expr::Ident(n) => n.clone(),
-                    Expr::Hier(p) => p.join("."),
-                    _ => unreachable!(),
+                let size = match q {
+                    Expr::Ident(n) => Expr::Call(format!("{n}.size"), vec![]),
+                    Expr::Hier(p) => Expr::Call(format!("{}.size", p.join(".")), vec![]),
+                    q => Expr::MethodCall(Box::new(q.clone()), "size".into(), vec![]),
                 };
-                let size = Expr::Call(format!("{name}.size"), vec![]);
                 Expr::Binary(BinOp::Sub, Box::new(size), Box::new(Expr::Num(ferrooxide_front::ast::dec(1))))
             }
             Expr::Unary(op, a) => Expr::Unary(*op, b(a)),
@@ -239,51 +337,53 @@ impl<'a> Compiler<'a> {
     /// An element read or a method call of a queue or dynamic array: the slot of the value
     /// (an element as stored: `elem.w` bits, a real's bits, a string handle) and its type.
     pub(crate) fn dyn_value(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Type)>> {
-        match e {
-            Expr::Index(a, i) => {
-                let Some((s, elem)) = self.dyn_var(a, sid) else { return Ok(None) };
-                let d = self.tmp(elem.w);
-                let slot = self.sig(s).slot;
-                if let Some(key) = self.assoc_key(s) {
-                    let k = self.key_value(i, key, sid)?;
-                    self.assoc_op(AssocOp::Get, d, slot, k, NONE, elem, key);
-                    return Ok(Some((d, elem.ty())));
+        if let Expr::Index(a, i) = e {
+            if self.dyn_arr_type(a, sid)?.is_none() {
+                return Ok(None);
+            }
+            // (the index first: a property's handle is read last)
+            let ix = match self.dyn_arr_type(a, sid)? {
+                Some((DynKind::Assoc(key), _)) => self.key_value(i, key, sid)?,
+                _ => self.dyn_index(a, i, sid)?,
+            };
+            let arr = self.dyn_arr(a, sid)?.unwrap();
+            let elem = arr.elem;
+            let d = self.tmp(elem.w);
+            match Self::assoc_key(&arr) {
+                Some(key) => self.assoc_op(AssocOp::Get, d, arr.slot, ix, NONE, elem, key),
+                None => self.arr_op(&arr, HeapOp::Get, d, ix, NONE),
+            }
+            return Ok(Some((d, elem.ty())));
+        }
+        let Some((base, m, args)) = self.dyn_method_expr(e, sid)? else { return Ok(None) };
+        let Some(arr) = self.dyn_arr(&base, sid)? else { return Ok(None) };
+        let elem = arr.elem;
+        if let Some(key) = Self::assoc_key(&arr) {
+            return self.assoc_value(&arr, m, args, key, sid).map(Some);
+        }
+        match m {
+            "size" => {
+                let d = self.tmp(32);
+                self.arr_op(&arr, HeapOp::Size, d, NONE, NONE);
+                Ok(Some((d, Type::vec(32, true))))
+            }
+            "pop_back" | "pop_front" => {
+                if !args.is_empty() {
+                    return self.err(format!("{m}() takes no arguments"));
                 }
-                let ix = self.dyn_index(a, i, sid)?;
-                self.var_op(s, HeapOp::Get, d, ix, NONE, elem);
+                let d = self.tmp(elem.w);
+                let op = if m == "pop_back" { HeapOp::PopBack } else { HeapOp::PopFront };
+                self.arr_op(&arr, op, d, NONE, NONE);
+                self.dyn_done(&arr);
                 Ok(Some((d, elem.ty())))
             }
-            Expr::Call(name, args) => {
-                let Some((_, s, elem, m)) = self.dyn_method(name, sid) else { return Ok(None) };
-                if let Some(key) = self.assoc_key(s) {
-                    return self.assoc_value(s, m, args, elem, key, sid).map(Some);
-                }
-                match m {
-                    "size" => {
-                        let d = self.tmp(32);
-                        self.var_op(s, HeapOp::Size, d, NONE, NONE, elem);
-                        Ok(Some((d, Type::vec(32, true))))
-                    }
-                    "pop_back" | "pop_front" => {
-                        if !args.is_empty() {
-                            return self.err(format!("{m}() takes no arguments"));
-                        }
-                        let d = self.tmp(elem.w);
-                        let op = if m == "pop_back" { HeapOp::PopBack } else { HeapOp::PopFront };
-                        self.var_op(s, op, d, NONE, NONE, elem);
-                        self.emit(Instr::Touch { sig: s });
-                        Ok(Some((d, elem.ty())))
-                    }
-                    _ => self.err(format!("'{m}' gives no value")),
-                }
-            }
-            _ => Ok(None),
+            _ => self.err(format!("'{m}' gives no value")),
         }
     }
 
-    /// A method of associative array `s` that gives a value: (slot, type).
-    fn assoc_value(&mut self, s: u32, m: &str, args: &[Expr], elem: Elem, key: KeyKind, sid: usize) -> R<(u32, Type)> {
-        let slot = self.sig(s).slot;
+    /// A method of associative array `a` that gives a value: (slot, type).
+    fn assoc_value(&mut self, a: &DynArr, m: &str, args: &[Expr], key: KeyKind, sid: usize) -> R<(u32, Type)> {
+        let (slot, elem) = (a.slot, a.elem);
         let d = self.tmp(32);
         match m {
             "num" | "size" => self.assoc_op(AssocOp::Num, d, slot, NONE, NONE, elem, key),
@@ -337,11 +437,12 @@ impl<'a> Compiler<'a> {
 
     /// `dyn_rhs` for a target that is an associative array (`assoc`) or not.
     fn dyn_rhs_k(&mut self, e: &Expr, elem: Elem, assoc: bool, sid: usize) -> R<(u32, bool)> {
-        if let Some((s, el)) = self.dyn_var(e, sid) {
+        if let Some(a) = self.dyn_arr(e, sid)? {
+            let el = a.elem;
             if el != elem && (el.w != elem.w || el.leaf != elem.leaf) {
                 return self.err("the arrays have different element types");
             }
-            return Ok((self.sig(s).slot, false));
+            return Ok((a.slot, false));
         }
         match e {
             Expr::NewArray(..) | Expr::Concat(_) | Expr::Pattern(..) | Expr::Range(..) if assoc => {
@@ -387,11 +488,11 @@ impl<'a> Compiler<'a> {
                 }
                 Ok((d, true))
             }
-            Expr::Range(a, lo, hi) if self.dyn_var(a, sid).is_some() => {
-                let (s, el) = self.dyn_var(a, sid).unwrap();
+            Expr::Range(a, lo, hi) if self.dyn_arr_type(a, sid)?.is_some() => {
                 let (lo, hi) = (self.dyn_index(a, lo, sid)?, self.dyn_index(a, hi, sid)?);
+                let arr = self.dyn_arr(a, sid)?.unwrap();
                 let d = self.tmp(64);
-                self.var_op(s, HeapOp::Slice, d, lo, hi, el);
+                self.heap_op(HeapOp::Slice, d, arr.slot, lo, hi, arr.elem);
                 Ok((d, true))
             }
             Expr::Cond(c, x, y) => {
@@ -464,45 +565,62 @@ impl<'a> Compiler<'a> {
     /// of a new array to it).
     pub(crate) fn dyn_free_target(&mut self, lhs: &Expr, sid: usize) {
         if let Some((s, elem)) = self.dyn_var(lhs, sid) {
-            self.var_op(s, HeapOp::Free, NONE, NONE, NONE, elem);
+            let slot = self.sig(s).slot;
+            self.heap_op(HeapOp::Free, NONE, slot, NONE, NONE, elem);
         }
     }
 
     /// `q[i] = v` of a queue or dynamic array: returns false if `lhs` is no such element.
     pub(crate) fn dyn_elem_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
         let Expr::Index(a, i) = lhs else { return Ok(false) };
-        let Some((s, elem)) = self.dyn_var(a, sid) else { return Ok(false) };
+        let Some((kind, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
         let v = self.elem_value(rhs, elem, sid)?;
-        let slot = self.sig(s).slot;
-        if let Some(key) = self.assoc_key(s) {
-            let k = self.key_value(i, key, sid)?;
-            self.assoc_op(AssocOp::Set, NONE, slot, k, v, elem, key);
-            self.emit(Instr::Touch { sig: s });
-            return Ok(true);
+        let ix = match kind {
+            DynKind::Assoc(key) => self.key_value(i, key, sid)?,
+            _ => self.dyn_index(a, i, sid)?,
+        };
+        let arr = self.dyn_arr(a, sid)?.unwrap();
+        match Self::assoc_key(&arr) {
+            Some(key) => self.assoc_op(AssocOp::Set, NONE, arr.slot, ix, v, elem, key),
+            None => self.arr_op(&arr, HeapOp::Set, NONE, ix, v),
         }
-        let ix = self.dyn_index(a, i, sid)?;
-        self.var_op(s, HeapOp::Set, NONE, ix, v, elem);
-        self.emit(Instr::Touch { sig: s });
+        self.dyn_done(&arr);
         Ok(true)
     }
 
     /// `q.method(args);` of a queue or dynamic array: returns false if `name` is no such
     /// method.
     pub(crate) fn dyn_task(&mut self, name: &str, args: &[Expr], sid: usize) -> R<bool> {
-        let Some((base, s, elem, m)) = self.dyn_method(name, sid) else { return Ok(false) };
-        let slot = self.sig(s).slot;
-        if let Some(key) = self.assoc_key(s) {
+        let Some((base, _, _, m)) = self.dyn_method(name, sid) else { return Ok(false) };
+        let m = &name[name.len() - m.len()..];
+        self.dyn_method_stmt(&base, m, args, sid)
+    }
+
+    /// `obj.q.method(args);` where `obj.q` is an array property: false if it is not one.
+    pub(crate) fn dyn_prop_task(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<bool> {
+        if !METHODS.contains(&m) || self.dyn_prop(obj, sid)?.is_none() {
+            return Ok(false);
+        }
+        self.dyn_method_stmt(obj, m, args, sid)
+    }
+
+    /// Method `m` of array `base` called as a statement.
+    fn dyn_method_stmt(&mut self, base: &Expr, m: &str, args: &[Expr], sid: usize) -> R<bool> {
+        let Some((kind, elem)) = self.dyn_arr_type(base, sid)? else { return Ok(false) };
+        if let DynKind::Assoc(key) = kind {
             if m == "delete" {
                 let k = match args {
                     [] => NONE,
                     [k] => self.key_value(k, key, sid)?,
                     _ => return self.err("delete() takes at most 1 argument"),
                 };
-                self.assoc_op(AssocOp::Delete, NONE, slot, k, NONE, elem, key);
-                self.emit(Instr::Touch { sig: s });
+                let arr = self.dyn_arr(base, sid)?.unwrap();
+                self.assoc_op(AssocOp::Delete, NONE, arr.slot, k, NONE, elem, key);
+                self.dyn_done(&arr);
             } else {
                 // a value method called as a statement (`aa.first(k);`)
-                self.assoc_value(s, m, args, elem, key, sid)?;
+                let arr = self.dyn_arr(base, sid)?.unwrap();
+                self.assoc_value(&arr, m, args, key, sid)?;
             }
             return Ok(true);
         }
@@ -512,41 +630,42 @@ impl<'a> Compiler<'a> {
             }
             Ok(())
         };
-        match m {
+        let (op, b, c) = match m {
             "push_back" | "push_front" => {
                 nargs(self, 1)?;
                 let v = self.elem_value(&args[0], elem, sid)?;
-                let op = if m == "push_back" { HeapOp::PushBack } else { HeapOp::PushFront };
-                self.var_op(s, op, NONE, NONE, v, elem);
+                (if m == "push_back" { HeapOp::PushBack } else { HeapOp::PushFront }, NONE, v)
             }
             "insert" => {
                 nargs(self, 2)?;
-                let ix = self.dyn_index(&base, &args[0], sid)?;
+                let ix = self.dyn_index(base, &args[0], sid)?;
                 let v = self.elem_value(&args[1], elem, sid)?;
-                self.var_op(s, HeapOp::Insert, NONE, ix, v, elem);
+                (HeapOp::Insert, ix, v)
             }
             "delete" => {
                 let ix = match args {
                     [] => NONE,
-                    [i] => self.dyn_index(&base, i, sid)?,
+                    [i] => self.dyn_index(base, i, sid)?,
                     _ => return self.err("delete() takes at most 1 argument"),
                 };
-                self.var_op(s, HeapOp::Delete, NONE, ix, NONE, elem);
+                (HeapOp::Delete, ix, NONE)
             }
             // a value method called for its effect (pop) or ignored (size)
             _ => {
-                self.dyn_value(&Expr::Call(name.to_string(), args.to_vec()), sid)?;
+                self.dyn_value(&Expr::MethodCall(Box::new(base.clone()), m.to_string(), args.to_vec()), sid)?;
                 return Ok(true);
             }
-        }
-        self.emit(Instr::Touch { sig: s });
+        };
+        let arr = self.dyn_arr(base, sid)?.unwrap();
+        self.arr_op(&arr, op, NONE, b, c);
+        self.dyn_done(&arr);
         Ok(true)
     }
 
     /// `a == b` / `a != b` of queues or dynamic arrays (1 bit).
     pub(crate) fn dyn_compare(&mut self, ne: bool, a: &Expr, b: &Expr, elem: Elem, sid: usize) -> R<u32> {
-        let assoc = |c: &Self, e: &Expr| c.dyn_var(e, sid).is_some_and(|(s, _)| c.assoc_key(s).is_some());
-        if assoc(self, a) || assoc(self, b) {
+        let assoc = |c: &mut Self, e: &Expr| -> R<bool> { Ok(matches!(c.dyn_arr_type(e, sid)?, Some((DynKind::Assoc(_), _)))) };
+        if assoc(self, a)? || assoc(self, b)? {
             return self.err("associative arrays cannot be compared");
         }
         let (x, _) = self.dyn_rhs(a, elem, sid)?;

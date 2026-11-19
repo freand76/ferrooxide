@@ -6,7 +6,7 @@
 //! class's constructor (`super.new(..)` where the body starts with it), then the class's
 //! property initializers, then its body. Objects are shared and never freed.
 
-use crate::types::Type;
+use crate::types::{DynKind, Type};
 use crate::*;
 use rt::ObjOp;
 
@@ -72,10 +72,15 @@ impl<'a> Compiler<'a> {
         let mut xs: Vec<(u32, u32)> = Vec::new();
         for d in &c.props {
             self.line = d.line;
-            let ty = self.prop_type(d, scope)?;
+            let base_ty = self.prop_type(d, scope)?;
             let four = !matches!(d.kind, NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class);
             for n in &d.names {
-                if four {
+                // a queue, dynamic or associative array: a handle (0: empty)
+                let ty = match &n.heap {
+                    Some(h) => self.dyn_prop_type(d, base_ty, h, scope)?,
+                    None => base_ty,
+                };
+                if four && n.heap.is_none() {
                     xs.push((width, ty.width()));
                 }
                 props.push(Prop { name: n.name.clone(), off: width, ty });
@@ -138,6 +143,22 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    /// The type of a property that is a queue, dynamic or associative array of `elem`.
+    fn dyn_prop_type(&mut self, d: &Decl, elem: Type, h: &HeapKind, sid: usize) -> R<Type> {
+        let (w, signed) = match elem {
+            Type::Vec { w, signed } => (w, signed),
+            Type::Real | Type::Str => (64, false),
+            _ => return self.err("an array of class handles as a class property is not supported"),
+        };
+        let kind = self.dyn_kind(h, sid)?;
+        let elem = Self::elem_of(d.kind, w, signed);
+        if elem.leaf == crate::types::Leaf::Str || matches!(kind, DynKind::Assoc(rt::KeyKind::Str)) {
+            self.intern(b"");
+        }
+        self.sigs.has_dyn = true;
+        Ok(Type::Dyn { kind, elem })
+    }
+
     /// The class a declaration of a class type names.
     pub(crate) fn class_of_decl(&self, d: &Decl, sid: usize) -> R<u32> {
         let name = d.ty.as_ref().and_then(|t| t.class.clone()).unwrap_or_default();
@@ -190,7 +211,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// The property `name` of class `c`.
-    fn prop(&self, c: u32, name: &str) -> R<Prop> {
+    pub(crate) fn prop(&self, c: u32, name: &str) -> R<Prop> {
         let ci = &self.classes.list[c as usize];
         match ci.props.iter().rev().find(|p| p.name == name) {
             Some(p) => Ok(p.clone()),
@@ -199,7 +220,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// The class of a handle expression (`super`: the base class of the method's class).
-    fn handle_class(&mut self, e: &Expr, sid: usize) -> R<Option<u32>> {
+    pub(crate) fn handle_class(&mut self, e: &Expr, sid: usize) -> R<Option<u32>> {
         if let Expr::Ident(n) = e {
             if n == "super" {
                 let Some(c) = self.class_of_scope(sid) else { return self.err("`super` outside a class") };
@@ -219,7 +240,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// The slot of a handle's value (`super`: `this`).
-    fn handle_value(&mut self, e: &Expr, sid: usize) -> R<u32> {
+    pub(crate) fn handle_value(&mut self, e: &Expr, sid: usize) -> R<u32> {
         let e = match e {
             Expr::Ident(n) if n == "super" => &Expr::Ident("this".into()),
             e => e,
@@ -242,7 +263,13 @@ impl<'a> Compiler<'a> {
                 None => Ok(None),
             },
             Expr::MethodCall(o, m, _) => {
-                let Some(c) = self.handle_class(o, sid)? else { return self.err(format!("'.{m}()' of a value that is not an object")) };
+                let Some(c) = self.handle_class(o, sid)? else {
+                    // (a method of an array property: `heap.rs`)
+                    if let Type::Dyn { .. } = self.type_of(o, sid)? {
+                        return Ok(None);
+                    }
+                    return self.err(format!("'.{m}()' of a value that is not an object"));
+                };
                 let Some((f, owner)) = self.find_method(c, m) else {
                     return self.err(format!("class '{}' has no method '{m}'", self.classes.list[c as usize].name));
                 };
@@ -270,6 +297,16 @@ impl<'a> Compiler<'a> {
                 let h = self.handle_value(x, sid)?;
                 let d = self.tmp(64);
                 self.emit(Instr::Obj { op: ObjOp::Copy, d, a: h, b: NONE, off: 0, w: 0 });
+                // array properties are values: the copy gets arrays of its own (8.12)
+                let props = self.classes.list[c as usize].props.clone();
+                for p in props {
+                    if let Type::Dyn { kind, elem } = p.ty {
+                        let t = self.tmp(64);
+                        self.emit(Instr::Obj { op: ObjOp::Get, d: t, a: d, b: NONE, off: p.off, w: 64 });
+                        let n = self.dyn_copy(t, kind, elem);
+                        self.emit(Instr::Obj { op: ObjOp::Set, d: NONE, a: d, b: n, off: p.off, w: 64 });
+                    }
+                }
                 Ok(Some((d, Type::Class(c))))
             }
             Expr::Member(b, m) => {
@@ -288,7 +325,7 @@ impl<'a> Compiler<'a> {
                 Ok(Some((d, p.ty)))
             }
             Expr::MethodCall(o, m, args) => {
-                let t = self.obj_type_of(e, sid)?.unwrap();
+                let Some(t) = self.obj_type_of(e, sid)? else { return Ok(None) };
                 let (r, _, _) = self.method_call(o, m, args, sid)?;
                 Ok(Some((r.unwrap(), t)))
             }

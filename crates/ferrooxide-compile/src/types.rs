@@ -132,8 +132,8 @@ impl<'a> Compiler<'a> {
             return Ok(t);
         }
         if self.sigs.has_dyn {
-            if let Some(t) = self.dyn_type_of(e, sid) {
-                return t;
+            if let Some(t) = self.dyn_type_of(e, sid)? {
+                return Ok(t);
             }
         }
         if let Some(n) = self.md_norm(e, sid) {

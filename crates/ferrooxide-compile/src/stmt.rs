@@ -597,6 +597,10 @@ impl<'a> Compiler<'a> {
                 if !*nonblocking && timing.is_none() && !self.code.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
+                // an element of an array property (`obj.q[i] = v`)
+                if self.sigs.has_dyn && !*nonblocking && timing.is_none() && matches!(lhs, Expr::Index(..)) && self.dyn_elem_assign(lhs, rhs, sid)? {
+                    return Ok(());
+                }
                 // a property of an object
                 if !self.classes.list.is_empty() && self.has_prop(lhs, sid)? {
                     if *nonblocking || timing.is_some() {
@@ -866,6 +870,9 @@ impl<'a> Compiler<'a> {
             }
             Stmt::MethodCall { obj, name, args, line } => {
                 self.line = *line;
+                if self.sigs.has_dyn && self.dyn_prop_task(obj, name, args, sid)? {
+                    return Ok(());
+                }
                 self.method_call(obj, name, args, sid)?;
             }
             Stmt::TaskCall { name, args, line } => {
