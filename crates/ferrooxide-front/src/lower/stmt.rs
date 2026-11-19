@@ -153,7 +153,15 @@ impl Lower {
                 t::Timing::Repeat(..) => return self.unsupported(s.loc, "repeat as a statement's timing control"),
             },
             t::StmtKind::Trigger { nonblocking: false, timing: None, target } => {
-                let Some(p) = self.dotted(target)? else { return self.unsupported(s.loc, "this event trigger") };
+                let p = match self.dotted(target)? {
+                    Some(p) => p,
+                    // `-> P::e`: an event of a package
+                    None => match self.expr(target)? {
+                        Expr::Hier(parts) if matches!(target.kind, t::ExprKind::Scoped(_)) => parts.join("."),
+                        Expr::Ident(n) if n.contains("::") => n,
+                        _ => return self.unsupported(s.loc, "this event trigger"),
+                    },
+                };
                 Stmt::Trigger { name: p, line }
             }
             t::StmtKind::Trigger { .. } => return self.unsupported(s.loc, "a nonblocking event trigger"),

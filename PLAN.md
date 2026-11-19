@@ -607,7 +607,8 @@ SystemVerilog data types and testbench features:
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
   a forward typedef defined in another scope than its declaration.
 - assignments to members or selects of package variables by their scoped name
-  (`P::s.x = 1`, `P::v[2] = 1`).
+  (`P::s.x = 1`, `P::v[2] = 1`), and to a package variable itself (`P::n = 5`);
+  `import` in a block [sv_wildcard_import3].
 - `.triggered` only on events declared in a module (not in tasks, functions or blocks).
 - `iff` only when every item of an event control has the same condition, and only in an
   event control before a statement (not in intra-assignment controls).
@@ -641,6 +642,9 @@ Verilog / scheduling:
 - compiler warnings the reference prints: port coercion to inout, constant out-of-range
   selects, `@*` without sensitivities.
 - `$dist_*` and `$q_*` system functions.
+- hierarchical names of variables in a named block of a later process (`always @(blk.x)`
+  before `initial begin : blk`; the block's variables are made when its code is
+  generated) [sv_var_init2].
 - parameters declared in functions and named blocks [pr2132552, scoped_events]; some
   constant functions [constfunc9/10/13]; hierarchical names found upwards in a generate
   block or in another top-level module [pr2257003, pr1698659].
