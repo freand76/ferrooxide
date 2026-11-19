@@ -110,6 +110,9 @@ Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
   variables) makes `z` a view of `a` (`alias_assigns`), so it updates immediately as in the
   reference, unless `z` has other drivers, is a special net type, has a strength, a link or
   is forced.
+- `$finish` (as in the reference, where it is an event at the end of the queue): the
+  processes already scheduled in the time step still run, then its NBAs (woken processes
+  do not run) and `$monitor` / `$strobe`; `$stop` stops at once (`Sim::finish_step`).
 - Port expressions (`m(a[3:0], .p({b, c}))`, 2026-11-19): each becomes a port net of the
   expression's width and a continuous assignment to the signals (input) or from them
   (output); the signals keep their direction in the AST but are internal (not in the port

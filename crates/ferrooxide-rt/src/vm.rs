@@ -223,6 +223,9 @@ pub struct Sim {
     finished: bool,
     /// a `$fatal` ended the simulation: the process exit status is 1
     pub fatal: bool,
+    /// `$finish` (not `$stop`) was called: the time step ends with its NBAs and its
+    /// `$monitor` / `$strobe` output, as in the reference
+    finishing: bool,
     out: BufWriter<Box<dyn Write>>,
     monitor: u32,
     monitor_on: bool,
@@ -526,6 +529,7 @@ impl Sim {
             time: 0,
             finished: false,
             fatal: false,
+            finishing: false,
             out: BufWriter::with_capacity(1 << 16, Box::new(std::io::stdout())),
             monitor: NONE,
             monitor_on: true,
@@ -858,7 +862,11 @@ impl Sim {
                 }
                 self.exec(p);
                 if self.finished {
-                    return;
+                    if !self.finishing {
+                        return;
+                    }
+                    self.finish_step();
+                    break;
                 }
                 continue;
             }
@@ -1275,6 +1283,32 @@ impl Sim {
 
     /// Run pending combinational processes in rank order. Returns true on $finish.
     #[inline]
+    /// `$finish` was called: as in the reference (where it is an event at the end of the
+    /// current queue) the processes already scheduled in this time step still run, then its
+    /// NBAs take effect (continuous assignments follow, woken processes do not run); the
+    /// caller then runs `$monitor` / `$strobe`.
+    fn finish_step(&mut self) {
+        let queued: Vec<(u32, u64, u32)> = self.active.drain(..).collect();
+        let inactive = std::mem::take(&mut self.inactive);
+        self.finished = false;
+        let todo = queued.into_iter().map(|(p, _, g)| (p, g)).chain(inactive);
+        for (p, g) in todo {
+            if self.procs[p as usize].gen != g {
+                continue;
+            }
+            self.exec(p);
+            if self.finished || self.settle() {
+                break;
+            }
+        }
+        if !self.finished && self.hot.nba_len != 0 {
+            self.apply_nba();
+            self.settle();
+        }
+        self.active.clear();
+        self.finished = true;
+    }
+
     fn settle(&mut self) -> bool {
         loop {
             while self.comb_lo < self.comb_bits.len() && self.comb_bits[self.comb_lo] == 0 {
@@ -2636,6 +2670,7 @@ impl Sim {
                     let _ = writeln!(self.out, "{loc}: {what} called at {} ({unit}{base})", self.time);
                 }
                 self.finished = true;
+                self.finishing = !*stop;
                 self.procs[p as usize].pc = pc as u32;
                 self.flush();
                 return true;
