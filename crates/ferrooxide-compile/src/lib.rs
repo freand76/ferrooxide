@@ -301,7 +301,7 @@ pub fn compile(modules: &[Module], tops: &[String]) -> Result<(Program, Vec<Stri
 }
 
 /// Language rules where Verilog-2005 and SystemVerilog differ.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Dialect {
     /// Verilog-2005 (`-g2005`): a variable declaration initializer is an assignment at time 0,
     /// with a change event; in SystemVerilog (the default) it sets the value before time 0
@@ -313,6 +313,9 @@ pub struct Dialect {
     pub io_range_warn: bool,
     /// `-Wno-anachronisms`: no warnings about such ports
     pub no_anachronisms: bool,
+    /// `-P<top>.<param>=<value>`: parameter values of top-level modules (a number, a real or
+    /// a string literal)
+    pub top_params: Vec<(String, String)>,
 }
 
 /// Compile and, with `lint`, also collect lint findings: (program, warnings, lint findings).
@@ -377,7 +380,7 @@ pub fn compile_dialect(
     let mut c = loop {
     let mut c = Compiler::new(modules);
     c.diag.lint_enabled = lint;
-    c.dialect = dialect;
+    c.dialect = dialect.clone();
     c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
     if let Some(sd) = &seed {
         c.hier.defparams = sd.clone();
@@ -401,7 +404,8 @@ pub fn compile_dialect(
         c.hier.pkg_scopes.insert(m.name.clone(), sid);
     }
     for m in &top_mods {
-        let sid = c.instantiate(m, m.name.clone(), &[], None)?;
+        let ovs = c.top_overrides(&m.name)?;
+        let sid = c.instantiate(m, m.name.clone(), &ovs, None)?;
         c.hier.tops.insert(m.name.clone(), sid);
     }
     if c.hier.late_defparam && seed.is_none() {

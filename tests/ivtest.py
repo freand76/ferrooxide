@@ -64,7 +64,7 @@ def run(t, root, timeout):
     for o in t["opts"]:
         if o.startswith("+"):
             plargs.append(o)
-        elif o.startswith("-D") or o.startswith("-I"):
+        elif o.startswith("-D") or o.startswith("-I") or o.startswith("-P"):
             args.append(o)
         elif o in ("-gspecify", "-gno-io-range-error", "-Wno-anachronisms", "-u", "-pfileline=1"):
             args.append(o)

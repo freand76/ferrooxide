@@ -48,7 +48,7 @@ pub fn load(o: &LoadOptions) -> Result<Session, String> {
     let modules = ferrooxide_front::parse_files(&o.files, &opts).map_err(|e| e.to_string())?;
     let t1 = Instant::now();
     let (mut prog, warnings, _) =
-        ferrooxide_compile::compile_dialect(&modules, &o.tops, false, o.dialect).map_err(|e| e.to_string())?;
+        ferrooxide_compile::compile_dialect(&modules, &o.tops, false, o.dialect.clone()).map_err(|e| e.to_string())?;
     let t2 = Instant::now();
     prog.no_fuse = !o.fuse;
     for s in prog.signals.iter_mut() {
@@ -102,7 +102,7 @@ pub fn lint(o: &LoadOptions) -> Result<String, String> {
     opts.incdirs = o.incdirs.clone();
     let modules = ferrooxide_front::parse_files(&o.files, &opts).map_err(|e| e.to_string())?;
     let (_, _, findings) =
-        ferrooxide_compile::compile_dialect(&modules, &o.tops, true, o.dialect).map_err(|e| e.to_string())?;
+        ferrooxide_compile::compile_dialect(&modules, &o.tops, true, o.dialect.clone()).map_err(|e| e.to_string())?;
     let mut out = findings.join("\n");
     if !out.is_empty() {
         out.push('\n');

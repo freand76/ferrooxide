@@ -5,6 +5,27 @@ use crate::*;
 impl<'a> Compiler<'a> {
     /// Evaluate the parameters of module `m` (with overrides) into scope `sid`, in order.
     pub(crate) fn eval_params(&mut self, m: &'a Module, overrides: &[(Option<String>, PVal)], sid: usize) -> R<()> {
+        // a named override needs a parameter of that name that is not local
+        let inst_line = self.line;
+        for (n, _) in overrides {
+            let Some(n) = n else { continue };
+            let local = m.items.iter().find_map(|it| match it {
+                Item::Param(p) if &p.name == n => Some(p.local),
+                Item::TypeParam { local, name, .. } if name == n => Some(*local),
+                _ => None,
+            });
+            match local {
+                None => return self.err(format!("parameter `{n}` not found in `{}`.", self.scopes[sid].name)),
+                Some(true) => {
+                    return self.err(format!(
+                        "Cannot override parameter `{n}` in `{}`. Parameter cannot be overridden in the scope it has been declared in.",
+                        self.scopes[sid].name
+                    ))
+                }
+                Some(false) => {}
+            }
+        }
+        self.line = inst_line;
         let mut pos = 0usize;
         for it in &m.items {
             if let Item::TypeParam { local, name, default, line } = it {
@@ -200,6 +221,29 @@ impl<'a> Compiler<'a> {
         } else {
             Ok(PVal::Int(self.const_eval(e, sid)?))
         }
+    }
+
+    /// The `-P<top>.<param>=<value>` overrides of top-level module `top`.
+    pub(crate) fn top_overrides(&self, top: &str) -> R<Vec<(Option<String>, PVal)>> {
+        let mut v = Vec::new();
+        for (path, val) in &self.dialect.top_params {
+            let Some((t, p)) = path.split_once('.') else { continue };
+            if t != top {
+                continue;
+            }
+            let val = val.trim();
+            let pv = if let Some(s) = val.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                PVal::Str(Const::from_str_lit(s))
+            } else if let Ok(i) = val.parse::<i64>() {
+                PVal::Int(Const::from_i64(i, 32, true))
+            } else if let Ok(r) = val.parse::<f64>() {
+                PVal::Real(r)
+            } else {
+                return self.err(format!("-P{path}={val}: the value must be a number or a string literal"));
+            };
+            v.push((Some(p.to_string()), pv));
+        }
+        Ok(v)
     }
 
     /// `e` is a string literal, a concatenation of such, or a parameter with one.

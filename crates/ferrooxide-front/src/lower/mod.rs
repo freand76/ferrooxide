@@ -66,6 +66,8 @@ pub(crate) struct Lower {
     default_automatic: bool,
     /// lowering the items of a program
     in_program: bool,
+    /// the module being lowered has a parameter port list: its own parameters are local
+    body_params_local: bool,
     /// classes declared so far: the names their methods reach through `this`
     classes: HashMap<String, Rc<class::ClassNames>>,
     /// the variables of the static properties of the class just lowered
@@ -146,6 +148,7 @@ impl Lower {
             in_subroutine: false,
             default_automatic: false,
             in_program: false,
+            body_params_local: false,
             classes: HashMap::new(),
             class_statics: Vec::new(),
         }
@@ -368,6 +371,7 @@ impl Lower {
         let interface = m.kind == t::ModuleKind::Interface;
         let program = m.kind == t::ModuleKind::Program;
         let saved_program = std::mem::replace(&mut self.in_program, program);
+        let saved_local = std::mem::replace(&mut self.body_params_local, m.params.is_some());
         let mname = self.name(&m.name, m.loc);
         let mut iface_ports = Vec::new();
         self.modports.clear();
@@ -419,6 +423,7 @@ impl Lower {
             }
         }
         self.in_program = saved_program;
+        self.body_params_local = saved_local;
         self.types = saved_types;
         // names of the packages it uses and of the file scope are found in their scopes
         let pkgs = std::mem::take(&mut self.mod_pkgs);

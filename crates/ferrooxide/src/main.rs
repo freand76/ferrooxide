@@ -26,6 +26,8 @@ options:
   --no-fuse         do not fuse combinational processes
   -g2005            Verilog-2005 rules where SystemVerilog differs (default: SystemVerilog)
   -gspecify         apply specify path delays (ignored by default)
+  -P<top>.<p>=<v>   value of parameter p of top-level module top (a number, a real or a
+                    quoted string)
   -gno-io-range-error  a port declared without a range whose net declaration has one is
                     a warning (default: an error); -Wno-anachronisms: not even that
   -u                every file is a compilation unit of its own (macros, `timescale,
@@ -162,6 +164,10 @@ fn main() -> ExitCode {
             "-gno-io-range-error" => dialect.io_range_warn = true,
             "-gio-range-error" => dialect.io_range_warn = false,
             "-Wno-anachronisms" => dialect.no_anachronisms = true,
+            _ if a.starts_with("-P") && a.contains('=') => {
+                let (p, v) = a[2..].split_once('=').unwrap();
+                dialect.top_params.push((p.to_string(), v.to_string()));
+            }
             "-u" => opts.separate_units = true,
             "-pfileline=1" => fileline = true,
             "-pfileline=0" => fileline = false,
@@ -225,7 +231,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let t1 = Instant::now();
-    let (mut prog, warnings, findings) = match ferrooxide_compile::compile_dialect(&modules, &tops, lint, dialect) {
+    let (mut prog, warnings, findings) = match ferrooxide_compile::compile_dialect(&modules, &tops, lint, dialect.clone()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");

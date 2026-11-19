@@ -70,7 +70,9 @@ impl Lower {
                 self.local_tu = (u.or(self.local_tu.0), p.or(self.local_tu.1));
             }
             t::Item::Param(p) => {
-                let local = p.kw != Some(Kw::Parameter);
+                // (with a parameter port list, the module's own parameters are local:
+                // IEEE 1800-2017 6.20.1)
+                let local = p.kw != Some(Kw::Parameter) || self.body_params_local;
                 match &p.kind {
                     t::ParamKind::Type { assigns } => {
                         for (n, d, loc) in assigns {

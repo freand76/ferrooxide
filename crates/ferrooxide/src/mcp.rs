@@ -124,6 +124,7 @@ impl Server {
                 specify: a.get("specify").and_then(Value::as_bool).unwrap_or(false),
                 io_range_warn: false,
                 no_anachronisms: false,
+                top_params: Vec::new(),
             },
             jit: true,
             fuse: true,
