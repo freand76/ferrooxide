@@ -625,15 +625,24 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Case { kind, expr, arms, default, line } => {
                 self.line = *line;
-                let (mut w, mut s) = self.type_of(expr, sid)?.ws();
+                let et = self.type_of(expr, sid)?;
+                let mut real = et.is_real();
+                let (mut w, mut s) = et.ws();
                 for (labels, _) in arms {
                     for l in labels {
-                        let (lw, ls) = self.type_of(l, sid)?.ws();
+                        let lt = self.type_of(l, sid)?;
+                        real |= lt.is_real();
+                        let (lw, ls) = lt.ws();
                         w = w.max(lw);
                         s &= ls;
                     }
                 }
-                let ev = self.expr(expr, sid, w, s)?;
+                // IEEE 1364-2005 9.5: with a real expression or item all are compared as reals
+                // (each converted with its own signedness)
+                if real {
+                    w = 64;
+                }
+                let ev = if real { self.rexpr(expr, sid)? } else { self.expr(expr, sid, w, s)? };
                 let e = self.ptmp(w);
                 self.emit(Instr::Copy { d: e, s: ev, w });
                 let op = match kind {
@@ -650,9 +659,14 @@ impl<'a> Compiler<'a> {
                             let h = self.here();
                             self.patch(n, h);
                         }
-                        let lv = self.expr(l, sid, w, s)?;
                         let t = self.tmp(1);
-                        self.emit(Instr::Cmp { op, d: t, a: e, b: lv, w });
+                        if real {
+                            let lv = self.rexpr(l, sid)?;
+                            self.emit(Instr::RCmp { op: CmpOp::Eq, d: t, a: e, b: lv });
+                        } else {
+                            let lv = self.expr(l, sid, w, s)?;
+                            self.emit(Instr::Cmp { op, d: t, a: e, b: lv, w });
+                        }
                         let jz = self.emit(Instr::Jz { c: t, w: 1, to: 0 });
                         if k + 1 < labels.len() {
                             to_body.push(self.emit(Instr::Jmp { to: 0 }));
