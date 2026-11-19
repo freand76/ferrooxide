@@ -198,6 +198,8 @@ pub struct SubroutineDecl {
     /// ports declared without a range that a later declaration gives one (`input a;
     /// reg [3:0] a;`): the line of that declaration (the reference warns about them)
     pub scalar_vec_ports: Vec<(String, Line)>,
+    /// parameters declared in the subroutine (local to it)
+    pub params: Vec<ParamDecl>,
     pub body: Stmt,
     pub line: Line,
 }
@@ -309,7 +311,8 @@ pub enum Stmt {
     Null,
     /// `fork`: Some(join kind) for fork ... join / join_any / join_none
     /// `imports`: packages imported in the block (`P`: all its names, `P::x`: one name)
-    Block { name: Option<String>, decls: Vec<Decl>, imports: Vec<String>, stmts: Vec<Stmt>, fork: Option<Join> },
+    /// `params`: parameters declared in the block (local to it)
+    Block { name: Option<String>, decls: Vec<Decl>, imports: Vec<String>, params: Vec<ParamDecl>, stmts: Vec<Stmt>, fork: Option<Join> },
     Assign { lhs: Expr, rhs: Expr, nonblocking: bool, timing: Option<Timing>, line: Line },
     If { cond: Expr, then_s: Box<Stmt>, else_s: Option<Box<Stmt>>, line: Line },
     Case { kind: CaseKind, expr: Expr, arms: Vec<(Vec<Expr>, Stmt)>, default: Option<Box<Stmt>>, line: Line },

@@ -1308,6 +1308,7 @@ impl<'a> Compiler<'a> {
         let path = format!("{}.{}", self.scopes[def_scope].name, f.name);
         let file = self.file.clone();
         let fs = self.new_scope(path.clone(), Some(def_scope), file);
+        self.local_params(&f.params, fs)?;
         // a method: `this`, the object's handle
         let this = match self.classes.of_scope.get(&def_scope) {
             Some(&c) => {

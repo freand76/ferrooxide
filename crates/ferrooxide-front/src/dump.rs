@@ -544,6 +544,9 @@ impl Printer {
             self.line(format!("function{auto} {ret} {}{heap};", f.name));
         }
         self.ind += 1;
+        for p in &f.params {
+            self.line(Self::param_text(p));
+        }
         for d in &f.decls {
             self.line(Self::decl_text(d));
         }
@@ -575,7 +578,7 @@ impl Printer {
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Null => self.line(";"),
-            Stmt::Block { name: n, decls, imports, stmts, fork } => {
+            Stmt::Block { name: n, decls, imports, params, stmts, fork } => {
                 let (open, close) = match fork {
                     None => ("begin", "end"),
                     Some(Join::All) => ("fork", "join"),
@@ -586,6 +589,9 @@ impl Printer {
                 self.ind += 1;
                 for i in imports {
                     self.line(if i.contains("::") { format!("import {i};") } else { format!("import {i}::*;") });
+                }
+                for p in params {
+                    self.line(Self::param_text(p));
                 }
                 for d in decls {
                     self.line(Self::decl_text(d));

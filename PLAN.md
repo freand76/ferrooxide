@@ -392,7 +392,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
 4. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
    list: 26 compile errors, 112 wrong outputs): the Verilog items under "Unsupported
    (known)", e.g. `$countdrivers` (5 tests),
-   parameters in functions and blocks, compiler warnings (also the `always_*` warnings of the
+   compiler warnings (also the `always_*` warnings of the
    SV list), nets of 2-state types (6 SV tests), `%v` (needs strength values on nets), force
    on array elements.
 5. **Debug front ends**: report the Surfer bugs upstream; MCP over streamable HTTP (attach to
@@ -647,8 +647,7 @@ Verilog / scheduling:
 - hierarchical names of variables in a named block of a later process (`always @(blk.x)`
   before `initial begin : blk`; the block's variables are made when its code is
   generated) [sv_var_init2].
-- parameters declared in functions and named blocks [pr2132552, scoped_events];
-  hierarchical names found upwards in a generate
+- hierarchical names found upwards in a generate
   block or in another top-level module [pr2257003, pr1698659].
 - `` `line `` sets `` `__LINE__ `` / `` `__FILE__ `` only; messages keep the physical location.
 - a second `$dumpvars` does not print "ignoring signals in previously scanned scope";

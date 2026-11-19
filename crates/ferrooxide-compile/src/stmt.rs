@@ -448,10 +448,10 @@ impl<'a> Compiler<'a> {
     pub(crate) fn stmt(&mut self, st: &Stmt, sid: usize) -> R<()> {
         match st {
             Stmt::Null => {}
-            Stmt::Block { name, decls, imports, stmts, fork } => {
+            Stmt::Block { name, decls, imports, params, stmts, fork } => {
                 // a fork block's automatic variables belong to each branch (see below)
                 let evict = (fork.is_some() && decls.iter().any(|d| d.automatic)).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
-                let bsid = if name.is_some() || !decls.is_empty() || !imports.is_empty() {
+                let bsid = if name.is_some() || !decls.is_empty() || !imports.is_empty() || !params.is_empty() {
                     let path = match name {
                         Some(n) => format!("{}.{}", self.scopes[sid].name, n),
                         None => self.scopes[sid].name.clone(),
@@ -462,6 +462,7 @@ impl<'a> Compiler<'a> {
                         self.scopes[sid].children.insert(n.clone(), b);
                     }
                     self.block_imports(imports, b)?;
+                    self.local_params(params, b)?;
                     self.code.block_scopes.insert((sid, st as *const Stmt), b);
                     for d in decls {
                         let (mut m, mut l) = self.range_vals(&d.range, b)?;
@@ -1613,6 +1614,26 @@ impl<'a> Compiler<'a> {
                 Some(n) => {
                     self.scopes[b].name_imports.insert(n.to_string(), ps);
                 }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> Compiler<'a> {
+    /// The parameters declared in a block or subroutine, in its scope `b`.
+    pub(crate) fn local_params(&mut self, params: &[ParamDecl], b: usize) -> R<()> {
+        for p in params {
+            // (a `defparam` of it: registered during elaboration, before any code)
+            let ov = match p.local {
+                false => self.hier.defparams.get(&format!("{}.{}", self.scopes[b].name, p.name)).cloned(),
+                true => None,
+            };
+            let v = self.param_value(p, ov, b)?;
+            self.insert_param(p, v, b)?;
+            if p.range.is_some() && !p.real {
+                let r = self.range_vals(&p.range, b)?;
+                self.scopes[b].param_ranges.insert(p.name.clone(), r);
             }
         }
         Ok(())

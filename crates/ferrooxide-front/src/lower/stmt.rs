@@ -41,7 +41,7 @@ pub(crate) fn side_effects(e: &Expr) -> bool {
 }
 
 fn block(stmts: Vec<Stmt>) -> Stmt {
-    Stmt::Block { name: None, decls: vec![], imports: vec![], stmts, fork: None }
+    Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts, fork: None }
 }
 
 impl Lower {
@@ -73,7 +73,7 @@ impl Lower {
         };
         let st = Stmt::If { cond, then_s: Box::new(pass), else_s: fail.map(Box::new), line };
         Ok(match label {
-            Some(l) => Stmt::Block { name: Some(self.name(l, a.loc)), decls: vec![], imports: vec![], stmts: vec![st], fork: None },
+            Some(l) => Stmt::Block { name: Some(self.name(l, a.loc)), decls: vec![], imports: vec![], params: vec![], stmts: vec![st], fork: None },
             None => st,
         })
     }
@@ -118,9 +118,32 @@ impl Lower {
         Ok(out)
     }
 
+    /// The parameters of a `parameter`/`localparam` item in a block or subroutine (a
+    /// `parameter` can be changed by a `defparam`).
+    pub(crate) fn local_params(&mut self, it: &t::Item) -> Result<Vec<ParamDecl>> {
+        let t::Item::Param(p) = it else { return Ok(vec![]) };
+        if matches!(p.kind, t::ParamKind::Type { .. }) {
+            return self.unsupported(p.loc, "a type parameter here");
+        }
+        let mut v = Vec::new();
+        self.module_item(it, &[], &mut v)?;
+        let mut out = Vec::new();
+        for x in v {
+            match x {
+                Item::Param(mut q) => {
+                    q.local = p.kw != Some(Kw::Parameter);
+                    out.push(q);
+                }
+                _ => return self.unsupported(p.loc, "this parameter here"),
+            }
+        }
+        Ok(out)
+    }
+
     /// The declarations of a block (no directions).
-    fn block_decls(&mut self, v: &[t::Item]) -> Result<Vec<Decl>> {
+    fn block_decls(&mut self, v: &[t::Item]) -> Result<(Vec<Decl>, Vec<ParamDecl>)> {
         let mut decls = Vec::new();
+        let mut params = Vec::new();
         for it in v {
             let (net, var, ty, dl, strength, delay, loc) = match it {
                 t::Item::Var(v) => {
@@ -130,7 +153,10 @@ impl Lower {
                     (None, v.var, &v.ty, &v.decls, None, None, v.loc)
                 }
                 t::Item::Net(n) if n.user.is_none() => (n.net, false, &n.ty, &n.decls, n.strength.as_ref(), n.delay.as_ref(), n.loc),
-                t::Item::Param(p) => return self.err(p.loc, "parameters in blocks are not supported"),
+                t::Item::Param(_) => {
+                    params.extend(self.local_params(it)?);
+                    continue;
+                }
                 // (handled by the block)
                 t::Item::Import(..) => continue,
                 other => return self.unsupported(item_loc(other), &format!("{} in a block", item_what(other))),
@@ -144,7 +170,7 @@ impl Lower {
             d.static_ = self.in_subroutine && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Static));
             decls.push(d);
         }
-        Ok(decls)
+        Ok((decls, params))
     }
 
     pub(crate) fn stmt(&mut self, s: &t::Stmt) -> Result<Stmt> {
@@ -167,7 +193,7 @@ impl Lower {
                         imports.extend(self.block_import(v)?);
                     }
                 }
-                let decls = self.block_decls(decls)?;
+                let (decls, params) = self.block_decls(decls)?;
                 let mut v = Vec::new();
                 for st in stmts {
                     v.push(self.stmt(st)?);
@@ -181,7 +207,7 @@ impl Lower {
                     t::Join::Any => Join::Any,
                     t::Join::None => Join::None,
                 });
-                Stmt::Block { name, decls, imports, stmts: v, fork }
+                Stmt::Block { name, decls, imports, params, stmts: v, fork }
             }
             t::StmtKind::Timed { timing, body } => match timing {
                 t::Timing::Delay(d) => {
@@ -209,9 +235,9 @@ impl Lower {
             t::StmtKind::Trigger { nonblocking: false, timing: None, target } => {
                 let p = match self.dotted(target)? {
                     Some(p) => p,
-                    // `-> P::e`: an event of a package
+                    // `-> P::e`: an event of a package; `-> a.g[1].e`: through an indexed scope
                     None => match self.expr(target)? {
-                        Expr::Hier(parts) if matches!(target.kind, t::ExprKind::Scoped(_)) => parts.join("."),
+                        Expr::Hier(parts) => parts.join("."),
                         Expr::Ident(n) if n.contains("::") => n,
                         _ => return self.unsupported(s.loc, "this event trigger"),
                     },
@@ -327,7 +353,7 @@ impl Lower {
                 if decls.is_empty() {
                     f
                 } else {
-                    Stmt::Block { name: None, decls, imports: vec![], stmts: vec![f], fork: None }
+                    Stmt::Block { name: None, decls, imports: vec![], params: vec![], stmts: vec![f], fork: None }
                 }
             }
             t::StmtKind::Foreach { array, vars, body } => self.foreach(array, vars, body, s.loc)?,
@@ -657,7 +683,7 @@ impl Lower {
             }
             None => decl(NetKind::Reg, false, Some((Expr::Num(dec(63)), Expr::Num(dec(0)))), v),
         };
-        Stmt::Block { name: None, decls: vec![kd, decl(NetKind::Int(32), true, None, &ok)], imports: vec![], stmts: vec![lp], fork: None }
+        Stmt::Block { name: None, decls: vec![kd, decl(NetKind::Int(32), true, None, &ok)], imports: vec![], params: vec![], stmts: vec![lp], fork: None }
     }
 
     /// `foreach (q[i])` of a queue or dynamic array: `i` from 0 to `q.size() - 1`.
@@ -707,7 +733,7 @@ impl Lower {
             static_: false,
             line,
         };
-        Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], stmts: vec![lp], fork: None })
+        Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![lp], fork: None })
     }
 
     fn foreach(&mut self, array: &t::Expr, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
@@ -775,6 +801,6 @@ impl Lower {
             static_: false,
             line,
         };
-        Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], stmts: vec![body], fork: None })
+        Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![body], fork: None })
     }
 }

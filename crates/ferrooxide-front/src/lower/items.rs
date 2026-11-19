@@ -493,6 +493,7 @@ impl Lower {
             }
         }
         // declarations (also non-ANSI ports) and statements, in source order
+        let mut params = Vec::new();
         for it in body_items {
             let (dir, net, var, ty, dl, loc) = match it {
                 t::Item::Port(p) => (Some(self.dir(p.dir, p.loc)?), p.net, p.var, &p.ty, &p.decls, p.loc),
@@ -511,7 +512,10 @@ impl Lower {
                     }
                     (None, None, v.var, &v.ty, &v.decls, v.loc)
                 }
-                t::Item::Param(p) => return self.err(p.loc, "parameters inside functions are not supported"),
+                t::Item::Param(_) => {
+                    params.extend(self.local_params(it)?);
+                    continue;
+                }
                 other => return self.unsupported(item_loc(other), &format!("{} in a subroutine", item_what(other))),
             };
             let mut d = self.decl_head(dir, net, var, ty, None, None, loc)?;
@@ -529,9 +533,9 @@ impl Lower {
         });
         self.in_subroutine = false;
         r?;
-        let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], imports: vec![], stmts, fork: None } };
+        let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts, fork: None } };
         let (decls, scalar_vec_ports) = super::merge_port_types(decls);
-        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, scalar_vec_ports, body, line })
+        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, scalar_vec_ports, params, body, line })
     }
 }
 
