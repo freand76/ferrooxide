@@ -875,6 +875,10 @@ impl<'a> Compiler<'a> {
                 }
                 self.method_call(obj, name, args, sid)?;
             }
+            Stmt::StaticCall { class, name, args, line } => {
+                self.line = *line;
+                self.static_call(class, name, args, sid)?;
+            }
             Stmt::TaskCall { name, args, line } => {
                 self.line = *line;
                 if self.sigs.has_dyn && self.dyn_task(name, args, sid)? {
@@ -1491,6 +1495,11 @@ impl<'a> Compiler<'a> {
             }
             Stmt::MethodCall { obj, args, .. } => {
                 self.reads_expr(obj, sid, out);
+                for a in args {
+                    self.reads_expr(a, sid, out);
+                }
+            }
+            Stmt::StaticCall { args, .. } => {
                 for a in args {
                     self.reads_expr(a, sid, out);
                 }

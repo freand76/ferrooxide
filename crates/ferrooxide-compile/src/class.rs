@@ -344,6 +344,14 @@ impl<'a> Compiler<'a> {
             Expr::Null | Expr::New(_) => Ok(Some(Type::Class(NONE))),
             Expr::NewCopy(x) => self.type_of(x, sid).map(Some),
             Expr::NewTyped(c, _) => Ok(Some(Type::Class(self.named_class(c, sid)?))),
+            Expr::StaticCall(cn, m, _) => {
+                let (f, owner) = self.static_method(cn, m, sid)?;
+                if f.is_task || f.ret_kind == NetKind::Int(0) {
+                    return self.err(format!("'{m}' gives no value"));
+                }
+                let scope = self.classes.list[owner as usize].scope;
+                self.func_ret_type(f, scope).map(Some)
+            }
             Expr::Member(b, m) => match self.handle_class(b, sid)? {
                 Some(c) => Ok(Some(match self.class_const(c, m) {
                     Some(Sym::Const(k)) => Type::vec(k.w, k.signed),
@@ -382,6 +390,11 @@ impl<'a> Compiler<'a> {
             Expr::NewTyped(c, args) => {
                 let c = self.named_class(c, sid)?;
                 Ok(Some((self.construct(c, args, sid)?, Type::Class(c))))
+            }
+            Expr::StaticCall(cn, m, args) => {
+                let t = self.obj_type_of(e, sid)?.unwrap();
+                let (r, _, _) = self.static_call(cn, m, args, sid)?;
+                Ok(Some((r.unwrap(), t)))
             }
             Expr::NewCopy(x) => {
                 let Some(c) = self.handle_class(x, sid)? else { return self.err("`new` copies an object") };
@@ -556,6 +569,11 @@ impl<'a> Compiler<'a> {
         if m == "new" {
             return self.err("`new` is called only through `super.new`");
         }
+        // a static method needs no object (8.10)
+        if self.classes.list[owner as usize].decl.statics.iter().any(|s| s == m) {
+            let scope = self.classes.list[owner as usize].scope;
+            return self.call_resolved(f, scope, m, None, args, sid);
+        }
         let h = self.handle_value(obj, sid)?;
         // (a task may wait: the handle must survive other processes' temporaries)
         let h = if f.is_task {
@@ -570,6 +588,26 @@ impl<'a> Compiler<'a> {
             return self.call_resolved(f, scope, m, Some(h), args, sid);
         }
         self.virtual_call(c, (f, owner), m, h, args, sid)
+    }
+
+    /// Static method `m` of the class named `cn` (or of a base class): (method, the class
+    /// declaring it).
+    fn static_method(&self, cn: &str, m: &str, sid: usize) -> R<(&'a SubroutineDecl, u32)> {
+        let c = self.named_class(cn, sid)?;
+        let Some((f, owner)) = self.find_method(c, m) else {
+            return self.err(format!("class '{cn}' has no method '{m}'"));
+        };
+        if !self.classes.list[owner as usize].decl.statics.iter().any(|s| s == m) {
+            return self.err(format!("'{cn}::{m}' is not a static method (it needs an object)"));
+        }
+        Ok((f, owner))
+    }
+
+    /// `C::m(args)`: a call of a static method, without an object.
+    pub(crate) fn static_call(&mut self, cn: &str, m: &str, args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
+        let (f, owner) = self.static_method(cn, m, sid)?;
+        let scope = self.classes.list[owner as usize].scope;
+        self.call_resolved(f, scope, m, None, args, sid)
     }
 
     /// Method `m` of class `c` is virtual: declared so there or in a base class.

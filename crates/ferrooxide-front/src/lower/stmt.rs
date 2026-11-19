@@ -35,7 +35,7 @@ pub(crate) fn side_effects(e: &Expr) -> bool {
         Expr::Index(a, b) | Expr::Binary(_, a, b) => side_effects(a) || side_effects(b),
         Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => side_effects(a) || side_effects(b) || side_effects(c),
         Expr::Unary(_, a) | Expr::Member(a, _) => side_effects(a),
-        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter().any(side_effects),
+        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) | Expr::StaticCall(_, _, v) => v.iter().any(side_effects),
         _ => false,
     }
 }
@@ -368,6 +368,10 @@ impl Lower {
                 Expr::Member(obj, name) => Ok(Stmt::MethodCall { obj: *obj, name, args: vec![], line }),
                 _ => self.unsupported(loc, "this expression as a statement"),
             },
+            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Scoped(..) if self.class_scoped(e) => match self.expr(e)? {
+                Expr::StaticCall(class, name, args) => Ok(Stmt::StaticCall { class, name, args, line }),
+                _ => self.unsupported(loc, "this expression as a statement"),
+            },
             t::ExprKind::Call { func, args, with_: None, .. } => {
                 let name = self.task_name(func, loc)?;
                 let args = self.call_args(args, loc)?;
@@ -385,6 +389,15 @@ impl Lower {
             }
             _ => self.unsupported(loc, "this expression as a statement"),
         }
+    }
+
+    /// A call of a static method (`C::m(..)`, `C::m`).
+    fn class_scoped(&self, e: &t::Expr) -> bool {
+        let f = match &e.kind {
+            t::ExprKind::Call { func, .. } => func,
+            _ => e,
+        };
+        matches!(&f.kind, t::ExprKind::Scoped(n) if n.scopes.len() == 1 && self.classes.contains_key(&n.scopes[0].name))
     }
 
     /// A call through a class handle (`obj.m(..)`, `this.m`, `super.new(..)`).

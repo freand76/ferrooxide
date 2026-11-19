@@ -259,6 +259,8 @@ pub struct ClassDecl {
     pub methods: Vec<SubroutineDecl>,
     /// the methods declared `virtual`
     pub virtuals: Vec<String>,
+    /// the methods declared `static` (no `this`)
+    pub statics: Vec<String>,
     /// `virtual class`: no objects of its own
     pub abstract_: bool,
     pub line: Line,
@@ -318,6 +320,8 @@ pub enum Stmt {
     TaskCall { name: String, args: Vec<Expr>, line: Line },
     /// a method call as a statement (a task, or a function whose result is not used)
     MethodCall { obj: Expr, name: String, args: Vec<Expr>, line: Line },
+    /// `C::m(args);`: a static method call as a statement
+    StaticCall { class: String, name: String, args: Vec<Expr>, line: Line },
     Disable { name: String, line: Line },
     /// `force lhs = rhs` (`rhs` None: `release lhs`)
     Force { lhs: Expr, rhs: Option<Expr>, line: Line },
@@ -416,6 +420,8 @@ pub enum Expr {
     NewCopy(Box<Expr>),
     /// `obj.m(args)` (`this.m`, `super.m`): a method call
     MethodCall(Box<Expr>, String, Vec<Expr>),
+    /// `C::m(args)`: a call of static method m of class C (also `m(args)` in C's methods)
+    StaticCall(String, String, Vec<Expr>),
     /// `$` in an index of a queue: its last index
     Last,
     /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value

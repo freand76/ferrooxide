@@ -19,8 +19,12 @@ use std::rc::Rc;
 /// The names a class's methods reach through `this` (with those of its base classes).
 #[derive(Debug, Default)]
 pub(crate) struct ClassNames {
+    /// the class
+    pub name: String,
     pub props: HashSet<String>,
     pub methods: HashSet<String>,
+    /// static methods (also of the base classes): called without `this`
+    pub static_methods: HashSet<String>,
     /// static properties: name -> the variable holding it
     pub statics: HashMap<String, String>,
     /// typedefs declared in the class (`C::T`)
@@ -43,7 +47,7 @@ impl Lower {
             return self.unsupported(c.loc, "implements");
         }
         let name = self.name(&c.name, c.loc);
-        let mut names = ClassNames::default();
+        let mut names = ClassNames { name: name.clone(), ..Default::default() };
         let (base, base_args) = match &c.extends {
             None => (None, None),
             Some((n, args)) => {
@@ -58,6 +62,7 @@ impl Lower {
                 };
                 names.props.extend(b.props.iter().cloned());
                 names.methods.extend(b.methods.iter().cloned());
+                names.static_methods.extend(b.static_methods.iter().cloned());
                 names.statics.extend(b.statics.iter().map(|(k, v)| (k.clone(), v.clone())));
                 names.types.extend(b.types.iter().map(|(k, v)| (k.clone(), v.clone())));
                 names.consts.extend(b.consts.iter().cloned());
@@ -138,11 +143,22 @@ impl Lower {
             props.push(d);
         }
         let mut virtuals = Vec::new();
+        let mut static_methods = Vec::new();
         for it in &c.items {
             if let t::ClassItem::Method(m) = it {
-                names.methods.insert(m.name.name.clone());
+                let n = &m.name.name;
+                names.methods.insert(n.clone());
+                // (a method of this class hides a static one of a base class)
+                names.static_methods.remove(n);
                 if m.quals.contains(&Kw::Virtual) {
-                    virtuals.push(m.name.name.clone());
+                    virtuals.push(n.clone());
+                }
+                if m.quals.contains(&Kw::Static) {
+                    if m.quals.contains(&Kw::Virtual) || n == "new" {
+                        return self.err(m.loc, format!("method '{n}' cannot be static"));
+                    }
+                    names.static_methods.insert(n.clone());
+                    static_methods.push(n.clone());
                 }
             }
         }
@@ -162,7 +178,7 @@ impl Lower {
             match it {
                 t::ClassItem::Property { .. } => {}
                 t::ClassItem::Method(m) => {
-                    if let Some(q) = m.quals.iter().find(|q| !matches!(q, Kw::Virtual | Kw::Local | Kw::Protected)) {
+                    if let Some(q) = m.quals.iter().find(|q| !matches!(q, Kw::Virtual | Kw::Local | Kw::Protected | Kw::Static)) {
                         return self.unsupported(m.loc, &format!("a {} method", q.as_str()));
                     }
                     let mut f = self.subroutine_in(m, true)?;
@@ -200,7 +216,7 @@ impl Lower {
             }
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
-        Ok(ClassDecl { name, base, base_args, props, consts, methods, virtuals, abstract_: c.virtual_, line })
+        Ok(ClassDecl { name, base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, line })
     }
 
     /// The type of handles of class `name`.
@@ -260,7 +276,9 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
         }
         Expr::Call(n, args) => {
             args.iter_mut().for_each(|a| this_expr(a, c, locals));
-            if let Some(x) = this_call(n, c, locals) {
+            if static_call(n, c, locals) {
+                *e = Expr::StaticCall(c.name.clone(), n.clone(), std::mem::take(args));
+            } else if let Some(x) = this_call(n, c, locals) {
                 *e = Expr::MethodCall(Box::new(x.0), x.1, std::mem::take(args));
             }
         }
@@ -278,7 +296,9 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
             this_expr(a, c, locals);
             this_expr(b, c, locals);
         }
-        Expr::Concat(v) | Expr::SysCall(_, v) | Expr::New(v) | Expr::NewTyped(_, v) => v.iter_mut().for_each(|a| this_expr(a, c, locals)),
+        Expr::Concat(v) | Expr::SysCall(_, v) | Expr::New(v) | Expr::NewTyped(_, v) | Expr::StaticCall(_, _, v) => {
+            v.iter_mut().for_each(|a| this_expr(a, c, locals))
+        }
         Expr::Repl(n, v) => {
             this_expr(n, c, locals);
             v.iter_mut().for_each(|a| this_expr(a, c, locals));
@@ -302,6 +322,11 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
         }
         _ => {}
     }
+}
+
+/// A call `m(...)` of a static method of the class.
+fn static_call(n: &str, c: &ClassNames, locals: &[String]) -> bool {
+    c.static_methods.contains(n) && !locals.iter().any(|l| l == n)
 }
 
 /// A call `m(...)` / `p.m(...)` of a method through `this`: (object, method).
@@ -386,7 +411,9 @@ fn this_stmt(s: &mut Stmt, c: &ClassNames, locals: &mut Vec<String>) {
         Stmt::SysTask { args, .. } => args.iter_mut().flatten().for_each(|a| ex(a, locals)),
         Stmt::TaskCall { name, args, line } => {
             args.iter_mut().for_each(|a| ex(a, locals));
-            if let Some((obj, m)) = this_call(name, c, locals) {
+            if static_call(name, c, locals) {
+                *s = Stmt::StaticCall { class: c.name.clone(), name: name.clone(), args: std::mem::take(args), line: *line };
+            } else if let Some((obj, m)) = this_call(name, c, locals) {
                 *s = Stmt::MethodCall { obj, name: m, args: std::mem::take(args), line: *line };
             }
         }
@@ -394,6 +421,7 @@ fn this_stmt(s: &mut Stmt, c: &ClassNames, locals: &mut Vec<String>) {
             ex(obj, locals);
             args.iter_mut().for_each(|a| ex(a, locals));
         }
+        Stmt::StaticCall { args, .. } => args.iter_mut().for_each(|a| ex(a, locals)),
         Stmt::Force { lhs, rhs, .. } => {
             ex(lhs, locals);
             if let Some(r) = rhs {

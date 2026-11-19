@@ -9,7 +9,7 @@ use ferrooxide_rt::{BinOp as RB, CmpOp, Index, RedOp, ShOp, SysFn, Target, UnOp 
 /// have side effects, so only what the operators select may run.
 pub(crate) fn has_call(e: &Expr) -> bool {
     match e {
-        Expr::Call(..) | Expr::MethodCall(..) | Expr::IncDec { .. } => true,
+        Expr::Call(..) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::IncDec { .. } => true,
         Expr::Index(a, b) | Expr::Binary(_, a, b) => has_call(a) || has_call(b),
         Expr::Range(a, b, c) | Expr::Cond(a, b, c) | Expr::IndexedRange(a, b, c, _) => has_call(a) || has_call(b) || has_call(c),
         Expr::Unary(_, a) => has_call(a),
@@ -364,7 +364,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
         match e {
             Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last | Expr::IncDec { .. } => false,
-            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::EmptyArg => false,
+            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::EmptyArg => false,
             // a member of a struct parameter
             Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
@@ -574,7 +574,9 @@ impl<'a> Compiler<'a> {
                 let r = self.inc_dec(*prefix, *inc, t, sid, false)?;
                 Ok(self.resize(r, tw, w, s && ts))
             }
-            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) => self.err("no classes are declared"),
+            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) => {
+                self.err("no classes are declared")
+            }
             Expr::EmptyArg => self.err("an empty argument is allowed only in a call of a function or task"),
             Expr::Num(n) => {
                 let c = Const::number_in(n, w, s).or_else(|m| self.err(m))?;
@@ -1765,7 +1767,7 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Type(_) | Expr::Last | Expr::Null | Expr::EmptyArg => {}
             Expr::IncDec { e, .. } => self.reads_expr(e, sid, out),
-            Expr::New(v) | Expr::NewTyped(_, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
+            Expr::New(v) | Expr::NewTyped(_, v) | Expr::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             Expr::NewCopy(x) => self.reads_expr(x, sid, out),
             Expr::MethodCall(o, _, args) => {
                 self.reads_expr(o, sid, out);

@@ -532,6 +532,17 @@ impl Lower {
                 if let Some(v) = self.static_prop(&Expr::Ident(p.clone()), &n.name) {
                     return self.selects(Expr::Ident(v), ops);
                 }
+                // `C::f(args)`: a static method of class C
+                if self.classes.get(&p).is_some_and(|c| c.methods.contains(&n.name)) && n.name != "new" {
+                    let (args, rest) = match ops.split_first() {
+                        Some((Op::Call(a, l), rest)) => (self.call_args(a, *l)?, rest),
+                        _ => (vec![], ops),
+                    };
+                    if !rest.is_empty() {
+                        return self.unsupported(e.loc, "a select of a call");
+                    }
+                    return Ok(Expr::StaticCall(p, n.name.clone(), args));
+                }
                 // `C::P`: a parameter or enum constant of class C (in its scope)
                 if self.classes.get(&p).is_some_and(|c| c.consts.contains(&n.name)) && !matches!(ops.first(), Some(Op::Call(..))) {
                     return self.selects(Expr::Ident(format!("{p}::{}", n.name)), ops);

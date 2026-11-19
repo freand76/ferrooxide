@@ -125,6 +125,7 @@ pub fn expr(e: &Expr) -> String {
         Expr::NewTyped(c, args) => format!("{c}::new({})", list(args)),
         Expr::NewCopy(x) => format!("new {}", expr(x)),
         Expr::MethodCall(o, m, args) => format!("{}.{m}({})", expr(o), list(args)),
+        Expr::StaticCall(c, m, args) => format!("{c}::{m}({})", list(args)),
         Expr::Pattern(t, items) => {
             let items: Vec<String> = items
                 .iter()
@@ -442,6 +443,9 @@ impl Printer {
                     if c.virtuals.contains(&f.name) {
                         self.line("// virtual");
                     }
+                    if c.statics.contains(&f.name) {
+                        self.line("// static");
+                    }
                     self.subroutine(f);
                 }
                 self.ind -= 1;
@@ -647,6 +651,7 @@ impl Printer {
             }
             Stmt::TaskCall { name: n, args, .. } => self.line(format!("{n}({});", list(args))),
             Stmt::MethodCall { obj, name: n, args, .. } => self.line(format!("{}.{n}({});", expr(obj), list(args))),
+            Stmt::StaticCall { class, name: n, args, .. } => self.line(format!("{class}::{n}({});", list(args))),
             Stmt::Disable { name: n, .. } => self.line(format!("disable {n};")),
             Stmt::Force { lhs, rhs: Some(r), .. } => self.line(format!("force {} = {};", expr(lhs), expr(r))),
             Stmt::Force { lhs, rhs: None, .. } => self.line(format!("release {};", expr(lhs))),

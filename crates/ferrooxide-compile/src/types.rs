@@ -149,7 +149,9 @@ impl<'a> Compiler<'a> {
             Expr::Type(_) => return self.err("a data type is not a value"),
             Expr::Member(..) => return self.member_error(e, sid),
             Expr::NewArray(..) => return self.err("new[] needs a dynamic array to assign to"),
-            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) => return self.err("no classes are declared"),
+            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) => {
+                return self.err("no classes are declared")
+            }
             Expr::EmptyArg => return self.err("an empty argument is allowed only in a call of a function or task"),
             Expr::Last => return self.err("`$` outside an index of a queue"),
             Expr::IncDec { e, .. } => return self.type_of(e, sid),

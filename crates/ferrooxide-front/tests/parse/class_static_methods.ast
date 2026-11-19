@@ -1,0 +1,32 @@
+module m ();
+  // imports $unit
+  class C c;
+  int(32) signed r;
+  initial begin
+    r = C::twice(4);
+    C::bump(2);
+    r = (c.twice(r) + C$count);
+  end
+endmodule
+package $unit ();
+  class C;
+    // static
+    function automatic integer signed twice;
+      input int(32) signed x;
+      return (2 * x);
+    endfunction
+    // static
+    task automatic bump;
+      input int(32) signed n;
+      C$count = (C$count + n);
+    endtask
+    function automatic integer signed both;
+      input int(32) signed v;
+      begin
+        C::bump(1);
+        return C::twice(v);
+      end
+    endfunction
+  endclass
+  int(32) signed C$count = 0;
+endpackage
