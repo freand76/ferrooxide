@@ -660,6 +660,8 @@ Verilog / scheduling:
   before `initial begin : blk`; the block's variables are made when its code is
   generated) [sv_var_init2].
 - `` `line `` sets `` `__LINE__ `` / `` `__FILE__ `` only; messages keep the physical location.
+- a source file that is not UTF-8 is read as Latin-1: a byte above 127 in one of its
+  string literals becomes two bytes (its character in UTF-8); the reference keeps the byte.
 - a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
   `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
 - multi-dimensional arrays as ports and in whole-array assignments, array ports connected

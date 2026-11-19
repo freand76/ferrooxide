@@ -46,11 +46,14 @@ impl Preprocessor {
 
     /// The preprocessed text of a file and where its lines come from (includes).
     pub fn process_file_mapped(&mut self, path: &Path) -> Result<(String, Vec<LineSeg>)> {
-        let text = std::fs::read_to_string(path).map_err(|e| Error {
+        let bytes = std::fs::read(path).map_err(|e| Error {
             msg: format!("cannot read file: {e}"),
             file: path.display().to_string(),
             line: 0,
         })?;
+        // a file that is not UTF-8 (e.g. Latin-1 comments) is read byte by byte: each byte is
+        // the character of that code, so bytes in strings keep their values
+        let text = String::from_utf8(bytes).unwrap_or_else(|e| e.into_bytes().iter().map(|&b| b as char).collect());
         // (a file named without a directory is in `.`: its includes are `./name`, as the
         // reference names them)
         let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
