@@ -32,7 +32,8 @@ tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: test
 tests/regress.sh [--baseline]        # both regression lists, per-test changes vs the baseline
 tests/parsecheck.py [--baseline]     # parser (--parse-only) over sv-tests, the regression
                                      # suite, tests/ and real designs; changes vs the baseline
-perf stat -e cycles target/release/ferrooxide bench/cpuish.v   # perf works on this machine
+cargo build --profile speed          # with LTO, for speed measurements only (target/speed/)
+perf stat -e cycles target/speed/ferrooxide bench/cpuish.v   # perf works on this machine
 ```
 Debug: `--dump-ast` (parsed tree, Verilog-like), `--dump-code`, `--stats`, `FX_TRACE=<time>`
 (activations), `FX_GENSTATS=1` (generic-path instructions, notifies), `FX_MAX_MEM_MB` (design
@@ -53,7 +54,7 @@ memory limit, default 2048), `FX_MEM_LIMIT_MB` (address-space cap of the process
   node. The lowering reports what it cannot handle as "X is not supported" at its line; it
   never drops or approximates a construct silently. `--parse-only` / `tests/parsecheck.py`
   check the parser on its own; `--elab-only` stops after elaboration and compilation.
-- Check benchmark cycles after scheduler/JIT changes; don't regress them.
+- Check benchmark cycles after scheduler/JIT changes (with the `speed` profile); don't regress them.
 - Memory: this machine has 14 GB and an out-of-memory crash kills the session (it has happened).
   EVERY run of ferrooxide, iverilog/vvp or a test outside the scripts goes under a limit:
   `(ulimit -v 2000000; timeout 60 target/release/ferrooxide ...)`. ferrooxide caps itself at

@@ -9,8 +9,13 @@ license = "BSD-2-Clause"
 repository = "https://github.com/freand76/ferrooxide"
 description = "A fast 4-state, event-driven Verilog simulator with a Cranelift JIT"
 
+# development and tests: optimized, but quick to build
 [profile.release]
 opt-level = 3
+debug = 1
+
+# speed measurements: `cargo build --profile speed` -> target/speed/ferrooxide
+[profile.speed]
+inherits = "release"
 lto = "fat"
 codegen-units = 1
-debug = 1
