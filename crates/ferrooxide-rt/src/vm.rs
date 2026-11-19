@@ -818,12 +818,18 @@ impl Sim {
             | Target::ElemPart { sig, .. }
             | Target::ElemDynPart { sig, .. } => sig,
         };
-        let driven = ws.iter().any(|&w| {
-            self.prog.procs[w as usize]
-                .code
-                .iter()
-                .any(|i| matches!(i, Instr::Store { t, mode, .. } if target_sig(t) == sig && !matches!(mode, StoreMode::Force | StoreMode::Reforce)))
-        });
+        // the drivers: writers with a store that is not a force (a process that only forces
+        // the signal is procedural: it must not run again, see below)
+        let ws: Vec<u32> = ws
+            .into_iter()
+            .filter(|&w| {
+                self.prog.procs[w as usize]
+                    .code
+                    .iter()
+                    .any(|i| matches!(i, Instr::Store { t, mode, .. } if target_sig(t) == sig && !matches!(mode, StoreMode::Force | StoreMode::Reforce)))
+            })
+            .collect();
+        let driven = !ws.is_empty();
         let r = self.sigs[sig as usize];
         if !driven && r.depth == 0 && self.prog.signals[sig as usize].kind == SigKind::Wire {
             let old = lsb_code(&self.mem, r.slot, r.width);
