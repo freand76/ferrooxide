@@ -21,6 +21,8 @@ options:
   --dump-code       print the compiled bytecode to stderr
   --dump-ast        print the parsed syntax tree to stdout and stop
   --parse-only      parse only (no elaboration) and stop; exit status 1 on errors
+  --elab-only       parse, elaborate and compile, then stop without simulating; exit
+                    status 1 on errors
   --dump-syntax     print the syntax tree (debug format) and stop
   --no-jit          interpret the bytecode instead of compiling it to native code
   --no-fuse         do not fuse combinational processes
@@ -87,6 +89,7 @@ fn main() -> ExitCode {
     let mut dump_code = false;
     let mut dump_ast = false;
     let mut parse_only = false;
+    let mut elab_only = false;
     let mut dump_syntax = false;
     let mut jit = true;
     let mut fuse = true;
@@ -147,6 +150,7 @@ fn main() -> ExitCode {
             "--dump-code" => dump_code = true,
             "--dump-ast" => dump_ast = true,
             "--parse-only" => parse_only = true,
+            "--elab-only" => elab_only = true,
             "--dump-syntax" => dump_syntax = true,
             "--no-jit" => jit = false,
             "--no-fuse" => fuse = false,
@@ -240,6 +244,9 @@ fn main() -> ExitCode {
     };
     for w in &warnings {
         eprintln!("{w}");
+    }
+    if elab_only {
+        return ExitCode::SUCCESS;
     }
     if lint {
         for f in &findings {

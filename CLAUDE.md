@@ -52,7 +52,7 @@ memory limit, default 2048), `FX_MEM_LIMIT_MB` (address-space cap of the process
   its own tree node (`syntax/tree.rs`), never a `$__` pseudo call or a reuse of an unrelated
   node. The lowering reports what it cannot handle as "X is not supported" at its line; it
   never drops or approximates a construct silently. `--parse-only` / `tests/parsecheck.py`
-  check the parser on its own.
+  check the parser on its own; `--elab-only` stops after elaboration and compilation.
 - Check benchmark cycles after scheduler/JIT changes; don't regress them.
 - Memory: this machine has 14 GB and an out-of-memory crash kills the session (it has happened).
   EVERY run of ferrooxide, iverilog/vvp or a test outside the scripts goes under a limit:

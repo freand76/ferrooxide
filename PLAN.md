@@ -370,8 +370,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    tests that must be rejected, `:top_module:`, `:incdirs:`, `:tags:`), and a runner per
    tool (`tools/runners/`) decides pass/fail mostly by exit status. `--parse-only` covers
    the parsing tests (`tests/parsecheck.py`); the elaboration tests need a mode that
-   parses, elaborates and compiles the design without simulating it (`--elab-only`: all
-   errors reported, exit status 1 on any, nothing run, no time-0 output), and the
+   parses, elaborates and compiles the design without simulating it (`--elab-only`, done
+   2026-11-19: exit status 1 on errors, nothing run), and the
    negative tests need the checks that reject what the standard forbids instead of
    accepting it. Then: a runner for ferrooxide (as for the reference) and a script like
    `parsecheck.py` that runs the elaboration and simulation tests with a baseline, so
