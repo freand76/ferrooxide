@@ -467,9 +467,6 @@ impl Lower {
         if let Some(ports) = &s.ports {
             let mut cur: Option<Decl> = None;
             for p in ports {
-                if !p.dims.is_empty() && !matches!(p.dims.as_slice(), [t::Dim::Unsized | t::Dim::Queue(_)]) {
-                    return self.unsupported(p.loc, "an array argument");
-                }
                 if p.dir.is_some() || p.ty.is_some() || p.var || cur.is_none() {
                     let dir = match p.dir {
                         Some(d) => Some(self.dir(d, p.loc)?),

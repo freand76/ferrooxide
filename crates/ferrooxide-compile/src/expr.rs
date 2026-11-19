@@ -1375,13 +1375,19 @@ impl<'a> Compiler<'a> {
                     }
                     continue;
                 }
-                let (depth, lo) = if let Some((a, b)) = dl.dims.first() {
+                if dl.dims.len() > 1 {
+                    return self.err(format!("'{}': a multi-dimensional array in a subroutine is not supported", dl.name));
+                }
+                let (depth, lo, desc) = if let Some((a, b)) = dl.dims.first() {
                     let (a, b) = (self.const_int(a, fs)?, self.const_int(b, fs)?);
-                    (((a - b).abs() + 1) as u32, a.min(b))
+                    (((a - b).abs() + 1) as u32, a.min(b), a > b)
                 } else {
-                    (0, 0)
+                    (0, 0, false)
                 };
                 let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
+                if desc {
+                    self.sigs.desc_arrays.insert(sg);
+                }
                 if let Some(d) = &pk {
                     self.sigs.packed_dims.insert(sg, d.clone());
                     self.scopes[fs].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(sg));
@@ -1519,6 +1525,13 @@ impl<'a> Compiler<'a> {
         let mut vals = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
+            if self.sig(ps).depth > 0 {
+                // an unpacked array: copied in element by element
+                if dir == Dir::Input || dir == Dir::Inout {
+                    self.array_arg(ps, fscope, a, sid, true)?;
+                }
+                continue;
+            }
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
                 let real = self.sig_type(ps);
@@ -1567,6 +1580,10 @@ impl<'a> Compiler<'a> {
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
             if dir == Dir::Output || dir == Dir::Inout {
+                if self.sig(ps).depth > 0 {
+                    self.array_arg(ps, fscope, a, sid, false)?;
+                    continue;
+                }
                 let info = self.sig(ps).clone();
                 self.store_value(&stmt::Lhs::Expr(a, sid), info.slot, info.width, rt::StoreMode::Blocking)?;
             }
@@ -1578,6 +1595,39 @@ impl<'a> Compiler<'a> {
             }
             None => (None, 0, false),
         })
+    }
+
+    /// An unpacked array argument `a` (in scope `sid`) of array port `ps` (of the subroutine
+    /// instance in scope `fscope`): copied element by element into the port (`into`) or out of
+    /// it to the argument (7.6: arrays of the same shape, elements left to right).
+    fn array_arg(&mut self, ps: u32, fscope: usize, a: &Expr, sid: usize, into: bool) -> R<()> {
+        let pname = self.sig(ps).name.rsplit('.').next().unwrap_or_default().to_string();
+        let port = Expr::Ident(pname.clone());
+        let Some((_, li)) = self.whole_array(&port, fscope)? else {
+            return self.err(format!("argument '{pname}': an array of this kind is not supported as an argument"));
+        };
+        let Some((rs, ri)) = self.whole_array(a, sid)? else {
+            return self.err(format!("argument '{pname}' is an array: it needs an array of the same shape"));
+        };
+        let (w, rw) = (self.sig(ps).width, self.sig(rs).width);
+        if li.len() != ri.len() || w != rw {
+            return self.err(format!(
+                "argument '{pname}' ({} elements of {w} bits) given an array of {} elements of {rw} bits",
+                li.len(),
+                ri.len()
+            ));
+        }
+        let ix = |e: &Expr, k: i64| {
+            let n = Expr::Num(ferrooxide_front::ast::dec(k.unsigned_abs()));
+            let n = if k < 0 { Expr::Unary(UnOp::Neg, Box::new(n)) } else { n };
+            Expr::Index(Box::new(e.clone()), Box::new(n))
+        };
+        for (&l, &r) in li.iter().zip(&ri) {
+            let (src, ss, dst, ds) = if into { (ix(a, r), sid, ix(&port, l), fscope) } else { (ix(&port, l), fscope, ix(a, r), sid) };
+            let v = self.expr(&src, ss, w, false)?;
+            self.store_value(&stmt::Lhs::Expr(&dst, ds), v, w, rt::StoreMode::Blocking)?;
+        }
+        Ok(())
     }
 
     /// The initializers of an automatic subroutine's variables (`fresh`: also of a static
@@ -1623,6 +1673,9 @@ impl<'a> Compiler<'a> {
         }
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
+            if self.sig(ps).depth > 0 {
+                return self.err(format!("an array argument of recursive '{}' is not supported", f.name));
+            }
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
                 let real = self.sig_type(ps);

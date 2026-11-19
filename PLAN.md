@@ -383,8 +383,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles and forward
    `typedef class`, static methods done 2026-11-19): class handle ports,
    parameterized classes, members through hierarchical names (`m1.c.f`, `inst.v.f`) [sv_class_in_module_decl, sv_unit3b/4b];
-   array and dynamic-array subroutine arguments [task_port_types1/2, br1015b,
-   sv_darray_args3/4]; string parameters [br_gh175, param_string_compare]; static variables
+   string parameters [br_gh175, param_string_compare]; static variables
    in automatic subroutines and in their blocks [func_init_var2, task_init_var2]; array
    methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
 3. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
@@ -560,6 +559,9 @@ standard that we match are in `ICARUS_NOTES.md`):
   [pr2001162].
 - An event-controlled NBA (`x <= @(e) v`) updates in the NBA region after the event, as the
   standard says; the reference updates at the trigger (ICARUS_NOTES 3) [nb_ec_multi_ev].
+- An unpacked array assigned from, or passed as an argument for, an array of the opposite
+  direction (`byte z[1:3] = o[3:1]`): elements pair from the left (`z[1] = o[3]`) as 7.6
+  says; the reference pairs the lowest indexes (`z[1] = o[1]`).
 
 ## Unsupported (known)
 
@@ -590,8 +592,8 @@ SystemVerilog data types and testbench features:
   program `initial` blocks end, no `program` limits on what a module may reference.
 - `static` variables in blocks inside functions and tasks, and a variable lifetime other
   than the subroutine's (`static` in an automatic function) [func_init_var2,
-  task_init_var2]; arrays and dynamic arrays as subroutine arguments [task_port_types1/2,
-  br1015b, sv_darray_args3/4]; parameters without a default [parameter_no_default*].
+  task_init_var2]; multi-dimensional arrays in subroutines (arguments and variables), array
+  arguments of recursive calls; parameters without a default [parameter_no_default*].
 - structs: members through hierarchical names (`inst.v.f`), unpacked array members, member
   defaults, method calls on members (`s.name.len()`), `%p` of a whole struct; assignment
   patterns for unpacked arrays [sv_ap_parray2]; `$is_signed` [struct_signed,
