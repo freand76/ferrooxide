@@ -94,6 +94,7 @@ impl<'a> Compiler<'a> {
         // a nested module looks up what it does not declare in the enclosing instance
         let outer = if m.is_nested { conns.map(|c| c.1) } else { None };
         let sid = self.new_scope(path.clone(), outer, m.file.clone());
+        self.scopes[sid].inst_parent = conns.map(|c| c.1);
         self.hier.scope_module.insert(sid, m);
         self.scopes[sid].imports = m.imports.iter().filter_map(|n| self.hier.pkg_scopes.get(n).copied()).collect();
         self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);

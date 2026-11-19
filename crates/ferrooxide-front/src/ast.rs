@@ -231,8 +231,10 @@ pub enum Item {
     Subroutine(SubroutineDecl),
     Class(std::rc::Rc<ClassDecl>),
     GenFor { init_var: String, init: Expr, cond: Expr, step_var: String, step: Expr, name: Option<String>, items: Vec<Item>, line: Line },
-    GenIf { cond: Expr, then_items: Vec<Item>, then_name: Option<String>, else_items: Vec<Item>, else_name: Option<String>, line: Line },
-    GenCase { expr: Expr, arms: Vec<(Vec<Expr>, Option<String>, Vec<Item>)>, line: Line },
+    /// `direct`: the whole block of an enclosing conditional (written without begin-end):
+    /// its blocks are in the enclosing conditional's scope (IEEE 1800 27.5)
+    GenIf { cond: Expr, then_items: Vec<Item>, then_name: Option<String>, else_items: Vec<Item>, else_name: Option<String>, direct: bool, line: Line },
+    GenCase { expr: Expr, arms: Vec<(Vec<Expr>, Option<String>, Vec<Item>)>, direct: bool, line: Line },
     GenBlock { name: Option<String>, items: Vec<Item>, line: Line },
     /// gate primitive: and/or/nand/nor/xor/xnor/not/buf
     /// `dims`: an array of gate instances, e.g. `buf b[7:0] (o, i);`

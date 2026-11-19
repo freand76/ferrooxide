@@ -111,7 +111,7 @@ impl Parser {
             // a labeled generate construct
             let mut v = Vec::new();
             self.module_item(&mut v)?;
-            out.push(Item::GenBlock(GenBlock { name: Some(label), items: v, loc }));
+            out.push(Item::GenBlock(GenBlock { name: Some(label), begin: true, items: v, loc }));
             return Ok(());
         }
         if self.soft_name_here() {
@@ -1151,7 +1151,7 @@ impl Parser {
                 self.module_item(&mut items)?;
             }
             self.end_label()?;
-            return Ok(GenBlock { name, items, loc });
+            return Ok(GenBlock { name, begin: true, items, loc });
         }
         // `label : begin`
         if self.is_ident() && self.is_p_at(1, ":") && self.is_kw_at(2, Kw::Begin) {
@@ -1165,7 +1165,7 @@ impl Parser {
         }
         let mut items = Vec::new();
         self.module_item(&mut items)?;
-        Ok(GenBlock { name: None, items, loc })
+        Ok(GenBlock { name: None, begin: false, items, loc })
     }
 
     fn gen_for(&mut self) -> Result<Item> {
@@ -1196,7 +1196,7 @@ impl Parser {
             if self.is_kw(Kw::If) {
                 let l = self.loc();
                 let i = self.gen_if()?;
-                Some(GenBlock { name: None, items: vec![i], loc: l })
+                Some(GenBlock { name: None, begin: false, items: vec![i], loc: l })
             } else {
                 Some(self.gen_block()?)
             }

@@ -22,6 +22,10 @@ impl Lower {
         let mut items = Vec::new();
         let refs: Vec<&t::Item> = b.items.iter().collect();
         self.item_list(&refs, &mut items)?;
+        // a conditional that is the whole block, without begin-end: no scope of its own
+        if let (false, None, [Item::GenIf { direct, .. } | Item::GenCase { direct, .. }]) = (b.begin, &name, &mut items[..]) {
+            *direct = true;
+        }
         Ok((name, items))
     }
 
@@ -156,7 +160,7 @@ impl Lower {
                     Some(b) => self.gen_items(b)?,
                     None => (None, Vec::new()),
                 };
-                items.push(Item::GenIf { cond, then_items, then_name, else_items, else_name, line: g.loc.line });
+                items.push(Item::GenIf { cond, then_items, then_name, else_items, else_name, direct: false, line: g.loc.line });
             }
             t::Item::GenCase(g) => {
                 let expr = self.expr(&g.expr)?;
@@ -169,7 +173,7 @@ impl Lower {
                     let (name, sub) = self.gen_items(b)?;
                     arms.push((ls, name, sub));
                 }
-                items.push(Item::GenCase { expr, arms, line: g.loc.line });
+                items.push(Item::GenCase { expr, arms, direct: false, line: g.loc.line });
             }
             t::Item::GenBlock(b) => {
                 let (name, sub) = self.gen_items(b)?;

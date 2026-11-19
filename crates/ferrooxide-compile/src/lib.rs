@@ -88,6 +88,9 @@ pub(crate) struct Scope<'a> {
     pub imports: Vec<usize>,
     /// names imported one by one (`import P::x;` in a block): the package's scope
     pub name_imports: HashMap<String, usize>,
+    /// a module instance's scope: the scope it is instantiated in (hierarchical names are
+    /// searched upwards through it, IEEE 1800 23.8; simple names are not)
+    pub inst_parent: Option<usize>,
 }
 
 enum Job<'a> {
@@ -668,6 +671,7 @@ impl<'a> Compiler<'a> {
             uncdrive: parent.and_then(|p| self.scopes[p].uncdrive),
             imports: Vec::new(),
             name_imports: HashMap::new(),
+            inst_parent: None,
         });
         self.scopes.len() - 1
     }
@@ -809,28 +813,29 @@ impl<'a> Compiler<'a> {
         } else {
             parts
         };
-        // find the scope for parts[0]
-        let mut s = Some(sid);
-        let mut start = None;
-        while let Some(x) = s {
-            if let Some(&c) = self.scopes[x].children.get(&parts[0]) {
-                start = Some(c);
-                break;
+        // the rest of the path below a scope
+        let down = |mut cur: usize| -> Option<usize> {
+            for p in &parts[1..] {
+                cur = *self.scopes[cur].children.get(p)?;
             }
-            if self.scopes[x].name.rsplit('.').next() == Some(parts[0].as_str()) {
-                start = Some(x);
-                break;
-            }
-            s = self.scopes[x].parent;
-        }
-        let mut cur = match start {
-            Some(c) => c,
-            None => *self.hier.tops.get(&parts[0]).or_else(|| self.hier.pkg_scopes.get(&parts[0]))?,
+            Some(cur)
         };
-        for p in &parts[1..] {
-            cur = *self.scopes[cur].children.get(p)?;
+        // find the scope for parts[0]: a child of this scope or of an enclosing one, or an
+        // enclosing scope by its name or (an instance) its module's name, upwards through
+        // the instances (IEEE 1800 23.8); the first one the rest of the path resolves in
+        let mut s = Some(sid);
+        while let Some(x) = s {
+            if let Some(r) = self.scopes[x].children.get(&parts[0]).and_then(|&c| down(c)) {
+                return Some(r);
+            }
+            let own = self.scopes[x].name.rsplit('.').next() == Some(parts[0].as_str())
+                || (self.scopes[x].inst_parent.is_some() && self.hier.scope_module.get(&x).is_some_and(|m| m.name == parts[0]));
+            if let Some(r) = own.then(|| down(x)).flatten() {
+                return Some(r);
+            }
+            s = self.scopes[x].parent.or(self.scopes[x].inst_parent);
         }
-        Some(cur)
+        down(*self.hier.tops.get(&parts[0]).or_else(|| self.hier.pkg_scopes.get(&parts[0]))?)
     }
 
     /// A package (or `$unit`) scope.

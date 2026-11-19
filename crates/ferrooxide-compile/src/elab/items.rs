@@ -700,7 +700,7 @@ impl<'a> Compiler<'a> {
                         }
                     }
                 }
-                Item::GenIf { cond, then_items, then_name, else_items, else_name, line } => {
+                Item::GenIf { cond, then_items, then_name, else_items, else_name, line, .. } => {
                     self.line = *line;
                     genblk += 1;
                     // an `else if` chain is one construct (IEEE 1800 27.5): the chosen branch is a
@@ -713,7 +713,7 @@ impl<'a> Compiler<'a> {
                             self.gen_scope(then_items, then_name, genblk, sid)?;
                             break;
                         }
-                        if let ([Item::GenIf { cond: c2, then_items: t2, then_name: n2, else_items: e2, else_name: en2, line: l2 }], None) =
+                        if let ([Item::GenIf { cond: c2, then_items: t2, then_name: n2, else_items: e2, else_name: en2, line: l2, .. }], None) =
                             (&else_items[..], else_name)
                         {
                             self.line = *l2;
@@ -724,7 +724,7 @@ impl<'a> Compiler<'a> {
                         break;
                     }
                 }
-                Item::GenCase { expr, arms, line } => {
+                Item::GenCase { expr, arms, line, .. } => {
                     self.line = *line;
                     genblk += 1;
                     let v = self.const_eval(expr, sid)?;
@@ -775,6 +775,10 @@ impl<'a> Compiler<'a> {
     pub(crate) fn gen_scope(&mut self, items: &'a [Item], name: &Option<String>, n: usize, sid: usize) -> R<()> {
         if items.is_empty() {
             return Ok(());
+        }
+        // a conditional that is the whole block: its blocks belong to this scope
+        if let (None, [Item::GenIf { direct: true, .. } | Item::GenCase { direct: true, .. }]) = (name, items) {
+            return self.elab_items(items, sid, false, &HashMap::new(), None);
         }
         let bname = name.clone().unwrap_or_else(|| format!("genblk{n}"));
         let path = format!("{}.{}", self.scopes[sid].name, bname);

@@ -544,6 +544,9 @@ pub struct Gates {
 #[derive(Clone, Debug)]
 pub struct GenBlock {
     pub name: Option<String>,
+    /// written with `begin ... end` (a block of a conditional without it that is just
+    /// another conditional makes no scope of its own, IEEE 1800 27.5)
+    pub begin: bool,
     pub items: Vec<Item>,
     pub loc: Loc,
 }

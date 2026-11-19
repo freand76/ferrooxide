@@ -637,7 +637,7 @@ Verilog / scheduling:
 - `~`/`buf` of a never-driven input gives x, the reference z (ICARUS_NOTES 8) [sv_unit1c].
 - strength values on nets (`%v`, strength reduction through switches, `trireg` charge),
   `$countdrivers`, `$fread`, `$ferror`, `%u`/`%z` in `$scanf`, specify paths on inout ports and conditional paths, timing
-  checks, SDF, force on array elements, generate blocks referenced before their definition [pr2350934b].
+  checks, SDF, force on array elements.
 - compiler warnings the reference prints: port coercion to inout, constant out-of-range
   selects, `@*` without sensitivities.
 - `$dist_*` and `$q_*` system functions.
@@ -647,8 +647,6 @@ Verilog / scheduling:
 - hierarchical names of variables in a named block of a later process (`always @(blk.x)`
   before `initial begin : blk`; the block's variables are made when its code is
   generated) [sv_var_init2].
-- hierarchical names found upwards in a generate
-  block or in another top-level module [pr2257003, pr1698659].
 - `` `line `` sets `` `__LINE__ `` / `` `__FILE__ `` only; messages keep the physical location.
 - a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
   `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
