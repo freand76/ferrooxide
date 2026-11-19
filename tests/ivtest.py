@@ -126,8 +126,15 @@ def main():
     # run a private copy of the binary: rebuilding during a run must not affect it
     global FX
     tmpdir = tempfile.mkdtemp(prefix="fx-ivtest-")
-    shutil.copy2(FX, os.path.join(tmpdir, "ferrooxide"))
-    FX = os.path.join(tmpdir, "ferrooxide")
+    try:
+        shutil.copy2(FX, os.path.join(tmpdir, "ferrooxide"))
+        FX = os.path.join(tmpdir, "ferrooxide")
+        run_all(a)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def run_all(a):
     # tests write files into work/, which the reference's runner creates
     os.makedirs(os.path.join(a.ivtest, "work"), exist_ok=True)
     tests = [t for t in parse_list(os.path.join(a.ivtest, a.list)) if t["kind"] == "normal" and re.search(a.filter, t["name"])]
