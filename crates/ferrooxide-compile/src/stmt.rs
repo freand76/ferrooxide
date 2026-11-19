@@ -1309,7 +1309,8 @@ impl<'a> Compiler<'a> {
                 let radix = if name == "$swrite" { radix } else { 'd' };
                 // (w 0: the handle of a string, for a string variable)
                 let w = if ty.is_str() { 0 } else { vw };
-                self.emit(sys(SysTask::SFormat { d, w, args: fargs, scope, texp, radix }));
+                let nul_warn = format!("{}:{}: {name}", self.file, self.line);
+                self.emit(sys(SysTask::SFormat { d, w, args: fargs, scope, texp, radix, nul_warn }));
                 self.store_value(&Lhs::Expr(var, sid), d, vw, StoreMode::Blocking)?;
             }
             "$timeformat" => {

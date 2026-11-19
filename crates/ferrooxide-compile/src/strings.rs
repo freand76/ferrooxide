@@ -246,7 +246,7 @@ impl<'a> Compiler<'a> {
                 let d = self.tmp(64);
                 let scope = self.scopes[sid].name.clone();
                 let texp = self.texp(sid);
-                self.emit(Instr::Sys(Box::new(rt::SysTask::SFormat { d, w: 0, args: fa, scope, texp, radix: 'd' })));
+                self.emit(Instr::Sys(Box::new(rt::SysTask::SFormat { d, w: 0, args: fa, scope, texp, radix: 'd', nul_warn: String::new() })));
                 return Ok(d);
             }
             _ => {}

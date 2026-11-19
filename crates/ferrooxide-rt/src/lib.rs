@@ -564,10 +564,13 @@ pub enum SysTask {
     /// `fmt`: the prefix and a conversion (`"name=%d"`), read when the call runs
     ValuePlusargs { d: u32, fmt: FileName, val: u32, w: u32, real: bool },
     /// format into the `w`-bit value at `d` (characters right-aligned)
-    SFormat { d: u32, w: u32, args: Vec<FmtArg>, scope: String, texp: u8, radix: char },
+    /// `nul_warn`: `file:line: $sformat` of the task forms, which warn about a result with a
+    /// NUL byte (empty for $sformatf)
+    SFormat { d: u32, w: u32, args: Vec<FmtArg>, scope: String, texp: u8, radix: char, nul_warn: String },
     /// file input: the 32-bit result goes to `d`; `src` is the descriptor (or, for $sscanf,
     /// the string) as (slot, width)
-    FileRead { kind: FileRead, d: u32, src: (u32, u32), scope: String },
+    /// `loc`: file:line of the call (for warnings)
+    FileRead { kind: FileRead, d: u32, src: (u32, u32), scope: String, loc: String },
 }
 
 #[derive(Clone, Debug)]

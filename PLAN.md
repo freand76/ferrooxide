@@ -628,15 +628,16 @@ SystemVerilog data types and testbench features:
   (`Scope::string_params`); constant comparisons of them are evaluated in the compiler
   (`const_str_cmp`), other string operations on them only at run time; implicit string ->
   vector assignment is
-  accepted (the reference rejects it); characters above 127 print as UTF-8; `%v` `%u` `%z`
-  in `$sformatf` [sformatf].
+  accepted (the reference rejects it); bytes above 127 of a `string` variable print as
+  U+FFFD (those of vectors, `%c` and `%u`/`%z` print as the bytes, 2026-11-19); `%v` in
+  `$sformatf` [sformatf].
 
 Verilog / scheduling:
 - nets with several drivers, `wand`/`tri1`, strength drivers and `assign z = m[i]` update in
   the combinational settle, the reference updates them immediately (see Differences).
 - `~`/`buf` of a never-driven input gives x, the reference z (ICARUS_NOTES 8) [sv_unit1c].
 - strength values on nets (`%v`, strength reduction through switches, `trireg` charge),
-  `$countdrivers`, `$fread`, `$ferror`, `%u`/`%z` in `$scanf`, specify paths on inout ports and conditional paths, timing
+  `$countdrivers`, `$fread`, `$ferror`, specify paths on inout ports and conditional paths, timing
   checks, SDF, force on array elements.
 - compiler warnings the reference prints: port coercion to inout, constant out-of-range
   selects, `@*` without sensitivities.

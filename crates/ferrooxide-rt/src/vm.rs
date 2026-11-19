@@ -2706,15 +2706,15 @@ impl Sim {
     fn systask(&mut self, p: u32, task: &SysTask, pc: usize) -> bool {
         match task {
             SysTask::Display { nl, args, scope, fd, prefix, texp, radix } => {
-                let mut s = String::from(*prefix);
+                let mut s: Vec<u8> = prefix.as_bytes().to_vec();
                 let args = self.str_args(args);
-                s.push_str(&fmt::format_args(&args, &self.mem, scope, *radix, *texp));
+                s.extend_from_slice(&fmt::format_args(&args, &self.mem, scope, *radix, *texp));
                 if *nl {
-                    s.push('\n');
+                    s.push(b'\n');
                 }
                 match fd {
                     None => {
-                        let _ = self.out.write_all(s.as_bytes());
+                        let _ = self.out.write_all(&s);
                     }
                     Some((slot, w)) => {
                         let v = ops::read_u64(&self.mem, *slot as usize, *w).unwrap_or(0) as u32;
@@ -2722,22 +2722,22 @@ impl Sim {
                             // multichannel descriptor (IEEE 1800 21.3.1): bit 0 = stdout, the
                             // other bits are files opened without a mode
                             if v & 1 != 0 {
-                                let _ = self.out.write_all(s.as_bytes());
+                                let _ = self.out.write_all(&s);
                             }
                             for k in 1..31 {
                                 if v & (1 << k) != 0 {
                                     if let Some(FileH::W(f)) = self.files.get_mut(&(1 << k)) {
-                                        let _ = f.write_all(s.as_bytes());
+                                        let _ = f.write_all(&s);
                                     }
                                 }
                             }
                         } else if v == 0x8000_0001 {
-                            let _ = self.out.write_all(s.as_bytes());
+                            let _ = self.out.write_all(&s);
                         } else if v == 0x8000_0002 {
                             let _ = self.out.flush();
-                            eprint!("{s}");
+                            let _ = std::io::stderr().write_all(&s);
                         } else if let Some(FileH::W(f)) = self.files.get_mut(&v) {
-                            let _ = f.write_all(s.as_bytes());
+                            let _ = f.write_all(&s);
                         }
                     }
                 }
@@ -2754,8 +2754,8 @@ impl Sim {
                 if self.monitor == *proc && self.monitor_on {
                     let args = self.str_args(args);
                     let mut s = fmt::format_args(&args, &self.mem, scope, *radix, *texp);
-                    s.push('\n');
-                    let _ = self.out.write_all(s.as_bytes());
+                    s.push(b'\n');
+                    let _ = self.out.write_all(&s);
                 }
             }
             SysTask::MonitorOn(on) => {
@@ -2897,12 +2897,15 @@ impl Sim {
                     plusarg_value(&mut self.mem, val, *w, *real, conv, &a);
                 }
             }
-            SysTask::SFormat { d, w, args, scope, texp, radix } => {
+            SysTask::SFormat { d, w, args, scope, texp, radix, nul_warn } => {
                 let args = self.str_args(args);
                 let s = fmt::format_args(&args, &self.mem, scope, *radix, *texp);
+                if !nul_warn.is_empty() && s.contains(&0) {
+                    let _ = writeln!(self.out, "WARNING: {nul_warn} returned a value with an embedded NULL (see %u/%z).");
+                }
                 if *w == 0 {
                     // into a string
-                    let h = self.intern(s.as_bytes());
+                    let h = self.intern(&s);
                     self.mem[*d as usize] = h;
                     self.mem[*d as usize + 1] = 0;
                 } else {
@@ -2957,8 +2960,8 @@ impl Sim {
                     }
                 }
             }
-            SysTask::FileRead { kind, d, src, scope } => {
-                let r = self.file_read(kind, *src, scope);
+            SysTask::FileRead { kind, d, src, scope, loc } => {
+                let r = self.file_read(kind, *src, scope, loc);
                 let d = *d as usize;
                 self.mem[d] = r as u32 as u64;
                 self.mem[d + 1] = 0;
@@ -2968,7 +2971,7 @@ impl Sim {
     }
 
     /// $fgetc & co.: the 32-bit result (-1 for EOF or errors).
-    fn file_read(&mut self, kind: &FileRead, src: (u32, u32), scope: &str) -> i32 {
+    fn file_read(&mut self, kind: &FileRead, src: (u32, u32), scope: &str, loc: &str) -> i32 {
         let rd = |m: &[u64], s: u32| m[s as usize] as u32;
         // the format of $fscanf / $sscanf (-1 when it has x or z bits)
         let fmt_text = match kind {
@@ -2978,10 +2981,11 @@ impl Sim {
         };
         let fmt = fmt_text.as_str();
         if let FileRead::Scan { string: true, outs, .. } = kind {
-            let s = fmt::value_string(&self.mem, src.0 as usize, src.1);
+            let s = fmt::value_bytes(&self.mem, src.0 as usize, src.1);
             let mut pos = 0;
             let mut eof = false;
-            return scan(&mut self.mem, s.as_bytes(), &mut pos, &mut eof, fmt, outs, scope);
+            let r = scan(&mut self.mem, &s, &mut pos, &mut eof, fmt, outs, scope, &mut self.out, &format!("{loc}: $sscanf()"));
+            return r;
         }
         let fd = rd(&self.mem, src.0);
         let Some(FileH::R { data, pos, eof }) = self.files.get_mut(&fd) else { return -1 };
@@ -3023,7 +3027,7 @@ impl Sim {
                     *eof = true;
                     return 0;
                 }
-                let line = String::from_utf8_lossy(&data[start..*pos]).into_owned();
+                let line = data[start..*pos].to_vec();
                 string_to_bits(&mut self.mem, *val as usize, *w, &line);
                 (*pos - start) as i32
             }
@@ -3053,7 +3057,7 @@ impl Sim {
             FileRead::Scan { outs, .. } => {
                 let data = std::mem::take(data);
                 let (mut p, mut e) = (*pos, *eof);
-                let r = scan(&mut self.mem, &data, &mut p, &mut e, fmt, outs, scope);
+                let r = scan(&mut self.mem, &data, &mut p, &mut e, fmt, outs, scope, &mut self.out, &format!("{loc}: $fscanf()"));
                 if let Some(FileH::R { data: d, pos, eof }) = self.files.get_mut(&fd) {
                     *d = data;
                     *pos = p;
@@ -4422,7 +4426,10 @@ enum FileH {
 
 /// $fscanf/$sscanf over `inp` from `*pos`. Returns the number of conversions assigned, or -1
 /// when the input ends before the first one.
-fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, outs: &[ScanOut], scope: &str) -> i32 {
+/// `out`, `who`: where and as which call (`file:line: $fscanf()`) to warn about input that
+/// ends inside a %u / %z value.
+#[allow(clippy::too_many_arguments)]
+fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, outs: &[ScanOut], scope: &str, out: &mut dyn Write, who: &str) -> i32 {
     for o in outs {
         m[o.ok as usize] = 0;
         m[o.ok as usize + 1] = 0;
@@ -4484,12 +4491,60 @@ fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, o
         if conv == b'm' {
             if !skip {
                 if let Some(o) = outs.get(oi) {
-                    string_to_bits(m, o.val as usize, o.w, scope);
+                    string_to_bits(m, o.val as usize, o.w, scope.as_bytes());
                     m[o.ok as usize] = 1;
                     oi += 1;
                     n += 1;
                 }
             }
+            continue;
+        }
+        // %u / %z (IEEE 1800 21.3.4.3): binary 32-bit words, as $fwrite writes them
+        if conv == b'u' || conv == b'z' {
+            // (a field width is the number of bits, also of a skipped value)
+            let w = match width {
+                usize::MAX => outs.get(oi).filter(|_| !skip).map(|o| if o.real { 64 } else { o.w }).unwrap_or(32),
+                k => k as u32,
+            };
+            let need = w.div_ceil(32) as usize * if conv == b'z' { 8 } else { 4 };
+            let have = inp.len().saturating_sub(*pos);
+            if have < need {
+                if have > 0 {
+                    let _ = writeln!(out, "WARNING: {who} only found {have} of {need} bytes needed by %{} format code.", conv as char);
+                    *pos = inp.len();
+                }
+                *eof = true;
+                ret_eof = n == 0;
+                break;
+            }
+            let bytes = &inp[*pos..*pos + need];
+            *pos += need;
+            if skip {
+                continue;
+            }
+            let Some(o) = outs.get(oi) else { break };
+            oi += 1;
+            // the variable gets the bits that fit in it (and those read: the rest are 0)
+            let (d, ow) = (o.val as usize, if o.real { 64 } else { o.w });
+            let nwords = nw(ow);
+            for i in 0..2 * nwords {
+                m[d + i] = 0;
+            }
+            let word = |k: usize| u32::from_le_bytes(bytes[4 * k..4 * k + 4].try_into().unwrap()) as u64;
+            let bits = w.min(ow);
+            for k in 0..bits.div_ceil(32) as usize {
+                let (a, b) = if conv == b'z' { (word(2 * k), word(2 * k + 1)) } else { (word(k), 0) };
+                m[d + k / 2] |= a << (32 * (k % 2));
+                m[d + nwords + k / 2] |= b << (32 * (k % 2));
+            }
+            let top = (bits - 1) / 64;
+            for k in top as usize..nwords {
+                let keep = if k == top as usize && bits % 64 != 0 { ops::mask(bits % 64) } else if k == top as usize { !0 } else { 0 };
+                m[d + k] &= keep;
+                m[d + nwords + k] &= keep;
+            }
+            m[o.ok as usize] = 1;
+            n += 1;
             continue;
         }
         if conv != b'c' {
@@ -4510,7 +4565,7 @@ fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, o
         match conv {
             b'c' => *pos += 1,
             b's' => take(pos, &|_, c| !ws(c)),
-            b'd' | b'u' => {
+            b'd' => {
                 let first = inp[start];
                 if matches!(first, b'x' | b'X' | b'z' | b'Z' | b'?') {
                     *pos += 1;
@@ -4545,10 +4600,10 @@ fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, o
                 if o.real {
                     ops::wr_real(m, d, tok[0] as f64);
                 } else {
-                    string_to_bits(m, d, o.w, &text);
+                    string_to_bits(m, d, o.w, tok);
                 }
             }
-            b's' => string_to_bits(m, d, o.w, &text),
+            b's' => string_to_bits(m, d, o.w, tok),
             b'e' | b'f' | b'g' | b't' => {
                 // the longest prefix that parses as a number
                 let v = (1..=text.len()).rev().find_map(|k| text[..k].parse::<f64>().ok()).unwrap_or(0.0);
@@ -4659,7 +4714,7 @@ fn plusarg_value(m: &mut [u64], d: usize, w: u32, real: bool, conv: char, text: 
                 ops::real_to_int(m, d, w, v);
             }
         }
-        's' => string_to_bits(m, d, w, text),
+        's' => string_to_bits(m, d, w, text.as_bytes()),
         _ => {
             let radix = match conv {
                 'h' | 'x' => 16,
@@ -4770,13 +4825,13 @@ fn int_text_bits(m: &mut [u64], d: usize, w: u32, radix: u32, text: &str) {
 }
 
 /// Store a string as Verilog characters (last character in the low byte) in a w-bit value.
-fn string_to_bits(m: &mut [u64], d: usize, w: u32, s: &str) {
+fn string_to_bits(m: &mut [u64], d: usize, w: u32, s: &[u8]) {
     let n = nw(w);
     for i in 0..2 * n {
         m[d + i] = 0;
     }
     // (as any vector truncated to w bits: a character that only partly fits keeps its low bits)
-    for (k, &b) in s.as_bytes().iter().rev().enumerate() {
+    for (k, &b) in s.iter().rev().enumerate() {
         let bit = 8 * k as u32;
         if bit >= w {
             break;

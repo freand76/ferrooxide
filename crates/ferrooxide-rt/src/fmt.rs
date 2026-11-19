@@ -210,8 +210,8 @@ pub fn fmt_radix(v: &Val, bits_per: u32, pad: bool) -> String {
     out.into_iter().collect()
 }
 
-fn fmt_str(v: &Val) -> String {
-    let mut s = String::new();
+fn fmt_str(v: &Val) -> Vec<u8> {
+    let mut s = Vec::new();
     let nbytes = v.w.div_ceil(8);
     for k in (0..nbytes).rev() {
         let mut byte = 0u32;
@@ -224,7 +224,7 @@ fn fmt_str(v: &Val) -> String {
             }
         }
         if byte != 0 {
-            s.push(char::from_u32(byte).unwrap_or('?'));
+            s.push(byte as u8);
         }
     }
     s
@@ -232,8 +232,8 @@ fn fmt_str(v: &Val) -> String {
 
 /// %s: one character per byte, NUL (or unknown) bytes as spaces; without padding (%0s) the
 /// leading NUL bytes are dropped. As Icarus does it.
-fn fmt_disp_str(v: &Val, pad: bool) -> String {
-    let mut s = String::new();
+fn fmt_disp_str(v: &Val, pad: bool) -> Vec<u8> {
+    let mut s = Vec::new();
     let nbytes = v.w.div_ceil(8);
     for k in (0..nbytes).rev() {
         let mut byte = 0u32;
@@ -246,28 +246,54 @@ fn fmt_disp_str(v: &Val, pad: bool) -> String {
         }
         if byte == 0 {
             if pad || !s.is_empty() {
-                s.push(' ');
+                s.push(b' ');
             }
         } else {
-            s.push(char::from_u32(byte).unwrap_or('?'));
+            s.push(byte as u8);
         }
     }
     s
 }
 
-fn fmt_char(v: &Val) -> String {
-    let mut byte = 0u32;
+/// %c: the low byte (as it is, also above 127).
+fn fmt_char(v: &Val) -> Vec<u8> {
+    let mut byte = 0u8;
     for i in 0..8.min(v.w) {
-        byte |= (v.bit(i).0 as u32) << i;
+        byte |= (v.bit(i).0 as u8) << i;
     }
-    char::from_u32(byte).map(|c| c.to_string()).unwrap_or_default()
+    vec![byte]
+}
+
+/// %u / %z (IEEE 1800 21.2.1.7): the value as 32-bit words, least significant first, each
+/// in little-endian byte order; %u gives x and z bits as 0, %z writes each word's value
+/// bits and then its unknown bits.
+fn binary_words(v: &Val, z: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    for k in 0..v.w.div_ceil(32) {
+        let (mut a, mut b) = (0u32, 0u32);
+        for i in 0..32 {
+            let bit = k * 32 + i;
+            if bit < v.w {
+                let (x, y) = v.bit(bit);
+                a |= (x as u32) << i;
+                b |= (y as u32) << i;
+            }
+        }
+        if z {
+            out.extend_from_slice(&a.to_le_bytes());
+            out.extend_from_slice(&b.to_le_bytes());
+        } else {
+            out.extend_from_slice(&(a & !b).to_le_bytes());
+        }
+    }
+    out
 }
 
 /// Format the argument list of a $display-family call.
 /// `get(slot, w)` returns the planes of a value.
 /// `texp`: %t prints a time in module units multiplied by 10^texp (simulation ticks).
-pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_radix: char, texp: u8) -> String {
-    let mut out = String::new();
+pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_radix: char, texp: u8) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
     let view = |s: u32, w: u32, signed: bool| {
         let n = nw(w);
         let s = s as usize;
@@ -283,7 +309,7 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                 while k < chars.len() {
                     let c = chars[k];
                     if c != '%' {
-                        out.push(c);
+                        out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
                         k += 1;
                         continue;
                     }
@@ -319,11 +345,11 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                     let spec = chars[k].to_ascii_lowercase();
                     k += 1;
                     if spec == '%' {
-                        out.push('%');
+                        out.push(b'%');
                         continue;
                     }
                     if spec == 'm' {
-                        out.push_str(scope);
+                        out.extend_from_slice(scope.as_bytes());
                         continue;
                     }
                     let explicit_w: Option<usize> = width_s.parse().ok();
@@ -350,10 +376,12 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                         (Some(_), _) => Some(&FmtArg::Empty),
                         (None, a) => a,
                     };
-                    let s = match arg {
+                    let s: Vec<u8> = match arg {
+                        // (%u / %z of a real: its 64 bits)
+                        Some(FmtArg::Real { s, .. }) if matches!(spec, 'u' | 'z') => binary_words(&view(*s, 64, false), spec == 'z'),
                         Some(FmtArg::Real { s, .. }) => {
                             let r = f64::from_bits(mem[*s as usize]);
-                            match spec {
+                            let t = match spec {
                                 'f' | 'e' | 'g' => {
                                     let t = fmt_real(r, spec, prec.unwrap_or(6));
                                     if upper {
@@ -388,9 +416,12 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                         format!("{}", v as i128)
                                     }
                                 }
-                            }
+                            };
+                            t.into_bytes()
                         }
                         Some(FmtArg::Str { s, w }) if spec == 's' => str_value(&view(*s, *w, false)),
+                        // %u / %z: binary words (IEEE 1800 21.2.1.7)
+                        Some(FmtArg::Val { s, w, .. } | FmtArg::Str { s, w }) if matches!(spec, 'u' | 'z') => binary_words(&view(*s, *w, false), spec == 'z'),
                         Some(FmtArg::Val { .. }) | Some(FmtArg::Str { .. }) | Some(FmtArg::Time { .. }) | Some(FmtArg::Empty) if lit_bits.is_some() || !matches!(arg, Some(FmtArg::Empty)) => {
                             let (v, w, signed) = match (arg, &lit_bits) {
                                 (_, Some((words, w))) => {
@@ -403,12 +434,15 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                 _ => unreachable!(),
                             };
                             match spec {
+                                'c' => fmt_char(&v),
+                                's' => fmt_disp_str(&v, pad),
+                                'u' | 'z' => binary_words(&v, spec == 'z'),
+                                _ => {
+                            let t = match spec {
                                 'd' => fmt_dec(&v, pad),
                                 'b' => fmt_radix(&v, 1, pad),
                                 'o' => fmt_radix(&v, 3, pad),
                                 'h' | 'x' => fmt_radix(&v, 4, pad),
-                                'c' => fmt_char(&v),
-                                's' => fmt_disp_str(&v, pad),
                                 't' => {
                                     let s = scaled_time(&v, texp);
                                     if v.known() && v.w <= 64 {
@@ -440,22 +474,28 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                                     }
                                 }
                                 _ => fmt_dec(&v, pad),
+                            };
+                            t.into_bytes()
+                                }
                             }
                         }
-                        Some(FmtArg::Lit(l)) => l.clone(),
-                        _ => String::new(),
+                        Some(FmtArg::Lit(l)) => l.clone().into_bytes(),
+                        _ => Vec::new(),
                     };
+                    // padding to an explicit width (in characters: bytes, as the reference)
                     match explicit_w {
-                        Some(wd) if wd > 0 => {
+                        Some(wd) if wd > s.len() && !matches!(spec, 'u' | 'z') => {
+                            let fill = wd - s.len();
                             if left {
-                                out.push_str(&format!("{:<wd$}", s));
-                            } else if matches!(spec, 'b' | 'h' | 'x' | 'o') || (zero_fill && spec == 'd') {
-                                out.push_str(&format!("{:0>wd$}", s));
+                                out.extend_from_slice(&s);
+                                out.extend(std::iter::repeat_n(b' ', fill));
                             } else {
-                                out.push_str(&format!("{:>wd$}", s));
+                                let c = if matches!(spec, 'b' | 'h' | 'x' | 'o') || (zero_fill && spec == 'd') { b'0' } else { b' ' };
+                                out.extend(std::iter::repeat_n(c, fill));
+                                out.extend_from_slice(&s);
                             }
                         }
-                        _ => out.push_str(&s),
+                        _ => out.extend_from_slice(&s),
                     }
                 }
             }
@@ -467,28 +507,31 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                     'o' => fmt_radix(&v, 3, true),
                     _ => fmt_dec(&v, true),
                 };
-                out.push_str(&s);
+                out.extend_from_slice(s.as_bytes());
                 i += 1;
             }
             FmtArg::Str { s, w } => {
-                out.push_str(&str_value(&view(*s, *w, false)));
+                out.extend_from_slice(&str_value(&view(*s, *w, false)));
                 i += 1;
             }
             FmtArg::Time { s } => {
                 let v = view(*s, 64, false);
-                out.push_str(&format!("{:>20}", fmt_dec(&v, false)));
+                out.extend_from_slice(format!("{:>20}", fmt_dec(&v, false)).as_bytes());
                 i += 1;
             }
             FmtArg::Real { s, fixed } => {
                 let r = f64::from_bits(mem[*s as usize]);
-                out.push_str(&match fixed {
-                    Some(d) if r.is_finite() => format!("{:.*}", *d as usize, r),
-                    _ => fmt_real(r, 'G', 6),
-                });
+                out.extend_from_slice(
+                    match fixed {
+                        Some(d) if r.is_finite() => format!("{:.*}", *d as usize, r),
+                        _ => fmt_real(r, 'G', 6),
+                    }
+                    .as_bytes(),
+                );
                 i += 1;
             }
             FmtArg::Empty => {
-                out.push(' ');
+                out.push(b' ');
                 i += 1;
             }
             // (turned into literals by the caller)
@@ -552,14 +595,19 @@ pub fn fmt_real(v: f64, spec: char, prec: usize) -> String {
 
 /// The characters of a value (as $display %s, leading zero bytes dropped).
 pub fn value_string(mem: &[u64], s: usize, w: u32) -> String {
+    String::from_utf8_lossy(&value_bytes(mem, s, w)).into_owned()
+}
+
+/// The bytes of a value, most significant first, zero bytes dropped (x/z bits as 0).
+pub fn value_bytes(mem: &[u64], s: usize, w: u32) -> Vec<u8> {
     let n = nw(w);
     let v = Val { a: &mem[s..s + n], b: &mem[s + n..s + 2 * n], w, signed: false };
     fmt_str(&v)
 }
 
 /// The characters of a string value (NUL bytes are padding, not characters).
-fn str_value(v: &Val) -> String {
-    let mut s = String::new();
+fn str_value(v: &Val) -> Vec<u8> {
+    let mut s = Vec::new();
     for k in (0..v.w.div_ceil(8)).rev() {
         let mut c = 0u8;
         for j in 0..8 {
@@ -569,7 +617,7 @@ fn str_value(v: &Val) -> String {
             }
         }
         if c != 0 {
-            s.push(c as char);
+            s.push(c);
         }
     }
     s
