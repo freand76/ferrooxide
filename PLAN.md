@@ -140,7 +140,7 @@ at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`, `$bit
 assignment patterns (positional, and beyond the reference: named and `default:`), packages
 with `import p::*` / `import p::x` (module, header, file scope), `pkg::name`, `P::x`/`P::f()`,
 `export p::x` / `p::*` / `*::*` (names resolve to the package that declares them),
-members and methods of package variables (`P::s.x`, `P::e.next(N)`, `P::c.f()`; read only).
+members and methods of package variables (`P::s.x`, `P::e.next(N)`, `P::c.f()`), assignments to them by scoped name (`P::v[i] = x`, `P::s.x = y`).
 Lint reports names that are SystemVerilog keywords.
 
 Also done: interfaces and modports (interface ports alias the connected instance's scope),
@@ -606,9 +606,8 @@ SystemVerilog data types and testbench features:
   interface port arrays; modport directions are not enforced (writing an input of a modport, members not
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
   a forward typedef defined in another scope than its declaration.
-- assignments to members or selects of package variables by their scoped name
-  (`P::s.x = 1`, `P::v[2] = 1`), and to a package variable itself (`P::n = 5`);
-  `import` in a block [sv_wildcard_import3].
+- assignments to properties of a package's class handle (`P::c.x = 1`); `import` in a
+  block [sv_wildcard_import3].
 - `.triggered` only on events declared in a module (not in tasks, functions or blocks).
 - `iff` only when every item of an event control has the same condition, and only in an
   event control before a statement (not in intra-assignment controls).

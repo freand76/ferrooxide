@@ -315,6 +315,8 @@ impl Lower {
             Base::Other(t::Expr { kind: t::ExprKind::Scoped(n), loc }) if n.scopes.len() == 1 && n.params.is_none() && n.scopes[0].params.is_none() => {
                 match self.static_prop(&Expr::Ident(n.scopes[0].name.clone()), &n.name) {
                     Some(v) => self.selects(Expr::Ident(v), &ops),
+                    // `P::v = ...`: a variable of a package
+                    None if self.packages.contains_key(&n.scopes[0].name) => self.chain(b, &ops, true),
                     None => self.unsupported(*loc, "this assignment target"),
                 }
             }
@@ -526,10 +528,30 @@ impl Lower {
                     }
                     return self.unsupported(e.loc, "a select of this expression");
                 };
-                if lvalue || n.scopes.len() != 1 || n.params.is_some() || n.scopes[0].params.is_some() || n.scopes[0].name == "$unit" {
+                if n.scopes.len() != 1 || n.params.is_some() || n.scopes[0].params.is_some() || n.scopes[0].name == "$unit" {
                     return self.unsupported(e.loc, "this scoped name");
                 }
                 let mut p = n.scopes[0].name.clone();
+                // `P::v = x`, `P::v[i] = x`, `P::s.m = x`: a variable of package P
+                if lvalue {
+                    let Some(mut pk) = self.packages.get(&p).cloned() else {
+                        return self.err(e.loc, format!("unknown package '{p}'"));
+                    };
+                    if let Some(o) = pk.exports.get(&n.name) {
+                        p = o.clone();
+                        pk = self.packages[&p].clone();
+                    }
+                    let Some(v) = pk.vars.get(&n.name) else {
+                        return self.unsupported(e.loc, "this scoped name as an assignment target");
+                    };
+                    if v.0.class.is_some() && !ops.is_empty() {
+                        return self.unsupported(e.loc, "a property of a package's class handle as an assignment target");
+                    }
+                    let has_struct = v.0.has_struct();
+                    self.use_package(&p);
+                    let base = Expr::Hier(vec![p, n.name.clone()]);
+                    return if has_struct { self.members(base, ops) } else { self.selects(base, ops) };
+                }
                 // `C::p`: a static property of class C
                 if let Some(v) = self.static_prop(&Expr::Ident(p.clone()), &n.name) {
                     return self.selects(Expr::Ident(v), ops);
