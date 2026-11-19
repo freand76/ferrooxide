@@ -302,8 +302,11 @@ impl<'a> Compiler<'a> {
         target
     }
 
-    fn event_ctl(&mut self, ec: &EventCtl, body: &Stmt, sid: usize) -> R<u32> {
+    /// The control of an event control, and its expressions that hidden signals follow (with
+    /// those signals).
+    fn event_ctl<'e>(&mut self, ec: &'e EventCtl, body: &Stmt, sid: usize) -> R<(u32, Vec<(u32, &'e Expr)>)> {
         let mut trig = Vec::new();
+        let mut followed = Vec::new();
         match ec {
             EventCtl::Star => {
                 let mut reads = Vec::new();
@@ -327,12 +330,13 @@ impl<'a> Compiler<'a> {
                             // a combinational process; edges and changes are detected on it
                             let h = self.event_signal(e, sid)?;
                             trig.push((h, re, NONE));
+                            followed.push((h, e));
                         }
                     }
                 }
             }
         }
-        Ok(self.make_ctl(trig))
+        Ok((self.make_ctl(trig), followed))
     }
 
     /// A hidden signal that follows the value of an event expression (e.g. `posedge a[3]`).
@@ -362,7 +366,15 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Delay { s: ds });
             }
             Timing::Event(ec) => {
-                let ctl = self.event_ctl(ec, body, sid)?;
+                let (ctl, followed) = self.event_ctl(ec, body, sid)?;
+                // the hidden signals start from the expressions' values now: their processes
+                // may not yet have seen a change this process made (`j = 1; @(a[j])`), which
+                // would then look like an event
+                for (h, e) in followed {
+                    let w = self.sig(h).width;
+                    let v = self.expr(e, sid, w, false)?;
+                    self.emit(Instr::Store { t: Target::Whole { sig: h }, s: v, mode: StoreMode::Blocking });
+                }
                 self.emit(Instr::Wait { ctl });
             }
             Timing::Repeat(n, ec) => {
