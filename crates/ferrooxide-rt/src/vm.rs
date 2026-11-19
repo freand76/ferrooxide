@@ -151,6 +151,27 @@ pub struct Sim {
     groups: Vec<Vec<u32>>,
     /// number of real processes
     nprocs: u32,
+    /// fork branch instances (a branch started again while it still runs) have ids from
+    /// `inst_base` on; `inst_def[q - inst_base]` is the branch they run
+    inst_base: u32,
+    inst_def: Vec<u32>,
+    /// free instance ids
+    inst_free: Vec<u32>,
+    /// per process definition: its running extra instances
+    insts: Vec<Vec<u32>>,
+    /// some definition has extra instances (notify checks them)
+    any_insts: bool,
+    /// per definition: which instance holds its frame (`ProcDef::frame`) in memory;
+    /// FRAME_OFF while it is not shared, FRAME_FREE when nobody's data is there
+    resident: Vec<u32>,
+    any_swap: bool,
+    /// frames of instances that are not resident
+    saved_frames: HashMap<u32, Vec<u64>>,
+    /// JIT entries of instances (by id - inst_base); their tables carry their own id
+    #[cfg(feature = "jit")]
+    inst_entries: Vec<(crate::jit::ProcFn, *const u32)>,
+    #[cfg(feature = "jit")]
+    inst_tables: Vec<Box<[u32]>>,
     /// signal -> processes that store to it (for Kick)
     writers: HashMap<u32, Vec<u32>>,
     /// forced bits per signal (value-plane words); stores keep these bits
@@ -243,6 +264,13 @@ pub struct Sim {
     #[cfg(feature = "jit")]
     entries: Vec<(crate::jit::ProcFn, *const u32)>,
 }
+
+/// `Sim::resident`: the frame is not shared / holds no instance's data
+const FRAME_OFF: u32 = NONE;
+const FRAME_FREE: u32 = NONE - 1;
+/// at most this many fork branch instances run at once: the process table must not move
+/// while JIT code runs (it holds a pointer to its record)
+const MAX_INSTANCES: usize = 1 << 16;
 
 #[inline(always)]
 fn lsb_code(mem: &[u64], slot: u32, width: u32) -> u8 {
@@ -414,6 +442,7 @@ impl Sim {
             });
         }
         let groups: Vec<Vec<u32>> = groups.into_iter().map(|g| g.0).collect();
+        procs.reserve(MAX_INSTANCES);
         let code = Rc::new(Code {
             ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals, &elem_sig)).collect(),
             orig: prog.procs.iter().map(|p| p.code.clone()).collect(),
@@ -455,6 +484,18 @@ impl Sim {
             },
             groups,
             nprocs,
+            inst_base: nprocs + ngroups,
+            inst_def: Vec::new(),
+            inst_free: Vec::new(),
+            insts: vec![Vec::new(); nprocs as usize],
+            any_insts: false,
+            resident: vec![FRAME_OFF; nprocs as usize],
+            any_swap: false,
+            saved_frames: HashMap::new(),
+            #[cfg(feature = "jit")]
+            inst_entries: Vec::new(),
+            #[cfg(feature = "jit")]
+            inst_tables: Vec::new(),
             cur_comb: NONE,
             has_elem: {
                 let mut v = vec![false; nsig];
@@ -932,6 +973,131 @@ impl Sim {
         }
     }
 
+    /// The process definition (code) that process or instance `p` runs.
+    #[inline(always)]
+    fn def(&self, p: u32) -> u32 {
+        if p < self.inst_base {
+            p
+        } else {
+            self.inst_def[(p - self.inst_base) as usize]
+        }
+    }
+
+    /// A new instance of fork branch `d` (which is still running): its id, None if too many
+    /// run at once.
+    #[cold]
+    #[inline(never)]
+    fn new_instance(&mut self, d: u32) -> Option<u32> {
+        let q = match self.inst_free.pop() {
+            Some(q) => {
+                self.inst_def[(q - self.inst_base) as usize] = d;
+                q
+            }
+            None => {
+                if self.procs.len() >= self.procs.capacity() {
+                    return None;
+                }
+                let q = self.procs.len() as u32;
+                let mut r = self.procs[d as usize];
+                r.gen = 0;
+                self.procs.push(r);
+                self.inst_def.push(d);
+                #[cfg(feature = "jit")]
+                if let Some(j) = &self.jit {
+                    let lo = j.table_off[d as usize];
+                    let hi = j.table_off.get(d as usize + 1).copied().unwrap_or(j.tables.len());
+                    let mut t: Box<[u32]> = j.tables[lo..hi].into();
+                    // (word 0: the process id, for its record)
+                    t[0] = q;
+                    self.inst_entries.push((j.fns[d as usize], t.as_ptr()));
+                    self.inst_tables.push(t);
+                }
+                q
+            }
+        };
+        #[cfg(feature = "jit")]
+        if let Some(t) = self.inst_tables.get_mut((q - self.inst_base) as usize) {
+            if let Some(j) = &self.jit {
+                // a reused id may have run another branch
+                let lo = j.table_off[d as usize];
+                let hi = j.table_off.get(d as usize + 1).copied().unwrap_or(j.tables.len());
+                if t.len() != hi - lo {
+                    *t = j.tables[lo..hi].into();
+                } else {
+                    t.copy_from_slice(&j.tables[lo..hi]);
+                }
+                t[0] = q;
+                self.inst_entries[(q - self.inst_base) as usize] = (j.fns[d as usize], t.as_ptr());
+            }
+        }
+        let r = self.procs[d as usize];
+        let pr = &mut self.procs[q as usize];
+        pr.class = r.class;
+        pr.rank = NONE;
+        pr.started = true;
+        self.insts[d as usize].push(q);
+        self.any_insts = true;
+        // the instances take turns holding the branch's frame; the running one has it now
+        if !self.prog.procs[d as usize].frame.is_empty() && self.resident[d as usize] == FRAME_OFF {
+            self.resident[d as usize] = d;
+            self.any_swap = true;
+        }
+        Some(q)
+    }
+
+    /// Put instance `q`'s frame of branch `d` into memory (saving the one there).
+    #[cold]
+    #[inline(never)]
+    fn make_resident(&mut self, d: u32, q: u32) {
+        let r = self.resident[d as usize];
+        if r == q {
+            return;
+        }
+        let frame = std::mem::take(&mut self.prog.procs[d as usize].frame);
+        if r != FRAME_FREE {
+            let mut v = Vec::new();
+            for &(lo, n) in &frame {
+                v.extend_from_slice(&self.mem[lo as usize..(lo + n) as usize]);
+            }
+            self.saved_frames.insert(r, v);
+        }
+        match self.saved_frames.remove(&q) {
+            Some(v) => {
+                let mut k = 0;
+                for &(lo, n) in &frame {
+                    self.mem[lo as usize..(lo + n) as usize].copy_from_slice(&v[k..k + n as usize]);
+                    k += n as usize;
+                }
+            }
+            // a new instance starts from the initial memory image
+            None => {
+                for &(lo, n) in &frame {
+                    self.mem[lo as usize..(lo + n) as usize].copy_from_slice(&self.prog.mem[lo as usize..(lo + n) as usize]);
+                }
+            }
+        }
+        self.prog.procs[d as usize].frame = frame;
+        self.resident[d as usize] = q;
+    }
+
+    /// Instance or branch `p` has ended: its frame is no longer needed; an extra instance's
+    /// id becomes free.
+    #[cold]
+    #[inline(never)]
+    fn instance_done(&mut self, p: u32) {
+        let d = self.def(p);
+        self.saved_frames.remove(&p);
+        if self.resident[d as usize] == p {
+            self.resident[d as usize] = FRAME_FREE;
+        }
+        if p >= self.inst_base {
+            self.insts[d as usize].retain(|&x| x != p);
+            self.procs[p as usize].gen = self.procs[p as usize].gen.wrapping_add(1);
+            self.procs[p as usize].wait = NONE;
+            self.inst_free.push(p);
+        }
+    }
+
     /// A process ran to its end: a finished fork branch lets its parent's join count down.
     fn proc_done(&mut self, p: u32) {
         let pr = &mut self.procs[p as usize];
@@ -947,6 +1113,9 @@ impl Sim {
                 self.push_active(parent);
             }
         }
+        if self.any_insts || self.any_swap {
+            self.instance_done(p);
+        }
     }
 
     /// Start fork branches. Returns true if the parent waits for them.
@@ -954,11 +1123,22 @@ impl Sim {
         let no = self.procs[p as usize].forks.wrapping_add(1);
         self.procs[p as usize].forks = no;
         // IEEE leaves the order open; Icarus starts the branches last to first
-        for &c in children.iter().rev() {
+        for &d in children.iter().rev() {
+            // a branch still running from an earlier fork: another instance of it
+            let c = if self.procs[d as usize].done {
+                d
+            } else {
+                match self.new_instance(d) {
+                    Some(q) => q,
+                    None => {
+                        let _ = writeln!(self.out, "ERROR: more than {MAX_INSTANCES} fork branches running at once");
+                        self.finished = true;
+                        return false;
+                    }
+                }
+            };
             let ch = &mut self.procs[c as usize];
-            if !ch.done {
-                eprintln!("warning: fork branch '{}' restarted while still running", self.prog.procs[c as usize].name);
-            }
+            ch.parent = p;
             ch.pc = 0;
             ch.wait = NONE;
             ch.gen = ch.gen.wrapping_add(1);
@@ -986,8 +1166,10 @@ impl Sim {
         if target == NONE {
             // disable fork: every branch started by `p`, and their branches
             let mut stack = vec![p];
+            let n = self.procs.len() as u32;
+            let mut ended = Vec::new();
             while let Some(q) = stack.pop() {
-                for c in 0..self.nprocs {
+                for c in (0..self.nprocs).chain(self.inst_base..n) {
                     let ch = &mut self.procs[c as usize];
                     if ch.parent == q && ch.class == ProcClass::Spawned && !ch.done {
                         ch.done = true;
@@ -995,14 +1177,27 @@ impl Sim {
                         ch.gen = ch.gen.wrapping_add(1);
                         ch.joining = 0;
                         stack.push(c);
+                        ended.push(c);
                     }
                 }
+            }
+            if self.any_insts || self.any_swap {
+                ended.into_iter().for_each(|c| self.instance_done(c));
             }
             return (None, false);
         }
         for &b in &self.prog.disables[target as usize].clone() {
             let blk = self.prog.blocks[b as usize].clone();
-            for &c in &blk.children {
+            // the block's fork branches, with their running instances
+            let mut kids: Vec<u32> = blk.children.clone();
+            if self.any_insts {
+                for &c in &blk.children {
+                    if let Some(v) = self.insts.get(c as usize) {
+                        kids.extend(v.iter().copied());
+                    }
+                }
+            }
+            for c in kids {
                 let ch = &mut self.procs[c as usize];
                 if !ch.done {
                     ch.done = true;
@@ -1011,6 +1206,9 @@ impl Sim {
                     ch.joining = 0;
                     if c == p {
                         stopped = true;
+                    }
+                    if ch.class == ProcClass::Spawned && (self.any_insts || self.any_swap) {
+                        self.instance_done(c);
                     }
                 }
             }
@@ -1146,6 +1344,27 @@ impl Sim {
     }
 
     #[inline]
+    /// Instances of fork branches wait on their branch's controls: those in fan-out entries
+    /// [lo, hi) whose control fires join `wake_buf`.
+    #[cold]
+    #[inline(never)]
+    fn notify_insts(&mut self, lo: u32, hi: u32, vector: bool, old: u8, new: u8) {
+        for i in lo..hi {
+            let f = self.fan[i as usize];
+            if (f.proc as usize) < self.insts.len() && !self.insts[f.proc as usize].is_empty() {
+                for k in 0..self.insts[f.proc as usize].len() {
+                    let q = self.insts[f.proc as usize][k];
+                    let pr = &mut self.procs[q as usize];
+                    if pr.wait != f.ctl || (vector && !edge_fires(f.edge, old, new)) {
+                        continue;
+                    }
+                    pr.wait = NONE;
+                    self.wake_buf.push((pr.wseq, q));
+                }
+            }
+        }
+    }
+
     fn notify(&mut self, sig: u32, old: u8) {
         let r = self.sigs[sig as usize];
         if let Some(st) = &mut self.genstats {
@@ -1175,6 +1394,9 @@ impl Sim {
             return;
         }
         let new = if r.depth == 0 { lsb_code(&self.mem, r.slot, r.width) } else { 0 };
+        if self.any_insts {
+            self.notify_insts(r.fan_lo, r.fan_hi, r.depth == 0, old, new);
+        }
         for i in r.fan_lo..r.fan_hi {
             let f = self.fan[i as usize];
             let pr = &mut self.procs[f.proc as usize];
@@ -1581,7 +1803,7 @@ impl Sim {
 
     /// Execute process `p` until it suspends.
     fn exec(&mut self, p: u32) {
-        if p >= self.nprocs {
+        if p >= self.nprocs && p < self.inst_base {
             // an edge group: run every member (each from its wait), then wait again as a group
             // members run newest waiter first: they re-wait in the order they ran, so the order
             // alternates from one activation to the next (Icarus's LIFO waiting lists)
@@ -1603,12 +1825,22 @@ impl Sim {
             return;
         }
         self.stats.activations += 1;
+        if self.any_swap {
+            let d = self.def(p);
+            if self.resident[d as usize] != FRAME_OFF {
+                self.make_resident(d, p);
+            }
+        }
         if self.time >= self.trace {
-            eprintln!("{} proc {p} {} pc {}", self.time, self.prog.procs[p as usize].name, self.procs[p as usize].pc);
+            eprintln!("{} proc {p} {} pc {}", self.time, self.prog.procs[self.def(p) as usize].name, self.procs[p as usize].pc);
         }
         #[cfg(feature = "jit")]
         if !self.entries.is_empty() {
-            let (f, table) = unsafe { *self.entries.get_unchecked(p as usize) };
+            let (f, table) = if p < self.inst_base {
+                unsafe { *self.entries.get_unchecked(p as usize) }
+            } else {
+                self.inst_entries[(p - self.inst_base) as usize]
+            };
             let pc = self.procs[p as usize].pc;
             let mem = self.mem.as_mut_ptr();
             self.hot.procs = self.procs.as_mut_ptr() as *mut u8;
@@ -1621,8 +1853,9 @@ impl Sim {
         // SAFETY: the code is never modified while the simulation runs, and `self.code` outlives
         // this call; avoiding the Rc clone keeps a refcount update off every activation.
         let code: &Code = unsafe { &*Rc::as_ptr(&self.code) };
-        let ops = &code.ops[p as usize][..];
-        let orig = &code.orig[p as usize][..];
+        let d = self.def(p);
+        let ops = &code.ops[d as usize][..];
+        let orig = &code.orig[d as usize][..];
         let mut pc = self.procs[p as usize].pc as usize;
         // SAFETY: slots are allocated by the compiler inside `mem`, which never shrinks.
         macro_rules! m {
@@ -2089,6 +2322,7 @@ impl Sim {
                 Instr::WaitFork => {
                     // the branches still running count down `joining` as they end (proc_done)
                     let running = (0..self.nprocs)
+                        .chain(self.inst_base..self.procs.len() as u32)
                         .filter(|&c| {
                             let ch = &self.procs[c as usize];
                             ch.parent == p && ch.class == ProcClass::Spawned && !ch.done
@@ -3897,7 +4131,7 @@ unsafe extern "C" fn cb_nba_wide(sim: *mut Sim, sig: u32, s: u32, w: u32) {
 unsafe extern "C" fn cb_gen(sim: *mut Sim, p: u32, pc: u32) -> u64 {
     let sim = &mut *sim;
     let code: &Code = &*Rc::as_ptr(&sim.code);
-    let ins = &code.orig[p as usize][pc as usize];
+    let ins = &code.orig[sim.def(p) as usize][pc as usize];
     let mut npc = pc as usize + 1;
     if sim.exec_gen(p, ins, &mut npc) {
         u64::MAX

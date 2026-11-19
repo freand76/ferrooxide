@@ -80,7 +80,7 @@ Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
 | M1 | Core Verilog: modules/ports (ANSI + non-ANSI), params + overrides, vectors + memories, assign, initial/always, blocking/NBA (incl. `<= #d`), all procedural statements, `#`/`@`/`wait`, all operators with IEEE width & sign rules, functions/tasks, generate, gate primitives, common system tasks | ✅ |
 | M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff/$dumpall/$dumpflush`, reals, events | ✅ (dumps everything; scope/level args ignored) |
 | M2 | `timescale`, reals, plusargs, hierarchical task calls, `$sformat`, `$fopen` modes | ✅ |
-| M2b | Testbench concurrency: fork/join (+ join_any/join_none, disable fork), named events, `disable`, automatic tasks/functions, recursion, Icarus wake order | ✅ (fork/join_none in a loop: A3) |
+| M2b | Testbench concurrency: fork/join (+ join_any/join_none, disable fork), named events, `disable`, automatic tasks/functions, recursion, Icarus wake order | ✅ |
 | M3 | Nets: multiple drivers, tri-state, wand/wor/tri0/tri1/supply, static drive strengths, tran islands, inertial delays (rise/fall/turn-off), specify path delays (-gspecify), UDPs, switches | ✅ (strength values on nets / `%v` pending) |
 | M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
 | M5 | Performance II: Cranelift JIT backend, shared per shape | ✅ (wide ops leave the JIT in places) |
@@ -340,8 +340,15 @@ deterministic, long runs cancellable, a memory budget for history.
    packages done 2026-11-18).
 4. **Heap objects** (A2): queues, dynamic and associative arrays (mutable objects: handles to
    a separate heap with copy on assignment).
-5. **Dynamic processes, subroutine calls, dynamic waiters** (A3); fixes fork/join_none in a
-   loop. Then classes (programs done 2026-11-18); VPI (A4) on the same base. (First SV measurement, as a
+5. **Dynamic processes, subroutine calls, dynamic waiters** (A3). *First part done
+   2026-11-19*: a fork branch started again while it still runs (fork/join_none in a loop)
+   becomes another instance of the branch: a process id from `Sim::inst_base` on, running
+   the branch's code (JIT: a copy of its table with the instance's id), woken through the
+   branch's fan-out entries (`notify_insts`). The branch's private memory
+   (`ProcDef::frame`: temporaries that live across waits, frames of automatic subroutines it
+   calls) is swapped between instances when another one runs. Left: automatic variables
+   declared in fork blocks (`fork automatic int k = i; ... join_none`), real subroutine
+   calls, dynamic waiters for run-time targets. Then classes (programs done 2026-11-18); VPI (A4) on the same base. (First SV measurement, as a
    size hint: queues/dynamic arrays ~76 failing tests, `program` 49, classes 19.)
 6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them): the
    Verilog items under "Unsupported (known)", from compiler warnings and `%v` (needs strength
@@ -675,8 +682,8 @@ Verilog / scheduling:
   `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
 - multi-dimensional arrays as ports and in whole-array assignments, array ports connected
   to arrays of another shape (index range, direction), assignment patterns for unpacked
-  arrays, a timing control in a whole-array assignment; fork/join_none restarting a
-  running branch (A3); VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
+  arrays, a timing control in a whole-array assignment; automatic variables in fork blocks
+  (each instance of a branch would need its own copy, A3); VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
   `` `uselib ``).
 - recursion copies frames (fine for testbench code, slow for deep recursion).
 - interactive/MCP `force` of a net made an alias of its source (`assign z = a`) forces the

@@ -112,6 +112,10 @@ pub struct ProcDef {
     pub fusible: bool,
     /// woken once at time 0 after every process has started (always_comb, always_latch)
     pub kick0: bool,
+    /// for a fork branch: its private memory (slot, words): temporaries that live across
+    /// waits and the frames of automatic subroutines it calls. Several instances of the
+    /// branch running at once take turns holding it.
+    pub frame: Vec<(u32, u32)>,
 }
 
 #[derive(Default, Clone, Debug)]

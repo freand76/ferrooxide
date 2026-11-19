@@ -100,6 +100,8 @@ pub(crate) struct PState {
     pub loops: Vec<(Vec<usize>, Vec<usize>)>,
     /// function/task bodies being inlined: (return variable, patches to the end)
     pub rets: Vec<(Option<u32>, Vec<usize>)>,
+    /// private memory of a fork branch (`ProcDef::frame`)
+    pub frame: Vec<(u32, u32)>,
 }
 
 pub(crate) struct FuncInst {
@@ -519,7 +521,18 @@ impl<'a> Compiler<'a> {
 
     /// A temporary that stays live across suspension points (private to the process).
     pub(crate) fn ptmp(&mut self, w: u32) -> u32 {
-        self.alloc(w)
+        let s = self.alloc(w);
+        self.note_frame(s, self.prog.mem.len() as u32);
+        s
+    }
+
+    /// Memory [lo, hi) belongs to the fork branch being compiled (if one is).
+    pub(crate) fn note_frame(&mut self, lo: u32, hi: u32) {
+        if let Some(pb) = self.code.pb.last_mut() {
+            if pb.proc != NONE && self.prog.procs[pb.proc as usize].class == rt::ProcClass::Spawned && hi > lo {
+                pb.frame.push((lo, hi - lo));
+            }
+        }
     }
 
     pub(crate) fn const_slot(&mut self, c: &Const) -> u32 {

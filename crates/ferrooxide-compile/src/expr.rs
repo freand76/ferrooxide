@@ -1416,6 +1416,10 @@ impl<'a> Compiler<'a> {
             self.scopes[def_scope].children.entry(f.name.clone()).or_insert(fs);
         }
         let mem = (mem_lo, self.prog.mem.len() as u32);
+        // an automatic subroutine's variables (per call site) are private to the process
+        if f.automatic {
+            self.note_frame(mem.0, mem.1);
+        }
         self.subr.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem, this });
         Ok(())
     }
