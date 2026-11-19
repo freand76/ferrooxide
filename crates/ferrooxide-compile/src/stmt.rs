@@ -524,14 +524,20 @@ impl<'a> Compiler<'a> {
                                 }
                                 continue;
                             }
-                            let (depth, lo) = if let Some((a, b2)) = dl.dims.first() {
+                            if dl.dims.len() > 1 {
+                                return self.err(format!("'{}': a multi-dimensional array in a block is not supported", dl.name));
+                            }
+                            let (depth, lo, desc) = if let Some((a, b2)) = dl.dims.first() {
                                 let (a, b2) = (self.const_int(a, b)?, self.const_int(b2, b)?);
-                                (((a - b2).abs() + 1) as u32, a.min(b2))
+                                (((a - b2).abs() + 1) as u32, a.min(b2), a > b2)
                             } else {
-                                (0, 0)
+                                (0, 0, false)
                             };
                             let s =
                                 self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, kind);
+                            if desc {
+                                self.sigs.desc_arrays.insert(s);
+                            }
                             if let Some(d) = &pk {
                                 self.sigs.packed_dims.insert(s, d.clone());
                                 self.scopes[b].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(s));

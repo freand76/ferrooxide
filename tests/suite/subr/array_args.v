@@ -40,6 +40,12 @@ module t;
     // o[3:1] is copied left to right into z[1:3]: z[1] = o[3]
     fill(z);
     check(`__LINE__, {z[1], z[2], z[3]}, 24'h030201);
+    begin : blk
+      // a block variable with a descending range pairs with o[3:1] index by index
+      byte w[3:1];
+      fill(w);
+      check(`__LINE__, {w[3], w[2], w[1]}, 24'h030201);
+    end
     if (errors == 0) $display("PASSED");
   end
 endmodule
