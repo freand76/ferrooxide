@@ -59,3 +59,9 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    `0.10000000000000000555` (a double); 1800-2017 6.12 makes `shortreal` the C `float`
    (32 bits), which would print `0.10000000149011611938`. ivtest `task_port_types1`.
    Test: `tests/verilog/shortreal.v`.
+16. **`new[n](v)` with a single real or string fills the array.** `d = new[3](3.0);` gives
+   three elements 3.0 (and `new[3]("A")` three strings "A"); 1800-2017 7.5.1 requires the
+   initializer to be an array. For vector elements the reference spreads the value's bits
+   over the elements instead (`int d[]; d = new[4](7);` gives `'{0, 0, 0, 7}`); ferrooxide
+   reports that form as unsupported. ivtest `sv_darray_args3`, `sv_darray_args4`. Test:
+   `tests/verilog/darray_new_fill.v`.

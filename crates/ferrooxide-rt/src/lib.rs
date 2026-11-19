@@ -606,7 +606,7 @@ pub enum HeapOp {
     /// a[b] = c; b == size appends; outside: no change
     Set,
     /// d = a new array of b elements: those of array c (NONE: none) as far as it has them,
-    /// the rest default values (`new[b](c)`)
+    /// the rest default values (`new[b](c)`), or copies of element a (not NONE)
     New,
     /// d = a copy of array a
     Copy,

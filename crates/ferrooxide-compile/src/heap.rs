@@ -460,12 +460,20 @@ impl<'a> Compiler<'a> {
             }
             Expr::NewArray(n, init) => {
                 let size = self.expr(n, sid, 32, true)?;
-                let src = match init {
-                    Some(i) => self.dyn_rhs(i, elem, sid)?.0,
-                    None => NONE,
+                // `new[n](v)` with a single real or string: every element is v (as in the
+                // reference; the standard wants an array, ICARUS_NOTES 16)
+                let (fill, src) = match init {
+                    Some(i) if !matches!(**i, Expr::Pattern(..) | Expr::Concat(_)) && !matches!(self.type_of(i, sid)?, Type::Dyn { .. }) => {
+                        if elem.leaf == Leaf::Bits {
+                            return self.err("`new[n](v)` with a value that is not an array is not supported for vector elements");
+                        }
+                        (self.elem_value(i, elem, sid)?, NONE)
+                    }
+                    Some(i) => (NONE, self.dyn_rhs(i, elem, sid)?.0),
+                    None => (NONE, NONE),
                 };
                 let d = self.tmp(64);
-                self.heap_op(HeapOp::New, d, NONE, size, src, elem);
+                self.heap_op(HeapOp::New, d, fill, size, src, elem);
                 Ok((d, true))
             }
             Expr::Concat(_) | Expr::Pattern(None, _) => {

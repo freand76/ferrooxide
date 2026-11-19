@@ -3417,7 +3417,7 @@ impl Sim {
                 let src = if c == NONE { &[][..] } else { self.harr(c) };
                 let mut data = Vec::with_capacity(size * n);
                 data.extend_from_slice(&src[..src.len().min(size * n)]);
-                let dv = dflt(w);
+                let dv = if a == NONE { dflt(w) } else { elem(&self.mem, a) };
                 while data.len() < size * n {
                     data.extend_from_slice(&dv);
                 }
