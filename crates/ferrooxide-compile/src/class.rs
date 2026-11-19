@@ -28,7 +28,23 @@ pub(crate) struct ClassInfo<'a> {
 pub(crate) struct Prop {
     pub name: String,
     pub off: u32,
+    /// the type (of an element, for an array)
     pub ty: Type,
+    /// a fixed-size array: (lowest index, number of elements) per dimension, stored flat
+    /// (row-major)
+    pub dims: Vec<(i64, u32)>,
+}
+
+impl Prop {
+    /// The number of elements (1 for a scalar).
+    fn count(&self) -> u32 {
+        self.dims.iter().map(|d| d.1).product()
+    }
+
+    /// Its width in the object.
+    fn size(&self) -> u32 {
+        self.ty.width() * self.count()
+    }
 }
 
 #[derive(Default)]
@@ -67,7 +83,7 @@ impl<'a> Compiler<'a> {
         }
         self.hier.pkg_scopes.entry(c.name.clone()).or_insert(scope);
         let mut props = base.map(|b| self.classes.list[b as usize].props.clone()).unwrap_or_default();
-        let mut width = props.last().map(|p| p.off + p.ty.width()).unwrap_or(0);
+        let mut width = props.last().map(|p| p.off + p.size()).unwrap_or(0);
         // (4-state properties start as x)
         let mut xs: Vec<(u32, u32)> = Vec::new();
         for d in &c.props {
@@ -80,11 +96,21 @@ impl<'a> Compiler<'a> {
                     Some(h) => self.dyn_prop_type(d, base_ty, h, scope)?,
                     None => base_ty,
                 };
-                if four && n.heap.is_none() {
-                    xs.push((width, ty.width()));
+                // a fixed-size array
+                let mut dims = Vec::new();
+                for (a, b) in &n.dims {
+                    if n.heap.is_some() {
+                        return self.err("an array of queues or dynamic arrays as a class property is not supported");
+                    }
+                    let (a, b) = (self.const_int(a, scope)?, self.const_int(b, scope)?);
+                    dims.push((a.min(b), ((a - b).abs() + 1) as u32));
                 }
-                props.push(Prop { name: n.name.clone(), off: width, ty });
-                width += ty.width();
+                let p = Prop { name: n.name.clone(), off: width, ty, dims };
+                if four && n.heap.is_none() {
+                    xs.push((width, p.size()));
+                }
+                width += p.size();
+                props.push(p);
             }
         }
         let n = rt::nw(width.max(1));
@@ -147,11 +173,10 @@ impl<'a> Compiler<'a> {
     fn dyn_prop_type(&mut self, d: &Decl, elem: Type, h: &HeapKind, sid: usize) -> R<Type> {
         let (w, signed) = match elem {
             Type::Vec { w, signed } => (w, signed),
-            Type::Real | Type::Str => (64, false),
-            _ => return self.err("an array of class handles as a class property is not supported"),
+            _ => (64, false),
         };
         let kind = self.dyn_kind(h, sid)?;
-        let elem = Self::elem_of(d.kind, w, signed);
+        let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), sid)?;
         if elem.leaf == crate::types::Leaf::Str || matches!(kind, DynKind::Assoc(rt::KeyKind::Str)) {
             self.intern(b"");
         }
@@ -219,6 +244,65 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Property `name` of class `c`, which is not an array.
+    fn scalar_prop(&self, c: u32, name: &str) -> R<Prop> {
+        let p = self.prop(c, name)?;
+        if !p.dims.is_empty() {
+            return self.err(format!("the whole array property '{name}' is not supported here (only its elements)"));
+        }
+        Ok(p)
+    }
+
+    /// An element of a fixed-size array property (`obj.a[i][j]`): (the handle expression,
+    /// the property, an index per dimension); None if `e` is no such element.
+    fn prop_elem<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(&'e Expr, Prop, Vec<&'e Expr>)>> {
+        let mut idx = Vec::new();
+        let mut cur = e;
+        while let Expr::Index(a, i) = cur {
+            idx.push(&**i);
+            cur = a;
+        }
+        let Expr::Member(b, m) = cur else { return Ok(None) };
+        if idx.is_empty() {
+            return Ok(None);
+        }
+        let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
+        if self.class_const(c, m).is_some() {
+            return Ok(None);
+        }
+        let p = self.prop(c, m)?;
+        if p.dims.is_empty() {
+            return Ok(None);
+        }
+        if idx.len() != p.dims.len() {
+            return self.err(format!("'{m}' has {} dimensions: a select of an element or a part of the array is not supported", p.dims.len()));
+        }
+        idx.reverse();
+        Ok(Some((&**b, p, idx)))
+    }
+
+    /// The flat element index (32-bit signed) of indices `idx` of array property `p`.
+    fn prop_index(&mut self, p: &Prop, idx: &[&Expr], sid: usize) -> R<u32> {
+        let b = |x: Expr| Box::new(x);
+        let num = |v: i64| -> Expr {
+            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            if v < 0 {
+                Expr::Unary(UnOp::Neg, b(n))
+            } else {
+                n
+            }
+        };
+        let mut lin: Option<Expr> = None;
+        for (k, &(lo, n)) in p.dims.iter().enumerate() {
+            let term = Expr::Binary(BinOp::Sub, b(idx[k].clone()), b(num(lo)));
+            lin = Some(match lin {
+                None => term,
+                Some(l) => Expr::Binary(BinOp::Add, b(Expr::Binary(BinOp::Mul, b(l), b(num(n as i64)))), b(term)),
+            });
+        }
+        self.expr(&lin.unwrap(), sid, 32, true)
+    }
+
     /// The class of a handle expression (`super`: the base class of the method's class).
     pub(crate) fn handle_class(&mut self, e: &Expr, sid: usize) -> R<Option<u32>> {
         if let Expr::Ident(n) = e {
@@ -258,10 +342,11 @@ impl<'a> Compiler<'a> {
                 Some(c) => Ok(Some(match self.class_const(c, m) {
                     Some(Sym::Const(k)) => Type::vec(k.w, k.signed),
                     Some(Sym::Real(_)) => Type::Real,
-                    _ => self.prop(c, m)?.ty,
+                    _ => self.scalar_prop(c, m)?.ty,
                 })),
                 None => Ok(None),
             },
+            Expr::Index(..) => Ok(self.prop_elem(e, sid)?.map(|(_, p, _)| p.ty)),
             Expr::MethodCall(o, m, _) => {
                 let Some(c) = self.handle_class(o, sid)? else {
                     // (a method of an array property: `heap.rs`)
@@ -317,11 +402,20 @@ impl<'a> Compiler<'a> {
                     Some(Sym::Real(r)) => return Ok(Some((self.const_slot(&Const::from_i64(r.to_bits() as i64, 64, false)), Type::Real))),
                     _ => {}
                 }
-                let p = self.prop(c, m)?;
+                let p = self.scalar_prop(c, m)?;
                 let h = self.handle_value(b, sid)?;
                 let w = p.ty.width();
                 let d = self.tmp(w);
                 self.emit(Instr::Obj { op: ObjOp::Get, d, a: h, b: NONE, off: p.off, w });
+                Ok(Some((d, p.ty)))
+            }
+            Expr::Index(..) => {
+                let Some((b, p, idx)) = self.prop_elem(e, sid)? else { return Ok(None) };
+                let h = self.handle_value(b, sid)?;
+                let ix = self.prop_index(&p, &idx, sid)?;
+                let w = p.ty.width();
+                let d = self.tmp(w);
+                self.emit(Instr::Obj { op: ObjOp::GetAt(p.count()), d, a: h, b: ix, off: p.off, w });
                 Ok(Some((d, p.ty)))
             }
             Expr::MethodCall(o, m, args) => {
@@ -568,9 +662,20 @@ impl<'a> Compiler<'a> {
 
     /// `lhs = rhs` where lhs is a property (`obj.p`); false if it is not one.
     pub(crate) fn prop_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
+        // an element of an array property
+        if let Some((b, p, idx)) = self.prop_elem(lhs, sid)? {
+            let v = match p.ty {
+                Type::Class(pc) => self.handle_for(rhs, pc, sid)?,
+                t => self.value_for(rhs, sid, t.width(), t, None)?,
+            };
+            let h = self.handle_value(b, sid)?;
+            let ix = self.prop_index(&p, &idx, sid)?;
+            self.emit(Instr::Obj { op: ObjOp::SetAt(p.count()), d: ix, a: h, b: v, off: p.off, w: p.ty.width() });
+            return Ok(true);
+        }
         let Expr::Member(b, m) = lhs else { return Ok(false) };
         let Some(c) = self.handle_class(b, sid)? else { return Ok(false) };
-        let p = self.prop(c, m)?;
+        let p = self.scalar_prop(c, m)?;
         let v = match p.ty {
             Type::Class(pc) => self.handle_for(rhs, pc, sid)?,
             t => self.value_for(rhs, sid, t.width(), t, None)?,

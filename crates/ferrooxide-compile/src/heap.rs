@@ -48,7 +48,17 @@ impl<'a> Compiler<'a> {
         };
         let two_state = matches!(kind, NetKind::Bit) || matches!(kind, NetKind::Int(n) if n > 0);
         let w = if leaf == Leaf::Bits { w } else { 64 };
-        Elem { w, signed: signed || leaf == Leaf::Real, leaf, two_state }
+        Elem { w, signed: signed || leaf == Leaf::Real, leaf, two_state, class: NONE }
+    }
+
+    /// `elem_of` for a declaration of data type `ty` (a class: its handles).
+    pub(crate) fn elem_for(&self, kind: NetKind, w: u32, signed: bool, ty: Option<&ferrooxide_front::lower::SvType>, sid: usize) -> R<Elem> {
+        if kind != NetKind::Class {
+            return Ok(Self::elem_of(kind, w, signed));
+        }
+        let name = ty.and_then(|t| t.class.clone()).unwrap_or_default();
+        let c = self.find_class(&name, sid).ok_or_else(|| self.mkerr(format!("unknown class '{name}'")))?;
+        Ok(Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: c })
     }
 
     /// Declare `name` in scope `sid` as a queue (or dynamic array) of `elem` (full name
@@ -596,9 +606,10 @@ impl<'a> Compiler<'a> {
         self.dyn_method_stmt(&base, m, args, sid)
     }
 
-    /// `obj.q.method(args);` where `obj.q` is an array property: false if it is not one.
-    pub(crate) fn dyn_prop_task(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<bool> {
-        if !METHODS.contains(&m) || self.dyn_prop(obj, sid)?.is_none() {
+    /// `q.method(args);` as a method call (`obj.q`: an array property, `q`: an array of
+    /// class handles): false if `obj` is no array.
+    pub(crate) fn dyn_method_task(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<bool> {
+        if !METHODS.contains(&m) || self.dyn_arr_type(obj, sid)?.is_none() {
             return Ok(false);
         }
         self.dyn_method_stmt(obj, m, args, sid)

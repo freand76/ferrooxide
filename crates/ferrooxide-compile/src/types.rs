@@ -36,11 +36,16 @@ pub(crate) struct Elem {
     pub(crate) leaf: Leaf,
     /// a 2-state type: an element outside the array reads as 0, not x
     pub(crate) two_state: bool,
+    /// a handle of an object of this class (`NONE`: not a handle); 64 bits, null outside
+    pub(crate) class: u32,
 }
 
 impl Elem {
     /// The type of an element value.
     pub(crate) fn ty(self) -> Type {
+        if self.class != NONE {
+            return Type::Class(self.class);
+        }
         match self.leaf {
             Leaf::Bits => Type::vec(self.w, self.signed),
             Leaf::Real => Type::Real,
@@ -50,7 +55,7 @@ impl Elem {
 
     /// An element outside the array reads as x.
     pub(crate) fn x(self) -> bool {
-        self.leaf == Leaf::Bits && !self.two_state
+        self.leaf == Leaf::Bits && !self.two_state && self.class == NONE
     }
 }
 
@@ -316,7 +321,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn func_ret_type(&mut self, f: &SubroutineDecl, fs: usize) -> R<Type> {
         if let Some(t) = f.ret_ty.as_ref().filter(|t| t.heap.is_some()) {
             let w = self.const_int(&t.width(), fs)? as u32;
-            let elem = Self::elem_of(t.kind, w, t.signed);
+            let elem = self.elem_for(t.kind, w, t.signed, Some(t), fs)?;
             let kind = self.dyn_kind(t.heap.as_ref().unwrap(), fs)?;
             return Ok(Type::Dyn { kind, elem });
         }

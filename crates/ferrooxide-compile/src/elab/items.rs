@@ -281,7 +281,7 @@ impl<'a> Compiler<'a> {
                 if mg.dir.is_some() && module_level {
                     return self.err(format!("port '{name}': a queue or dynamic array port is not supported"));
                 }
-                let elem = Self::elem_of(mg.kind, width, signed);
+                let elem = self.elem_for(mg.kind, width, signed, mg.ty.map(|t| &**t), sid)?;
                 self.new_dyn(full, &name, elem, h, sid)?;
                 if let Some(init) = mg.init {
                     let line = self.line;
@@ -289,15 +289,26 @@ impl<'a> Compiler<'a> {
                 }
                 continue;
             }
+            // (an array of class handles: an array of 64-bit words, below)
+            let mut class_arr = None;
             if mg.kind == NetKind::Class {
                 // a class handle: starts as null; an initializer is assigned at time 0
-                if mg.dir.is_some() || depth > 0 {
-                    return self.err(format!("'{name}': class handle ports and arrays are not supported"));
+                if mg.dir.is_some() {
+                    return self.err(format!("'{name}': a class handle port is not supported"));
                 }
                 let c = match mg.ty.and_then(|t| t.class.clone()) {
                     Some(n) => self.find_class(&n, sid).ok_or_else(|| self.mkerr(format!("unknown class '{n}'")))?,
                     None => return self.err(format!("'{name}': a class handle without its class")),
                 };
+                if depth > 0 {
+                    if mg.init.is_some() {
+                        return self.err(format!("'{name}': an initializer of an array of class handles is not supported"));
+                    }
+                    class_arr = Some(c);
+                }
+            }
+            if mg.kind == NetKind::Class && class_arr.is_none() {
+                let c = self.find_class(mg.ty.and_then(|t| t.class.as_deref()).unwrap_or_default(), sid).unwrap();
                 let s = self.new_signal(full, 64, false, 0, 63, 0, 0, SigKind::Reg);
                 self.sigs.types[s as usize] = types::Type::Class(c);
                 self.zero_init(s);
@@ -444,6 +455,11 @@ impl<'a> Compiler<'a> {
             }
             if mg.kind == NetKind::String {
                 self.mark_string(s);
+            }
+            if let Some(c) = class_arr {
+                // every element starts as null
+                self.sigs.types[s as usize] = types::Type::Class(c);
+                self.zero_init(s);
             }
             if is_event {
                 self.zero_init(s);

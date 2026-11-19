@@ -472,7 +472,7 @@ impl<'a> Compiler<'a> {
                         for dl in &d.names {
                             if let Some(h) = &dl.heap {
                                 // a queue or dynamic array
-                                let elem = Self::elem_of(d.kind, w, signed);
+                                let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), b)?;
                                 let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
                                 if let Some(init) = &dl.init {
                                     let ty = self.sig_type(s);
@@ -870,7 +870,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::MethodCall { obj, name, args, line } => {
                 self.line = *line;
-                if self.sigs.has_dyn && self.dyn_prop_task(obj, name, args, sid)? {
+                if self.sigs.has_dyn && self.dyn_method_task(obj, name, args, sid)? {
                     return Ok(());
                 }
                 self.method_call(obj, name, args, sid)?;

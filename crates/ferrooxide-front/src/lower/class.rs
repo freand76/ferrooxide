@@ -123,9 +123,6 @@ impl Lower {
                 }
             }
             d.names = self.declarators(&v.decls)?;
-            if d.names.iter().any(|n| !n.dims.is_empty()) {
-                return self.unsupported(v.loc, "an array as a class property");
-            }
             if is_static {
                 for n in &mut d.names {
                     let var = format!("{name}${}", n.name);
@@ -208,7 +205,7 @@ impl Lower {
 
     /// The type of a variable named `n` is a class.
     pub(crate) fn is_class_var(&self, n: &str) -> bool {
-        n == "this" || n == "super" || self.vars.get(n).is_some_and(|v| v.0.class.is_some() && v.1.is_empty())
+        n == "this" || n == "super" || self.vars.get(n).is_some_and(|v| v.0.class.is_some())
     }
 }
 

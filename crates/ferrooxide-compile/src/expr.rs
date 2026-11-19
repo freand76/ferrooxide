@@ -1366,7 +1366,7 @@ impl<'a> Compiler<'a> {
             for dl in &d.names {
                 if let Some(h) = &dl.heap {
                     // a queue or dynamic array argument or variable
-                    let elem = Self::elem_of(d.kind, w, signed);
+                    let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), fs)?;
                     let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, fs)?;
                     if let Some(dir) = d.dir {
                         ports.push((dir, sg));

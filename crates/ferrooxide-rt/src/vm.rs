@@ -3120,6 +3120,30 @@ impl Sim {
 
     /// A class object operation (`Instr::Obj`).
     fn exec_obj(&mut self, op: ObjOp, d: u32, a: u32, b: u32, off: u32, w: u32) {
+        // an array element: the element's bits (an invalid index reads x, writes nothing)
+        match op {
+            ObjOp::GetAt(n) => {
+                match ops::read_index(&self.mem, b as usize, 32, true) {
+                    Some(i) if (0..n as i64).contains(&i) => self.exec_obj(ObjOp::Get, d, a, NONE, off + i as u32 * w, w),
+                    _ => {
+                        let n = nw(w);
+                        for k in 0..n {
+                            let full = if k == n - 1 { ops::mask(w - 64 * k as u32) } else { !0 };
+                            self.mem[d as usize + k] = full;
+                            self.mem[d as usize + n + k] = full;
+                        }
+                    }
+                }
+                return;
+            }
+            ObjOp::SetAt(n) => {
+                if let Some(i) = ops::read_index(&self.mem, d as usize, 32, true).filter(|i| (0..n as i64).contains(i)) {
+                    self.exec_obj(ObjOp::Set, NONE, a, b, off + i as u32 * w, w);
+                }
+                return;
+            }
+            _ => {}
+        }
         let (d, a, b) = (d as usize, a as usize, b as usize);
         // the object of the handle at slot a
         let obj = |s: &Self| -> Option<usize> {
@@ -3186,6 +3210,7 @@ impl Sim {
                     ops::set_bits(&mut o.data, on, bit, len, x);
                 }
             }
+            ObjOp::GetAt(_) | ObjOp::SetAt(_) => unreachable!("handled above"),
         }
     }
 

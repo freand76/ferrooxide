@@ -776,6 +776,12 @@ pub enum ObjOp {
     Copy,
     /// d (32 bits) = the class of object a (all ones for null)
     Class,
+    /// d (`w` bits) = element b (a 32-bit index; x/z or outside 0..n: x) of the array of n
+    /// `w`-bit elements at bit `off` of object a
+    GetAt(u32),
+    /// element d (a 32-bit index; x/z or outside 0..n: no change) of the array of n `w`-bit
+    /// elements at bit `off` of object a = b
+    SetAt(u32),
 }
 
 /// The array of an `Instr::Heap`.
