@@ -132,9 +132,9 @@ impl<'a> Compiler<'a> {
         }
         self.emit(Instr::Udp { table, ins: ins.into_boxed_slice(), prev: prev.into_boxed_slice(), q });
         if let Some(d) = delay {
-            // the output changes `d` later; evaluation goes on meanwhile (no input change is missed)
-            let ds = self.delay_ticks(d, sid)?;
-            self.store_value(&stmt::Lhs::Expr(&terms[0], sid), q, 1, rt::StoreMode::NbaDelay(ds))?;
+            // the output changes `d` later (inertial, as a gate's); evaluation goes on meanwhile
+            let ds = self.delays3(d, sid)?;
+            self.store_value(&stmt::Lhs::Expr(&terms[0], sid), q, 1, rt::StoreMode::Inertial(ds))?;
         } else {
             self.store_value(&stmt::Lhs::Expr(&terms[0], sid), q, 1, rt::StoreMode::Blocking)?;
         }

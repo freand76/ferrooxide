@@ -179,7 +179,10 @@ pub struct Sim {
     /// recursion: per process, the saved frames of active subroutine calls
     frames: HashMap<u32, Vec<Frame>>,
     /// pending inertial (continuous-assignment delay) updates: target -> current generation
-    inertial: HashMap<(u32, u32), u32>,
+    /// and the pending value
+    inertial: HashMap<(u32, u32), (u32, Box<[u64]>)>,
+    /// generations of inertial updates (never reused: a stale update must not match)
+    inertial_seq: u32,
     /// a $dumpvars block is due at the end of the current time step
     dump_pending: bool,
     /// a force store is writing (the mask does not apply)
@@ -464,6 +467,7 @@ impl Sim {
             group_rev: vec![true; groups.len()],
             force_mask: HashMap::new(),
             inertial: HashMap::new(),
+            inertial_seq: 0,
             frames: HashMap::new(),
             dump_pending: false,
             force_bypass: false,
@@ -650,7 +654,7 @@ impl Sim {
                         self.push_generic(Nba { sig, res, off, sw });
                     }
                     Fut::Inertial { key, gen, sig, res, sw, val } => {
-                        if self.inertial.get(&key) == Some(&gen) {
+                        if self.inertial.get(&key).is_some_and(|p| p.0 == gen) {
                             self.inertial.remove(&key);
                             self.apply(sig, res, &val, sw);
                         }
@@ -1923,13 +1927,18 @@ impl Sim {
                     Res::Whole => 0,
                 };
                 let key = (sig, lsb);
-                let gen = self.inertial.get(&key).map_or(1, |g| g.wrapping_add(1));
                 let val: Box<[u64]> = self.mem[s..s + n].into();
+                // the value already on its way: the pending update stays as it is
+                if self.inertial.get(&key).is_some_and(|p| p.1 == val) {
+                    return;
+                }
+                self.inertial_seq = self.inertial_seq.wrapping_add(1);
+                let gen = self.inertial_seq;
                 if d == 0 {
                     self.inertial.remove(&key);
                     self.apply(sig, res, &val, sw);
                 } else {
-                    self.inertial.insert(key, gen);
+                    self.inertial.insert(key, (gen, val.clone()));
                     self.future.entry(self.time + d).or_default().push(Fut::Inertial { key, gen, sig, res, sw, val });
                 }
             }
