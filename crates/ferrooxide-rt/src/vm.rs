@@ -4573,12 +4573,17 @@ fn string_to_bits(m: &mut [u64], d: usize, w: u32, s: &str) {
     for i in 0..2 * n {
         m[d + i] = 0;
     }
+    // (as any vector truncated to w bits: a character that only partly fits keeps its low bits)
     for (k, &b) in s.as_bytes().iter().rev().enumerate() {
         let bit = 8 * k as u32;
-        if bit + 8 > w {
+        if bit >= w {
             break;
         }
-        m[d + (bit / 64) as usize] |= (b as u64) << (bit % 64);
+        let b = b as u64 & ops::mask((w - bit).min(8));
+        m[d + (bit / 64) as usize] |= b << (bit % 64);
+        if bit % 64 > 56 {
+            m[d + (bit / 64) as usize + 1] |= b >> (64 - bit % 64);
+        }
     }
 }
 
