@@ -146,6 +146,8 @@ impl<'a> Compiler<'a> {
                 let value = r.as_ref().unwrap_or(&p.value);
                 if self.type_of(value, sid)?.is_real() {
                     PVal::Real(self.const_real(value, sid)?)
+                } else if self.is_str_valued(value, sid) {
+                    PVal::Str(self.const_eval(value, sid)?)
                 } else {
                     PVal::Int(self.const_eval(value, sid)?)
                 }
@@ -157,13 +159,16 @@ impl<'a> Compiler<'a> {
         if p.real || (untyped && matches!(v, PVal::Real(_))) {
             let r = match v {
                 PVal::Real(r) => r,
-                PVal::Int(c) => c.to_i64().unwrap_or(0) as f64,
+                PVal::Int(c) | PVal::Str(c) => c.to_i64().unwrap_or(0) as f64,
                 PVal::Type(_) => unreachable!(),
             };
             return Ok(Sym::Real(r));
         }
+        if matches!(v, PVal::Str(_)) {
+            self.scopes[sid].str_params.insert(p.name.clone());
+        }
         let c = match v {
-            PVal::Int(c) => c,
+            PVal::Int(c) | PVal::Str(c) => c,
             PVal::Real(r) => Const::from_i64(r.round() as i64, 32, true),
             PVal::Type(_) => unreachable!(),
         };
@@ -190,8 +195,41 @@ impl<'a> Compiler<'a> {
         }
         if self.type_of(e, sid)?.is_real() {
             Ok(PVal::Real(self.const_real(e, sid)?))
+        } else if self.is_str_valued(e, sid) {
+            Ok(PVal::Str(self.const_eval(e, sid)?))
         } else {
             Ok(PVal::Int(self.const_eval(e, sid)?))
+        }
+    }
+
+    /// `e` is a string literal, a concatenation of such, or a parameter with one.
+    pub(crate) fn is_str_valued(&self, e: &Expr, sid: usize) -> bool {
+        match e {
+            Expr::Str(_) => true,
+            Expr::Concat(v) => !v.is_empty() && v.iter().all(|x| self.is_str_valued(x, sid)),
+            Expr::Ident(n) => self.is_str_param(n, sid),
+            _ => false,
+        }
+    }
+
+    /// `n` names a parameter whose value is a string literal (see `Scope::str_params`).
+    pub(crate) fn is_str_param(&self, n: &str, mut sid: usize) -> bool {
+        if let Some((p, n)) = n.split_once("::") {
+            return self.hier.pkg_scopes.get(p).is_some_and(|&s| self.scopes[s].str_params.contains(n));
+        }
+        loop {
+            if self.scopes[sid].syms.contains_key(n) {
+                return self.scopes[sid].str_params.contains(n);
+            }
+            for &p in &self.scopes[sid].imports {
+                if self.scopes[p].syms.contains_key(n) {
+                    return self.scopes[p].str_params.contains(n);
+                }
+            }
+            match self.scopes[sid].parent {
+                Some(p) => sid = p,
+                None => return false,
+            }
         }
     }
 

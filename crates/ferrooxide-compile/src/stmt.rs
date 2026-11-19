@@ -1000,6 +1000,11 @@ impl<'a> Compiler<'a> {
             v.push(match a {
                 None => FmtArg::Empty,
                 Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),
+                // a parameter with a string literal value prints as text (as the reference)
+                Some(e @ Expr::Ident(n)) if self.is_str_param(n, sid) => {
+                    let (s, w, _) = self.self_expr(e, sid)?;
+                    FmtArg::Str { s, w }
+                }
                 Some(e) if self.type_of(e, sid)?.is_str() => FmtArg::SVar { s: self.str_expr(e, sid)? },
                 Some(e) if self.type_of(e, sid)?.is_real() => {
                     let fixed = matches!(e, Expr::SysCall(n, a) if n == "$realtime" && a.is_empty())

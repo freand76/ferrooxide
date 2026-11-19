@@ -48,3 +48,9 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    bit 31 set the index is negative, out of range); an x/z bit anywhere still gives x, and a
    constant index is not cut. 1364-2005 5.2.1 makes such an index out of range (x on read,
    no write). ivtest `signed_a`. Test: `tests/verilog/wide_index.v`.
+14. **A parameter with a string literal value prints as text.** `parameter P = "PASSED";
+   $display(P);` prints `PASSED`, also with a range (`parameter [47:0] P = "..."`), for a
+   concatenation of literals, a parameter set from such a parameter and a string override;
+   1364-2005 3.6 / 1800-2017 5.9 make a string literal a vector, which `$display` prints as
+   a decimal number. Only a bare parameter name as an argument (`P + 0` is a number).
+   ivtest `param_string`. Test: `tests/verilog/param_string_display.v`.

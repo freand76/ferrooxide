@@ -55,6 +55,8 @@ pub(crate) struct Link {
 #[derive(Clone, Debug)]
 pub(crate) enum PVal {
     Int(Const),
+    /// the value of a string literal (or a concatenation of them, or a parameter with one)
+    Str(Const),
     Real(f64),
     Type(Rc<SvType>),
 }
@@ -67,6 +69,9 @@ pub(crate) struct Scope<'a> {
     pub funcs: HashMap<String, &'a SubroutineDecl>,
     /// declared [msb:lsb] of parameters with a range (for bit and part selects)
     pub param_ranges: HashMap<String, (i64, i64)>,
+    /// parameters whose value is a string literal: `$display(P)` prints them as text, as
+    /// the reference does
+    pub str_params: HashSet<String>,
     pub file: String,
     /// time unit and precision of the enclosing module (powers of ten of seconds)
     pub tunit: i32,
@@ -636,6 +641,7 @@ impl<'a> Compiler<'a> {
             children: HashMap::new(),
             funcs: HashMap::new(),
             param_ranges: HashMap::new(),
+            str_params: HashSet::new(),
             file,
             tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
             tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
