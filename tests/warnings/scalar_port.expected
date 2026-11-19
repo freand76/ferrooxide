@@ -1,0 +1,6 @@
+scalar_port.v:8: warning: Scalar port ``a'' has a vectored net declaration [7:0].
+scalar_port.v:9: warning: Scalar port ``b'' has a vectored net declaration [3:0].
+scalar_port.v:10: warning: Scalar port ``c'' has a vectored net declaration [2:0].
+scalar_port.v:19: warning: Scalar port ``l'' has a vectored net declaration [7:0].
+scalar_port.v:13: warning: Scalar port ``l'' has a vectored net declaration [4:0].
+b=8 c=z10

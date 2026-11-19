@@ -110,6 +110,11 @@ Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
   variables) makes `z` a view of `a` (`alias_assigns`), so it updates immediately as in the
   reference, unless `z` has other drivers, is a special net type, has a strength, a link or
   is forced.
+- Port expressions (`m(a[3:0], .p({b, c}))`, 2026-11-19): each becomes a port net of the
+  expression's width and a continuous assignment to the signals (input) or from them
+  (output); the signals keep their direction in the AST but are internal (not in the port
+  list). A port declared without a range whose net declaration has one is an error (IEEE
+  1364-2005 12.3.3), a warning with `-gno-io-range-error` (as the reference).
 
 ### SystemVerilog status
 Resolved in the lowering (`front/src/lower/types.rs`): `typedef` (module and file scope, unpacked
@@ -692,5 +697,7 @@ Verilog / scheduling:
   arrays, a timing control in a whole-array assignment; VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
   `` `uselib ``).
 - recursion copies frames (fine for testbench code, slow for deep recursion).
+- inout port expressions; port expressions are connected through a continuous assignment,
+  not collapsed as the reference does (an extra delta step between the port and the signal).
 - interactive/MCP `force` of a net made an alias of its source (`assign z = a`) forces the
   source.

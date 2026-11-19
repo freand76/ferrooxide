@@ -301,6 +301,11 @@ pub struct Dialect {
     pub v2005: bool,
     /// `-gspecify`: specify path delays apply (otherwise they are ignored)
     pub specify: bool,
+    /// `-gno-io-range-error`: a port declared without a range whose net or variable
+    /// declaration has one is a warning, not an error (IEEE 1364-2005 12.3.3)
+    pub io_range_warn: bool,
+    /// `-Wno-anachronisms`: no warnings about such ports
+    pub no_anachronisms: bool,
 }
 
 /// Compile and, with `lint`, also collect lint findings: (program, warnings, lint findings).

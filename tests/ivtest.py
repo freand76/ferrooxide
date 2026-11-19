@@ -66,7 +66,7 @@ def run(t, root, timeout):
             plargs.append(o)
         elif o.startswith("-D") or o.startswith("-I"):
             args.append(o)
-        elif o == "-gspecify" or o == "-u" or o == "-pfileline=1":
+        elif o in ("-gspecify", "-gno-io-range-error", "-Wno-anachronisms", "-u", "-pfileline=1"):
             args.append(o)
         elif o.endswith(".v") or o.endswith(".sv"):
             # another source file, before the test's own

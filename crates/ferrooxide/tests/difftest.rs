@@ -49,6 +49,39 @@ fn lint_sv_keywords() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// Elaboration warnings (tests/warnings/*.v, options in a `// flags:` line): stderr without the
+/// summary line, then stdout, equal to `<name>.expected`.
+#[test]
+fn elab_warnings() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
+    assert!(st.success());
+    let dir = root.join("tests/warnings");
+    let mut n = 0;
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_none_or(|x| x != "v") {
+            continue;
+        }
+        let name = p.file_name().unwrap().to_str().unwrap().to_string();
+        let src = std::fs::read_to_string(&p).unwrap();
+        let flags: Vec<&str> = src.lines().find_map(|l| l.strip_prefix("// flags:")).map(|f| f.split_whitespace().collect()).unwrap_or_default();
+        let out = std::process::Command::new(root.join("target/release/ferrooxide"))
+            .args(&flags)
+            .arg(&name)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        let mut got: String = err.lines().filter(|l| !l.starts_with("ferrooxide:")).map(|l| format!("{l}\n")).collect();
+        got.push_str(&String::from_utf8_lossy(&out.stdout));
+        let expected = std::fs::read_to_string(p.with_extension("expected")).unwrap();
+        assert_eq!(got, expected, "{name}");
+        n += 1;
+    }
+    assert!(n > 0);
+}
+
 /// Interactive mode: a command script on stdin (run, step, print, force, release, set, list).
 #[test]
 fn interactive_commands() {

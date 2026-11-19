@@ -233,6 +233,7 @@ impl Lower {
                     delay: None,
                     signed: false,
                     range: None,
+                    range_written: false,
                     packed: vec![],
                     type_param: None,
                     ty: None,
@@ -529,8 +530,8 @@ impl Lower {
         self.in_subroutine = false;
         r?;
         let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], stmts, fork: None } };
-        let decls = super::merge_port_types(decls);
-        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, body, line })
+        let (decls, scalar_vec_ports) = super::merge_port_types(decls);
+        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, scalar_vec_ports, body, line })
     }
 }
 

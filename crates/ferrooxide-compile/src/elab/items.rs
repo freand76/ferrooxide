@@ -3,6 +3,21 @@
 use crate::*;
 
 impl<'a> Compiler<'a> {
+    /// Port `name` was declared without a range, its net or variable declaration (at `line`)
+    /// with [a:b]: an error, or with `-gno-io-range-error` a warning (as the reference).
+    fn scalar_port(&mut self, name: &str, line: u32, a: i64, b: i64) -> R<()> {
+        let msg = format!("Scalar port ``{name}'' has a vectored net declaration [{a}:{b}].");
+        if !self.dialect.io_range_warn {
+            self.line = line;
+            return self.err(msg);
+        }
+        let w = format!("{}:{line}: warning: {msg}", self.file);
+        if !self.dialect.no_anachronisms && self.diag.warned.insert(w.clone()) {
+            self.diag.warnings.push(w);
+        }
+        Ok(())
+    }
+
     pub(crate) fn elab_items(
         &mut self,
         items: &'a [Item],
@@ -62,6 +77,10 @@ impl<'a> Compiler<'a> {
             /// a queue or dynamic array
             heap: Option<&'d HeapKind>,
             line: u32,
+            /// declared as a port without a range (`input a;`)
+            scalar_port: bool,
+            /// the line of a declaration without a direction that has a range
+            vec_line: Option<u32>,
         }
         let mut order: Vec<String> = Vec::new();
         let mut merged: HashMap<String, Merged> = HashMap::new();
@@ -70,9 +89,13 @@ impl<'a> Compiler<'a> {
                 if d.kind == NetKind::Genvar {
                     continue;
                 }
+                let scalar_port = d.dir.is_some() && d.range.is_none() && d.packed.is_empty() && d.ty.as_ref().is_none_or(|t| t.fields.is_none() && t.enum_names.is_none()) && matches!(d.kind, NetKind::Wire | NetKind::Reg);
+                let vec_line = (d.dir.is_none() && d.range_written).then_some(d.line);
                 for dl in &d.names {
                     match merged.get_mut(&dl.name) {
                         Some(mg) => {
+                            mg.scalar_port |= scalar_port;
+                            mg.vec_line = mg.vec_line.or(vec_line);
                             if d.dir.is_some() {
                                 mg.dir = d.dir;
                             }
@@ -130,6 +153,8 @@ impl<'a> Compiler<'a> {
                                     ty: d.ty.as_ref(),
                                     heap: dl.heap.as_ref(),
                                     line: dl.line,
+                                    scalar_port,
+                                    vec_line,
                                 },
                             );
                         }
@@ -138,9 +163,21 @@ impl<'a> Compiler<'a> {
             }
         }
         let mut port_dirs: HashMap<String, Dir> = HashMap::new();
+        // the module's port list (signals named in port expressions have a direction but are
+        // not ports themselves)
+        let port_list = if module_level { self.hier.scope_module.get(&sid).map(|m| &m.ports) } else { None };
         for name in order {
             let mut mg = merged.remove(&name).unwrap();
             self.line = mg.line;
+            if let (true, Some(l)) = (mg.scalar_port && mg.dir.is_some(), mg.vec_line) {
+                if let Some((a, b)) = mg.range {
+                    let (a, b) = (self.const_int(a, sid)?, self.const_int(b, sid)?);
+                    self.scalar_port(&name, l, a, b)?;
+                }
+            }
+            if port_list.is_some_and(|p| !p.contains(&name)) {
+                mg.dir = None;
+            }
             if let Some(d) = mg.dir {
                 port_dirs.insert(name.clone(), d);
             }
@@ -442,6 +479,17 @@ impl<'a> Compiler<'a> {
             }
             if let Some(init) = mg.init {
                 self.decl_init(init, s, kind, mg.kind, is_real, depth, width, mg.strength, mg.delay, &name, sid)?;
+            }
+        }
+        // function and task ports declared without a range that get one later: warned about
+        // (as the reference does) by subroutine name
+        let mut subs: Vec<&SubroutineDecl> = items.iter().filter_map(|it| if let Item::Subroutine(f) = it { Some(f) } else { None }).collect();
+        subs.sort_by(|a, b| a.name.cmp(&b.name));
+        for f in subs {
+            for (n, l) in &f.scalar_vec_ports {
+                let Some((a, b)) = f.decls.iter().find(|d| d.dir.is_some() && d.names.iter().any(|x| &x.name == n)).and_then(|d| d.range.as_ref()) else { continue };
+                let (a, b) = (self.const_int(a, sid)?, self.const_int(b, sid)?);
+                self.scalar_port(n, *l, a, b)?;
             }
         }
         // 3b. implicit nets: undeclared names on the left of continuous assignments and as gate

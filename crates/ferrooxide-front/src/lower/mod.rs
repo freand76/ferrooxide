@@ -381,6 +381,8 @@ impl Lower {
         let mut items = Vec::new();
         self.import(&m.imports, false)?;
         let mut ports = Vec::new();
+        // port expressions (`a[3:0]`, `.p({a, b})`): (port name, expression, line)
+        let mut port_exprs: Vec<(String, &t::Expr)> = Vec::new();
         if let Some(params) = &m.params {
             self.param_ports(params, &mut items)?;
         }
@@ -392,7 +394,14 @@ impl Lower {
                     match (&p.name, &p.expr) {
                         (None, None) => ports.push(String::new()),
                         (None, Some(t::Expr { kind: t::ExprKind::Ident(n), loc })) => ports.push(self.name(n, *loc)),
-                        _ => return self.unsupported(p.loc, "a port expression"),
+                        (Some(pn), Some(t::Expr { kind: t::ExprKind::Ident(n), loc })) if pn == n => ports.push(self.name(n, *loc)),
+                        (pn, Some(e)) => {
+                            // (an unnamed one can only be connected by position)
+                            let pn = pn.clone().unwrap_or_else(|| format!("$port{}", ports.len() + 1));
+                            ports.push(pn.clone());
+                            port_exprs.push((pn, e));
+                        }
+                        (Some(_), None) => return self.unsupported(p.loc, "a named port without an expression"),
                     }
                 }
             }
@@ -400,6 +409,9 @@ impl Lower {
         }
         let refs: Vec<&t::Item> = m.items.iter().filter(|i| !matches!(i, t::Item::Module(_))).collect();
         self.item_list(&refs, &mut items)?;
+        if !port_exprs.is_empty() {
+            self.port_exprs(port_exprs, &mut items)?;
+        }
         let mut nested_mods = Vec::new();
         for it in &m.items {
             if let t::Item::Module(n) = it {
@@ -433,6 +445,80 @@ impl Lower {
             nested: nested_mods,
             is_nested: nested,
         })
+    }
+
+    /// Ports that are expressions of the module's signals (IEEE 1800-2017 23.2.2.1): each a
+    /// net `pn` of the expression's width, with the port's direction (that of the signals,
+    /// whose declarations keep it, though they are not in the port list), driving them
+    /// (input) or driven by them (output).
+    fn port_exprs(&mut self, v: Vec<(String, &t::Expr)>, items: &mut Vec<Item>) -> Result<()> {
+        let mut ports = Vec::new();
+        for (pn, e) in v {
+            let (x, dir) = self.port_expr(&pn, e, items)?;
+            ports.push((pn, x, dir, e.loc.line));
+        }
+        for (pn, x, dir, line) in ports {
+            let one = Expr::Num(crate::ast::dec(1));
+            let msb = Expr::Binary(BinOp::Sub, Box::new(Expr::SysCall("$bits".into(), vec![x.clone()])), Box::new(one));
+            items.push(Item::Decl(Decl {
+                dir: Some(dir),
+                kind: NetKind::Wire,
+                net: NetType::Wire,
+                explicit_kind: false,
+                real_net: false,
+                strength: None,
+                delay: None,
+                signed: false,
+                range: Some((msb, Expr::Num(crate::ast::dec(0)))),
+                range_written: false,
+                packed: vec![],
+                type_param: None,
+                ty: None,
+                names: vec![Declarator { name: pn.clone(), dims: vec![], heap: None, init: None, line }],
+                automatic: false,
+                line,
+            }));
+            let p = Expr::Ident(pn);
+            let (lhs, rhs) = if dir == Dir::Input { (x, p) } else { (p, x) };
+            items.push(Item::ContAssign { delay: None, lhs, rhs, strength: None, line });
+        }
+        Ok(())
+    }
+
+    /// Port expression `e` of port `pn` and the direction of the signals it names.
+    fn port_expr(&mut self, pn: &str, e: &t::Expr, items: &[Item]) -> Result<(Expr, Dir)> {
+        fn names(e: &Expr, out: &mut Vec<String>) -> bool {
+            match e {
+                Expr::Ident(n) => {
+                    out.push(n.clone());
+                    true
+                }
+                Expr::Index(a, _) | Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) => names(a, out),
+                Expr::Concat(v) => v.iter().all(|x| names(x, out)),
+                _ => false,
+            }
+        }
+        let x = self.lvalue(e)?;
+        let mut ns = Vec::new();
+        if !names(&x, &mut ns) {
+            return self.unsupported(e.loc, "this port expression");
+        }
+        let mut dir = None;
+        for it in items.iter() {
+            if let Item::Decl(d) = it {
+                if let Some(dd) = d.dir.filter(|_| d.names.iter().any(|n| ns.contains(&n.name))) {
+                    if dir.is_some_and(|x| x != dd) {
+                        return self.err(e.loc, "the signals of a port expression have different directions");
+                    }
+                    dir = Some(dd);
+                }
+            }
+        }
+        match dir {
+            Some(Dir::Inout) => self.unsupported(e.loc, "an inout port expression"),
+            Some(d) => Ok((x, d)),
+            None => self.err(e.loc, format!("port '{pn}': its signals are not declared as ports")),
+        }
     }
 
     /// A module or program declared in module `outer`: lowered with the enclosing module's
@@ -993,15 +1079,16 @@ pub(crate) fn push_hier_index(e: Expr) -> usize {
 
 /// Non-ANSI subroutine ports typed by a second declaration (`input x; integer x;`): the
 /// port takes the type, and the type-only declaration is dropped.
-pub(crate) fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
+pub(crate) fn merge_port_types(decls: Vec<Decl>) -> (Vec<Decl>, Vec<(String, crate::ast::Line)>) {
     let typed: Vec<&Decl> = decls.iter().filter(|d| d.dir.is_none()).collect();
     let find = |n: &str| typed.iter().find(|d| d.names.iter().any(|x| x.name == n)).copied();
     let port_names: Vec<String> =
         decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|x| x.name.clone())).collect();
     if !port_names.iter().any(|n| find(n).is_some()) {
-        return decls;
+        return (decls, Vec::new());
     }
     let mut out = Vec::new();
+    let mut scalar_vec = Vec::new();
     for d in &decls {
         if d.dir.is_some() {
             for x in &d.names {
@@ -1012,6 +1099,9 @@ pub(crate) fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
                     nd.net = t.net;
                     nd.explicit_kind = true;
                     nd.signed |= t.signed;
+                    if t.range_written && d.range.is_none() && d.packed.is_empty() && matches!(d.kind, NetKind::Wire | NetKind::Reg) {
+                        scalar_vec.push((x.name.clone(), t.line));
+                    }
                     if t.range.is_some() {
                         nd.range = t.range.clone();
                         nd.packed = t.packed.clone();
@@ -1033,5 +1123,5 @@ pub(crate) fn merge_port_types(decls: Vec<Decl>) -> Vec<Decl> {
             }
         }
     }
-    out
+    (out, scalar_vec)
 }

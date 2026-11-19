@@ -132,6 +132,8 @@ pub struct Decl {
     pub delay: Option<Expr>,
     pub signed: bool,
     pub range: Option<Range>,
+    /// the range is written in the declaration (not that of a named type)
+    pub range_written: bool,
     /// further packed dimensions (`reg [3:0][7:0] x`: range [3:0], packed [[7:0]])
     pub packed: Vec<Range>,
     /// declared with a type parameter: its type (per instance) replaces kind, sign and ranges
@@ -190,6 +192,9 @@ pub struct SubroutineDecl {
     pub ret_ty: Option<std::rc::Rc<crate::lower::SvType>>,
     /// ports in order + local declarations
     pub decls: Vec<Decl>,
+    /// ports declared without a range that a later declaration gives one (`input a;
+    /// reg [3:0] a;`): the line of that declaration (the reference warns about them)
+    pub scalar_vec_ports: Vec<(String, Line)>,
     pub body: Stmt,
     pub line: Line,
 }

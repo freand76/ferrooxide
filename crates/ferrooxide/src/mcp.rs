@@ -122,6 +122,8 @@ impl Server {
             dialect: ferrooxide_compile::Dialect {
                 v2005: a.get("verilog2005").and_then(Value::as_bool).unwrap_or(false),
                 specify: a.get("specify").and_then(Value::as_bool).unwrap_or(false),
+                io_range_warn: false,
+                no_anachronisms: false,
             },
             jit: true,
             fuse: true,
