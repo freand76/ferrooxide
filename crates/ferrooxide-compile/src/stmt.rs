@@ -1106,11 +1106,34 @@ impl<'a> Compiler<'a> {
                 if is_mon {
                     let texp = self.texp(sid);
                     self.emit(sys(SysTask::MonitorPrint { proc: p, args: fargs, scope: scope.clone(), texp, radix }));
-                    let mut reads = Vec::new();
+                    // IEEE 1364-2005 17.1.3: a change of an argument's value prints (not of
+                    // $time, $stime, $realtime): a select or an expression is followed by a
+                    // hidden signal, so a change of other bits of its signals does not print
+                    let mut trig = Vec::new();
                     for e in args.iter().flatten() {
-                        self.reads_expr(e, sid, &mut reads);
+                        match e {
+                            Expr::Str(_) => {}
+                            Expr::SysCall(n, v) if v.is_empty() && matches!(n.as_str(), "$time" | "$stime" | "$realtime") => {}
+                            Expr::Ident(_) | Expr::Hier(_) => {
+                                let mut reads = Vec::new();
+                                self.reads_expr(e, sid, &mut reads);
+                                trig.extend(reads.into_iter().map(|(s, x)| (s, REdge::Any, x)));
+                            }
+                            _ => {
+                                let t = self.type_of(e, sid)?;
+                                // (calls must not run in another process: as before, the reads)
+                                if !matches!(t, types::Type::Vec { .. }) || crate::expr::has_call(e) {
+                                    let mut reads = Vec::new();
+                                    self.reads_expr(e, sid, &mut reads);
+                                    trig.extend(reads.into_iter().map(|(s, x)| (s, REdge::Any, x)));
+                                } else {
+                                    let h = self.event_signal(e, sid)?;
+                                    trig.push((h, REdge::Any, NONE));
+                                }
+                            }
+                        }
                     }
-                    let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
+                    let ctl = self.make_ctl(trig);
                     self.emit(Instr::Wait { ctl });
                     self.emit(Instr::Jmp { to: top });
                 } else {
