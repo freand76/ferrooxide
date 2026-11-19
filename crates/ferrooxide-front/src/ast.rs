@@ -445,8 +445,10 @@ pub enum Expr {
 #[derive(Debug, Clone)]
 pub enum PatItem {
     Pos(Expr),
-    /// `member: value`
+    /// `member: value` (or, for an array, an index named by a parameter)
     Key(String, Expr),
+    /// `index: value` (an array element)
+    Index(Expr, Expr),
     /// `default: value`
     Default(Expr),
 }

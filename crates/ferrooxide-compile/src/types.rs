@@ -841,6 +841,7 @@ impl<'a> Compiler<'a> {
                 PatItem::Pos(v) => pos.push(v),
                 PatItem::Key(k, v) => named.push((k, v)),
                 PatItem::Default(v) => default = Some(v),
+                PatItem::Index(..) => return self.err("an index key in an assignment pattern of a packed type is not supported"),
             }
         }
         let parts: Vec<(Option<&str>, Packed)> = if !t.dims.is_empty() && !t.int_kind {

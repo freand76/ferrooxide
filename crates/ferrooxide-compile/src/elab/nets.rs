@@ -319,6 +319,7 @@ impl<'a> Compiler<'a> {
             }
             if let Job::Assign { lhs, rhs, delay, scope, line } = &job {
                 self.line = *line;
+                self.file = self.scopes[*scope].file.clone();
                 if let Some(pairs) = self.array_pairs(lhs, rhs, *scope)? {
                     for (l, r) in pairs {
                         if let Some(st) = old_strength.get(&k) {

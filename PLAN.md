@@ -160,7 +160,7 @@ controls, task calls), immediate `assert`/`assume` (default `$error`; `cover` do
 as in the reference), `$error`/`$warning`/`$info`/`$fatal` with file, line, time and scope,
 initial values of variables in functions and tasks (static: once; automatic: per call;
 constant calls start afresh), `module automatic`, whole unpacked array assignments (continuous: an alias for the same shape, else per
-element; procedural: per element) and array ports (an alias of an array of the same shape),
+element; procedural: per element; also subarrays, constant slices and assignment patterns) and array ports (an alias of an array of the same shape),
 `void'(f())`, `->`/`<->`, enum name ranges (`N[3]`, `M[5:3]`), `$countbits`, array
 queries of parameters, expressions and queues, `wire integer`/`wire time`, `++`/`--` inside
 expressions (with short-circuit `&&`/`||`/`?:` when the
@@ -384,8 +384,14 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    port (`cacheSystem.icMemAccessResult.data`, step 4). `tests/svtests.py` runs sv-tests as the runner does
    (modes, `:assert:` checks; 3845 of 5112 at a5d09e5, matching the official run) with a
    baseline and pass rates per tag (`--tags`): 4370 of 5112 (85.5%) at the end of this step.
-   Left from the run: 2 crashes (stack overflow in regress-vlg_pr2728812b/c), 3 failed
-   `:assert:` checks; then priorities 6-11 of `SV_TESTS.md`.
+   The leftovers of the run fixed: recursive module instances (only through a generate
+   block, at most 10 deep, as the reference; were a stack overflow), `$ftell`/`$fseek`/
+   `$rewind` on files opened for writing, block variables with a descending range, and
+   subarrays of multi-dimensional arrays (`b[1][1] = a[0][2]`, were silently wrong). With
+   them: assignment patterns for unpacked arrays (positional, index keys, `default:`,
+   nested; also real and string arrays) and unpacked array slices as array values
+   (`d[5:3] = c[7:5]`, `+:`/`-:` with constant bounds): 4386 of 5112. Next: priorities 6-11
+   of `SV_TESTS.md`.
 2. **Dynamic processes, subroutine calls, dynamic waiters** (A3). *First part done
    2026-11-19*: a fork branch started again while it still runs (fork/join_none in a loop)
    becomes another instance of the branch: a process id from `Sim::inst_base` on, running
@@ -424,7 +430,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    `$cast`/`$typename`, pure methods, replication in assignment patterns.
 5. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
    spans on `Expr`/`Stmt` (R6); `elab_items` (`elab/items.rs`) is still one function, to be
-   split per item kind; assignment patterns for unpacked arrays [sv_ap_parray2].
+   split per item kind; positional assignment patterns for packed array parameters
+   [sv_ap_parray2].
 6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
    list: 14 compile errors, 105 wrong outputs): the Verilog items under "Unsupported
    (known)", e.g. `$countdrivers` (5 tests),
@@ -636,7 +643,8 @@ SystemVerilog data types and testbench features:
   arguments of recursive calls; parameters without a default [parameter_no_default*].
 - structs: members through hierarchical names (`inst.v.f`), unpacked array members, member
   defaults, method calls on members (`s.name.len()`), `%p` of a whole struct; assignment
-  patterns for unpacked arrays [sv_ap_parray2]; `$is_signed` [struct_signed,
+  patterns for packed array parameters [sv_ap_parray2]; unpacked array slices with
+  run-time bounds, comparisons of whole unpacked arrays (`a == b`); `$is_signed` [struct_signed,
   struct_member_signed].
 - nested modules with ports instantiated from outside their module; multi-dimensional
   interface port arrays; modport directions are not enforced (writing an input of a modport, members not

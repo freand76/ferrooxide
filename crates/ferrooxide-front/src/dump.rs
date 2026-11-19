@@ -133,6 +133,7 @@ pub fn expr(e: &Expr) -> String {
                 .map(|it| match it {
                     PatItem::Pos(v) => expr(v),
                     PatItem::Key(k, v) => format!("{k}: {}", expr(v)),
+                    PatItem::Index(k, v) => format!("{}: {}", expr(k), expr(v)),
                     PatItem::Default(v) => format!("default: {}", expr(v)),
                 })
                 .collect();

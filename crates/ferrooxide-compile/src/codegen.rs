@@ -179,29 +179,175 @@ impl<'a> Compiler<'a> {
         Ok(Some((s, idx)))
     }
 
-    /// `lhs = rhs` of two whole unpacked arrays as one assignment per element pair (None if
-    /// `lhs` is not a whole array).
+    /// The elements of the unpacked array named by `e` (a whole array, or a multi-dimensional
+    /// one with its first dimensions indexed: a subarray) as element expressions from left to
+    /// right (the order elements pair up in an array assignment, IEEE 1800-2017 7.6), and
+    /// the array's signal and the sizes of the dimensions it spans (its shape). None for
+    /// anything else.
+    pub(crate) fn array_elems(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Vec<u32>, Vec<Expr>)>> {
+        let Some((s, base, dims)) = self.array_dims(e, sid)? else { return Ok(None) };
+        let mut elems = vec![base];
+        for &d in &dims {
+            elems = elems.into_iter().flat_map(|x| dim_indexes(d).map(move |v| index_expr(&x, v))).collect();
+        }
+        Ok(Some((s, dims.iter().map(|d| d.1).collect(), elems)))
+    }
+
+    /// The unpacked array, subarray or slice named by `e`: its signal, the expression its
+    /// elements index (`e` itself, or the array a slice selects from) and the dimensions it
+    /// spans, each (lowest index, size, descending).
+    #[allow(clippy::type_complexity)]
+    fn array_dims(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Expr, Vec<(i64, u32, bool)>)>> {
+        if let Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) = e {
+            if matches!(**a, Expr::Range(..) | Expr::IndexedRange(..)) {
+                return Ok(None); // a slice of a slice
+            }
+            let Some((s, base, mut dims)) = self.array_dims(a, sid)? else { return Ok(None) };
+            let desc = dims[0].2;
+            let (left, right) = match e {
+                Expr::Range(_, m, l) => (self.const_int(m, sid)?, self.const_int(l, sid)?),
+                Expr::IndexedRange(_, b, w, up) => {
+                    let (b, w) = (self.const_int(b, sid)?, self.const_int(w, sid)?);
+                    let far = if *up { b + w - 1 } else { b - w + 1 };
+                    if (far > b) == desc {
+                        (far, b)
+                    } else {
+                        (b, far)
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let (lo, n) = (dims[0].0, dims[0].1 as i64);
+            if left.min(right) < lo || left.max(right) >= lo + n {
+                return self.err(format!("slice [{left}:{right}] of array '{}' is outside its range", self.sig(s).name));
+            }
+            if n > 1 && left != right && (left > right) != desc {
+                return self.err(format!("slice [{left}:{right}] of array '{}' runs against its range", self.sig(s).name));
+            }
+            dims[0] = (left.min(right), ((left - right).abs() + 1) as u32, desc);
+            return Ok(Some((s, base, dims)));
+        }
+        let mut nidx = 0;
+        let mut base = e;
+        while let Expr::Index(a, _) = base {
+            nidx += 1;
+            base = a;
+        }
+        if !matches!(base, Expr::Ident(_) | Expr::Hier(_)) {
+            return Ok(None);
+        }
+        let Some(crate::expr::Base::Sig(s)) = self.resolve_base(base, sid)? else { return Ok(None) };
+        let i = self.sig(s);
+        if i.depth == 0 {
+            return Ok(None);
+        }
+        let mut dims = match self.sigs.md_dims.get(&s) {
+            Some(d) => d.clone(),
+            None => vec![(i.arr_lo, i.depth, self.sigs.desc_arrays.contains(&s))],
+        };
+        if nidx >= dims.len() {
+            return Ok(None);
+        }
+        dims.drain(..nidx);
+        Ok(Some((s, e.clone(), dims)))
+    }
+
+    /// `lhs = '{...}` for an unpacked array (or subarray) indexed by `lhs` spanning `dims`: one
+    /// assignment per element into `out` (IEEE 1800-2017 10.9.1: positional items left to
+    /// right, index keys, `default:` for the rest; nested patterns for the inner dimensions).
+    fn pattern_pairs(&mut self, lhs: &Expr, dims: &[(i64, u32, bool)], items: &[PatItem], sid: usize, out: &mut Vec<(Expr, Expr)>) -> R<()> {
+        let idx: Vec<i64> = dim_indexes(dims[0]).collect();
+        let mut vals: Vec<Option<&Expr>> = vec![None; idx.len()];
+        let (mut npos, mut default) = (0, None);
+        for it in items {
+            let (k, v) = match it {
+                PatItem::Pos(v) => {
+                    if let Some(x) = vals.get_mut(npos) {
+                        *x = Some(v);
+                    }
+                    npos += 1;
+                    continue;
+                }
+                PatItem::Default(v) => {
+                    default = Some(v);
+                    continue;
+                }
+                PatItem::Key(k, v) => (self.const_int(&Expr::Ident(k.clone()), sid)?, v),
+                PatItem::Index(k, v) => (self.const_int(k, sid)?, v),
+            };
+            let Some(p) = idx.iter().position(|&i| i == k) else {
+                return self.err(format!("assignment pattern key {k} is outside the array's range"));
+            };
+            vals[p] = Some(v);
+        }
+        if npos > 0 && npos != idx.len() {
+            return self.err(format!("assignment pattern has {npos} values for {} elements", idx.len()));
+        }
+        for (p, &i) in idx.iter().enumerate() {
+            let el = index_expr(lhs, i);
+            match (vals[p], default) {
+                (Some(v), _) => self.elem_pairs(el, &dims[1..], v, false, sid, out)?,
+                (None, Some(d)) => self.elem_pairs(el, &dims[1..], d, true, sid, out)?,
+                (None, None) => return self.err(format!("assignment pattern has no value for element {i}")),
+            }
+        }
+        Ok(())
+    }
+
+    /// The assignments of value `v` to element `el` of an array pattern, `el` spanning the
+    /// unpacked dimensions `dims` (none: a single element). A `default:` value that is not
+    /// itself an array goes to every element below `el`.
+    fn elem_pairs(&mut self, el: Expr, dims: &[(i64, u32, bool)], v: &Expr, default: bool, sid: usize, out: &mut Vec<(Expr, Expr)>) -> R<()> {
+        if dims.is_empty() {
+            out.push((el, v.clone()));
+            return Ok(());
+        }
+        if let Expr::Pattern(None, items) = v {
+            return self.pattern_pairs(&el, dims, items, sid, out);
+        }
+        if default && self.array_dims(v, sid)?.is_none() {
+            for i in dim_indexes(dims[0]) {
+                self.elem_pairs(index_expr(&el, i), &dims[1..], v, true, sid, out)?;
+            }
+            return Ok(());
+        }
+        match self.array_pairs(&el, v, sid)? {
+            Some(p) => out.extend(p),
+            None => unreachable!("an element spanning dimensions is an array"),
+        }
+        Ok(())
+    }
+
+    /// An array shape and element width for messages: `[2][3] of 8 bits`.
+    pub(crate) fn shape_str(shape: &[u32], w: u32) -> String {
+        let dims: String = shape.iter().map(|n| format!("[{n}]")).collect();
+        format!("{dims} of {w} bits")
+    }
+
+    /// `lhs = rhs` of two unpacked arrays (or subarrays) as one assignment per element pair
+    /// (None if `lhs` is not an array).
     pub(crate) fn array_pairs(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<Option<Vec<(Expr, Expr)>>> {
-        let Some((ls, li)) = self.whole_array(lhs, sid)? else { return Ok(None) };
-        let Some((rs, ri)) = self.whole_array(rhs, sid)? else {
+        let Some((ls, lshape, li)) = self.array_elems(lhs, sid)? else { return Ok(None) };
+        if let Expr::Pattern(None, items) = rhs {
+            let (_, base, dims) = self.array_dims(lhs, sid)?.unwrap();
+            let mut out = Vec::new();
+            self.pattern_pairs(&base, &dims, items, sid, &mut out)?;
+            return Ok(Some(out));
+        }
+        let Some((rs, rshape, ri)) = self.array_elems(rhs, sid)? else {
             return self.err(format!("array '{}' assigned from something that is not an array of the same shape", self.sig(ls).name));
         };
         let (lw, rw) = (self.sig(ls).width, self.sig(rs).width);
-        if li.len() != ri.len() || lw != rw {
+        if lshape != rshape || lw != rw {
             return self.err(format!(
-                "array '{}' ({} elements of {lw} bits) assigned from '{}' ({} elements of {rw} bits)",
+                "array '{}' ({}) assigned from '{}' ({})",
                 self.sig(ls).name,
-                li.len(),
+                Self::shape_str(&lshape, lw),
                 self.sig(rs).name,
-                ri.len()
+                Self::shape_str(&rshape, rw)
             ));
         }
-        let ix = |e: &Expr, k: i64| {
-            let n = Expr::Num(ferrooxide_front::ast::dec(k.unsigned_abs()));
-            let n = if k < 0 { Expr::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(n)) } else { n };
-            Expr::Index(Box::new(e.clone()), Box::new(n))
-        };
-        Ok(Some(li.iter().zip(&ri).map(|(&a, &b)| (ix(lhs, a), ix(rhs, b))).collect()))
+        Ok(Some(li.into_iter().zip(ri).collect()))
     }
 
     pub(crate) fn redir(&mut self, s: u32) -> u32 {
@@ -585,4 +731,17 @@ pub(crate) fn merge_ranges(mut f: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
         }
     }
     merged
+}
+
+/// The indexes of an unpacked dimension (lowest index, size, descending) from left to right.
+fn dim_indexes((lo, n, desc): (i64, u32, bool)) -> impl Iterator<Item = i64> {
+    let n = n as i64;
+    (0..n).map(move |k| if desc { lo + n - 1 - k } else { lo + k })
+}
+
+/// `e[v]` with a constant index.
+fn index_expr(e: &Expr, v: i64) -> Expr {
+    let num = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+    let num = if v < 0 { Expr::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(num)) } else { num };
+    Expr::Index(Box::new(e.clone()), Box::new(num))
 }

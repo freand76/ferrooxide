@@ -362,7 +362,8 @@ impl Lower {
                     out.push(match &k.kind {
                         t::ExprKind::Ident(n) => PatItem::Key(n.clone(), x),
                         t::ExprKind::Default => PatItem::Default(x),
-                        _ => return self.unsupported(k.loc, "this assignment pattern key"),
+                        t::ExprKind::Type(_) => return self.unsupported(k.loc, "a type key in an assignment pattern"),
+                        _ => PatItem::Index(self.expr(k)?, x),
                     });
                 }
             }

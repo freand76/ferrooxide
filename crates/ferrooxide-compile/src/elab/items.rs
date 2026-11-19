@@ -258,7 +258,7 @@ impl<'a> Compiler<'a> {
             let is_event = mg.kind == NetKind::Event;
             let width = ((msb - lsb).abs() + 1) as u32;
             // a multi-dimensional array is stored flat (row-major); `md` keeps its dimensions
-            let mut md: Option<Vec<(i64, u32)>> = None;
+            let mut md: Option<Vec<(i64, u32, bool)>> = None;
             let mut desc = false;
             let (depth, arr_lo) = match mg.dims.len() {
                 0 => (0, 0),
@@ -274,7 +274,7 @@ impl<'a> Compiler<'a> {
                         let (a, b) = (self.const_int(x, sid)?, self.const_int(y, sid)?);
                         let n = ((a - b).abs() + 1) as u32;
                         total *= n as u64;
-                        dims.push((a.min(b), n));
+                        dims.push((a.min(b), n, a > b));
                     }
                     if total > u32::MAX as u64 {
                         return self.err(format!("array '{name}' is too large"));

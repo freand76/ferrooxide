@@ -149,7 +149,7 @@ impl<'a> Compiler<'a> {
             }
         };
         let mut lin: Option<Expr> = None;
-        for (k, &(lo, n)) in dims.iter().enumerate() {
+        for (k, &(lo, n, _)) in dims.iter().enumerate() {
             let term = Expr::Binary(BinOp::Sub, b(idx[k].clone()), b(num(lo)));
             lin = Some(match lin {
                 None => term,
@@ -1652,27 +1652,22 @@ impl<'a> Compiler<'a> {
     fn array_arg(&mut self, ps: u32, fscope: usize, a: &Expr, sid: usize, into: bool) -> R<()> {
         let pname = self.sig(ps).name.rsplit('.').next().unwrap_or_default().to_string();
         let port = Expr::Ident(pname.clone());
-        let Some((_, li)) = self.whole_array(&port, fscope)? else {
+        let Some((_, lshape, li)) = self.array_elems(&port, fscope)? else {
             return self.err(format!("argument '{pname}': an array of this kind is not supported as an argument"));
         };
-        let Some((rs, ri)) = self.whole_array(a, sid)? else {
+        let Some((rs, rshape, ri)) = self.array_elems(a, sid)? else {
             return self.err(format!("argument '{pname}' is an array: it needs an array of the same shape"));
         };
         let (w, rw) = (self.sig(ps).width, self.sig(rs).width);
-        if li.len() != ri.len() || w != rw {
+        if lshape != rshape || w != rw {
             return self.err(format!(
-                "argument '{pname}' ({} elements of {w} bits) given an array of {} elements of {rw} bits",
-                li.len(),
-                ri.len()
+                "argument '{pname}' ({}) given an array {}",
+                Self::shape_str(&lshape, w),
+                Self::shape_str(&rshape, rw)
             ));
         }
-        let ix = |e: &Expr, k: i64| {
-            let n = Expr::Num(ferrooxide_front::ast::dec(k.unsigned_abs()));
-            let n = if k < 0 { Expr::Unary(UnOp::Neg, Box::new(n)) } else { n };
-            Expr::Index(Box::new(e.clone()), Box::new(n))
-        };
-        for (&l, &r) in li.iter().zip(&ri) {
-            let (src, ss, dst, ds) = if into { (ix(a, r), sid, ix(&port, l), fscope) } else { (ix(&port, l), fscope, ix(a, r), sid) };
+        for (l, r) in li.into_iter().zip(ri) {
+            let (src, ss, dst, ds) = if into { (r, sid, l, fscope) } else { (l, fscope, r, sid) };
             let v = self.expr(&src, ss, w, false)?;
             self.store_value(&stmt::Lhs::Expr(&dst, ds), v, w, rt::StoreMode::Blocking)?;
         }
@@ -1884,7 +1879,10 @@ impl<'a> Compiler<'a> {
             Expr::Member(a, _) => self.reads_expr(a, sid, out),
             Expr::Pattern(_, items) => {
                 for it in items {
-                    let (PatItem::Pos(v) | PatItem::Key(_, v) | PatItem::Default(v)) = it;
+                    if let PatItem::Index(k, _) = it {
+                        self.reads_expr(k, sid, out);
+                    }
+                    let (PatItem::Pos(v) | PatItem::Key(_, v) | PatItem::Default(v) | PatItem::Index(_, v)) = it;
                     self.reads_expr(v, sid, out);
                 }
             }

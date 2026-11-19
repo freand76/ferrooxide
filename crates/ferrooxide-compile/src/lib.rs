@@ -290,8 +290,9 @@ pub(crate) struct Sigs {
     /// memory limit (words) and the error raised when a declaration exceeds it
     pub(crate) mem_limit_words: u64,
     pub(crate) mem_error: Option<Error>,
-    /// multi-dimensional arrays (stored flat): per dimension (lowest index, size)
-    pub(crate) md_dims: HashMap<u32, Vec<(i64, u32)>>,
+    /// multi-dimensional arrays (stored flat): per dimension (lowest index, size, declared
+    /// with a descending range)
+    pub(crate) md_dims: HashMap<u32, Vec<(i64, u32, bool)>>,
     /// vectors with several packed dimensions (stored [W-1:0]): per dimension (left, right)
     pub(crate) packed_dims: HashMap<u32, Vec<(i64, i64)>>,
     /// arrays declared with a descending range (`mem [N:0]`), for the $readmem warning
