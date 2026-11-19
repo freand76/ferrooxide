@@ -448,7 +448,7 @@ impl Lower {
                         signed = rt.signed != Some(false);
                     }
                     t::TypeKind::Int(t::IntKw::Time) => range = width(64),
-                    t::TypeKind::Real(t::RealKw::Real | t::RealKw::Realtime) => ret_kind = NetKind::Real,
+                    t::TypeKind::Real(_) => ret_kind = NetKind::Real,
                     t::TypeKind::String => ret_kind = NetKind::String,
                     _ => return self.unsupported(rt.loc, "this return type"),
                 }

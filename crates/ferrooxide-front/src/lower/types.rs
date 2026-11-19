@@ -428,7 +428,7 @@ impl Lower {
                 dims.extend(self.dims(&ty.packed, ty.loc)?);
                 Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
-            t::TypeKind::Real(t::RealKw::Real | t::RealKw::Realtime) => {
+            t::TypeKind::Real(_) => {
                 let (kind, signed, iw) = builtin("real").unwrap();
                 let mut dims = vec![(num(iw.unwrap() as i64 - 1), num(0))];
                 dims.extend(self.dims(&ty.packed, ty.loc)?);
@@ -611,7 +611,7 @@ impl Lower {
                 integer = true;
                 signed = ty.signed != Some(false);
             }
-            t::TypeKind::Real(t::RealKw::Real | t::RealKw::Realtime) => real = true,
+            t::TypeKind::Real(_) => real = true,
             _ => return self.unsupported(ty.loc, "a parameter of this type"),
         }
         let range = match ty.packed.as_slice() {
@@ -679,7 +679,7 @@ impl Lower {
                 explicit_kind = true;
                 match &ty.kind {
                     t::TypeKind::Implicit | t::TypeKind::Int(t::IntKw::Logic | t::IntKw::Reg) => {}
-                    t::TypeKind::Real(t::RealKw::Real | t::RealKw::Realtime) => {
+                    t::TypeKind::Real(_) => {
                         kind = NetKind::Real;
                         real_net = true;
                     }
@@ -714,7 +714,7 @@ impl Lower {
                     t::TypeKind::Int(t::IntKw::Byte) => Some(NetKind::Int(8)),
                     t::TypeKind::Int(t::IntKw::Shortint) => Some(NetKind::Int(16)),
                     t::TypeKind::Int(t::IntKw::Longint) => Some(NetKind::Int(64)),
-                    t::TypeKind::Real(t::RealKw::Real | t::RealKw::Realtime) => Some(NetKind::Real),
+                    t::TypeKind::Real(_) => Some(NetKind::Real),
                     t::TypeKind::Event => Some(NetKind::Event),
                     t::TypeKind::String => Some(NetKind::String),
                     _ => return self.unsupported(ty.loc, "this data type"),

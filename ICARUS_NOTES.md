@@ -55,3 +55,7 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    1364-2005 3.6 / 1800-2017 5.9 make a string literal a vector, which `$display` prints as
    a decimal number. Only a bare parameter name as an argument (`P + 0` is a number).
    ivtest `param_string`. Test: `tests/verilog/param_string_display.v`.
+15. **`shortreal` is a 64-bit `real`.** `shortreal x = 0.1; $display("%.20f", x);` prints
+   `0.10000000000000000555` (a double); 1800-2017 6.12 makes `shortreal` the C `float`
+   (32 bits), which would print `0.10000000149011611938`. ivtest `task_port_types1`.
+   Test: `tests/verilog/shortreal.v`.
