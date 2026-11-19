@@ -21,10 +21,16 @@ use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 /// (sim, mem, pc, table): `table` holds [proc id, slots.., signals.., event controls..]
 pub type ProcFn = unsafe extern "C" fn(*mut Sim, *mut u64, u32, *const u32, *mut crate::vm::Hot);
 
+/// Processes longer than this many ops are interpreted: compile time (register allocation)
+/// grows much faster than their length, and one huge process (a 48-fold inlined function of
+/// a 256-deep `?:` chain) took gigabytes. Processes of real designs stay far below it.
+pub const MAX_OPS: usize = 8000;
+
 pub struct Jit {
     // keeps the generated code alive
     _module: JITModule,
-    pub fns: Vec<ProcFn>,
+    /// per process: its compiled function (None: interpreted, see MAX_OPS)
+    pub fns: Vec<Option<ProcFn>>,
     /// per-process tables (see ProcFn), concatenated; `table_off[p]` indexes into it
     pub tables: Vec<u32>,
     pub table_off: Vec<usize>,
@@ -225,9 +231,13 @@ pub fn compile(
         shape.promoted = slots.iter().map(|&s| s < scratch && !in_mem.contains(&s) && !recursive).collect();
         table_off.push(tables.len());
         tables.extend_from_slice(&table);
+        if ops.len() > MAX_OPS {
+            ids.push(None);
+            continue;
+        }
         let key = (shape.ops.clone(), shape.promoted.clone());
         if let Some(&id) = shape_ids.get(&key) {
-            ids.push(id);
+            ids.push(Some(id));
             continue;
         }
         ctx.func.signature = proc_sig.clone();
@@ -255,15 +265,17 @@ pub fn compile(
         module.define_function(id, &mut ctx).map_err(|e| format!("proc {p}: {e:?}"))?;
         module.clear_context(&mut ctx);
         shape_ids.insert(key, id);
-        ids.push(id);
+        ids.push(Some(id));
     }
     module.finalize_definitions().map_err(|e| e.to_string())?;
     let fns = ids
         .iter()
-        .map(|&id| {
-            let f = module.get_finalized_function(id);
-            // SAFETY: the function was declared with the ProcFn signature
-            unsafe { std::mem::transmute::<*const u8, ProcFn>(f) }
+        .map(|id| {
+            id.map(|id| {
+                let f = module.get_finalized_function(id);
+                // SAFETY: the function was declared with the ProcFn signature
+                unsafe { std::mem::transmute::<*const u8, ProcFn>(f) }
+            })
         })
         .collect();
     Ok(Jit { _module: module, fns, tables, table_off, shapes: shape_ids.len() })

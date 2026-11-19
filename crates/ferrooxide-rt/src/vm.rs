@@ -169,7 +169,7 @@ pub struct Sim {
     saved_frames: HashMap<u32, Vec<u64>>,
     /// JIT entries of instances (by id - inst_base); their tables carry their own id
     #[cfg(feature = "jit")]
-    inst_entries: Vec<(crate::jit::ProcFn, *const u32)>,
+    inst_entries: Vec<(Option<crate::jit::ProcFn>, *const u32)>,
     #[cfg(feature = "jit")]
     inst_tables: Vec<Box<[u32]>>,
     /// signal -> processes that store to it (for Kick)
@@ -273,7 +273,8 @@ pub struct Sim {
     jit: Option<crate::jit::Jit>,
     /// per process: compiled function and its table (empty when not JIT-compiled)
     #[cfg(feature = "jit")]
-    entries: Vec<(crate::jit::ProcFn, *const u32)>,
+    /// per process: its compiled function (None: interpreted) and table
+    entries: Vec<(Option<crate::jit::ProcFn>, *const u32)>,
 }
 
 /// `Sim::resident`: the frame is not shared / holds no instance's data
@@ -2039,14 +2040,17 @@ impl Sim {
             } else {
                 self.inst_entries[(p - self.inst_base) as usize]
             };
-            let pc = self.procs[p as usize].pc;
-            let mem = self.mem.as_mut_ptr();
-            self.hot.procs = self.procs.as_mut_ptr() as *mut u8;
-            let hot = &mut self.hot as *mut Hot;
-            // SAFETY: generated code only touches `mem` at compiler-allocated slots, its own
-            // process record, the NBA queue through `hot`, and calls back into cb_* below.
-            unsafe { f(self as *mut Sim, mem, pc, table, hot) };
-            return;
+            // (a process too large to compile is interpreted, below)
+            if let Some(f) = f {
+                let pc = self.procs[p as usize].pc;
+                let mem = self.mem.as_mut_ptr();
+                self.hot.procs = self.procs.as_mut_ptr() as *mut u8;
+                let hot = &mut self.hot as *mut Hot;
+                // SAFETY: generated code only touches `mem` at compiler-allocated slots, its
+                // own process record, the NBA queue through `hot`, and calls back into cb_*.
+                unsafe { f(self as *mut Sim, mem, pc, table, hot) };
+                return;
+            }
         }
         // SAFETY: the code is never modified while the simulation runs, and `self.code` outlives
         // this call; avoiding the Rc clone keeps a refcount update off every activation.
