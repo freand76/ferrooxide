@@ -2998,6 +2998,25 @@ impl Sim {
             return r;
         }
         let fd = rd(&self.mem, src.0);
+        if let Some(FileH::W(f)) = self.files.get_mut(&fd) {
+            use std::io::{Seek, SeekFrom};
+            // positioning in a file opened for writing
+            let r = match kind {
+                FileRead::Tell => return f.stream_position().map_or(-1, |p| p as i32),
+                FileRead::Rewind => f.rewind(),
+                FileRead::Seek { off, op } => {
+                    let off = self.mem[*off as usize] as u32 as i32 as i64;
+                    match self.mem[*op as usize] {
+                        0 if off >= 0 => f.seek(SeekFrom::Start(off as u64)).map(|_| ()),
+                        1 => f.seek(SeekFrom::Current(off)).map(|_| ()),
+                        2 => f.seek(SeekFrom::End(off)).map(|_| ()),
+                        _ => return -1,
+                    }
+                }
+                _ => return -1,
+            };
+            return if r.is_ok() { 0 } else { -1 };
+        }
         let Some(FileH::R { data, pos, eof }) = self.files.get_mut(&fd) else { return -1 };
         match kind {
             FileRead::Getc => match data.get(*pos) {
