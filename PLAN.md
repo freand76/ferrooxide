@@ -365,17 +365,22 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
 (A1 = R4 slices 1-4), heap objects (A2: queues, dynamic and associative arrays), classes
 (first part), programs, package exports, port expressions, process instances (A3 first part).
 
-1. **Elaboration mode for sv-tests** (chipsalliance/sv-tests). Its tests carry metadata
-   in comments (`:type:` parsing / elaboration / simulation, `:should_fail_because:` for
-   tests that must be rejected, `:top_module:`, `:incdirs:`, `:tags:`), and a runner per
-   tool (`tools/runners/`) decides pass/fail mostly by exit status. `--parse-only` covers
-   the parsing tests (`tests/parsecheck.py`); the elaboration tests need a mode that
-   parses, elaborates and compiles the design without simulating it (`--elab-only`, done
-   2026-11-19: exit status 1 on errors, nothing run), and the
-   negative tests need the checks that reject what the standard forbids instead of
-   accepting it. Then: a runner for ferrooxide (as for the reference) and a script like
-   `parsecheck.py` that runs the elaboration and simulation tests with a baseline, so
-   the pass rate per tag can be tracked; the failures go into "Unsupported (known)".
+1. **sv-tests, first part** (chipsalliance/sv-tests; results, error tables and the reasons
+   in `SV_TESTS.md`). 3798 of 5110 tests pass at a3fa6b3 with the ferrooxide runner
+   (`tools/runners/ferrooxide.py`: parsing -> `--parse-only`, elaboration ->
+   `--elab-only`, simulation -> a full run; pass = exit status, inverted for
+   `:should_fail_because:` tests). Done 2026-11-19: `--elab-only`, and the bugs the run
+   found (`` `include `` + tab, locations through includes, directives from macro
+   expansions, non-UTF-8 sources, non-constant variable initializers, a JIT size limit,
+   `release` looping in an edge group). Next, in this order:
+   - parameters with several packed dimensions (`localparam bit [1:0][4:0] X = ...`), also
+     as a function return type and after an enum: 367 tests (all of basejump, black-parrot,
+     RgGen); packed multi-dimensional variables already exist;
+   - SystemVerilog keywords used as identifiers are an error in SV mode (`-g2005` stays
+     permissive): 184 tests; `--lint` already finds them;
+   - named arguments in calls (`f(.clear(x), .set(y))`): blocks two real cores (TNoC, RSD).
+   Then a script like `parsecheck.py` over the elaboration and simulation tests with a
+   baseline, so the pass rate per tag can be tracked.
 2. **Dynamic processes, subroutine calls, dynamic waiters** (A3). *First part done
    2026-11-19*: a fork branch started again while it still runs (fork/join_none in a loop)
    becomes another instance of the branch: a process id from `Sim::inst_base` on, running
@@ -390,23 +395,38 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    block's automatic variables (the standard shares one between them), real subroutine
    calls (also for recursion from a fork branch [recursive_task]), dynamic waiters for
    run-time targets. VPI (A4) on the same base.
-3. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
+3. **sv-tests, invalid code** (`SV_TESTS.md`: 412 tests that must fail are accepted). The
+   checks that reject what the standard forbids, largest families first: conflicting
+   non-ANSI port declarations (37), enum base type and compatibility rules (21),
+   `automatic` misuse (13), constant-expression checks (11), invalid lvalue selects, real
+   as an index or in a concatenation, several continuous drivers of a variable, procedural
+   assignment to a net, `local`/`protected` access, macro argument counts and `` `line ``
+   arguments. Interleave with the other steps.
+4. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
    `typedef class`, static methods, array arguments, string parameters and static
    variables in subroutine blocks, class members through hierarchical names, functions
    returning handles, `extends P::B`, `this.super` done 2026-11-19): class handle ports, parameterized classes, struct members through
    hierarchical names (`inst.v.f`); `static` variables at the top level of an automatic
    subroutine; array methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
-4. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
+   From sv-tests (`SV_TESTS.md` priorities 7-11, by tests won): array methods with `with`,
+   locator, ordering and reduction methods (25); concurrent assertions, `sequence`,
+   `property`, `expect` and clocking blocks (58, used by ariane); parameterized classes,
+   `typedef C#(...) T`, `mailbox #(T)` (~171, the first error of every UVM test, though
+   UVM needs much more after it); constraints, `randomize`, `randsequence`, `randcase`,
+   `$dist_*` (51); then interface classes (21), streaming concatenation (14), extern
+   methods (12), tagged unions (10), assignment in an expression (8), the `process` class,
+   `$cast`/`$typename`, pure methods, replication in assignment patterns.
+5. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
    spans on `Expr`/`Stmt` (R6); `elab_items` (`elab/items.rs`) is still one function, to be
    split per item kind; assignment patterns for unpacked arrays [sv_ap_parray2].
-5. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
+6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
    list: 14 compile errors, 105 wrong outputs): the Verilog items under "Unsupported
    (known)", e.g. `$countdrivers` (5 tests),
    compiler warnings (also the `always_*` warnings of the
    SV list), nets of 2-state types (6 SV tests), `%v` (needs strength values on nets), force
    on array elements.
-6. **Debug front ends**: report the Surfer bugs upstream; MCP over streamable HTTP (attach to
+7. **Debug front ends**: report the Surfer bugs upstream; MCP over streamable HTTP (attach to
    a running simulation), MCP history queries on the CDSP value history, MCP resources; CDSP
    arrays (per-element items for small memories; memories with `depth`/`zero_at`), port
    directions (`input`/`output` are false; needs direction in `SignalInfo`), `src` from
@@ -416,7 +436,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    `$display`/assertions as markers, `goto_declaration` from declaration locations,
    `add_drivers`/`add_loads` from the elaborated netlist. Interactive mode: watch, conditional
    breakpoints, waveform history, scopes.
-7. **Performance** (in parallel, when speed matters again):
+8. **Performance** (in parallel, when speed matters again):
    - `notify` (largest item): per change it follows `parent` (array elements), checks the
      dirty list, sets one comb bit per combinational reader with a `comb_wake` call each, then
      scans the event fan-out (edge check from the value's LSB) and sorts `wake_buf` when more
@@ -437,9 +457,9 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    - Multi-threading (M8, A5) last.
    - The instance checks of A3 in `exec`/`notify` (about 3 % on cpuish): a per-process flag
      or a separate entry point could remove them for processes that are never instanced.
-8. **Outputs**: FST, VCD of arrays, `$dumpvars` scope/level arguments, `$dumplimit`,
+9. **Outputs**: FST, VCD of arrays, `$dumpvars` scope/level arguments, `$dumplimit`,
    `$dumpports`.
-9. **Verilog-2005 rest**: VPI/PLI, configurations and libraries (`config`, `-y`/`-v`,
+10. **Verilog-2005 rest**: VPI/PLI, configurations and libraries (`config`, `-y`/`-v`,
     `` `uselib ``), timing checks, SDF back-annotation, see Unsupported.
 
 ### Restructuring for maintainability (review 2026-11-15, done)
@@ -478,7 +498,7 @@ Each step ended with all tests in all three modes and no regression-suite test w
      variable owns its object, copies on assignment, `Touch` for change events),
      associative arrays (`Instr::Assoc`), bounded queues with the reference's run-time
      warnings (`-pfileline=1`, `Program::locs`).
-  Left: see Next steps 4 and "Unsupported (known)".
+  Left: see Next steps 5 and "Unsupported (known)".
 - **R5** (2026-11-15): `elab/{hier,params,decls,items,nets,udp,specify}.rs` and
   `codegen.rs`; `lib.rs` keeps state, scopes, lookup and constant evaluation; fields grouped
   in `hier`, `diag`, `code`, `subr`, `nets`, `sigs`.
