@@ -184,6 +184,8 @@ pub struct Sim {
     dump_pending: bool,
     /// a force store is writing (the mask does not apply)
     force_bypass: bool,
+    /// for the next `apply`: the bits that keep their value (instead of the forced ones)
+    keep_override: Option<Vec<u64>>,
     /// per group: run the members last to first next time
     group_rev: Vec<bool>,
     /// (array, element) -> virtual signal of that element
@@ -462,6 +464,7 @@ impl Sim {
             frames: HashMap::new(),
             dump_pending: false,
             force_bypass: false,
+            keep_override: None,
             writers: {
                 let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
                 for (p, pd) in prog.procs.iter().enumerate() {
@@ -792,6 +795,41 @@ impl Sim {
     /// Re-evaluate the waiting processes that write `sig`.
     fn kick(&mut self, sig: u32) {
         let ws = self.writers.get(&sig).cloned().unwrap_or_default();
+        // a net no continuous assignment drives (only forces write it) floats again: z
+        let target_sig = |t: &Target| match *t {
+            Target::Whole { sig }
+            | Target::Part { sig, .. }
+            | Target::DynPart { sig, .. }
+            | Target::Elem { sig, .. }
+            | Target::ElemK { sig, .. }
+            | Target::ElemPart { sig, .. }
+            | Target::ElemDynPart { sig, .. } => sig,
+        };
+        let driven = ws.iter().any(|&w| {
+            self.prog.procs[w as usize]
+                .code
+                .iter()
+                .any(|i| matches!(i, Instr::Store { t, mode, .. } if target_sig(t) == sig && !matches!(mode, StoreMode::Force | StoreMode::Reforce)))
+        });
+        let r = self.sigs[sig as usize];
+        if !driven && r.depth == 0 && self.prog.signals[sig as usize].kind == SigKind::Wire {
+            let old = lsb_code(&self.mem, r.slot, r.width);
+            let n = nw(r.width) as usize;
+            let mask = self.force_mask.get(&sig).cloned();
+            let mut changed = false;
+            for i in 0..n {
+                let full = if i + 1 == n { crate::tmask(r.width) } else { !0 };
+                let free = full & !mask.as_ref().map_or(0, |m| m[i]);
+                let (a, b) = (r.slot as usize + i, r.slot as usize + n + i);
+                let (na, nb) = (self.mem[a] & !free, self.mem[b] | free);
+                changed |= (na, nb) != (self.mem[a], self.mem[b]);
+                self.mem[a] = na;
+                self.mem[b] = nb;
+            }
+            if changed {
+                self.notify(sig, old);
+            }
+        }
         for w in ws {
             // a continuous assignment of a constant: it ran once and ended; it runs again
             let code = &self.prog.procs[w as usize].code;
@@ -1513,11 +1551,12 @@ impl Sim {
         let mut base = r.slot as usize;
         let old = if r.depth == 0 { lsb_code(&self.mem, r.slot, r.width) } else { 0 };
         // forced bits keep their value (unless this is the force itself)
-        let snap = if !self.force_bypass && r.depth == 0 && self.force_mask.contains_key(&sig) {
-            Some(self.mem[base..base + 2 * n].to_vec())
-        } else {
-            None
+        let keep = match self.keep_override.take() {
+            Some(k) => Some(k),
+            None if !self.force_bypass && r.depth == 0 => self.force_mask.get(&sig).cloned(),
+            None => None,
         };
+        let snap = keep.as_ref().map(|_| self.mem[base..base + 2 * n].to_vec());
         let changed = match res {
             Res::Whole | Res::Elem(_) => {
                 if let Res::Elem(e) = res {
@@ -1554,7 +1593,7 @@ impl Sim {
         };
         let changed = match snap {
             Some(old_words) => {
-                let m = &self.force_mask[&sig];
+                let m = keep.as_ref().unwrap();
                 for i in 0..n {
                     let k = m[i];
                     self.mem[base + i] = (self.mem[base + i] & !k) | (old_words[i] & k);
@@ -1739,6 +1778,19 @@ impl Sim {
                 self.force_bypass = true;
                 self.apply(sig, res, &tmp, sw);
                 self.force_bypass = false;
+            }
+            StoreMode::Reforce => {
+                let r = self.sigs[sig as usize];
+                if r.depth == 0 {
+                    // the bits no longer forced keep their value
+                    let Some(m) = self.force_mask.get(&sig) else { return };
+                    self.keep_override = Some(m.iter().map(|&x| !x).collect());
+                }
+                let tmp: Vec<u64> = self.mem[s..s + n].to_vec();
+                self.force_bypass = true;
+                self.apply(sig, res, &tmp, sw);
+                self.force_bypass = false;
+                self.keep_override = None;
             }
             StoreMode::Blocking => {
                 if n == 2 {

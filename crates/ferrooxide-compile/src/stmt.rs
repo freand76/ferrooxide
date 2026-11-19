@@ -867,7 +867,7 @@ impl<'a> Compiler<'a> {
                     // ... and is kept up to date by the spawned process
                     let tl = self.target_layout(lhs, sid);
                     let v = self.value_for(rhs, sid, lw, lt, tl.as_ref())?;
-                    self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Force)?;
+                    self.store_value(&Lhs::Expr(lhs, sid), v, lw, StoreMode::Reforce)?;
                     let mut reads = Vec::new();
                     self.reads_expr(rhs, sid, &mut reads);
                     self.reads_lvalue(lhs, sid, &mut reads);

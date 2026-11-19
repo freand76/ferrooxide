@@ -462,6 +462,9 @@ pub enum StoreMode {
     NbaDelay(u32),
     /// force / procedural assign: writes the bits and marks them forced (other stores keep them)
     Force,
+    /// a force's process keeping the forced value up to date: writes only the bits that are
+    /// still forced (a part may have been released)
+    Reforce,
     /// continuous assignment / gate output with an (inertial) delay: the store happens after the
     /// delay unless a newer value for the same target replaces it first. The slot holds a
     /// 192-bit value whose words are the rise, fall and turn-off delays in ticks.
