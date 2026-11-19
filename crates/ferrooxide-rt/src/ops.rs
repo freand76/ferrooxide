@@ -1172,9 +1172,10 @@ pub fn exec_real(ins: &crate::Instr, m: &mut [u64]) -> bool {
             m[d as usize + 1] = 0;
         }
         I::RToTicks { d, s, exp, post } => {
+            // a negative delay is a two's-complement time value (IEEE 1364-2005 9.7.1)
             let v = rd_real(m, s as usize) * pow10(exp);
-            let t = if v.is_finite() && v > 0.0 { v.round() as u64 } else { 0 };
-            let t = t * 10u64.pow(post as u32);
+            let t = if v.is_finite() { v.round() as i64 as u64 } else { 0 };
+            let t = t.wrapping_mul(10u64.pow(post as u32));
             m[d as usize] = t;
             m[d as usize + 1] = 0;
         }

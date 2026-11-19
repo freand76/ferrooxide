@@ -2101,9 +2101,10 @@ impl<'a> Compiler<'a> {
         let post = (sc.tprec - self.gprec).clamp(0, 18) as u8;
         if self.type_of(d, sid)?.is_real() {
             if self.is_const(d, sid) {
+                // a negative delay is a two's-complement time value (IEEE 1364-2005 9.7.1)
                 let r = self.const_real(d, sid)? * 10f64.powi(to_prec as i32);
-                let t = if r > 0.0 { r.round() as i64 } else { 0 };
-                let t = t * 10i64.pow(post as u32);
+                let t = if r.is_finite() { r.round() as i64 } else { 0 };
+                let t = t.wrapping_mul(10i64.pow(post as u32));
                 return Ok(self.const_slot(&Const::from_i64(t, 64, false)));
             }
             let v = self.rexpr(d, sid)?;
