@@ -381,11 +381,11 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    run-time targets. VPI (A4) on the same base.
 2. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
-   `typedef class`, static methods, array arguments and string parameters done
-   2026-11-19): class handle ports, parameterized classes, members through hierarchical
-   names (`m1.c.f`, `inst.v.f`) [sv_class_in_module_decl, sv_unit3b/4b]; static variables
-   in automatic subroutines and in their blocks [func_init_var2, task_init_var2]; array
-   methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
+   `typedef class`, static methods, array arguments, string parameters and static
+   variables in subroutine blocks done 2026-11-19): class handle ports, parameterized
+   classes, members through hierarchical names (`m1.c.f`, `inst.v.f`)
+   [sv_class_in_module_decl, sv_unit3b/4b]; `static` variables at the top level of an
+   automatic subroutine; array methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
 3. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
    spans on `Expr`/`Stmt` (R6); `elab_items` (`elab/items.rs`) is still one function, to be
    split per item kind; assignment patterns for unpacked arrays [sv_ap_parray2].
@@ -590,9 +590,9 @@ SystemVerilog data types and testbench features:
 - programs: processes run in the Active region, not the Reactive one (as the reference,
   which warns about assignments to module variables), no implicit `$finish` when all
   program `initial` blocks end, no `program` limits on what a module may reference.
-- `static` variables in blocks inside functions and tasks, and a variable lifetime other
-  than the subroutine's (`static` in an automatic function) [func_init_var2,
-  task_init_var2]; multi-dimensional arrays in subroutines (arguments and variables), array
+- `static` variables at the top level of an automatic function or task (in its blocks they
+  work since 2026-11-19: `Subr::static_vars`), static queues in subroutine blocks;
+  multi-dimensional arrays in subroutines (arguments and variables), array
   arguments of recursive calls; parameters without a default [parameter_no_default*].
 - structs: members through hierarchical names (`inst.v.f`), unpacked array members, member
   defaults, method calls on members (`s.name.len()`), `%p` of a whole struct; assignment

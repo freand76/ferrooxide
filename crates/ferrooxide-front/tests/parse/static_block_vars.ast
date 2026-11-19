@@ -1,0 +1,14 @@
+module m ();
+  // imports $unit
+  function automatic integer signed acc;
+    input integer signed value;
+    begin : blk
+      static int(32) signed a = 1;
+      automatic int(32) signed b = 2;
+      a = ((a + value) + b);
+      return a;
+    end
+  endfunction
+  initial
+    $display(acc(1));
+endmodule

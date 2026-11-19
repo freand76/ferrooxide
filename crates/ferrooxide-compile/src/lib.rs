@@ -230,6 +230,8 @@ pub(crate) struct Subr<'a> {
     pub(crate) call_depth: u32,
     /// functions being inlined: (definition scope, name, instance key)
     pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
+    /// `static` variables of blocks in subroutines, by declaration: shared by all calls
+    pub(crate) static_vars: HashMap<*const Declarator, u32>,
     /// recursive functions compiled as subroutines (of the process at `level`)
     pub(crate) subs: Vec<SubReq<'a>>,
     /// counter for per-call storage of automatic functions and tasks

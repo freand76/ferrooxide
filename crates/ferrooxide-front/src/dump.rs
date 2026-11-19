@@ -324,6 +324,9 @@ impl Printer {
 
     fn decl_text(d: &Decl) -> String {
         let mut s = String::new();
+        if d.static_ {
+            s.push_str("static ");
+        }
         if d.automatic {
             s.push_str("automatic ");
         }

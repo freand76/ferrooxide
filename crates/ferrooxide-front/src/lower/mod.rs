@@ -481,6 +481,7 @@ impl Lower {
                 ty: None,
                 names: vec![Declarator { name: pn.clone(), dims: vec![], heap: None, init: None, line }],
                 automatic: false,
+                static_: false,
                 line,
             }));
             let p = Expr::Ident(pn);

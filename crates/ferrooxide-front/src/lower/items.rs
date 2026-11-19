@@ -241,6 +241,7 @@ impl Lower {
                     ty: None,
                     names,
                     automatic: false,
+                    static_: false,
                     line,
                 };
                 items.append(&mut self.pending);

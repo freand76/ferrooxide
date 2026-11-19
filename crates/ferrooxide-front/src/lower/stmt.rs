@@ -87,11 +87,6 @@ impl Lower {
                     if v.const_ {
                         return self.unsupported(v.loc, "a const variable");
                     }
-                    // (a static variable in a subroutine's block would need its initial value
-                    // once, not on each entry)
-                    if v.lifetime == Some(t::Lifetime::Static) && self.in_subroutine {
-                        return self.unsupported(v.loc, "a static variable in a block of a subroutine");
-                    }
                     (None, v.var, &v.ty, &v.decls, None, None, v.loc)
                 }
                 t::Item::Net(n) if n.user.is_none() => (n.net, false, &n.ty, &n.decls, n.strength.as_ref(), n.delay.as_ref(), n.loc),
@@ -104,6 +99,7 @@ impl Lower {
             }
             d.names = self.declarators(dl)?;
             d.automatic = matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
+            d.static_ = self.in_subroutine && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Static));
             decls.push(d);
         }
         Ok(decls)
@@ -586,6 +582,7 @@ impl Lower {
             ty: None,
             names: vec![Declarator { name: n.to_string(), dims: vec![], heap: None, init: None, line }],
             automatic: true,
+            static_: false,
             line,
         };
         // the loop variable: of the key type (`[*]`: 64-bit)
@@ -645,6 +642,7 @@ impl Lower {
             ty: None,
             names: vec![Declarator { name: v.clone(), dims: vec![], heap: None, init: None, line }],
             automatic: true,
+            static_: false,
             line,
         };
         Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![lp], fork: None })
@@ -712,6 +710,7 @@ impl Lower {
             ty: None,
             names,
             automatic: true,
+            static_: false,
             line,
         };
         Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![body], fork: None })

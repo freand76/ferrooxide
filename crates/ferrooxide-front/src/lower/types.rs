@@ -672,7 +672,7 @@ impl Lower {
             self.decl_type = Some(ty.clone());
             let netk = net.map(net_type).unwrap_or_default();
             let range_written = range.is_some() && !named;
-            return Ok(Decl { dir, kind, net: netk, explicit_kind: true, real_net: false, strength, delay, signed, range, range_written, packed, type_param, ty: Some(ty), names: vec![], automatic: false, line });
+            return Ok(Decl { dir, kind, net: netk, explicit_kind: true, real_net: false, strength, delay, signed, range, range_written, packed, type_param, ty: Some(ty), names: vec![], automatic: false, static_: false, line });
         }
         let mut kind = NetKind::Wire;
         let mut explicit_kind = false;
@@ -764,7 +764,7 @@ impl Lower {
         }
         let ty = self.decl_type.clone();
         let range_written = range.is_some();
-        Ok(Decl { dir, kind, net: netk, explicit_kind, real_net, strength, delay, signed, range, range_written, packed, type_param: None, ty, names: Vec::new(), automatic: false, line })
+        Ok(Decl { dir, kind, net: netk, explicit_kind, real_net, strength, delay, signed, range, range_written, packed, type_param: None, ty, names: Vec::new(), automatic: false, static_: false, line })
     }
 
     /// The declarators of a declaration (after `decl_head`).

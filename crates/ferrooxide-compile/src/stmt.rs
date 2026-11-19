@@ -469,8 +469,21 @@ impl<'a> Compiler<'a> {
                         }
                         let w = ((m - l).abs() + 1) as u32;
                         let layout = self.layout_for(d.ty.as_ref(), b)?;
+                        // a `static` variable of a subroutine's block: one for all calls (not in
+                        // a constant function call, which starts afresh)
+                        let shared = d.static_ && self.subr.inline_stack.last().is_some_and(|f| !f.2 .1.ends_with("$const"));
                         for dl in &d.names {
+                            let key = dl as *const Declarator;
+                            if shared {
+                                if let Some(&s) = self.subr.static_vars.get(&key) {
+                                    self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
+                                    continue;
+                                }
+                            }
                             if let Some(h) = &dl.heap {
+                                if shared {
+                                    return self.err(format!("'{}': a static queue or dynamic array in a subroutine's block is not supported", dl.name));
+                                }
                                 // a queue or dynamic array
                                 let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), b)?;
                                 let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
@@ -510,6 +523,14 @@ impl<'a> Compiler<'a> {
                             self.mark_two_state(s, d.kind);
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
                             self.set_layout(s, &dl.name, layout.clone(), b)?;
+                            if shared {
+                                // its initial value once, as for a module variable
+                                self.subr.static_vars.insert(key, s);
+                                if let Some(init) = &dl.init {
+                                    self.decl_init(init, s, kind, d.kind, is_real, depth, w, None, None, &dl.name, b)?;
+                                }
+                                continue;
+                            }
                             if let Some(init) = &dl.init {
                                 let ty = self.sig_type(s);
                                 let l = self.layout(s);
