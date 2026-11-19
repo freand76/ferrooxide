@@ -51,7 +51,15 @@ impl<'a> Compiler<'a> {
             }
         }
         self.register_defparams(items, sid)?;
-        // (after the parameters, which property types may use)
+        // (after the parameters, which property types may use; the ids first, so that a
+        // property can be a handle of a class declared after it)
+        let mut id = self.classes.list.len() as u32;
+        for it in items {
+            if let Item::Class(c) = it {
+                self.classes.by_name.insert((sid, c.name.clone()), id);
+                id += 1;
+            }
+        }
         for it in items {
             if let Item::Class(c) = it {
                 self.declare_class(c, sid)?;

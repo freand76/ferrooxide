@@ -380,10 +380,9 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    calls (also for recursion from a fork branch [recursive_task]), dynamic waiters for
    run-time targets. VPI (A4) on the same base.
 2. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
-   errors, 22 wrong outputs at ba4fb93; array properties and arrays of handles done
-   2026-11-19), forward `typedef class` [sv_typedef_fwd_class*],
-   static methods and `C::f()`, class handle ports, parameterized classes, members through
-   hierarchical names (`m1.c.f`, `inst.v.f`) [sv_class_in_module_decl, sv_unit3b/4b];
+   errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles and forward
+   `typedef class` done 2026-11-19): static methods and `C::f()`, class handle ports,
+   parameterized classes, members through hierarchical names (`m1.c.f`, `inst.v.f`) [sv_class_in_module_decl, sv_unit3b/4b];
    array and dynamic-array subroutine arguments [task_port_types1/2, br1015b,
    sv_darray_args3/4]; string parameters [br_gh175, param_string_compare]; static variables
    in automatic subroutines and in their blocks [func_init_var2, task_init_var2]; array
@@ -579,10 +578,10 @@ SystemVerilog data types and testbench features:
   and written back; shallow copies copy them). Arrays of handles (variables: an array of
   64-bit words typed `Class`) and fixed-size array properties (stored flat in the object,
   `ObjOp::GetAt`/`SetAt` with a flat index), queues, dynamic and associative arrays of
-  handles (`Elem::class`) (2026-11-19). Left: static methods, `C::f()`,
-  enum methods on an enum property from outside the class, parameterized classes, forward
-  `typedef class`, whole array properties (assignments, selects of an
-  element, arrays of queues), `foreach` and array queries of properties through a handle
+  handles (`Elem::class`), forward `typedef class` (2026-11-19). Left: static methods,
+  `C::f()`, enum methods on an enum property from outside the class, parameterized
+  classes, a base class declared after the class (forward typedef), whole array properties
+  (assignments, selects of an element, arrays of queues), `foreach` and array queries of properties through a handle
   (`foreach (obj.a[i])`), class handle ports, string methods on properties, NBAs to
   properties, `void'(obj.f())`, pure/extern methods, randomize, interface classes.
 - programs: processes run in the Active region, not the Reactive one (as the reference,

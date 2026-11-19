@@ -61,7 +61,13 @@ impl<'a> Compiler<'a> {
     pub(crate) fn declare_class(&mut self, c: &'a ClassDecl, sid: usize) -> R<()> {
         self.line = c.line;
         let base = match &c.base {
-            Some(b) => Some(self.find_class(b, sid).ok_or_else(|| self.mkerr(format!("unknown base class '{b}'")))?),
+            Some(b) => match self.find_class(b, sid) {
+                None => return self.err(format!("unknown base class '{b}'")),
+                Some(x) if x as usize >= self.classes.list.len() => {
+                    return self.err(format!("base class '{b}' declared after class '{}' is not supported", c.name))
+                }
+                x => x,
+            },
             None => None,
         };
         let id = self.classes.list.len() as u32;

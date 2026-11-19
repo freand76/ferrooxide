@@ -51,6 +51,9 @@ impl Lower {
                     return self.unsupported(c.loc, "this base class");
                 }
                 let Some(b) = self.classes.get(&n.name) else {
+                    if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) {
+                        return self.unsupported(c.loc, "a base class declared after the class");
+                    }
                     return self.err(c.loc, format!("unknown base class '{}'", n.name));
                 };
                 names.props.extend(b.props.iter().cloned());
@@ -66,10 +69,7 @@ impl Lower {
             }
         };
         // the class is a type from here on (also inside itself)
-        let mut ct = SvType::vector(NetKind::Class, false, vec![(super::types::num(63), super::types::num(0))]);
-        ct.int_kind = true;
-        ct.class = Some(name.clone());
-        self.types.insert(name.clone(), Rc::new(ct));
+        self.types.insert(name.clone(), Self::class_type(&name));
         // (typedefs of a base class are visible in this one; its own stay inside)
         let saved_types = self.types.clone();
         for (k, v) in &names.types {
@@ -201,6 +201,14 @@ impl Lower {
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
         Ok(ClassDecl { name, base, base_args, props, consts, methods, virtuals, abstract_: c.virtual_, line })
+    }
+
+    /// The type of handles of class `name`.
+    pub(crate) fn class_type(name: &str) -> Rc<SvType> {
+        let mut ct = SvType::vector(NetKind::Class, false, vec![(super::types::num(63), super::types::num(0))]);
+        ct.int_kind = true;
+        ct.class = Some(name.to_string());
+        Rc::new(ct)
     }
 
     /// The type of a variable named `n` is a class.

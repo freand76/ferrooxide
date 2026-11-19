@@ -493,6 +493,9 @@ impl Lower {
                     if let Some(def) = find_typedef(rest, name) {
                         self.typedef(def, &[])?;
                         self.early.insert(def as *const t::Typedef as usize);
+                    } else if find_class(rest, name) {
+                        // a class declared later: its name is a class type from here on
+                        self.types.insert(name.clone(), Self::class_type(name));
                     }
                 }
                 if let Some(t) = self.types.get(name) {
@@ -500,6 +503,7 @@ impl Lower {
                         Some(Kw::Enum) => (t.enum_names.is_some(), "enum"),
                         Some(Kw::Struct) => (t.fields.as_ref().is_some_and(|f| !f.union), "struct"),
                         Some(Kw::Union) => (t.fields.as_ref().is_some_and(|f| f.union), "union"),
+                        Some(Kw::Class) => (t.class.is_some(), "class"),
                         Some(_) => (false, "class"),
                         None => (true, ""),
                     };
@@ -936,6 +940,15 @@ impl Lower {
 }
 
 /// The definition of a forward-declared type later in the scope.
+/// A class named `name` is declared in `rest` (or in a generate block there).
+fn find_class(rest: &[&t::Item], name: &str) -> bool {
+    rest.iter().any(|it| match it {
+        t::Item::Class(c) => c.name == name,
+        t::Item::Generate(v, _) => find_class(&v.iter().collect::<Vec<_>>(), name),
+        _ => false,
+    })
+}
+
 fn find_typedef<'a>(rest: &[&'a t::Item], name: &str) -> Option<&'a t::Typedef> {
     for it in rest {
         match it {
