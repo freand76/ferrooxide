@@ -118,11 +118,16 @@ impl Preprocessor {
             }
             if c == '`' {
                 i += 1;
-                let st = i;
-                while i < s.len() && (s[i].is_alphanumeric() || s[i] == '_' || s[i] == '$') {
-                    i += 1;
-                }
-                let name: String = s[st..i].iter().collect();
+                // `\name : an escaped identifier (to the next white space) names a macro too
+                let name: String = if s.get(i) == Some(&'\\') {
+                    escaped_ident(&s, &mut i)
+                } else {
+                    let st = i;
+                    while i < s.len() && (s[i].is_alphanumeric() || s[i] == '_' || s[i] == '$') {
+                        i += 1;
+                    }
+                    s[st..i].iter().collect()
+                };
                 match name.as_str() {
                     "ifdef" | "ifndef" | "elsif" => {
                         let id = read_ident(&s, &mut i);
@@ -154,7 +159,15 @@ impl Preprocessor {
                     }
                     _ if !active(&conds) => {}
                     "define" => {
-                        let id = read_ident(&s, &mut i);
+                        while i < s.len() && (s[i] == ' ' || s[i] == '\t') {
+                            i += 1;
+                        }
+                        // an escaped name ends at white space, so its parameters follow it
+                        let escaped = s.get(i) == Some(&'\\');
+                        let id = if escaped { escaped_ident(&s, &mut i) } else { read_ident(&s, &mut i) };
+                        if escaped && s.get(i) == Some(&' ') && s.get(i + 1) == Some(&'(') {
+                            i += 1;
+                        }
                         let mut params = None;
                         if i < s.len() && s[i] == '(' {
                             i += 1;
@@ -477,6 +490,17 @@ fn skip_space_comments(s: &[char], i: &mut usize, line: &mut u32, out: &mut Stri
             break;
         }
     }
+}
+
+/// An escaped identifier `\name` at `*i`: the characters up to white space (which ends it
+/// and is not part of it), without the backslash.
+fn escaped_ident(s: &[char], i: &mut usize) -> String {
+    *i += 1;
+    let st = *i;
+    while *i < s.len() && !s[*i].is_whitespace() {
+        *i += 1;
+    }
+    s[st..*i].iter().collect()
 }
 
 fn read_ident(s: &[char], i: &mut usize) -> String {
