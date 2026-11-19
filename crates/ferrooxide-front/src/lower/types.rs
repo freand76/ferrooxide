@@ -48,6 +48,8 @@ pub struct Package {
     pub names: std::collections::HashSet<String>,
     /// `export`ed names: name -> the package that declares it
     pub exports: std::collections::HashMap<String, String>,
+    /// the classes it declares (for `extends P::C`)
+    pub(crate) classes: std::collections::HashMap<String, Rc<super::class::ClassNames>>,
 }
 
 #[derive(Debug, Clone)]

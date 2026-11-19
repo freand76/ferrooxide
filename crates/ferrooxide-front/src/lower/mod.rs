@@ -756,6 +756,7 @@ impl Lower {
         let saved_tu = std::mem::take(&mut self.local_tu);
         let saved_scope = self.type_scope.replace((name.clone(), Default::default()));
         let saved_ctx = self.pkg_ctx.replace(PkgCtx::default());
+        let saved_classes = self.classes.clone();
         let mut own = Vec::new();
         let refs: Vec<&t::Item> = p.items.iter().collect();
         for (k, it) in refs.iter().enumerate() {
@@ -791,6 +792,12 @@ impl Lower {
                 _ => {}
             }
         }
+        let classes = self
+            .classes
+            .iter()
+            .filter(|(k, v)| saved_classes.get(*k).is_none_or(|o| !Rc::ptr_eq(o, v)))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let exports = self.exports(&ctx, &names)?;
         // (the packages it imports are found through its scope's imports)
         let used = std::mem::replace(&mut self.mod_pkgs, saved_pkgs);
@@ -822,7 +829,7 @@ impl Lower {
         self.pkg_modules.push(m);
         self.local_tu = saved_tu;
         self.types = saved_types;
-        self.packages.insert(name, Rc::new(Package { types, vars, funcs, names, exports }));
+        self.packages.insert(name, Rc::new(Package { types, vars, funcs, names, exports, classes }));
         Ok(())
     }
 

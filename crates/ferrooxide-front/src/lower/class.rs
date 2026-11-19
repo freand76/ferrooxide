@@ -51,14 +51,27 @@ impl Lower {
         let (base, base_args) = match &c.extends {
             None => (None, None),
             Some((n, args)) => {
-                if n.params.is_some() || !n.scopes.is_empty() {
+                if n.params.is_some() || n.scopes.len() > 1 || n.scopes.first().is_some_and(|s| s.params.is_some()) {
                     return self.unsupported(c.loc, "this base class");
                 }
-                let Some(b) = self.classes.get(&n.name) else {
-                    if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) {
-                        return self.unsupported(c.loc, "a base class declared after the class");
+                // `extends P::B`: a class of package P (named `P::B` for the compiler)
+                let (b, bname) = match n.scopes.first() {
+                    Some(s) => {
+                        let Some(b) = self.packages.get(&s.name).and_then(|p| p.classes.get(&n.name)).cloned() else {
+                            return self.err(c.loc, format!("unknown base class '{}::{}'", s.name, n.name));
+                        };
+                        self.use_package(&s.name);
+                        (b, format!("{}::{}", s.name, n.name))
                     }
-                    return self.err(c.loc, format!("unknown base class '{}'", n.name));
+                    None => {
+                        let Some(b) = self.classes.get(&n.name).cloned() else {
+                            if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) {
+                                return self.unsupported(c.loc, "a base class declared after the class");
+                            }
+                            return self.err(c.loc, format!("unknown base class '{}'", n.name));
+                        };
+                        (b, n.name.clone())
+                    }
                 };
                 names.props.extend(b.props.iter().cloned());
                 names.methods.extend(b.methods.iter().cloned());
@@ -70,7 +83,7 @@ impl Lower {
                     Some(a) => Some(self.call_args(a, c.loc)?),
                     None => None,
                 };
-                (Some(n.name.clone()), args)
+                (Some(bname), args)
             }
         };
         // the class is a type from here on (also inside itself)

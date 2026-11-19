@@ -198,6 +198,10 @@ impl<'a> Compiler<'a> {
 
     /// The class named `name` visible from scope `sid`.
     pub(crate) fn find_class(&self, name: &str, mut sid: usize) -> Option<u32> {
+        // `P::C`: class C of package P
+        if let Some((p, n)) = name.split_once("::") {
+            return self.classes.by_name.get(&(*self.hier.pkg_scopes.get(p)?, n.to_string())).copied();
+        }
         loop {
             if let Some(&c) = self.classes.by_name.get(&(sid, name.to_string())) {
                 return Some(c);

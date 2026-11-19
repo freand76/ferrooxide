@@ -382,8 +382,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
 2. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
    `typedef class`, static methods, array arguments, string parameters and static
-   variables in subroutine blocks, class members through hierarchical names done
-   2026-11-19): class handle ports, parameterized classes, struct members through
+   variables in subroutine blocks, class members through hierarchical names, functions
+   returning handles, `extends P::B`, `this.super` done 2026-11-19): class handle ports, parameterized classes, struct members through
    hierarchical names (`inst.v.f`); `static` variables at the top level of an automatic
    subroutine; array methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
 3. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
@@ -581,7 +581,11 @@ SystemVerilog data types and testbench features:
   words typed `Class`) and fixed-size array properties (stored flat in the object,
   `ObjOp::GetAt`/`SetAt` with a flat index), queues, dynamic and associative arrays of
   handles (`Elem::class`), forward `typedef class`, static methods (`C::f()`,
-  `Expr::StaticCall`; called without an object) (2026-11-19). Left: enum methods on an enum
+  `Expr::StaticCall`; called without an object), functions returning handles (`c = f()`,
+  `f().p`), a base class from a package (`extends P::B`; the compiler finds `P::B` in the
+  package's scope), `this.super` (2026-11-19). Left: members of a call to a function
+  declared after the use or in a package (`P::f().p`), a class in a package that refers to
+  file-scope names [sv_ps_type_class1], enum methods on an enum
   property from outside the class, parameterized classes, a base class declared after the
   class (forward typedef), whole array properties (assignments, selects of an element,
   arrays of queues), `foreach` and array queries of properties through a handle (`foreach

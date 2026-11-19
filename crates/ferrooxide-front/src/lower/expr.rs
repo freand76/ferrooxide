@@ -448,6 +448,8 @@ impl Lower {
                     k += 1;
                     Expr::MethodCall(Box::new(e), m.to_string(), args)
                 }
+                // `this.super` is `super`
+                (Op::Member(m, _), _) if *m == "super" && matches!(&e, Expr::Ident(n) if n == "this") => Expr::Ident("super".into()),
                 (Op::Member(m, _), _) => match self.static_prop(&e, m) {
                     Some(v) => Expr::Ident(v),
                     None => Expr::Member(Box::new(e), m.to_string()),
@@ -602,6 +604,11 @@ impl Lower {
         };
         let _ = loc;
         if self.is_class_var(&name) {
+            // `f()` of a function returning a class handle: a call (`f().m` a member of it)
+            if let Some((Op::Call(a, l), rest)) = ops.split_first() {
+                let args = self.call_args(a, *l)?;
+                return self.class_chain(Expr::Call(name, args), rest, lvalue);
+            }
             return self.class_chain(Expr::Ident(name), ops, lvalue);
         }
         let var = self.vars.get(&name).map(|v| v.0.clone());
