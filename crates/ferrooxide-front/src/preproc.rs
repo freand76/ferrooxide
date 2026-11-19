@@ -1,5 +1,6 @@
 //! A small Verilog preprocessor: `define (with arguments), `undef, `ifdef/`ifndef/`elsif/`else/`endif,
-//! `include. Other directives (`timescale, `default_nettype, ...) are dropped.
+//! `include, `line (for `__LINE__ / `__FILE__ only, not message locations). Other directives
+//! (`timescale, `default_nettype, ...) are dropped.
 //! Comments are stripped; line structure is preserved (directive lines become empty lines).
 
 use crate::{Error, Options, Result};
@@ -64,6 +65,9 @@ impl Preprocessor {
         let mut out = String::with_capacity(text.len());
         let mut i = 0;
         let mut line = 1u32;
+        // `line N "file" level: the next line is line N of `file` for `__LINE__ / `__FILE__
+        let mut line_off = 0i64;
+        let mut cur_file = fname.to_string();
         let mut conds: Vec<Cond> = Vec::new();
         let err = |msg: String, line: u32| Error { msg, file: fname.to_string(), line };
         let active = |conds: &Vec<Cond>| conds.last().map(|c| c.active).unwrap_or(true);
@@ -307,13 +311,28 @@ impl Preprocessor {
                         }
                     }
                     "celldefine" | "endcelldefine" | "end_keywords" => {}
-                    "pragma" | "line" => {
+                    "line" => {
+                        let st = i;
+                        while i < s.len() && s[i] != '\n' {
+                            i += 1;
+                        }
+                        let rest: String = s[st..i].iter().collect();
+                        let mut parts = rest.trim().splitn(2, char::is_whitespace);
+                        let n: Option<i64> = parts.next().and_then(|n| n.parse().ok());
+                        let f = parts.next().map(str::trim).and_then(|r| r.strip_prefix('"')).and_then(|r| r.split_once('"')).map(|x| x.0.to_string());
+                        // (a malformed one is ignored)
+                        if let (Some(n), Some(f), true) = (n, f, active(&conds)) {
+                            line_off = n - (line as i64 + 1);
+                            cur_file = f;
+                        }
+                    }
+                    "pragma" => {
                         while i < s.len() && s[i] != '\n' {
                             i += 1;
                         }
                     }
-                    "__LINE__" => out.push_str(&self.macro_line.unwrap_or(line).to_string()),
-                    "__FILE__" => out.push_str(&format!("\"{fname}\"")),
+                    "__LINE__" => out.push_str(&self.macro_line.unwrap_or((line as i64 + line_off) as u32).to_string()),
+                    "__FILE__" => out.push_str(&format!("\"{cur_file}\"")),
                     _ => {
                         let m = self
                             .macros
@@ -390,9 +409,9 @@ impl Preprocessor {
                         }
                         let outer = self.macro_line.is_none();
                         if outer {
-                            self.macro_line = Some(line);
+                            self.macro_line = Some((line as i64 + line_off) as u32);
                         }
-                        let expanded = self.process_text(&body, fname, dir);
+                        let expanded = self.process_text(&body, &cur_file, dir);
                         if outer {
                             self.macro_line = None;
                         }

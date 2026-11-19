@@ -699,6 +699,7 @@ Verilog / scheduling:
 - compiler warnings the reference prints: port coercion to inout, constant out-of-range
   selects, `@*` without sensitivities.
 - `$dist_*` and `$q_*` system functions.
+- `` `line `` sets `` `__LINE__ `` / `` `__FILE__ `` only; messages keep the physical location.
 - a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
   `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
 - multi-dimensional arrays as ports and in whole-array assignments, array ports connected
