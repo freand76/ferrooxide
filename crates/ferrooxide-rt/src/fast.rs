@@ -327,8 +327,10 @@ fn t_sig(t: &Target) -> u32 {
 
 fn lower_narrow(ins: &Instr, sigs: &[SignalInfo], elem_sig: &std::collections::HashMap<(u32, u32), u32>) -> Op {
     use crate::Instr as I;
-    // a plain index: offset = value (no negation, no offset), at most 64 bits
-    let plain = |ix: &Index| !ix.neg && ix.k == 0 && ix.w <= 64;
+    // a plain index: offset = value (no negation, no offset), at most 32 bits (wider ones
+    // count by their low 32 bits: `read_sel_index`); a signed one only of 32 bits (read
+    // unsigned, a negative value is still out of range)
+    let plain = |ix: &Index| !ix.neg && ix.k == 0 && (ix.w < 32 && !ix.signed || ix.w == 32);
     match *ins {
         I::ArrRead { d, sig, ix } if plain(&ix) && sigs[sig as usize].width <= 64 => {
             let i = &sigs[sig as usize];

@@ -103,6 +103,18 @@ pub fn read_u64(m: &[u64], s: usize, w: u32) -> Option<u64> {
 
 /// Read an index value as i64 (sign-extended if signed). Values that do not fit saturate.
 #[inline]
+/// The index of a select or array word: as the reference, an index wider than 32 bits counts
+/// by its low 32 bits, read as a signed integer (ICARUS_NOTES 13); None if it has x/z bits.
+pub fn read_sel_index(m: &[u64], s: usize, w: u32, signed: bool) -> Option<i64> {
+    if w <= 32 {
+        return read_index(m, s, w, signed);
+    }
+    if !is_known(m, s, w) {
+        return None;
+    }
+    Some(m[s] as u32 as i32 as i64)
+}
+
 pub fn read_index(m: &[u64], s: usize, w: u32, signed: bool) -> Option<i64> {
     if w <= 64 {
         if m[s + 1] != 0 {
@@ -856,7 +868,7 @@ pub fn copy(m: &mut [u64], d: usize, s: usize, w: u32) {
 /// Extract `w` bits starting at signed bit offset `off` of the `sw`-bit value at `s`.
 /// Bits outside [0, sw) read as X.
 pub fn extract(m: &mut [u64], d: usize, s: usize, sw: u32, off: i64, w: u32) {
-    if off >= 0 && off + w as i64 <= sw as i64 {
+    if off >= 0 && off.saturating_add(w as i64) <= sw as i64 {
         let off = off as u32;
         if sw <= 64 {
             let mk = mask(w);
@@ -885,7 +897,7 @@ pub fn extract(m: &mut [u64], d: usize, s: usize, sw: u32, off: i64, w: u32) {
         m[d + nd + i] = 0;
     }
     for i in 0..w as i64 {
-        let src = off + i;
+        let src = off.saturating_add(i);
         let (a, b) = if src < 0 || src >= sw as i64 {
             (1, 1)
         } else {

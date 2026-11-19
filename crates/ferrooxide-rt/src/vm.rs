@@ -1619,7 +1619,7 @@ impl Sim {
 
     #[inline]
     fn index(&self, ix: &Index) -> Option<i64> {
-        let v = ops::read_index(&self.mem, ix.slot as usize, ix.w, ix.signed)?;
+        let v = ops::read_sel_index(&self.mem, ix.slot as usize, ix.w, ix.signed)?;
         Some(if ix.neg { ix.k.saturating_sub(v) } else { v.saturating_add(ix.k) })
     }
 
@@ -1632,7 +1632,7 @@ impl Sim {
                 let off = self.index(&ix)?;
                 let width = self.sigs[sig as usize].width as i64;
                 let lo = off.max(0);
-                let hi = (off + w as i64).min(width);
+                let hi = off.saturating_add(w as i64).min(width);
                 if lo >= hi {
                     return None;
                 }
@@ -1663,7 +1663,7 @@ impl Sim {
                 }
                 let off = self.index(&bix)?;
                 let lo = off.max(0);
-                let hi = (off + w as i64).min(r.width as i64);
+                let hi = off.saturating_add(w as i64).min(r.width as i64);
                 if lo >= hi {
                     return None;
                 }
@@ -3838,7 +3838,7 @@ fn urandom(seed: &mut i32, start: u32, end: u32) -> u32 {
 /// constant functions at elaboration time). Stores update memory without notifications.
 pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Result<(), String> {
     let index = |m: &[u64], ix: &Index| -> Option<i64> {
-        let v = ops::read_index(m, ix.slot as usize, ix.w, ix.signed)?;
+        let v = ops::read_sel_index(m, ix.slot as usize, ix.w, ix.signed)?;
         Some(if ix.neg { ix.k - v } else { v + ix.k })
     };
     let mut pc = 0usize;

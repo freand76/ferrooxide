@@ -43,3 +43,8 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    `$left(P)` is 7 and `$increment(P)` 1 (as for `[7:0]`), and `$size(Q + 1'b1)` of an
    expression is x; 1800-2017 20.7 gives the declared range (3, -1) and the expression's
    width. ferrooxide follows the standard here. Test: `tests/suite/sv/array_query_param.v`.
+13. **An index wider than 32 bits counts by its low 32 bits.** With `reg [127:0] b = 2**64 + 7;`
+   `array[b]`, `v[b]` and `v[b +: 4]` use index 7 (the low 32 bits as a signed integer: with
+   bit 31 set the index is negative, out of range); an x/z bit anywhere still gives x, and a
+   constant index is not cut. 1364-2005 5.2.1 makes such an index out of range (x on read,
+   no write). ivtest `signed_a`. Test: `tests/verilog/wide_index.v`.
