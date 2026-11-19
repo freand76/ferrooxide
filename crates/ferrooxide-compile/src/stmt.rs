@@ -1097,11 +1097,19 @@ impl<'a> Compiler<'a> {
                     self.emit(sys(SysTask::FClose { s: fs, loc }));
                 }
             }
-            "$monitor" | "$strobe" => {
+            "$monitor" | "$strobe" | "$fstrobe" => {
                 let is_mon = name == "$monitor";
                 let class = ProcClass::Postponed;
                 let p = self.begin_proc(scope.clone(), class);
                 let top = self.here();
+                // `$fstrobe(fd, ...)`: the descriptor too is read at the end of the time step
+                let (fd, args) = if name == "$fstrobe" {
+                    let Some((Some(fd), rest)) = args.split_first() else { return self.err("$fstrobe needs a file descriptor") };
+                    let (fs, fw, _) = self.self_expr(fd, sid)?;
+                    (Some((fs, fw)), rest)
+                } else {
+                    (None, &args[..])
+                };
                 let fargs = self.fmt_args(args, sid)?;
                 if is_mon {
                     let texp = self.texp(sid);
@@ -1138,7 +1146,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Jmp { to: top });
                 } else {
                     let texp = self.texp(sid);
-                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd: None, prefix: "", texp, radix }));
+                    self.emit(sys(SysTask::Display { nl: true, args: fargs, scope: scope.clone(), fd, prefix: "", texp, radix }));
                     self.emit(Instr::Halt);
                 }
                 self.end_proc();
@@ -1320,6 +1328,15 @@ impl<'a> Compiler<'a> {
                 // called as a task: the result is dropped
                 let a: Vec<Expr> = args.iter().map(|a| a.clone().unwrap_or(Expr::Str(String::new()))).collect();
                 self.file_read(name, &a, sid)?;
+            }
+            "$fflush" => {
+                // (arguments that are calls still run)
+                for e in args.iter().flatten() {
+                    if crate::expr::has_call(e) {
+                        self.self_expr(e, sid)?;
+                    }
+                }
+                self.emit(sys(SysTask::Flush));
             }
             _ => self.warn(format!("system task '{name}' is not supported, ignored")),
         }

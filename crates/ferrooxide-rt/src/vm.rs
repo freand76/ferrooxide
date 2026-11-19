@@ -2750,6 +2750,7 @@ impl Sim {
                 self.monitor_on = *on;
             }
             SysTask::TimeFormat(f) => fmt::set_time_format(f.clone()),
+            SysTask::Flush => self.flush(),
             SysTask::Strobe { proc } => {
                 self.procs[*proc as usize].pc = 0;
                 self.postponed.push(*proc);

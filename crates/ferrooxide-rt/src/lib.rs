@@ -525,6 +525,8 @@ pub enum SysTask {
     /// only print if this proc is the active monitor
     MonitorPrint { proc: u32, args: Vec<FmtArg>, scope: String, texp: u8, radix: char },
     MonitorOn(bool),
+    /// `$fflush`: write out buffered output (of all files)
+    Flush,
     Strobe { proc: u32 },
     /// $finish / $stop; `loc` is "file:line" for the message (empty: no message)
     /// `$finish` / `$stop` (`loc`: print the message), `$fatal` (`fatal`: exit status 1)

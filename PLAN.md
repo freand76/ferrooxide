@@ -632,6 +632,12 @@ standard that we match are in `ICARUS_NOTES.md`):
   `wire`; here one code, and an output port collapsed onto a variable is `reg`.
 - Beyond the reference: named and `default:` assignment patterns. Like the reference,
   overlapping `unique` case/if items are not reported.
+- At time 0 the reference lets `always @(n)` see the first value of a net driven by an
+  operator (`assign n = d <<< 2;`: an x event) but not of one driven through a part select;
+  here continuous assignments settle before other processes wait [pr1002a].
+- Two processes woken by delays scheduled in the same time step and then waiting on the
+  same edge (tasks called hierarchically) run in another order than in the reference
+  [pr2001162].
 
 ## Unsupported (known)
 
