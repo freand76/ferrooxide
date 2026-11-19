@@ -48,8 +48,15 @@ struct ProcRt {
     gen: u32,
     /// fork branches still to finish before this process continues (join)
     joining: u32,
+    /// which branches count for `joining`: those started by the fork with this number, or
+    /// all of them (NONE, `wait fork`)
+    join_fork: u32,
+    /// forks this process has started (numbers them)
+    forks: u32,
     /// the forking process of a branch, NONE otherwise
     parent: u32,
+    /// the number of the parent's fork that started this branch
+    fork_no: u32,
     /// a fork branch that has finished (or was disabled)
     done: bool,
 }
@@ -381,7 +388,10 @@ impl Sim {
                 rank: ranks[i],
                 gen: 0,
                 joining: 0,
+                join_fork: NONE,
+                forks: 0,
                 parent: p.parent,
+                fork_no: 0,
                 done: p.class == ProcClass::Spawned,
             })
             .collect();
@@ -396,7 +406,10 @@ impl Sim {
                 rank: NONE,
                 gen: 0,
                 joining: 0,
+                join_fork: NONE,
+                forks: 0,
                 parent: NONE,
+                fork_no: 0,
                 done: false,
             });
         }
@@ -926,8 +939,8 @@ impl Sim {
             return;
         }
         pr.done = true;
-        let parent = pr.parent;
-        if parent != NONE && self.procs[parent as usize].joining > 0 {
+        let (parent, no) = (pr.parent, pr.fork_no);
+        if parent != NONE && self.procs[parent as usize].joining > 0 && matches!(self.procs[parent as usize].join_fork, f if f == NONE || f == no) {
             let pp = &mut self.procs[parent as usize];
             pp.joining -= 1;
             if pp.joining == 0 {
@@ -938,6 +951,8 @@ impl Sim {
 
     /// Start fork branches. Returns true if the parent waits for them.
     fn fork(&mut self, p: u32, children: &[u32], join: u8) -> bool {
+        let no = self.procs[p as usize].forks.wrapping_add(1);
+        self.procs[p as usize].forks = no;
         // IEEE leaves the order open; Icarus starts the branches last to first
         for &c in children.iter().rev() {
             let ch = &mut self.procs[c as usize];
@@ -949,6 +964,7 @@ impl Sim {
             ch.gen = ch.gen.wrapping_add(1);
             ch.done = false;
             ch.joining = 0;
+            ch.fork_no = no;
             self.push_active(c);
         }
         let n = children.len() as u32;
@@ -958,6 +974,7 @@ impl Sim {
             _ => 0,
         };
         self.procs[p as usize].joining = joining;
+        self.procs[p as usize].join_fork = no;
         joining > 0
     }
 
@@ -2080,6 +2097,7 @@ impl Sim {
                     if running > 0 {
                         let pr = &mut self.procs[p as usize];
                         pr.joining = running;
+                        pr.join_fork = NONE;
                         pr.pc = *pc as u32;
                         pr.wait = NONE;
                         return true;
