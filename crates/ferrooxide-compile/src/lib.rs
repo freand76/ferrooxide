@@ -389,6 +389,18 @@ pub fn compile_dialect(
     if top_mods.is_empty() {
         return Err(Error { msg: "no top-level module found".into(), file: String::new(), line: 0 });
     }
+    // a keyword used as a name (IEEE 1800-2017 5.6.2); Verilog-2005 code keeps the names
+    // 1800 added (`-g2005` or `begin_keywords "1364-2005")
+    if !dialect.v2005 {
+        let first = modules.iter().find_map(|m| Some((m, m.keyword_names.iter().min_by_key(|k| k.1)?)));
+        if let Some((m, (n, l))) = first {
+            let mut msg = format!("'{n}' is a keyword and cannot be a name");
+            if ferrooxide_front::syntax::kw::Kw::from_str(n).is_some_and(|k| k.is_sv()) {
+                msg.push_str(" in SystemVerilog (Verilog-2005 code: -g2005 or `begin_keywords \"1364-2005\")");
+            }
+            return Err(Error { msg, file: m.file.clone(), line: *l });
+        }
+    }
     // elaboration; a defparam found after its target parameter was evaluated restarts it once,
     // with all defparams known from the start
     let mut seed: Option<HashMap<String, PVal>> = None;
@@ -456,7 +468,8 @@ pub fn compile_dialect(
             // once per name and module, where it first appears (usually its declaration)
             let mut seen = HashSet::new();
             for (n, l) in &m.keyword_names {
-                if !seen.insert(n) {
+                // (only IEEE 1800 reserves it)
+                if !ferrooxide_front::syntax::kw::Kw::from_str(n).is_some_and(|k| k.is_sv()) || !seen.insert(n) {
                     continue;
                 }
                 let msg = format!(

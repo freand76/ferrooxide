@@ -1520,6 +1520,13 @@ impl Parser {
                     _ => None,
                 })
             }
+            "__fx_keywords" => match self.peek() {
+                T::Str(_) => {
+                    let T::Str(v) = self.bump() else { unreachable!() };
+                    Directive::Keywords(Some(v))
+                }
+                _ => Directive::Keywords(None),
+            },
             _ => return self.err(format!("unknown directive {d}")),
         };
         self.expect_p(";")?;

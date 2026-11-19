@@ -376,10 +376,20 @@ impl Preprocessor {
                         skip_space_comments(&s, &mut i, &mut line, &mut out);
                         if i < s.len() && s[i] == '"' {
                             i += 1;
+                            let st = i;
                             while i < s.len() && s[i] != '"' && s[i] != '\n' {
                                 i += 1;
                             }
+                            let v: String = s[st..i].iter().collect();
                             i += 1;
+                            if active(&conds) {
+                                out.push_str(&format!(" __fx_keywords \"{v}\" ; "));
+                            }
+                        }
+                    }
+                    "end_keywords" => {
+                        if active(&conds) {
+                            out.push_str(" __fx_keywords ; ");
                         }
                     }
                     // no arguments
@@ -388,7 +398,7 @@ impl Preprocessor {
                             out.push_str(" __fx_uncdrive none ; ");
                         }
                     }
-                    "celldefine" | "endcelldefine" | "end_keywords" => {}
+                    "celldefine" | "endcelldefine" => {}
                     "line" => {
                         let st = i;
                         while i < s.len() && s[i] != '\n' {

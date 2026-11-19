@@ -385,13 +385,15 @@ impl Lower {
     }
 
     /// An argument: a bare type keyword or type name the parser took for a type is a name
-    /// there (`$display(bit)` with a variable `bit`), except for `$bits`.
+    /// there (`$display(bit)` with a variable `bit`, Verilog-2005), except for `$bits`.
     pub(crate) fn arg(&mut self, e: &t::Expr) -> Result<Expr> {
         if let t::ExprKind::Type(dt) = &e.kind {
             if dt.signed.is_none() && dt.packed.is_empty() {
+                // (a keyword only where such a variable exists)
+                let var = |l: &Self, n: &str| l.vars.contains_key(n).then(|| n.to_string());
                 let n = match &dt.kind {
-                    t::TypeKind::Int(k) => Some(super::types::int_name(*k).to_string()),
-                    t::TypeKind::String => Some("string".to_string()),
+                    t::TypeKind::Int(k) => var(self, super::types::int_name(*k)),
+                    t::TypeKind::String => var(self, "string"),
                     t::TypeKind::Named(n) if n.scopes.is_empty() && n.params.is_none() => Some(n.name.clone()),
                     _ => None,
                 };

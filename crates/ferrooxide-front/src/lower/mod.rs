@@ -14,6 +14,7 @@ mod types;
 
 use crate::ast::*;
 pub use types::{Package, SvType};
+use crate::syntax::kw::Kw;
 use crate::syntax::tree as t;
 use crate::{Error, Options, Result};
 use std::collections::{HashMap, HashSet};
@@ -51,8 +52,10 @@ pub(crate) struct Lower {
     type_scope: Option<(String, HashSet<String>)>,
     /// modules made for packages (added after the file's modules)
     pkg_modules: Vec<Module>,
-    /// names that are SystemVerilog keywords (lint), until the next module ends
+    /// names that are keywords of the active keyword set, until the next module ends
     kw_names: Vec<(String, Line)>,
+    /// the `begin_keywords versions in effect (innermost last; none: IEEE 1800-2017)
+    keywords: Vec<String>,
     packages: HashMap<String, Rc<Package>>,
     /// packages the current module (or package) imports or refers to
     mod_pkgs: Vec<String>,
@@ -141,6 +144,7 @@ impl Lower {
             type_scope: None,
             pkg_modules: Vec::new(),
             kw_names: Vec::new(),
+            keywords: Vec::new(),
             packages: HashMap::new(),
             mod_pkgs: Vec::new(),
             pkg_ctx: None,
@@ -162,13 +166,27 @@ impl Lower {
         self.err(loc, format!("{what} is not supported"))
     }
 
-    /// A name read from the source: SystemVerilog keywords used as names are noted (lint).
+    /// A name read from the source: keywords used as names are noted (an error in
+    /// SystemVerilog, the lint check in Verilog-2005).
     pub(crate) fn name(&mut self, n: &str, loc: t::Loc) -> String {
         self.note_ref(n);
-        if SV_RESERVED.contains(&n) {
+        if Kw::from_str(n).is_some_and(|k| self.reserved(k)) {
             self.kw_names.push((n.to_string(), loc.line));
         }
         n.to_string()
+    }
+
+    /// Whether `k` is a keyword of the keyword set in effect (IEEE 1800-2017 22.14).
+    fn reserved(&self, k: Kw) -> bool {
+        let Some(v) = self.keywords.last().map(String::as_str).filter(|v| v.starts_with("1364")) else { return true };
+        let s = k.as_str();
+        // added by 1364-2001: the configuration keywords and a few others; by 1364-2005: uwire
+        const CONFIG: &[&str] = &["cell", "config", "design", "endconfig", "incdir", "include", "instance", "liblist", "library", "use"];
+        const V2001: &[&str] = &["noshowcancelled", "pulsestyle_ondetect", "pulsestyle_onevent", "showcancelled"];
+        !(k.is_sv()
+            || (s == "uwire" && v != "1364-2005")
+            || (CONFIG.contains(&s) && matches!(v, "1364-1995" | "1364-2001-noconfig"))
+            || (V2001.contains(&s) && v == "1364-1995"))
     }
 
     fn directive(&mut self, d: &t::Directive) {
@@ -176,6 +194,8 @@ impl Lower {
             t::Directive::Timescale(u, p) => self.timescale = Some((*u, *p)),
             t::Directive::DefaultNettype(n) => self.default_nettype = if n == "wire" { None } else { Some(n.clone()) },
             t::Directive::UnconnectedDrive(d) => self.unconnected_drive = *d,
+            t::Directive::Keywords(Some(v)) => self.keywords.push(v.clone()),
+            t::Directive::Keywords(None) => _ = self.keywords.pop(),
         }
     }
 
@@ -1051,24 +1071,6 @@ pub(crate) fn item_what(it: &t::Item) -> &'static str {
         I::Empty(_) => "';'",
     }
 }
-
-/// Keywords IEEE 1800 (SystemVerilog) reserves beyond those of Verilog-2005: legal names in
-/// Verilog-2005 code, but such code does not compile as SystemVerilog (lint check).
-pub const SV_RESERVED: &[&str] = &[
-    "accept_on", "alias", "always_comb", "always_ff", "always_latch", "assert", "assume", "before", "bind", "bins",
-    "binsof", "bit", "break", "byte", "chandle", "checker", "class", "clocking", "const", "constraint", "context",
-    "continue", "cover", "covergroup", "coverpoint", "cross", "dist", "do", "endchecker", "endclass", "endclocking",
-    "endgroup", "endinterface", "endpackage", "endprogram", "endproperty", "endsequence", "enum", "eventually",
-    "expect", "export", "extends", "extern", "final", "first_match", "foreach", "forkjoin", "global", "iff",
-    "ignore_bins", "illegal_bins", "implements", "implies", "import", "inside", "int", "interconnect", "interface",
-    "intersect", "join_any", "join_none", "let", "local", "logic", "longint", "matches", "modport", "nettype", "new",
-    "nexttime", "null", "package", "packed", "priority", "program", "property", "protected", "pure", "rand", "randc",
-    "randcase", "randsequence", "ref", "reject_on", "restrict", "return", "s_always", "s_eventually", "s_nexttime",
-    "s_until", "s_until_with", "sequence", "shortint", "shortreal", "soft", "solve", "static", "string", "strong",
-    "struct", "super", "sync_accept_on", "sync_reject_on", "tagged", "this", "throughout", "timeprecision",
-    "timeunit", "type", "typedef", "union", "unique", "unique0", "until", "until_with", "untyped", "var", "virtual",
-    "void", "wait_order", "weak", "wildcard", "with", "within",
-];
 
 thread_local! {
     /// Index expressions of hierarchical-name segments that are not literals (`blk[i].x`): the

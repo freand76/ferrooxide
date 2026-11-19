@@ -29,7 +29,7 @@ module m #(parameter integer N = 4, parameter [7:0] P = 8'hA5) (a, b, y, q);
       assign t[1] = 1'b0;
     end
     case (N)
-      1, 2: begin : small end
+      1, 2: begin : sm end
       default: ;
     endcase
   endgenerate

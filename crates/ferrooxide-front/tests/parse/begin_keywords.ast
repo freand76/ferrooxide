@@ -1,0 +1,17 @@
+module old (bit, logic);
+  // imports $unit
+  // keyword names small
+  input wire(implicit) bit;
+  output wire(implicit) logic;
+  wire small;
+  assign logic = (~bit);
+endmodule
+module older ();
+  // imports $unit
+  reg config, uwire, int;
+endmodule
+module m ();
+  // imports $unit
+  // keyword names bit, config
+  reg bit, config;
+endmodule

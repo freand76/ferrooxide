@@ -40,6 +40,8 @@ pub enum Directive {
     DefaultNettype(String),
     /// `unconnected_drive pull1 (Some(true)) / pull0 / `nounconnected_drive (None)
     UnconnectedDrive(Option<bool>),
+    /// `begin_keywords "version" (Some), `end_keywords (None)
+    Keywords(Option<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

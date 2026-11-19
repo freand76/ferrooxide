@@ -18,7 +18,8 @@ pub struct Module {
     pub items: Vec<Item>,
     /// a user-defined primitive (`primitive ... endprimitive`): its table
     pub udp: Option<UdpDef>,
-    /// names that are SystemVerilog keywords (legal Verilog-2005 names; for the lint check)
+    /// names that are keywords of the keyword set in effect (an error in SystemVerilog; the
+    /// lint check reports those that only IEEE 1800 reserves)
     pub keyword_names: Vec<(String, Line)>,
     /// an `interface ... endinterface`
     pub interface: bool,

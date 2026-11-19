@@ -376,9 +376,9 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    dimensions, packed dimensions after an enum, parameter ports without a default (331 of
    the 366 basejump/black-parrot tests pass now; the rest stop at elaboration system tasks
    (17), unpacked array parameters (7), DPI (5), streaming concatenation, real casts).
-   Next, in this order:
-   - SystemVerilog keywords used as identifiers are an error in SV mode (`-g2005` stays
-     permissive): 184 tests; `--lint` already finds them;
+   Keywords used as names are an error in SV mode (`-g2005` stays permissive;
+   `` `begin_keywords "1364-2005" `` frees the SV keywords in its region): all 248 keyword
+   tests pass. Next:
    - named arguments in calls (`f(.clear(x), .set(y))`): blocks two real cores (TNoC, RSD).
    Then a script like `parsecheck.py` over the elaboration and simulation tests with a
    baseline, so the pass rate per tag can be tracked.
