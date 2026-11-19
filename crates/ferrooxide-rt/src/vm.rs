@@ -1265,7 +1265,16 @@ impl Sim {
             ch.done = false;
             ch.joining = 0;
             ch.fork_no = no;
-            self.push_active(c);
+            match self.prog.procs[d as usize].code.first() {
+                Some(Instr::Wait { ctl }) if join == 3 => {
+                    let ch = &mut self.procs[c as usize];
+                    ch.wait = *ctl;
+                    ch.pc = 1;
+                    ch.wseq = self.hot.wseq;
+                    self.hot.wseq += 1;
+                }
+                _ => self.push_active(c),
+            }
         }
         let n = children.len() as u32;
         let joining = match join {

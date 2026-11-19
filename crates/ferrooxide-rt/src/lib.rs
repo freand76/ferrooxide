@@ -707,7 +707,9 @@ pub enum Instr {
     /// `$countbits`: the number of bits of `s` equal to one of the (1-bit, 4-state) control
     /// values in `ctl` (32 bits)
     CountBits { d: u32, s: u32, w: u32, ctl: Box<[u32]> },
-    /// start the fork branches; join: 0 = join (all), 1 = join_any, 2 = join_none
+    /// start the fork branches; join: 0 = join (all), 1 = join_any, 2 = join_none, 3 = as
+    /// join_none, and a branch that starts with a `Wait` is waiting at once (the thread of an
+    /// event-controlled nonblocking assignment: the event control counts from the statement)
     Fork { children: Box<[u32]>, join: u8 },
     /// `wait fork`: suspend until the fork branches this process started have all ended
     WaitFork,

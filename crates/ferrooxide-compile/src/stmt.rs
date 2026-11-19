@@ -302,6 +302,39 @@ impl<'a> Compiler<'a> {
         target
     }
 
+    /// `lhs` with its run-time indices replaced by hidden variables set now (their memory is
+    /// added to `frame`): the target of an event-controlled nonblocking assignment is the one
+    /// its indices name at the statement.
+    fn capture_indices(&mut self, lhs: &Expr, sid: usize, frame: &mut Vec<(u32, u32)>) -> R<Expr> {
+        let cap = |c: &mut Self, e: &Expr, frame: &mut Vec<(u32, u32)>| -> R<Box<Expr>> {
+            if c.is_const(e, sid) {
+                return Ok(Box::new(e.clone()));
+            }
+            let (v, w, signed) = c.self_expr(e, sid)?;
+            let name = format!("$nbaix{}", c.prog.signals.len());
+            let h = c.new_signal(format!("{}.{name}", c.scopes[sid].name), w, signed, 0, w as i64 - 1, 0, 0, SigKind::Reg);
+            c.prog.names.pop(); // (no VCD entry)
+            c.scopes[sid].syms.insert(name.clone(), Sym::Sig(h));
+            let slot = c.sig(h).slot;
+            c.emit(Instr::Copy { d: slot, s: v, w });
+            frame.push((slot, rt::words(w)));
+            Ok(Box::new(Expr::Ident(name)))
+        };
+        Ok(match lhs {
+            Expr::Index(a, i) => {
+                let a = self.capture_indices(a, sid, frame)?;
+                Expr::Index(Box::new(a), cap(self, i, frame)?)
+            }
+            Expr::Range(a, m, l) => Expr::Range(Box::new(self.capture_indices(a, sid, frame)?), m.clone(), l.clone()),
+            Expr::IndexedRange(a, b, w, up) => {
+                let a = self.capture_indices(a, sid, frame)?;
+                Expr::IndexedRange(Box::new(a), cap(self, b, frame)?, w.clone(), *up)
+            }
+            Expr::Concat(v) => Expr::Concat(v.iter().map(|x| self.capture_indices(x, sid, frame)).collect::<R<_>>()?),
+            e => e.clone(),
+        })
+    }
+
     /// The control of an event control, and its expressions that hidden signals follow (with
     /// those signals).
     fn event_ctl<'e>(&mut self, ec: &'e EventCtl, body: &Stmt, sid: usize) -> R<(u32, Vec<(u32, &'e Expr)>)> {
@@ -607,6 +640,30 @@ impl<'a> Compiler<'a> {
                     Some(Timing::Delay(d)) if *nonblocking => {
                         let ds = self.delay_ticks(d, sid)?;
                         self.store_value(&lv, v, lw, StoreMode::NbaDelay(ds))?;
+                    }
+                    Some(t) if *nonblocking => {
+                        // `x <= @(e) v`: the value (and the target's indices) now; a thread of
+                        // its own waits for the event and makes the update while this process
+                        // goes on (each pending update an instance with its own copies)
+                        let tv = self.alloc(lw);
+                        let hi = self.prog.mem.len() as u32;
+                        let mut frame = vec![(tv, hi - tv)];
+                        let parent = self.code.pb.last().unwrap().proc;
+                        let evict = self.emit(Instr::Evict { defs: Box::new([]) });
+                        self.emit(Instr::Copy { d: tv, s: v, w: lw });
+                        let lhs2 = self.capture_indices(lhs, sid, &mut frame)?;
+                        let c = self.begin_proc(self.scopes[sid].name.clone(), ProcClass::Spawned);
+                        self.prog.procs[c as usize].parent = parent;
+                        self.timing(t, &Stmt::Null, sid)?;
+                        self.store_value(&Lhs::Expr(&lhs2, sid), tv, lw, StoreMode::Nba)?;
+                        self.emit(Instr::Halt);
+                        self.end_proc();
+                        let pd = &mut self.prog.procs[c as usize];
+                        pd.frame.extend(frame);
+                        pd.frame = crate::codegen::merge_ranges(std::mem::take(&mut pd.frame));
+                        pd.capture = true;
+                        self.code.pb.last_mut().unwrap().code[evict] = Instr::Evict { defs: Box::new([c]) };
+                        self.emit(Instr::Fork { children: Box::new([c]), join: 3 });
                     }
                     Some(t) => {
                         // intra-assignment timing: evaluate, wait, assign

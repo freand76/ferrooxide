@@ -12,8 +12,9 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    in a comment ("technically incorrect for 1'bz inputs"). Test: `tests/verilog/condblend.v`.
 3. **Event-controlled nonblocking assignments update at the trigger.** `x <= @(e) x + 1;`
    followed by `->e;` shows the new `x` in the triggering thread straight away (ivtest
-   `nb_ec_multi_ev`). The NBA should be scheduled in the NBA region after the event. Not
-   matched by ferrooxide yet.
+   `nb_ec_multi_ev`). The NBA should be scheduled in the NBA region after the event, as
+   ferrooxide does (a thread per pending update; the value and the target's indices are
+   taken at the statement). Test: `tests/verilog/nba_event_control.v`.
 4. **`logic` is reserved with `-g2005`.** `reg logic;` is a syntax error, but `logic` is not a
    1364-2005 keyword (`bit`, `int`, `byte`, `do`, `priority`, ... are accepted as names).
 5. **`$urandom(seed)` leaks its seed into the unseeded generator.** After `$urandom(s)` the
