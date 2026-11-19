@@ -119,6 +119,9 @@ pub struct ProcDef {
     /// the frame holds automatic variables of the fork block: their values when the branch
     /// is started (set by the forking process) are its instance's own
     pub capture: bool,
+    /// fused combinational processes (`fuse.rs`): a time-0 evaluation, then the loop; both
+    /// end in a wait on the same control
+    pub fused: bool,
 }
 
 #[derive(Default, Clone, Debug)]

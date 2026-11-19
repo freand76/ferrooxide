@@ -4048,7 +4048,9 @@ pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>)
                 _ => {}
             }
         }
-        eligible[i] = ok && waits == 1;
+        // (a fused group waits twice on its control: still evaluated in the settle, before
+        // the processes reading what it writes)
+        eligible[i] = ok && (waits == 1 || (p.fused && waits == 2));
     }
     // signal -> eligible readers
     let mut readers: Vec<Vec<(u32, u32)>> = vec![Vec::new(); prog.signals.len()];

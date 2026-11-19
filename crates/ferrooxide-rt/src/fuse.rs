@@ -213,6 +213,7 @@ pub fn fuse(prog: &mut Program) -> usize {
         prog.ctls[ctl as usize].triggers = triggers;
         prog.procs[rep].code = code;
         prog.procs[rep].kick0 = kick0;
+        prog.procs[rep].fused = true;
     }
     removed
 }

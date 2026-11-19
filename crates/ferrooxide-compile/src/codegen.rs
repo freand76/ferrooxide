@@ -83,7 +83,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
         self.code.proc_scope.push(self.code.job_scope);
-        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false, kick0: false, frame: Vec::new(), capture: false });
+        self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false, kick0: false, frame: Vec::new(), capture: false, fused: false });
         self.code.pb.push(PState { proc: id, ..Default::default() });
         self.code.scratch_saved.push(self.code.scratch_top);
         self.code.scratch_top = 0;
