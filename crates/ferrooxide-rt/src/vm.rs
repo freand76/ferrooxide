@@ -4195,6 +4195,8 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
                     _ => return Err("unsupported assignment in constant function".into()),
                 }
             }
+            // (IEEE 1364-2005 10.4.5: system tasks are ignored in constant functions)
+            Instr::Sys(t) if matches!(**t, SysTask::Display { .. } | SysTask::Finish { .. }) => {}
             _ => return Err("not a constant expression".into()),
         }
     }

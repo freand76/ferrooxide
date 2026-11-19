@@ -594,6 +594,12 @@ impl<'a> Compiler<'a> {
                     }
                     None => None,
                 };
+                // in constant evaluation: a `disable` of the block jumps to its end
+                let const_block = name.is_some() && reg.is_none() && fork.is_none();
+                if let (true, Some(n)) = (const_block, name) {
+                    let path = format!("{}.{}", self.scopes[sid].name, n);
+                    self.code.const_blocks.push((path, Vec::new()));
+                }
                 match fork {
                     None => {
                         for s in stmts {
@@ -634,6 +640,13 @@ impl<'a> Compiler<'a> {
                         if !children.is_empty() {
                             self.emit(Instr::Fork { children: children.into_boxed_slice(), join });
                         }
+                    }
+                }
+                if const_block {
+                    let (_, jumps) = self.code.const_blocks.pop().unwrap();
+                    let h = self.here();
+                    for j in jumps {
+                        self.patch(j, h);
                     }
                 }
                 self.close_block(reg);
@@ -1013,6 +1026,12 @@ impl<'a> Compiler<'a> {
                     while let Some(x) = sc {
                         cands.push(format!("{}.{}", self.scopes[x].name, name));
                         sc = self.scopes[x].parent;
+                    }
+                    // in constant evaluation: an enclosing named block of the evaluated code
+                    if let Some(k) = self.code.const_blocks.iter().rposition(|(p, _)| cands.contains(p)) {
+                        let j = self.emit(Instr::Jmp { to: 0 });
+                        self.code.const_blocks[k].1.push(j);
+                        return Ok(());
                     }
                     cands.extend(self.hier.tops.keys().map(|t| format!("{t}.{}", name.split_once('.').map(|x| x.1).unwrap_or(""))));
                     let target = self.disable_target(cands);

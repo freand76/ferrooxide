@@ -209,6 +209,9 @@ pub(crate) struct Code<'a> {
     /// registry entries of the blocks being compiled (fork branches started inside them are
     /// stopped when they are disabled)
     pub(crate) open_blocks: Vec<usize>,
+    /// named blocks open in constant evaluation (not registered): (path, jumps of the
+    /// `disable`s of the block, patched to its end)
+    pub(crate) const_blocks: Vec<(String, Vec<usize>)>,
     /// (enclosing scope, block statement) -> the scope of a block with declarations or
     /// imports, for the sensitivity of `@*`/`always_comb` (also unnamed blocks)
     pub(crate) block_scopes: HashMap<(usize, *const Stmt), usize>,
