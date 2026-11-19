@@ -19,8 +19,9 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<tree::Source
             pp = preproc::Preprocessor::new(opts);
             state.unit_types.clear();
         }
-        let text = pp.process_file(f)?;
+        let (text, segs) = pp.process_file_mapped(f)?;
         let name = f.display().to_string();
+        crate::set_line_map(&name, segs);
         let (sf, st) = parse::parse_file(&text, &name, state)?;
         state = st;
         out.push(sf);

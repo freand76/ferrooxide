@@ -1200,7 +1200,7 @@ impl<'a> Compiler<'a> {
                     _ => "FATAL: ",
                 };
                 // `ERROR: file:line: message` and the time and scope below it
-                let mut v = vec![Some(Expr::Str(format!("{prefix}{}:{}: ", self.file, self.line).replace('%', "%%")))];
+                let mut v = vec![Some(Expr::Str(format!("{prefix}{}: ", self.loc()).replace('%', "%%")))];
                 v.extend(a.iter().cloned());
                 let pad = " ".repeat(prefix.len());
                 v.push(Some(Expr::Str(format!("\n{pad}Time: %0d  Scope: %m"))));
@@ -1218,7 +1218,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     "value is unhandled for priority or unique case statement"
                 };
-                let msg = format!("WARNING: {}:{}: {what}\n         Time: %0d  Scope: %m", self.file, self.line);
+                let msg = format!("WARNING: {}: {what}\n         Time: %0d  Scope: %m", self.loc());
                 let a = [Some(Expr::Str(msg)), Some(Expr::SysCall("$__ticks".into(), Vec::new()))];
                 let args = self.fmt_args(&a, sid)?;
                 let texp = self.texp(sid);
@@ -1234,7 +1234,7 @@ impl<'a> Compiler<'a> {
             "$fclose" => {
                 if let Some(Some(fd)) = args.first() {
                     let (fs, _, _) = self.self_expr(fd, sid)?;
-                    let loc = format!("{}:{}", self.file, self.line);
+                    let loc = format!("{}", self.loc());
                     self.emit(sys(SysTask::FClose { s: fs, loc }));
                 }
             }
@@ -1309,7 +1309,7 @@ impl<'a> Compiler<'a> {
                 let radix = if name == "$swrite" { radix } else { 'd' };
                 // (w 0: the handle of a string, for a string variable)
                 let w = if ty.is_str() { 0 } else { vw };
-                let nul_warn = format!("{}:{}: {name}", self.file, self.line);
+                let nul_warn = format!("{}: {name}", self.loc());
                 self.emit(sys(SysTask::SFormat { d, w, args: fargs, scope, texp, radix, nul_warn }));
                 self.store_value(&Lhs::Expr(var, sid), d, vw, StoreMode::Blocking)?;
             }
@@ -1403,7 +1403,7 @@ impl<'a> Compiler<'a> {
             "$finish" | "$stop" => {
                 // $finish(0) prints nothing; otherwise "file:line: $finish called at <time> (<unit>)"
                 let quiet = matches!(args.first(), Some(Some(Expr::Num(n))) if n.digits == "0");
-                let loc = if quiet { String::new() } else { format!("{}:{}", self.file, self.line) };
+                let loc = if quiet { String::new() } else { format!("{}", self.loc()) };
                 self.emit(sys(SysTask::Finish { loc, stop: name == "$stop", fatal: false }));
             }
             "$dumpfile" => {
@@ -1450,7 +1450,7 @@ impl<'a> Compiler<'a> {
                 };
                 let start = opt(2, self)?;
                 let end = opt(3, self)?;
-                let loc = format!("{}:{}", self.file, self.line);
+                let loc = format!("{}", self.loc());
                 let hex = name.ends_with('h');
                 if name.starts_with("$write") {
                     self.emit(sys(SysTask::WriteMem { hex, file, sig, start, end }));

@@ -377,8 +377,9 @@ impl<'a> Compiler<'a> {
                 (_, true) => format!("Padding {n} high bits of the port."),
                 (_, false) => format!("Padding {n} high bits of the expression."),
             };
+            let at = ferrooxide_front::loc_str(&pfile, line);
             let w = format!(
-                "{pfile}:{line}: warning: Port {} ({pn}) of module {} expects {pw} bit(s), given {ew}.\n{pfile}:{line}:        : {detail}",
+                "{at}: warning: Port {} ({pn}) of module {} expects {pw} bit(s), given {ew}.\n{at}:        : {detail}",
                 k + 1,
                 m.name
             );

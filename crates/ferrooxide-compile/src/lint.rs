@@ -48,10 +48,9 @@ impl<'a> Compiler<'a> {
         }
         let list = missing.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
         let msg = format!(
-            "{}:{}: lint: incomplete sensitivity list: {} {} read but not in the list \
+            "{}: lint: incomplete sensitivity list: {} {} read but not in the list \
              (synthesis treats the block as combinational logic of all its inputs; use @*)",
-            self.file,
-            line,
+            ferrooxide_front::loc_str(&self.file, line),
             list,
             if missing.len() == 1 { "is" } else { "are" }
         );

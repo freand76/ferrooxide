@@ -150,7 +150,7 @@ impl<'a> Compiler<'a> {
             }
             if ids.is_empty() && !cands.iter().any(|c| c.starts_with("$force:")) {
                 let n = cands.first().map(|c| c.rsplit('.').next().unwrap_or(c).to_string()).unwrap_or_default();
-                let m = format!("{file}:{line}: warning: disable: no block or task named '{n}'");
+                let m = format!("{}: warning: disable: no block or task named '{n}'", ferrooxide_front::loc_str(&file, line));
                 if self.diag.warned.insert(m.clone()) {
                     self.diag.warnings.push(m);
                 }

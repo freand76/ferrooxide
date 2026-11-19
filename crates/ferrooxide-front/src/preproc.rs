@@ -3,7 +3,7 @@
 //! (`timescale, `default_nettype, ...) are dropped.
 //! Comments are stripped; line structure is preserved (directive lines become empty lines).
 
-use crate::{Error, Options, Result};
+use crate::{Error, LineSeg, Options, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -41,16 +41,27 @@ impl Preprocessor {
     }
 
     pub fn process_file(&mut self, path: &Path) -> Result<String> {
+        Ok(self.process_file_mapped(path)?.0)
+    }
+
+    /// The preprocessed text of a file and where its lines come from (includes).
+    pub fn process_file_mapped(&mut self, path: &Path) -> Result<(String, Vec<LineSeg>)> {
         let text = std::fs::read_to_string(path).map_err(|e| Error {
             msg: format!("cannot read file: {e}"),
             file: path.display().to_string(),
             line: 0,
         })?;
-        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-        self.process_text(&text, &path.display().to_string(), &dir)
+        // (a file named without a directory is in `.`: its includes are `./name`, as the
+        // reference names them)
+        let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+        self.process_text_mapped(&text, &path.display().to_string(), &dir)
     }
 
     pub fn process_text(&mut self, text: &str, fname: &str, dir: &Path) -> Result<String> {
+        Ok(self.process_text_mapped(text, fname, dir)?.0)
+    }
+
+    fn process_text_mapped(&mut self, text: &str, fname: &str, dir: &Path) -> Result<(String, Vec<LineSeg>)> {
         self.depth += 1;
         if self.depth > 64 {
             return Err(Error { msg: "include/macro nesting too deep".into(), file: fname.into(), line: 0 });
@@ -60,9 +71,30 @@ impl Preprocessor {
         r
     }
 
-    fn run(&mut self, text: &str, fname: &str, dir: &Path) -> Result<String> {
+    fn run(&mut self, text: &str, fname: &str, dir: &Path) -> Result<(String, Vec<LineSeg>)> {
         let s: Vec<char> = text.chars().collect();
         let mut out = String::with_capacity(text.len());
+        // where the output lines come from: this file, except for included text and
+        // expansions whose line count differs from that of their source
+        let mut segs = vec![LineSeg { start: 1, file: fname.to_string(), delta: 0 }];
+        // the output's line number at its end (newlines counted up to `counted`)
+        let (mut counted, mut out_line) = (0usize, 1u32);
+        let mut out_line_now = |out: &str| {
+            out_line += out[counted..].matches('\n').count() as u32;
+            counted = out.len();
+            out_line
+        };
+        // from output line `at` on: this file's line `src`
+        let resync = |segs: &mut Vec<LineSeg>, at: u32, src: u32| {
+            let delta = src as i64 - at as i64;
+            if segs.last().is_some_and(|l| l.file == fname && l.delta == delta) {
+                return;
+            }
+            if segs.last().is_some_and(|l| l.start == at) {
+                segs.pop();
+            }
+            segs.push(LineSeg { start: at, file: fname.to_string(), delta });
+        };
         let mut i = 0;
         let mut line = 1u32;
         // `line N "file" level: the next line is line N of `file` for `__LINE__ / `__FILE__
@@ -254,7 +286,7 @@ impl Preprocessor {
                         self.macros.remove(&id);
                     }
                     "include" => {
-                        while i < s.len() && s[i] == ' ' {
+                        while i < s.len() && (s[i] == ' ' || s[i] == '\t') {
                             i += 1;
                         }
                         let inc: String = if i < s.len() && s[i] == '`' {
@@ -292,12 +324,22 @@ impl Preprocessor {
                         }
                         let p = found.ok_or_else(|| err(format!("include file '{inc}' not found"), line))?;
                         let saved = self.macro_line.take();
-                        let t = self.process_file(&p);
+                        let t = self.process_file_mapped(&p);
                         self.macro_line = saved;
-                        let t = t?;
-                        // keep it on one logical line position: replace newlines with spaces
-                        // is wrong for `define bodies; just append (line numbers shift after includes)
+                        let (t, inner) = t?;
+                        // the included lines keep their own file and line numbers
+                        let start = out_line_now(&out);
+                        if segs.last().is_some_and(|l| l.start == start) {
+                            segs.pop();
+                        }
+                        for g in inner {
+                            segs.push(LineSeg { start: g.start + start - 1, file: g.file, delta: g.delta - (start as i64 - 1) });
+                        }
                         out.push_str(&t);
+                        let end = out_line_now(&out);
+                        // (the rest of the include's line is on the included text's last
+                        // line; the next output line is this file's next line)
+                        segs.push(LineSeg { start: end + 1, file: fname.to_string(), delta: line as i64 - end as i64 });
                     }
                     "timescale" => {
                         let st = i;
@@ -447,6 +489,9 @@ impl Preprocessor {
                             self.macro_line = None;
                         }
                         out.push_str(&expanded?);
+                        // (an expansion may have more or fewer lines than its source)
+                        let at = out_line_now(&out);
+                        resync(&mut segs, at, line);
                     }
                 }
                 continue;
@@ -459,7 +504,7 @@ impl Preprocessor {
         if !conds.is_empty() {
             return Err(err("unterminated `ifdef".into(), line));
         }
-        Ok(out)
+        Ok((out, segs))
     }
 }
 

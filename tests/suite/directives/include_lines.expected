@@ -1,0 +1,6 @@
+INFO: include_lines.v:8: line 8
+      Time: 0  Scope: m
+INFO: include_lines.v:11: line 11, s = 3
+      Time: 0  Scope: m
+INFO: ./include_lines.vh:4: in the included file, line 4
+      Time: 0  Scope: m.inc_task

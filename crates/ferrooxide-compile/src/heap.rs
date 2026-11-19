@@ -220,7 +220,7 @@ impl<'a> Compiler<'a> {
 
     /// The current source location for run-time warnings (`Program::locs`).
     fn loc_id(&mut self) -> u32 {
-        let l = format!("{}:{}", self.file, self.line);
+        let l = format!("{}", self.loc());
         if self.prog.locs.last() != Some(&l) {
             self.prog.locs.push(l);
         }
@@ -570,9 +570,7 @@ impl<'a> Compiler<'a> {
             _ => return None,
         };
         let w = format!(
-            "{}:{}: Warning: Array pattern assignment has more elements ({}) than bounded queue '{name}' supports ({b}).\n         Only using first {b} elements.",
-            self.file,
-            self.line,
+            "{}: Warning: Array pattern assignment has more elements ({}) than bounded queue '{name}' supports ({b}).\n         Only using first {b} elements.", self.loc(),
             items.len()
         );
         self.diag.warnings.push(w);

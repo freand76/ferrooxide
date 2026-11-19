@@ -11,7 +11,7 @@ impl<'a> Compiler<'a> {
             self.line = line;
             return self.err(msg);
         }
-        let w = format!("{}:{line}: warning: {msg}", self.file);
+        let w = format!("{}: warning: {msg}", ferrooxide_front::loc_str(&self.file, line));
         if !self.dialect.no_anachronisms && self.diag.warned.insert(w.clone()) {
             self.diag.warnings.push(w);
         }

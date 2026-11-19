@@ -1001,7 +1001,7 @@ impl<'a> Compiler<'a> {
         let fd_at = |me: &mut Self, i: usize| -> R<(u32, u32)> { Ok((me.expr(&args[i], sid, 32, false)?, 32)) };
         let scope = self.scopes[sid].name.clone();
         let d = self.tmp(32);
-        let loc = format!("{}:{}", self.file, self.line);
+        let loc = format!("{}", self.loc());
         let sys = |kind, src| Instr::Sys(Box::new(rt::SysTask::FileRead { kind, d, src, scope: scope.clone(), loc: loc.clone() }));
         match name {
             "$fgetc" | "$feof" | "$ftell" | "$rewind" => {

@@ -523,8 +523,13 @@ impl<'a> Compiler<'a> {
         Err(Error { msg: msg.into(), file: self.file.clone(), line: self.line })
     }
 
+    /// `file:line` of the current location in the source (through includes).
+    pub(crate) fn loc(&self) -> String {
+        ferrooxide_front::loc_str(&self.file, self.line)
+    }
+
     pub(crate) fn warn(&mut self, msg: impl Into<String>) {
-        let m = format!("{}:{}: warning: {}", self.file, self.line, msg.into());
+        let m = format!("{}: warning: {}", self.loc(), msg.into());
         if self.diag.warned.insert(m.clone()) {
             self.diag.warnings.push(m);
         }

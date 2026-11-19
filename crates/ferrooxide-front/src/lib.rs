@@ -21,8 +21,44 @@ pub struct Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: error: {}", self.file, self.line, self.msg)
+        write!(f, "{}: error: {}", loc_str(&self.file, self.line), self.msg)
     }
+}
+
+/// A part of a preprocessed file: from this line of the preprocessed text on, line `l` is
+/// line `l + delta` of `file` (an included file, or the file itself between includes).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineSeg {
+    pub start: u32,
+    pub file: String,
+    pub delta: i64,
+}
+
+/// The line maps of the preprocessed files, by file name. Locations in the AST are lines of
+/// the preprocessed text; messages print them through `src_loc`.
+static LINE_MAPS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<LineSeg>>>> = std::sync::OnceLock::new();
+
+pub(crate) fn set_line_map(file: &str, segs: Vec<LineSeg>) {
+    let m = LINE_MAPS.get_or_init(Default::default);
+    m.lock().unwrap().insert(file.to_string(), segs);
+}
+
+/// The source file and line of line `line` of the preprocessed `file`.
+pub fn src_loc(file: &str, line: u32) -> (String, u32) {
+    if let Some(m) = LINE_MAPS.get() {
+        if let Some(segs) = m.lock().unwrap().get(file) {
+            if let Some(s) = segs.iter().rev().find(|s| s.start <= line) {
+                return (s.file.clone(), (line as i64 + s.delta).max(1) as u32);
+            }
+        }
+    }
+    (file.to_string(), line)
+}
+
+/// `file:line` of line `line` of the preprocessed `file`, in the source.
+pub fn loc_str(file: &str, line: u32) -> String {
+    let (f, l) = src_loc(file, line);
+    format!("{f}:{l}")
 }
 
 impl std::error::Error for Error {}
