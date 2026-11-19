@@ -1512,16 +1512,26 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Store { t: Target::Whole { sig: r }, s: z, mode: rt::StoreMode::Blocking });
             }
         }
-        // inputs
+        // inputs: all arguments are evaluated before the first is assigned (a call of the same
+        // function in a later one, `add(1, add(4, 2))`, uses the same port variables)
+        let mut vals = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
             if dir == Dir::Input || dir == Dir::Inout {
                 let pw = self.sig(ps).width;
                 let real = self.sig_type(ps);
                 let pl = self.layout(ps);
-                let v = self.value_for(a, sid, pw, real, pl.as_deref())?;
-                self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
+                let mut v = self.value_for(a, sid, pw, real, pl.as_deref())?;
+                if args[i + 1..].iter().any(has_call) {
+                    let t = self.ptmp(pw);
+                    self.emit(Instr::Copy { d: t, s: v, w: pw });
+                    v = t;
+                }
+                vals.push((ps, v));
             }
+        }
+        for (ps, v) in vals {
+            self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
         }
         if let (Some(h), Some(t)) = (this, this_sig) {
             let ts = self.sig(t).slot;
