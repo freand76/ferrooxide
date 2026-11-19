@@ -81,7 +81,7 @@ started (IEEE 1800 9.2.2.2.2).
 ## Status (2026-11-19)
 
 Regression suite (normal tests): main list 1386 of 1526 (91 %), SystemVerilog list
-(`--list regress-sv.list`) 623 of 701 (89 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
+(`--list regress-sv.list`) 643 of 701 (92 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
 to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
 `--vcd`/`--trace`, the CDSP debug server with value history and the Surfer pairing work.
 Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.

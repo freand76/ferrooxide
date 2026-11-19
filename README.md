@@ -78,7 +78,7 @@ Verilog-2005 plus common SystemVerilog:
 Not yet: the rest of classes (parameterized classes, randomization),
 concurrent assertions, array methods (`sort`, `find`, ...), `%v` strength display, SDF, VPI.
 The full list is "Unsupported (known)" in [PLAN.md](PLAN.md). Icarus's regression suite
-(ivtest) passes at about 91% (its SystemVerilog list at 89%); places where Icarus seems to
+(ivtest) passes at about 91% (its SystemVerilog list at 92%); places where Icarus seems to
 deviate from the standard (ferrooxide matches Icarus) are listed in
 [ICARUS_NOTES.md](ICARUS_NOTES.md).
 
