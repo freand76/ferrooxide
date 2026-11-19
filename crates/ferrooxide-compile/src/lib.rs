@@ -373,7 +373,9 @@ pub fn compile_dialect(
         for m in modules {
             scan_mod(m, &mut used);
         }
-        modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none() && !m.interface && !m.package).collect()
+        // (nor one with a parameter that has no default: an instance must give its value)
+        let no_default = |m: &Module| m.items.iter().any(|i| matches!(i, Item::Param(p) if p.value.is_none()));
+        modules.iter().filter(|m| !used.contains(m.name.as_str()) && m.udp.is_none() && !m.interface && !m.package && !no_default(m)).collect()
     } else {
         let mut v = Vec::new();
         for t in tops {

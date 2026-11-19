@@ -644,8 +644,8 @@ impl Lower {
         Ok(PType { signed, integer, real, range, sv: None })
     }
 
-    /// One `name = value` of a value parameter.
-    pub(crate) fn param_assign(&mut self, local: bool, pt: &PType, d: &t::Declarator) -> Result<ParamDecl> {
+    /// One `name = value` of a value parameter; `port`: in a parameter port list.
+    pub(crate) fn param_assign(&mut self, local: bool, port: bool, pt: &PType, d: &t::Declarator) -> Result<ParamDecl> {
         let name = self.name(&d.name, d.loc);
         if !d.dims.is_empty() {
             return self.unsupported(d.loc, "an unpacked array parameter");
@@ -654,8 +654,8 @@ impl Lower {
         // override it
         let value = match &d.init {
             Some(v) => Some(self.expr(v)?),
-            None if !local => None,
-            None => return self.err(d.loc, format!("localparam '{name}' needs a value")),
+            None if port && !local => None,
+            None => return self.err(d.loc, format!("parameter '{name}' needs a value (only a parameter port may leave it out)")),
         };
         self.decl_type = pt.sv.clone().map(Rc::new);
         self.declare_var(&name, &[]);

@@ -153,6 +153,9 @@ impl<'a> Compiler<'a> {
             (None, Some(_)) => &Expr::Num(ferrooxide_front::ast::dec(0)),
             (None, None) => return self.err(format!("parameter '{}' has no value: it must be overridden", p.name)),
         };
+        if p.value.is_none() && self.dialect.v2005 {
+            return self.err(format!("parameter '{}' needs a default value in Verilog-2005 (a SystemVerilog parameter port may leave it out)", p.name));
+        }
         // a `string` parameter: the text (a literal, another string, an override)
         if p.ty.as_ref().is_some_and(|t| t.kind == NetKind::String) {
             let c = match ov {

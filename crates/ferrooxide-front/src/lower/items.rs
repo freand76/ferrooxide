@@ -87,7 +87,7 @@ impl Lower {
                     t::ParamKind::Value { ty, assigns } => {
                         let pt = self.param_type(ty)?;
                         for d in assigns {
-                            let p = self.param_assign(local, &pt, d)?;
+                            let p = self.param_assign(local, false, &pt, d)?;
                             items.push(Item::Param(p));
                         }
                     }
@@ -363,7 +363,7 @@ impl Lower {
                     };
                     let pt = self.param_type(ty)?;
                     for d in assigns {
-                        let p = self.param_assign(true, &pt, d)?;
+                        let p = self.param_assign(true, false, &pt, d)?;
                         items.push(Item::Param(p));
                     }
                 }

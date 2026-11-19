@@ -600,7 +600,7 @@ impl Lower {
                 t::ParamKind::Value { ty, assigns } => {
                     let pt = self.param_type(ty)?;
                     for d in assigns {
-                        let it = self.param_assign(local, &pt, d)?;
+                        let it = self.param_assign(local, true, &pt, d)?;
                         items.append(&mut self.pending);
                         items.push(Item::Param(it));
                     }
