@@ -80,8 +80,8 @@ started (IEEE 1800 9.2.2.2.2).
 
 ## Status (2026-11-19)
 
-Regression suite (normal tests): main list 1386 of 1526 (91 %), SystemVerilog list
-(`--list regress-sv.list`) 648 of 701 (92 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
+Regression suite (normal tests): main list 1405 of 1526 (92 %), SystemVerilog list
+(`--list regress-sv.list`) 650 of 701 (93 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
 to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
 `--vcd`/`--trace`, the CDSP debug server with value history and the Surfer pairing work.
 Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
@@ -390,7 +390,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    spans on `Expr`/`Stmt` (R6); `elab_items` (`elab/items.rs`) is still one function, to be
    split per item kind; assignment patterns for unpacked arrays [sv_ap_parray2].
 4. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
-   list: 26 compile errors, 112 wrong outputs): the Verilog items under "Unsupported
+   list: 14 compile errors, 105 wrong outputs): the Verilog items under "Unsupported
    (known)", e.g. `$countdrivers` (5 tests),
    compiler warnings (also the `always_*` warnings of the
    SV list), nets of 2-state types (6 SV tests), `%v` (needs strength values on nets), force
