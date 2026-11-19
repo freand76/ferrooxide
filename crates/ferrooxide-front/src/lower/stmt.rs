@@ -41,7 +41,7 @@ pub(crate) fn side_effects(e: &Expr) -> bool {
 }
 
 fn block(stmts: Vec<Stmt>) -> Stmt {
-    Stmt::Block { name: None, decls: vec![], stmts, fork: None }
+    Stmt::Block { name: None, decls: vec![], imports: vec![], stmts, fork: None }
 }
 
 impl Lower {
@@ -73,9 +73,49 @@ impl Lower {
         };
         let st = Stmt::If { cond, then_s: Box::new(pass), else_s: fail.map(Box::new), line };
         Ok(match label {
-            Some(l) => Stmt::Block { name: Some(self.name(l, a.loc)), decls: vec![], stmts: vec![st], fork: None },
+            Some(l) => Stmt::Block { name: Some(self.name(l, a.loc)), decls: vec![], imports: vec![], stmts: vec![st], fork: None },
             None => st,
         })
+    }
+
+    /// `import P::*;` / `import P::x;` in a block: the package's types and variables become
+    /// visible here (over those of enclosing scopes); returns the block's imports for the
+    /// compiler (`P`: all names of P, `P::x`: one name).
+    fn block_import(&mut self, v: &[t::Import]) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for im in v {
+            let Some(p) = self.packages.get(&im.package).cloned() else {
+                return self.err(im.loc, format!("unknown package '{}'", im.package));
+            };
+            if !p.exports.is_empty() {
+                return self.unsupported(im.loc, "an import in a block of a package that exports names");
+            }
+            self.use_package(&im.package);
+            match &im.name {
+                None => {
+                    for (k, t) in &p.types {
+                        self.types.insert(k.clone(), t.clone());
+                    }
+                    for (k, t) in &p.vars {
+                        self.vars.insert(k.clone(), t.clone());
+                    }
+                    out.push(im.package.clone());
+                }
+                Some(n) => {
+                    if !(p.names.contains(n) || p.types.contains_key(n) || p.vars.contains_key(n) || p.funcs.contains(n)) {
+                        return self.err(im.loc, format!("'{n}' is not declared in package '{}'", im.package));
+                    }
+                    if let Some(t) = p.types.get(n) {
+                        self.types.insert(n.clone(), t.clone());
+                    }
+                    if let Some(t) = p.vars.get(n) {
+                        self.vars.insert(n.clone(), t.clone());
+                    }
+                    out.push(format!("{}::{n}", im.package));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The declarations of a block (no directions).
@@ -91,6 +131,8 @@ impl Lower {
                 }
                 t::Item::Net(n) if n.user.is_none() => (n.net, false, &n.ty, &n.decls, n.strength.as_ref(), n.delay.as_ref(), n.loc),
                 t::Item::Param(p) => return self.err(p.loc, "parameters in blocks are not supported"),
+                // (handled by the block)
+                t::Item::Import(..) => continue,
                 other => return self.unsupported(item_loc(other), &format!("{} in a block", item_what(other))),
             };
             let mut d = self.decl_head(None, net, var, ty, strength, delay, loc)?;
@@ -117,17 +159,29 @@ impl Lower {
                     (Some(n), _) | (None, Some(n)) => Some(self.name(n, s.loc)),
                     _ => None,
                 };
+                // `import` in the block: the package's types and variables are visible in it
+                let saved = decls.iter().any(|d| matches!(d, t::Item::Import(..))).then(|| (self.types.clone(), self.vars.clone()));
+                let mut imports = Vec::new();
+                for d in decls {
+                    if let t::Item::Import(v, _) = d {
+                        imports.extend(self.block_import(v)?);
+                    }
+                }
                 let decls = self.block_decls(decls)?;
                 let mut v = Vec::new();
                 for st in stmts {
                     v.push(self.stmt(st)?);
+                }
+                if let Some((types, vars)) = saved {
+                    self.types = types;
+                    self.vars = vars;
                 }
                 let fork = fork.map(|j| match j {
                     t::Join::All => Join::All,
                     t::Join::Any => Join::Any,
                     t::Join::None => Join::None,
                 });
-                Stmt::Block { name, decls, stmts: v, fork }
+                Stmt::Block { name, decls, imports, stmts: v, fork }
             }
             t::StmtKind::Timed { timing, body } => match timing {
                 t::Timing::Delay(d) => {
@@ -273,7 +327,7 @@ impl Lower {
                 if decls.is_empty() {
                     f
                 } else {
-                    Stmt::Block { name: None, decls, stmts: vec![f], fork: None }
+                    Stmt::Block { name: None, decls, imports: vec![], stmts: vec![f], fork: None }
                 }
             }
             t::StmtKind::Foreach { array, vars, body } => self.foreach(array, vars, body, s.loc)?,
@@ -603,7 +657,7 @@ impl Lower {
             }
             None => decl(NetKind::Reg, false, Some((Expr::Num(dec(63)), Expr::Num(dec(0)))), v),
         };
-        Stmt::Block { name: None, decls: vec![kd, decl(NetKind::Int(32), true, None, &ok)], stmts: vec![lp], fork: None }
+        Stmt::Block { name: None, decls: vec![kd, decl(NetKind::Int(32), true, None, &ok)], imports: vec![], stmts: vec![lp], fork: None }
     }
 
     /// `foreach (q[i])` of a queue or dynamic array: `i` from 0 to `q.size() - 1`.
@@ -653,7 +707,7 @@ impl Lower {
             static_: false,
             line,
         };
-        Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![lp], fork: None })
+        Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], stmts: vec![lp], fork: None })
     }
 
     fn foreach(&mut self, array: &t::Expr, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
@@ -721,6 +775,6 @@ impl Lower {
             static_: false,
             line,
         };
-        Ok(Stmt::Block { name: None, decls: vec![d], stmts: vec![body], fork: None })
+        Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], stmts: vec![body], fork: None })
     }
 }

@@ -509,8 +509,16 @@ impl<'a> Compiler<'a> {
                         ProcKind::AlwaysComb | ProcKind::AlwaysLatch => {
                             let p = self.code.pb.last().unwrap().proc;
                             self.prog.procs[p as usize].fusible = *kind == ProcKind::AlwaysComb;
+                            // 9.2.2.2.2: it runs once at time 0 after all initial and always
+                            // procedures have started: it waits first and gets a time-0 wake
+                            let ctl = self.make_ctl(Vec::new());
+                            let top = self.here();
+                            self.emit(Instr::Wait { ctl });
+                            self.stmt(body, *scope)?;
+                            self.emit(Instr::Jmp { to: top });
                             // IEEE 1800 9.2.2.2.1: what the block and the functions it calls read,
-                            // except what the block writes itself
+                            // except what the block writes itself (after the body is compiled:
+                            // the scopes of its blocks exist then)
                             let mut reads = Vec::new();
                             self.subr.func_reads.set(true);
                             self.reads_stmt(body, *scope, &mut reads);
@@ -518,13 +526,10 @@ impl<'a> Compiler<'a> {
                             let mut written = Vec::new();
                             self.blocking_writes(body, *scope, &mut written);
                             reads.retain(|(s, _)| !written.contains(s));
-                            let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect());
-                            // 9.2.2.2.2: it runs once at time 0 after all initial and always
-                            // procedures have started: it waits first and gets a time-0 wake
-                            let top = self.here();
-                            self.emit(Instr::Wait { ctl });
-                            self.stmt(body, *scope)?;
-                            self.emit(Instr::Jmp { to: top });
+                            let mut trig: Vec<(u32, rt::Edge, u32)> = reads.into_iter().map(|(s, e)| (s, rt::Edge::Any, e)).collect();
+                            trig.sort_by_key(|t| (t.0, t.2, t.1 as u8));
+                            trig.dedup();
+                            self.prog.ctls[ctl as usize].triggers = trig;
                             self.prog.procs[p as usize].kick0 = true;
                         }
                     }

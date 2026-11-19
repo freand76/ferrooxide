@@ -288,6 +288,9 @@ impl<'a> Compiler<'a> {
             if self.scopes[sid].syms.contains_key(n) {
                 return set(&self.scopes[sid]).contains(n);
             }
+            if let Some(&p) = self.scopes[sid].name_imports.get(n) {
+                return set(&self.scopes[p]).contains(n);
+            }
             for &p in &self.scopes[sid].imports {
                 if self.scopes[p].syms.contains_key(n) {
                     return set(&self.scopes[p]).contains(n);

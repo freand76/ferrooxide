@@ -84,8 +84,10 @@ pub(crate) struct Scope<'a> {
     pub nettype: Option<String>,
     /// `unconnected_drive of the module
     pub uncdrive: Option<bool>,
-    /// package scopes whose names a module sees after its own (module scopes only)
+    /// package scopes whose names the scope sees after its own (modules, blocks with imports)
     pub imports: Vec<usize>,
+    /// names imported one by one (`import P::x;` in a block): the package's scope
+    pub name_imports: HashMap<String, usize>,
 }
 
 enum Job<'a> {
@@ -207,6 +209,9 @@ pub(crate) struct Code<'a> {
     /// registry entries of the blocks being compiled (fork branches started inside them are
     /// stopped when they are disabled)
     pub(crate) open_blocks: Vec<usize>,
+    /// (enclosing scope, block statement) -> the scope of a block with declarations or
+    /// imports, for the sensitivity of `@*`/`always_comb` (also unnamed blocks)
+    pub(crate) block_scopes: HashMap<(usize, *const Stmt), usize>,
     /// disable targets to resolve after code generation: (target, candidate paths, file, line)
     pub(crate) pending_disables: Vec<(u32, Vec<String>, String, u32)>,
     /// signals given an initial value before time 0 (declaration initializers, constant
@@ -659,6 +664,7 @@ impl<'a> Compiler<'a> {
             nettype: parent.and_then(|p| self.scopes[p].nettype.clone()),
             uncdrive: parent.and_then(|p| self.scopes[p].uncdrive),
             imports: Vec::new(),
+            name_imports: HashMap::new(),
         });
         self.scopes.len() - 1
     }
@@ -706,6 +712,9 @@ impl<'a> Compiler<'a> {
             if self.scopes[sid].syms.contains_key(name) {
                 return self.scopes[sid].param_ranges.get(name).copied();
             }
+            if let Some(&p) = self.scopes[sid].name_imports.get(name) {
+                return self.scopes[p].param_ranges.get(name).copied();
+            }
             for &p in &self.scopes[sid].imports {
                 if self.scopes[p].syms.contains_key(name) {
                     return self.scopes[p].param_ranges.get(name).copied();
@@ -722,6 +731,9 @@ impl<'a> Compiler<'a> {
         }
         loop {
             if let Some(s) = self.scopes[sid].syms.get(name) {
+                return Some(s.clone());
+            }
+            if let Some(s) = self.scopes[sid].name_imports.get(name).and_then(|&p| self.scopes[p].syms.get(name)) {
                 return Some(s.clone());
             }
             for &p in &self.scopes[sid].imports {
@@ -743,6 +755,9 @@ impl<'a> Compiler<'a> {
         loop {
             if let Some(f) = self.scopes[sid].funcs.get(name) {
                 return Some((f, sid));
+            }
+            if let Some(f) = self.scopes[sid].name_imports.get(name).and_then(|&p| self.scopes[p].funcs.get(name).map(|f| (*f, p))) {
+                return Some(f);
             }
             // functions and tasks of packages run in their package's scope
             for &p in &self.scopes[sid].imports {

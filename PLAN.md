@@ -138,7 +138,7 @@ dimensions: the type's first, ICARUS_NOTES 9, forward typedefs, array typedefs),
 `struct`/`union` (flat vectors; member/index/select chains become one `[off +: w]` select, also
 at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`, `$bits(T)`,
 assignment patterns (positional, and beyond the reference: named and `default:`), packages
-with `import p::*` / `import p::x` (module, header, file scope), `pkg::name`, `P::x`/`P::f()`,
+with `import p::*` / `import p::x` (module, header, file scope, begin-end blocks), `pkg::name`, `P::x`/`P::f()`,
 `export p::x` / `p::*` / `*::*` (names resolve to the package that declares them),
 members and methods of package variables (`P::s.x`, `P::e.next(N)`, `P::c.f()`), assignments to them by scoped name (`P::v[i] = x`, `P::s.x = y`).
 Lint reports names that are SystemVerilog keywords.
@@ -607,7 +607,7 @@ SystemVerilog data types and testbench features:
   listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
   a forward typedef defined in another scope than its declaration.
 - assignments to properties of a package's class handle (`P::c.x = 1`); `import` in a
-  block [sv_wildcard_import3].
+  block of a package that exports names, and in subroutines.
 - `.triggered` only on events declared in a module (not in tasks, functions or blocks).
 - `iff` only when every item of an event control has the same condition, and only in an
   event control before a statement (not in intra-assignment controls).

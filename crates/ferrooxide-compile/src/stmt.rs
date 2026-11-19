@@ -403,7 +403,9 @@ impl<'a> Compiler<'a> {
         Ok(h)
     }
 
-    fn timing(&mut self, t: &Timing, body: &Stmt, sid: usize) -> R<()> {
+    /// The wait of a timing control; returns the control of an `@*` (its triggers are set
+    /// again once the body is compiled, see `set_star_ctl`).
+    fn timing(&mut self, t: &Timing, body: &Stmt, sid: usize) -> R<Option<u32>> {
         match t {
             Timing::Delay(d) => {
                 let ds = self.delay_ticks(d, sid)?;
@@ -420,22 +422,36 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Store { t: Target::Whole { sig: h }, s: v, mode: StoreMode::Blocking });
                 }
                 self.emit(Instr::Wait { ctl });
+                if matches!(ec, EventCtl::Star) {
+                    return Ok(Some(ctl));
+                }
             }
             Timing::Repeat(n, ec) => {
                 let wait = Stmt::Timed { timing: Timing::Event(ec.clone()), body: Box::new(Stmt::Null), line: self.line };
                 self.stmt(&Stmt::Repeat { count: n.clone(), body: Box::new(wait), line: self.line }, sid)?;
             }
         }
-        Ok(())
+        Ok(None)
+    }
+
+    /// The triggers of `@*` before `body`: what it reads. Found after the body is compiled,
+    /// when the scopes of its blocks (their declarations and imports) exist.
+    fn set_star_ctl(&mut self, ctl: u32, body: &Stmt, sid: usize) {
+        let mut reads = Vec::new();
+        self.reads_stmt(body, sid, &mut reads);
+        let mut trig: Vec<(u32, REdge, u32)> = reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect();
+        trig.sort_by_key(|t| (t.0, t.2, t.1 as u8));
+        trig.dedup();
+        self.prog.ctls[ctl as usize].triggers = trig;
     }
 
     pub(crate) fn stmt(&mut self, st: &Stmt, sid: usize) -> R<()> {
         match st {
             Stmt::Null => {}
-            Stmt::Block { name, decls, stmts, fork } => {
+            Stmt::Block { name, decls, imports, stmts, fork } => {
                 // a fork block's automatic variables belong to each branch (see below)
                 let evict = (fork.is_some() && decls.iter().any(|d| d.automatic)).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
-                let bsid = if name.is_some() || !decls.is_empty() {
+                let bsid = if name.is_some() || !decls.is_empty() || !imports.is_empty() {
                     let path = match name {
                         Some(n) => format!("{}.{}", self.scopes[sid].name, n),
                         None => self.scopes[sid].name.clone(),
@@ -445,6 +461,8 @@ impl<'a> Compiler<'a> {
                     if let Some(n) = name {
                         self.scopes[sid].children.insert(n.clone(), b);
                     }
+                    self.block_imports(imports, b)?;
+                    self.code.block_scopes.insert((sid, st as *const Stmt), b);
                     for d in decls {
                         let (mut m, mut l) = self.range_vals(&d.range, b)?;
                         let mut signed = d.signed;
@@ -876,8 +894,11 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Timed { timing, body, line } => {
                 self.line = *line;
-                self.timing(timing, body, sid)?;
+                let star = self.timing(timing, body, sid)?;
                 self.stmt(body, sid)?;
+                if let Some(ctl) = star {
+                    self.set_star_ctl(ctl, body, sid);
+                }
             }
             Stmt::Wait { cond, body, line } => {
                 self.line = *line;
@@ -1465,9 +1486,9 @@ impl<'a> Compiler<'a> {
                 }
                 self.reads_lvalue(lhs, sid, out);
             }
-            Stmt::Block { stmts, name, .. } => {
+            Stmt::Block { stmts, .. } => {
                 // block-local variables live in a child scope created at codegen time
-                let bsid = name.as_ref().and_then(|n| self.scopes[sid].children.get(n).copied()).unwrap_or(sid);
+                let bsid = self.code.block_scopes.get(&(sid, st as *const Stmt)).copied().unwrap_or(sid);
                 if bsid != sid {
                     for s in self.scopes[bsid].syms.values() {
                         if let Sym::Sig(x) = s {
@@ -1555,5 +1576,26 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+    }
+}
+
+impl<'a> Compiler<'a> {
+    /// The imports of a block's scope `b`: `P` makes all names of package P visible (after the
+    /// block's own), `P::x` the one name.
+    fn block_imports(&mut self, imports: &[String], b: usize) -> R<()> {
+        for i in imports {
+            let (p, n) = match i.split_once("::") {
+                Some((p, n)) => (p, Some(n)),
+                None => (i.as_str(), None),
+            };
+            let Some(&ps) = self.hier.pkg_scopes.get(p) else { return self.err(format!("unknown package '{p}'")) };
+            match n {
+                None => self.scopes[b].imports.push(ps),
+                Some(n) => {
+                    self.scopes[b].name_imports.insert(n.to_string(), ps);
+                }
+            }
+        }
+        Ok(())
     }
 }

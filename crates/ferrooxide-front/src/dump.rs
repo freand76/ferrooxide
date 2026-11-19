@@ -575,7 +575,7 @@ impl Printer {
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Null => self.line(";"),
-            Stmt::Block { name: n, decls, stmts, fork } => {
+            Stmt::Block { name: n, decls, imports, stmts, fork } => {
                 let (open, close) = match fork {
                     None => ("begin", "end"),
                     Some(Join::All) => ("fork", "join"),
@@ -584,6 +584,9 @@ impl Printer {
                 };
                 self.line(format!("{open}{}", name(n)));
                 self.ind += 1;
+                for i in imports {
+                    self.line(if i.contains("::") { format!("import {i};") } else { format!("import {i}::*;") });
+                }
                 for d in decls {
                     self.line(Self::decl_text(d));
                 }

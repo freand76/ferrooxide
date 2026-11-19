@@ -308,7 +308,8 @@ pub enum Timing {
 pub enum Stmt {
     Null,
     /// `fork`: Some(join kind) for fork ... join / join_any / join_none
-    Block { name: Option<String>, decls: Vec<Decl>, stmts: Vec<Stmt>, fork: Option<Join> },
+    /// `imports`: packages imported in the block (`P`: all its names, `P::x`: one name)
+    Block { name: Option<String>, decls: Vec<Decl>, imports: Vec<String>, stmts: Vec<Stmt>, fork: Option<Join> },
     Assign { lhs: Expr, rhs: Expr, nonblocking: bool, timing: Option<Timing>, line: Line },
     If { cond: Expr, then_s: Box<Stmt>, else_s: Option<Box<Stmt>>, line: Line },
     Case { kind: CaseKind, expr: Expr, arms: Vec<(Vec<Expr>, Stmt)>, default: Option<Box<Stmt>>, line: Line },
