@@ -75,7 +75,21 @@ impl<'a> Compiler<'a> {
                 line: self.line,
             });
             self.nets.cur_strength = None;
-        } else if nkind == NetKind::String {
+            return Ok(());
+        }
+        // an initializer that is not a constant expression (6.8: it need not be one) is
+        // assigned at time 0, before the processes start
+        if self.decl_init_const(init, s, nkind, is_real, depth, width, sid).is_err() {
+            let line = self.line;
+            self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.to_string()), rhs: init.clone(), scope: sid, line });
+        }
+        Ok(())
+    }
+
+    /// The initial value of variable `s` from a constant initializer, set in memory.
+    #[allow(clippy::too_many_arguments)]
+    fn decl_init_const(&mut self, init: &Expr, s: u32, nkind: NetKind, is_real: bool, depth: u32, width: u32, sid: usize) -> R<()> {
+        if nkind == NetKind::String {
             // the initial text
             let text = match init {
                 Expr::Str(t) => t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect(),
