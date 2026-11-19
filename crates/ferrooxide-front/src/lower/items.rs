@@ -460,7 +460,14 @@ impl Lower {
                 match rt.packed.as_slice() {
                     [] => {}
                     [d] if range.is_none() => range = Some(self.dim(d, rt.loc)?),
-                    _ => return self.unsupported(rt.loc, "a return type with several packed dimensions"),
+                    ds if range.is_none() && ret_kind == NetKind::Reg => {
+                        // several packed dimensions: the whole width, the type keeps them
+                        let kind = if matches!(rt.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
+                        let t = super::types::SvType::vector(kind, signed, self.dims(ds, rt.loc)?);
+                        range = Some((super::types::minus_one(t.width()), Expr::Num(dec(0))));
+                        ret_type = Some(std::rc::Rc::new(t));
+                    }
+                    _ => return self.err(rt.loc, "packed dimensions after a return type that has a width"),
                 }
             }
         }

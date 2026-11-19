@@ -162,7 +162,8 @@ pub struct ParamDecl {
     /// the declared data type of a parameter with a struct or enum type (as `Decl::ty`)
     pub ty: Option<std::rc::Rc<crate::lower::SvType>>,
     pub name: String,
-    pub value: Expr,
+    /// None: a parameter port without a default, which every instance must override
+    pub value: Option<Expr>,
     pub line: Line,
 }
 

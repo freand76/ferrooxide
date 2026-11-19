@@ -609,6 +609,7 @@ impl<'a> Compiler<'a> {
             Expr::Hier(p) if !p.last()?.starts_with("$flat:") => self.lookup_hier(p, sid)?,
             _ => return None,
         };
+        let is_param = matches!(sym, Sym::Const(_));
         let (layout, nun) = match sym {
             Sym::Sig(s) => {
                 let info = self.sig(s);
@@ -628,7 +629,10 @@ impl<'a> Compiler<'a> {
             }
             _ => return None,
         };
-        layout.fields.as_ref()?;
+        // (a parameter with several packed dimensions has no other path for its selects)
+        if layout.fields.is_none() && !(is_param && layout.dims.len() > 1) {
+            return None;
+        }
         let flat_base = renamed("$flat:");
         let mut k = 0;
         let mut elem = base.clone();

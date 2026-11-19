@@ -360,9 +360,6 @@ impl Lower {
                 Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
             t::TypeKind::Enum(et) => {
-                if !ty.packed.is_empty() {
-                    return self.unsupported(ty.loc, "packed dimensions after an enum");
-                }
                 let int32 = |signed: bool| SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None, class: None };
                 let base = match &et.base {
                     None => int32(true),
@@ -411,13 +408,20 @@ impl Lower {
                                 None => num(0),
                             },
                         };
-                        self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value, line: it.loc.line }));
+                        self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value: Some(value), line: it.loc.line }));
                         names.push(name.clone());
                         prev = Some(name);
                     }
                 }
                 let mut t = base;
                 t.enum_names = Some(Rc::new(names));
+                // dimensions after the enum are outer to its base type's
+                let mut outer = self.dims(&ty.packed, ty.loc)?;
+                if !outer.is_empty() {
+                    t.int_kind = false;
+                    outer.extend(t.dims);
+                    t.dims = outer;
+                }
                 Ok(Some(t))
             }
             t::TypeKind::Int(k) => {
@@ -621,10 +625,20 @@ impl Lower {
             }
             _ => return self.unsupported(ty.loc, "a parameter of this type"),
         }
+        if ty.packed.len() > 1 {
+            // several packed dimensions: one range for the whole width, the type keeps them
+            if integer || real {
+                return self.err(ty.loc, "packed dimensions after a type that has a width");
+            }
+            let kind = if matches!(ty.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
+            let t = SvType::vector(kind, signed, self.dims(&ty.packed, ty.loc)?);
+            let range = Some((minus_one(t.width()), Expr::Num(dec(0))));
+            return Ok(PType { signed, integer: false, real: false, range, sv: Some(t) });
+        }
         let range = match ty.packed.as_slice() {
             [] => None,
             [d] => Some(self.dim(d, ty.loc)?),
-            _ => return self.unsupported(ty.loc, "a parameter with several packed dimensions"),
+            _ => unreachable!(),
         };
         Ok(PType { signed, integer, real, range, sv: None })
     }
@@ -635,10 +649,13 @@ impl Lower {
         if !d.dims.is_empty() {
             return self.unsupported(d.loc, "an unpacked array parameter");
         }
-        let Some(v) = &d.init else {
-            return self.unsupported(d.loc, "a parameter without a value");
+        // a parameter port may leave out its default (IEEE 1800 6.20.1); its instances must
+        // override it
+        let value = match &d.init {
+            Some(v) => Some(self.expr(v)?),
+            None if !local => None,
+            None => return self.err(d.loc, format!("localparam '{name}' needs a value")),
         };
-        let value = self.expr(v)?;
         self.decl_type = pt.sv.clone().map(Rc::new);
         self.declare_var(&name, &[]);
         let ty = self.decl_type.clone();

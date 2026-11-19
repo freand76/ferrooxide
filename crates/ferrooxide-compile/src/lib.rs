@@ -738,7 +738,11 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn lookup(&self, name: &str, mut sid: usize) -> Option<Sym> {
         if let Some((p, n)) = name.split_once("::") {
-            // `pkg::name`: in the package's scope only
+            // `pkg::name`: in the package's scope only; `$flat:pkg::name` and the like name
+            // `$flat:name` there
+            if let Some((pre, p)) = p.strip_prefix('$').and_then(|r| r.split_once(':')) {
+                return self.scopes[*self.hier.pkg_scopes.get(p)?].syms.get(&format!("${pre}:{n}")).cloned();
+            }
             return self.scopes[*self.hier.pkg_scopes.get(p)?].syms.get(n).cloned();
         }
         loop {

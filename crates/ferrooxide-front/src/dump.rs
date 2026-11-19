@@ -517,7 +517,10 @@ impl Printer {
         if let Some(r) = &p.range {
             let _ = write!(s, " {}", range(r));
         }
-        let _ = write!(s, " {} = {};", p.name, expr(&p.value));
+        match &p.value {
+            Some(v) => _ = write!(s, " {} = {};", p.name, expr(v)),
+            None => _ = write!(s, " {};", p.name),
+        }
         s
     }
 

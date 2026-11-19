@@ -148,12 +148,17 @@ impl<'a> Compiler<'a> {
 
     /// The value of a parameter (from its override if any): integer or real.
     pub(crate) fn param_value(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
+        let value = match (&p.value, &ov) {
+            (Some(v), _) => v,
+            (None, Some(_)) => &Expr::Num(ferrooxide_front::ast::dec(0)),
+            (None, None) => return self.err(format!("parameter '{}' has no value: it must be overridden", p.name)),
+        };
         // a `string` parameter: the text (a literal, another string, an override)
         if p.ty.as_ref().is_some_and(|t| t.kind == NetKind::String) {
             let c = match ov {
                 Some(PVal::Int(c) | PVal::Str(c)) => c,
                 Some(_) => return self.err(format!("string parameter '{}' needs a string value", p.name)),
-                None => self.const_eval(&p.value, sid)?,
+                None => self.const_eval(value, sid)?,
             };
             self.scopes[sid].string_params.insert(p.name.clone());
             // (string operations need the table)
@@ -163,7 +168,7 @@ impl<'a> Compiler<'a> {
         }
         let untyped = !p.integer && p.range.is_none() && !p.signed;
         // a number given for a ranged parameter: widened like in an expression (`'bx` fills)
-        if let (None, Expr::Num(n), Some(_), false) = (&ov, &p.value, &p.range, p.real) {
+        if let (None, Expr::Num(n), Some(_), false) = (&ov, value, &p.range, p.real) {
             let (a, b) = self.range_vals(&p.range, sid)?;
             let w = ((a - b).abs() + 1) as u32;
             let c = Const::number_in(n, w, n.signed).or_else(|m| self.err(m))?;
@@ -176,8 +181,8 @@ impl<'a> Compiler<'a> {
                     Some(t) => Some(self.packed(t, sid)?),
                     None => None,
                 };
-                let r = self.with_target(&p.value, layout.as_ref(), sid)?;
-                let value = r.as_ref().unwrap_or(&p.value);
+                let r = self.with_target(value, layout.as_ref(), sid)?;
+                let value = r.as_ref().unwrap_or(value);
                 if self.type_of(value, sid)?.is_real() {
                     PVal::Real(self.const_real(value, sid)?)
                 } else if self.is_str_valued(value, sid) {
@@ -209,10 +214,11 @@ impl<'a> Compiler<'a> {
         Ok(Sym::Const(self.param_type(p, c, sid)?))
     }
 
-    /// Declare parameter `p` with value `v` in scope `sid`; one with a struct type also gets
-    /// its type (`$type:p`, for member selects) and its flat name.
+    /// Declare parameter `p` with value `v` in scope `sid`; one with a struct type or several
+    /// packed dimensions also gets its type (`$type:p`, for member and element selects) and
+    /// its flat name.
     pub(crate) fn insert_param(&mut self, p: &ParamDecl, v: Sym, sid: usize) -> R<()> {
-        if let Some(t) = p.ty.as_ref().filter(|t| t.has_struct()) {
+        if let Some(t) = p.ty.as_ref().filter(|t| t.has_struct() || t.dims.len() > 1) {
             let t = self.resolve_type(t, sid)?;
             self.scopes[sid].syms.insert(format!("$type:{}", p.name), Sym::Type(Rc::new(t)));
             self.scopes[sid].syms.insert(format!("$flat:{}", p.name), v.clone());

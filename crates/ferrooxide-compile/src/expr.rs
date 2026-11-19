@@ -1334,6 +1334,11 @@ impl<'a> Compiler<'a> {
             };
             let layout = self.layout_for(f.ret_ty.as_ref(), fs)?;
             let sg = self.new_signal(path.clone(), w, s, 0, m, l, 0, SigKind::Reg);
+            // several packed dimensions: kept for selects of the result variable
+            if let Some(p) = layout.as_ref().filter(|p| p.fields.is_none() && p.dims.len() > 1) {
+                self.sigs.packed_dims.insert(sg, p.dims.clone());
+                self.scopes[fs].syms.insert(format!("$flat:{}", f.name), Sym::Sig(sg));
+            }
             if let t @ Type::Class(_) = self.func_ret_type(f, def_scope)? {
                 self.sigs.types[sg as usize] = t;
             }

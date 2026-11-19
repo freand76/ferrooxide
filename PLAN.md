@@ -372,10 +372,11 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    `:should_fail_because:` tests). Done 2026-11-19: `--elab-only`, and the bugs the run
    found (`` `include `` + tab, locations through includes, directives from macro
    expansions, non-UTF-8 sources, non-constant variable initializers, a JIT size limit,
-   `release` looping in an edge group). Next, in this order:
-   - parameters with several packed dimensions (`localparam bit [1:0][4:0] X = ...`), also
-     as a function return type and after an enum: 367 tests (all of basejump, black-parrot,
-     RgGen); packed multi-dimensional variables already exist;
+   `release` looping in an edge group), parameters and return types with several packed
+   dimensions, packed dimensions after an enum, parameter ports without a default (331 of
+   the 366 basejump/black-parrot tests pass now; the rest stop at elaboration system tasks
+   (17), unpacked array parameters (7), DPI (5), streaming concatenation, real casts).
+   Next, in this order:
    - SystemVerilog keywords used as identifiers are an error in SV mode (`-g2005` stays
      permissive): 184 tests; `--lint` already finds them;
    - named arguments in calls (`f(.clear(x), .set(y))`): blocks two real cores (TNoC, RSD).
