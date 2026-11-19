@@ -789,6 +789,22 @@ impl Sim {
     fn kick(&mut self, sig: u32) {
         let ws = self.writers.get(&sig).cloned().unwrap_or_default();
         for w in ws {
+            // a continuous assignment of a constant: it ran once and ended; it runs again
+            let code = &self.prog.procs[w as usize].code;
+            let pr = &self.procs[w as usize];
+            if pr.class == ProcClass::Normal
+                && pr.wait == NONE
+                && matches!(code.get(pr.pc as usize), Some(Instr::Halt))
+                && code.iter().all(|i| match i {
+                    Instr::Store { mode, .. } => *mode == StoreMode::Blocking,
+                    Instr::Wait { .. } | Instr::Delay { .. } | Instr::Jmp { .. } | Instr::Jz { .. } | Instr::Fork { .. } => false,
+                    _ => true,
+                })
+            {
+                self.procs[w as usize].pc = 0;
+                self.push_active(w);
+                continue;
+            }
             let pr = &mut self.procs[w as usize];
             if pr.wait != NONE && pr.class != ProcClass::Spawned {
                 pr.wait = NONE;
