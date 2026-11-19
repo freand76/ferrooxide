@@ -458,7 +458,7 @@ impl Lower {
             },
             t::ExprKind::Call { func, args, with_: None, .. } => {
                 let name = self.task_name(func, loc)?;
-                let args = self.call_args(args, loc)?;
+                let args = self.call_args(args)?;
                 Ok(Stmt::TaskCall { name, args, line })
             }
             t::ExprKind::Ident(_) | t::ExprKind::Member(..) | t::ExprKind::Index(..) | t::ExprKind::Scoped(_) => {

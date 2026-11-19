@@ -368,7 +368,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
         match e {
             Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last | Expr::IncDec { .. } => false,
-            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::EmptyArg => false,
+            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::EmptyArg | Expr::NamedArg(..) => false,
             // a member of a struct parameter
             Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
@@ -585,6 +585,7 @@ impl<'a> Compiler<'a> {
                 self.err("no classes are declared")
             }
             Expr::EmptyArg => self.err("an empty argument is allowed only in a call of a function or task"),
+            Expr::NamedArg(..) => self.err("a named argument is allowed only in a call of a function or task"),
             Expr::Num(n) => {
                 let c = Const::number_in(n, w, s).or_else(|m| self.err(m))?;
                 Ok(self.const_slot(&c))
@@ -1476,6 +1477,35 @@ impl<'a> Compiler<'a> {
         args: &[Expr],
         sid: usize,
     ) -> R<(Option<u32>, u32, bool)> {
+        // named arguments (IEEE 1800 13.5.4): in the order of the ports, after the
+        // positional ones
+        let ordered: Vec<Expr>;
+        let args: &[Expr] = if args.iter().any(|a| matches!(a, Expr::NamedArg(..))) {
+            let names: Vec<&str> = f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|n| n.name.as_str())).collect();
+            let mut v: Vec<Option<Expr>> = vec![None; names.len()];
+            let mut named = false;
+            for (k, a) in args.iter().enumerate() {
+                match a {
+                    Expr::NamedArg(n, e) => {
+                        named = true;
+                        let Some(i) = names.iter().position(|x| x == n) else {
+                            return self.err(format!("'{name}' has no argument '{n}'"));
+                        };
+                        if v[i].is_some() {
+                            return self.err(format!("argument '{n}' of '{name}' is given twice"));
+                        }
+                        v[i] = Some((**e).clone());
+                    }
+                    _ if named => return self.err(format!("a positional argument after a named one in a call of '{name}'")),
+                    _ if k >= names.len() => return self.err(format!("too many arguments to '{name}'")),
+                    _ => v[k] = Some(a.clone()),
+                }
+            }
+            ordered = v.into_iter().map(|x| x.unwrap_or(Expr::EmptyArg)).collect();
+            &ordered
+        } else {
+            args
+        };
         // missing trailing arguments and empty ones take their default values (IEEE 1800
         // 13.5.3)
         let filled: Vec<Expr>;
@@ -1838,7 +1868,7 @@ impl<'a> Compiler<'a> {
         }
         match e {
             Expr::Type(_) | Expr::Last | Expr::Null | Expr::EmptyArg => {}
-            Expr::IncDec { e, .. } => self.reads_expr(e, sid, out),
+            Expr::IncDec { e, .. } | Expr::NamedArg(_, e) => self.reads_expr(e, sid, out),
             Expr::New(v) | Expr::NewTyped(_, v) | Expr::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             Expr::NewCopy(x) => self.reads_expr(x, sid, out),
             Expr::MethodCall(o, _, args) => {

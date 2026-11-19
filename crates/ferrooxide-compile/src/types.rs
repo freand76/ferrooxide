@@ -153,6 +153,7 @@ impl<'a> Compiler<'a> {
                 return self.err("no classes are declared")
             }
             Expr::EmptyArg => return self.err("an empty argument is allowed only in a call of a function or task"),
+            Expr::NamedArg(..) => return self.err("a named argument is allowed only in a call of a function or task"),
             Expr::Last => return self.err("`$` outside an index of a queue"),
             Expr::IncDec { e, .. } => return self.type_of(e, sid),
             Expr::Pattern(..) => {

@@ -1,0 +1,19 @@
+module m ();
+  // imports $unit
+  function automatic integer signed f;
+    input int(32) signed a;
+    input int(32) signed b = 1;
+    return (a + b);
+  endfunction
+  task t;
+    input int(32) signed x;
+    output int(32) signed y;
+    y = x;
+  endtask
+  initial begin
+    int(32) signed r;
+    r = f(.b(2), .a(1));
+    r = f(3, .b());
+    t(.y(r), .x(f(.a(r))));
+  end
+endmodule

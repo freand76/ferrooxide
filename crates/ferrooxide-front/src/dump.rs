@@ -121,6 +121,7 @@ pub fn expr(e: &Expr) -> String {
         }
         Expr::Null => "null".into(),
         Expr::EmptyArg => String::new(),
+        Expr::NamedArg(n, e) => format!(".{n}({})", expr(e)),
         Expr::New(args) => format!("new({})", list(args)),
         Expr::NewTyped(c, args) => format!("{c}::new({})", list(args)),
         Expr::NewCopy(x) => format!("new {}", expr(x)),

@@ -423,6 +423,8 @@ pub enum Expr {
     Null,
     /// an empty argument of a call (`f(a, , c)`): the argument's default value
     EmptyArg,
+    /// `.name(e)` in a call: the argument for port `name` (`EmptyArg` for `.name()`)
+    NamedArg(String, Box<Expr>),
     /// `new` / `new(args)`: an object of the class the target's type names
     New(Vec<Expr>),
     /// `C::new(args)`: an object of class C

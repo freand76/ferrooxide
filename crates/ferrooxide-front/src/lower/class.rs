@@ -80,7 +80,7 @@ impl Lower {
                 names.types.extend(b.types.iter().map(|(k, v)| (k.clone(), v.clone())));
                 names.consts.extend(b.consts.iter().cloned());
                 let args = match args {
-                    Some(a) => Some(self.call_args(a, c.loc)?),
+                    Some(a) => Some(self.call_args(a)?),
                     None => None,
                 };
                 (Some(bname), args)

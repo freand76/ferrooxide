@@ -266,7 +266,7 @@ impl Lower {
                 Expr::NewArray(Box::new(n), init)
             }
             t::ExprKind::New { size: None, args, copy: None } => Expr::New(match args {
-                Some(a) => self.call_args(a, loc)?,
+                Some(a) => self.call_args(a)?,
                 None => vec![],
             }),
             t::ExprKind::New { size: None, args: None, copy: Some(x) } => Expr::NewCopy(Box::new(self.expr(x)?)),
@@ -284,7 +284,7 @@ impl Lower {
                     }
                 };
                 let args = match args {
-                    Some(a) => self.call_args(a, loc)?,
+                    Some(a) => self.call_args(a)?,
                     None => Vec::new(),
                 };
                 Expr::NewTyped(c, args)
@@ -372,13 +372,19 @@ impl Lower {
     }
 
     /// Positional arguments of a call.
-    pub(crate) fn call_args(&mut self, args: &[t::Arg], loc: t::Loc) -> Result<Vec<Expr>> {
+    pub(crate) fn call_args(&mut self, args: &[t::Arg]) -> Result<Vec<Expr>> {
         let mut v = Vec::new();
         for a in args {
             match a {
                 t::Arg::Pos(Some(e)) => v.push(self.arg(e)?),
                 t::Arg::Pos(None) => v.push(Expr::EmptyArg),
-                t::Arg::Named(..) => return self.unsupported(loc, "a named argument"),
+                t::Arg::Named(n, e) => {
+                    let e = match e {
+                        Some(e) => self.arg(e)?,
+                        None => Expr::EmptyArg,
+                    };
+                    v.push(Expr::NamedArg(n.clone(), Box::new(e)));
+                }
             }
         }
         Ok(v)
@@ -424,7 +430,10 @@ impl Lower {
                 }
             }
         }
-        let args = self.call_args(args, loc)?;
+        if args.iter().any(|a| matches!(a, t::Arg::Named(..))) {
+            return self.unsupported(loc, "a named argument of a system function");
+        }
+        let args = self.call_args(args)?;
         Ok(Expr::SysCall(name.to_string(), args))
     }
 
@@ -448,7 +457,7 @@ impl Lower {
                     if lvalue {
                         return self.unsupported(*l, "a method call as an assignment target");
                     }
-                    let args = self.call_args(a, *l)?;
+                    let args = self.call_args(a)?;
                     k += 1;
                     Expr::MethodCall(Box::new(e), m.to_string(), args)
                 }
@@ -561,7 +570,7 @@ impl Lower {
                 // `C::f(args)`: a static method of class C
                 if self.classes.get(&p).is_some_and(|c| c.methods.contains(&n.name)) && n.name != "new" {
                     let (args, rest) = match ops.split_first() {
-                        Some((Op::Call(a, l), rest)) => (self.call_args(a, *l)?, rest),
+                        Some((Op::Call(a, _), rest)) => (self.call_args(a)?, rest),
                         _ => (vec![], ops),
                     };
                     if !rest.is_empty() {
@@ -605,7 +614,7 @@ impl Lower {
                 if pk.funcs.contains(&n.name) {
                     self.use_package(&p);
                     let (args, rest) = match ops.split_first() {
-                        Some((Op::Call(a, l), rest)) => (self.call_args(a, *l)?, rest),
+                        Some((Op::Call(a, _), rest)) => (self.call_args(a)?, rest),
                         _ => (vec![], ops),
                     };
                     if !rest.is_empty() {
@@ -629,8 +638,8 @@ impl Lower {
         let _ = loc;
         if self.is_class_var(&name) {
             // `f()` of a function returning a class handle: a call (`f().m` a member of it)
-            if let Some((Op::Call(a, l), rest)) = ops.split_first() {
-                let args = self.call_args(a, *l)?;
+            if let Some((Op::Call(a, _), rest)) = ops.split_first() {
+                let args = self.call_args(a)?;
                 return self.class_chain(Expr::Call(name, args), rest, lvalue);
             }
             return self.class_chain(Expr::Ident(name), ops, lvalue);
@@ -663,7 +672,7 @@ impl Lower {
             }
         }
         if let Some((Op::Call(a, l), rest)) = ops.split_first() {
-            let args = self.call_args(a, *l)?;
+            let args = self.call_args(a)?;
             if !rest.is_empty() {
                 return self.unsupported(*l, "a select of a call");
             }
@@ -673,7 +682,7 @@ impl Lower {
         if parts.len() > 1 {
             if let Some((Op::Call(a, l), rest)) = ops[k..].split_first() {
                 // hierarchical function call: inst.f(args)
-                let args = self.call_args(a, *l)?;
+                let args = self.call_args(a)?;
                 if !rest.is_empty() {
                     return self.unsupported(*l, "a select of a call");
                 }

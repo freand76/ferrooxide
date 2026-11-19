@@ -378,9 +378,9 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    (17), unpacked array parameters (7), DPI (5), streaming concatenation, real casts).
    Keywords used as names are an error in SV mode (`-g2005` stays permissive;
    `` `begin_keywords "1364-2005" `` frees the SV keywords in its region): all 248 keyword
-   tests pass. Next:
-   - named arguments in calls (`f(.clear(x), .set(y))`): blocks two real cores (TNoC, RSD).
-   Then a script like `parsecheck.py` over the elaboration and simulation tests with a
+   tests pass. Named arguments in calls (`f(.clear(x), .set(y))`) done; TNoC now stops at
+   a typedef of an interface port's type, RSD at a package type whose dimensions use a
+   parameter the package imported from another package. Next: a script like `parsecheck.py` over the elaboration and simulation tests with a
    baseline, so the pass rate per tag can be tracked.
 2. **Dynamic processes, subroutine calls, dynamic waiters** (A3). *First part done
    2026-11-19*: a fork branch started again while it still runs (fork/join_none in a loop)
