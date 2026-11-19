@@ -148,6 +148,19 @@ impl<'a> Compiler<'a> {
 
     /// The value of a parameter (from its override if any): integer or real.
     pub(crate) fn param_value(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
+        // a `string` parameter: the text (a literal, another string, an override)
+        if p.ty.as_ref().is_some_and(|t| t.kind == NetKind::String) {
+            let c = match ov {
+                Some(PVal::Int(c) | PVal::Str(c)) => c,
+                Some(_) => return self.err(format!("string parameter '{}' needs a string value", p.name)),
+                None => self.const_eval(&p.value, sid)?,
+            };
+            self.scopes[sid].string_params.insert(p.name.clone());
+            // (string operations need the table)
+            self.intern(b"");
+            self.scopes[sid].str_params.insert(p.name.clone());
+            return Ok(Sym::Const(c.with_sign(false)));
+        }
         let untyped = !p.integer && p.range.is_none() && !p.signed;
         // a number given for a ranged parameter: widened like in an expression (`'bx` fills)
         if let (None, Expr::Num(n), Some(_), false) = (&ov, &p.value, &p.range, p.real) {
@@ -257,17 +270,27 @@ impl<'a> Compiler<'a> {
     }
 
     /// `n` names a parameter whose value is a string literal (see `Scope::str_params`).
-    pub(crate) fn is_str_param(&self, n: &str, mut sid: usize) -> bool {
+    pub(crate) fn is_str_param(&self, n: &str, sid: usize) -> bool {
+        self.param_in(n, sid, |s| &s.str_params)
+    }
+
+    /// `n` names a parameter declared `string` (see `Scope::string_params`).
+    pub(crate) fn is_string_param(&self, n: &str, sid: usize) -> bool {
+        self.param_in(n, sid, |s| &s.string_params)
+    }
+
+    /// The scope that declares `n` lists it in `set`.
+    fn param_in(&self, n: &str, mut sid: usize, set: for<'s> fn(&'s Scope<'a>) -> &'s HashSet<String>) -> bool {
         if let Some((p, n)) = n.split_once("::") {
-            return self.hier.pkg_scopes.get(p).is_some_and(|&s| self.scopes[s].str_params.contains(n));
+            return self.hier.pkg_scopes.get(p).is_some_and(|&s| set(&self.scopes[s]).contains(n));
         }
         loop {
             if self.scopes[sid].syms.contains_key(n) {
-                return self.scopes[sid].str_params.contains(n);
+                return set(&self.scopes[sid]).contains(n);
             }
             for &p in &self.scopes[sid].imports {
                 if self.scopes[p].syms.contains_key(n) {
-                    return self.scopes[p].str_params.contains(n);
+                    return set(&self.scopes[p]).contains(n);
                 }
             }
             match self.scopes[sid].parent {

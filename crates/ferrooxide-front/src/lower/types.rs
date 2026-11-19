@@ -612,6 +612,11 @@ impl Lower {
                 signed = ty.signed != Some(false);
             }
             t::TypeKind::Real(_) => real = true,
+            t::TypeKind::String if ty.packed.is_empty() => {
+                // a string parameter (its value is the text, as a vector; typed `string`)
+                let st = SvType { kind: NetKind::String, signed: false, dims: vec![], fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None };
+                return Ok(PType { signed: false, integer: false, real: false, range: None, sv: Some(st) });
+            }
             _ => return self.unsupported(ty.loc, "a parameter of this type"),
         }
         let range = match ty.packed.as_slice() {

@@ -380,10 +380,10 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    calls (also for recursion from a fork branch [recursive_task]), dynamic waiters for
    run-time targets. VPI (A4) on the same base.
 2. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
-   errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles and forward
-   `typedef class`, static methods done 2026-11-19): class handle ports,
-   parameterized classes, members through hierarchical names (`m1.c.f`, `inst.v.f`) [sv_class_in_module_decl, sv_unit3b/4b];
-   string parameters [br_gh175, param_string_compare]; static variables
+   errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
+   `typedef class`, static methods, array arguments and string parameters done
+   2026-11-19): class handle ports, parameterized classes, members through hierarchical
+   names (`m1.c.f`, `inst.v.f`) [sv_class_in_module_decl, sv_unit3b/4b]; static variables
    in automatic subroutines and in their blocks [func_init_var2, task_init_var2]; array
    methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
 3. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
@@ -620,7 +620,10 @@ SystemVerilog data types and testbench features:
   unpacked arrays as set items.
 - `string` (first version, 2026-11-14): no reclaiming of strings (every distinct text made at
   run time stays in the table: a testbench building millions of different strings grows);
-  string parameters [br_gh175, param_string_compare]; implicit string -> vector assignment is
+  string parameters (2026-11-19) hold their text as a vector constant, typed `string`
+  (`Scope::string_params`); constant comparisons of them are evaluated in the compiler
+  (`const_str_cmp`), other string operations on them only at run time; implicit string ->
+  vector assignment is
   accepted (the reference rejects it); characters above 127 print as UTF-8; `%v` `%u` `%z`
   in `$sformatf` [sformatf].
 

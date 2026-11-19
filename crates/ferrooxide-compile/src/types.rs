@@ -171,6 +171,7 @@ impl<'a> Compiler<'a> {
             Expr::Str(s) => v((8 * s.len()).max(8) as u32, false),
             Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
                 Some(Base::Sig(s)) => self.sig_type(s),
+                Some(Base::Const(_)) if matches!(e, Expr::Ident(n) if self.is_string_param(n, sid)) => Type::Str,
                 Some(Base::Const(c)) => v(c.w, c.signed),
                 Some(Base::Real(_)) => Type::Real,
                 None => unreachable!(),

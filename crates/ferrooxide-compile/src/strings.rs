@@ -51,7 +51,7 @@ impl<'a> Compiler<'a> {
 
     /// A string variable that is not an array (`s[i]` is its character).
     pub(crate) fn is_string_scalar(&self, e: &Expr, sid: usize) -> bool {
-        self.string_var(e, sid).is_some_and(|s| self.sig(s).depth == 0)
+        self.string_var(e, sid).is_some_and(|s| self.sig(s).depth == 0) || matches!(e, Expr::Ident(n) if self.is_string_param(n, sid))
     }
 
     /// `base.method` of a call name whose base is a string variable.
@@ -59,7 +59,41 @@ impl<'a> Compiler<'a> {
         let (base, m) = name.rsplit_once('.')?;
         let parts: Vec<String> = base.split('.').map(String::from).collect();
         let e = if parts.len() == 1 { Expr::Ident(parts[0].clone()) } else { Expr::Hier(parts) };
-        self.string_var(&e, sid).is_some().then_some((e, m))
+        self.is_string_scalar(&e, sid).then_some((e, m))
+    }
+
+    /// The text of a constant string operand: a literal or a `string` parameter.
+    fn const_text(&self, e: &Expr, sid: usize) -> Option<Vec<u8>> {
+        let c = match e {
+            Expr::Str(t) => return Some(t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect()),
+            Expr::Ident(n) if self.is_string_param(n, sid) => match self.lookup(n, sid)? {
+                Sym::Const(c) => c,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some((0..c.w / 8).rev().map(|k| ((c.a[(k * 8 / 64) as usize] >> (k * 8 % 64)) & 0xff) as u8).filter(|&x| x != 0).collect())
+    }
+
+    /// A comparison of constant strings, at least one a `string` parameter (`P == "AB"`,
+    /// `P < Q`): its 1-bit result (6.16.8: lexicographic). None for other expressions.
+    pub(crate) fn const_str_cmp(&self, e: &Expr, sid: usize) -> Option<Const> {
+        let Expr::Binary(op, a, b) = e else { return None };
+        let param = |x: &Expr| matches!(x, Expr::Ident(n) if self.is_string_param(n, sid));
+        if !param(a) && !param(b) {
+            return None;
+        }
+        let (x, y) = (self.const_text(a, sid)?, self.const_text(b, sid)?);
+        let r = match op {
+            BinOp::Eq | BinOp::CaseEq => x == y,
+            BinOp::Ne | BinOp::CaseNe => x != y,
+            BinOp::Lt => x < y,
+            BinOp::Le => x <= y,
+            BinOp::Gt => x > y,
+            BinOp::Ge => x >= y,
+            _ => return None,
+        };
+        Some(Const::from_i64(r as i64, 1, false))
     }
 
     /// Compile `e` as a string: the slot of its handle.
@@ -91,6 +125,13 @@ impl<'a> Compiler<'a> {
                 let b: Vec<u8> = t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect();
                 let h = self.intern(&b);
                 return Ok(self.const_slot(&Const::from_i64(h as i64, 64, false)));
+            }
+            // a `string` parameter: its text
+            Expr::Ident(n) if self.is_string_param(n, sid) => {
+                if let Some(b) = self.const_text(e, sid) {
+                    let h = self.intern(&b);
+                    return Ok(self.const_slot(&Const::from_i64(h as i64, 64, false)));
+                }
             }
             Expr::Ident(_) | Expr::Hier(_) if self.string_var(e, sid).is_some() => {
                 if let Some(Base::Sig(s)) = self.resolve_base(e, sid)? {

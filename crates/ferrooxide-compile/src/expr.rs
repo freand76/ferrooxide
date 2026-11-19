@@ -546,6 +546,9 @@ impl<'a> Compiler<'a> {
         }
         // constant folding
         if !self.code.pb.last().map(|p| p.proc == NONE).unwrap_or(true) && self.is_const(e, sid) {
+            if let Some(c) = self.const_str_cmp(e, sid) {
+                return Ok(self.const_slot(&c.resize(w, s)));
+            }
             if !matches!(e, Expr::Num(_) | Expr::Ident(_)) {
                 // evaluate in the context width and signedness (operands are extended first)
                 self.code.pb.push(PState { proc: NONE, ..Default::default() });

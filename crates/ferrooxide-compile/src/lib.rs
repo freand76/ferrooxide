@@ -74,6 +74,8 @@ pub(crate) struct Scope<'a> {
     /// parameters whose value is a string literal: `$display(P)` prints them as text, as
     /// the reference does
     pub str_params: HashSet<String>,
+    /// parameters declared `string` (typed as strings; the value is the text as a vector)
+    pub string_params: HashSet<String>,
     pub file: String,
     /// time unit and precision of the enclosing module (powers of ten of seconds)
     pub tunit: i32,
@@ -648,6 +650,7 @@ impl<'a> Compiler<'a> {
             funcs: HashMap::new(),
             param_ranges: HashMap::new(),
             str_params: HashSet::new(),
+            string_params: HashSet::new(),
             file,
             tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
             tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
@@ -831,6 +834,9 @@ impl<'a> Compiler<'a> {
     pub(crate) fn const_eval(&mut self, e: &Expr, sid: usize) -> R<Const> {
         if let Expr::Num(n) = e {
             return Const::from_number(n).or_else(|m| self.err(m));
+        }
+        if let Some(c) = self.const_str_cmp(e, sid) {
+            return Ok(c);
         }
         if let Expr::Real(r) = e {
             return Ok(Const::from_i64(r.round() as i64, 64, false));
