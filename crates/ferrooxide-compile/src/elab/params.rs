@@ -14,7 +14,7 @@ impl<'a> Compiler<'a> {
                     ov = overrides.iter().find(|(n, _)| n.as_deref() == Some(name.as_str())).map(|x| x.1.clone());
                     if ov.is_none() {
                         let positional: Vec<&PVal> = overrides.iter().filter(|(n, _)| n.is_none()).map(|(_, c)| c).collect();
-                        if pos < positional.len() {
+                        if pos < positional.len() && !matches!(positional[pos], PVal::Default) {
                             ov = Some(positional[pos].clone());
                         }
                     }
@@ -37,7 +37,7 @@ impl<'a> Compiler<'a> {
                     if ov.is_none() {
                         let positional: Vec<&PVal> =
                             overrides.iter().filter(|(n, _)| n.is_none()).map(|(_, c)| c).collect();
-                        if pos < positional.len() {
+                        if pos < positional.len() && !matches!(positional[pos], PVal::Default) {
                             ov = Some(positional[pos].clone());
                         }
                     }
@@ -160,7 +160,7 @@ impl<'a> Compiler<'a> {
             let r = match v {
                 PVal::Real(r) => r,
                 PVal::Int(c) | PVal::Str(c) => c.to_i64().unwrap_or(0) as f64,
-                PVal::Type(_) => unreachable!(),
+                PVal::Type(_) | PVal::Default => unreachable!(),
             };
             return Ok(Sym::Real(r));
         }
@@ -170,7 +170,7 @@ impl<'a> Compiler<'a> {
         let c = match v {
             PVal::Int(c) | PVal::Str(c) => c,
             PVal::Real(r) => Const::from_i64(r.round() as i64, 32, true),
-            PVal::Type(_) => unreachable!(),
+            PVal::Type(_) | PVal::Default => unreachable!(),
         };
         Ok(Sym::Const(self.param_type(p, c, sid)?))
     }

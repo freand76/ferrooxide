@@ -57,6 +57,8 @@ pub(crate) enum PVal {
     Int(Const),
     /// the value of a string literal (or a concatenation of them, or a parameter with one)
     Str(Const),
+    /// an empty positional override (`#( , 4)`): the parameter keeps its default
+    Default,
     Real(f64),
     Type(Rc<SvType>),
 }

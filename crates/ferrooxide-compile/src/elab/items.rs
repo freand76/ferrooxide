@@ -581,6 +581,7 @@ impl<'a> Compiler<'a> {
                     for p in params {
                         match p {
                             Conn::Positional(Some(e)) => ovs.push((None, self.pval(e, sid)?)),
+                            Conn::Positional(None) => ovs.push((None, PVal::Default)),
                             Conn::Named(n, Some(e)) => ovs.push((Some(n.clone()), self.pval(e, sid)?)),
                             _ => {}
                         }
