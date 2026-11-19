@@ -1001,7 +1001,11 @@ impl<'a> Compiler<'a> {
                 None => FmtArg::Empty,
                 Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),
                 Some(e) if self.type_of(e, sid)?.is_str() => FmtArg::SVar { s: self.str_expr(e, sid)? },
-                Some(e) if self.type_of(e, sid)?.is_real() => FmtArg::Real { s: self.rexpr(e, sid)? },
+                Some(e) if self.type_of(e, sid)?.is_real() => {
+                    let fixed = matches!(e, Expr::SysCall(n, a) if n == "$realtime" && a.is_empty())
+                        .then(|| (self.scopes[sid].tunit - self.scopes[sid].tprec).clamp(0, 18) as u8);
+                    FmtArg::Real { s: self.rexpr(e, sid)?, fixed }
+                }
                 // a string value (an enum's .name())
                 Some(Expr::SysCall(n, a)) if n == "$__str" => {
                     let (s, w, _) = self.self_expr(&a[0], sid)?;

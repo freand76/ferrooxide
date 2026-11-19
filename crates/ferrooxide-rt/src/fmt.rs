@@ -351,7 +351,7 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                         (None, a) => a,
                     };
                     let s = match arg {
-                        Some(FmtArg::Real { s }) => {
+                        Some(FmtArg::Real { s, .. }) => {
                             let r = f64::from_bits(mem[*s as usize]);
                             match spec {
                                 'f' | 'e' | 'g' => {
@@ -479,8 +479,12 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                 out.push_str(&format!("{:>20}", fmt_dec(&v, false)));
                 i += 1;
             }
-            FmtArg::Real { s } => {
-                out.push_str(&fmt_real(f64::from_bits(mem[*s as usize]), 'g', 6));
+            FmtArg::Real { s, fixed } => {
+                let r = f64::from_bits(mem[*s as usize]);
+                out.push_str(&match fixed {
+                    Some(d) if r.is_finite() => format!("{:.*}", *d as usize, r),
+                    _ => fmt_real(r, 'G', 6),
+                });
                 i += 1;
             }
             FmtArg::Empty => {
@@ -503,7 +507,7 @@ fn scaled_time(v: &Val, texp: u8) -> String {
     t.to_string()
 }
 
-/// C-style %f / %e / %g
+/// C-style %f / %e / %g (`G`: %#g, trailing zeros kept)
 pub fn fmt_real(v: f64, spec: char, prec: usize) -> String {
     let fmt_e = |v: f64, prec: usize| -> String {
         let s = format!("{:.*e}", prec, v);
@@ -520,7 +524,7 @@ pub fn fmt_real(v: f64, spec: char, prec: usize) -> String {
         _ => {
             let p = if prec == 0 { 1 } else { prec };
             if v == 0.0 {
-                return "0".into();
+                return if spec == 'G' { format!("{:.*}", p - 1, 0.0) } else { "0".into() };
             }
             let e: i32 = {
                 let s = format!("{:.*e}", p - 1, v);
@@ -531,8 +535,10 @@ pub fn fmt_real(v: f64, spec: char, prec: usize) -> String {
             } else {
                 format!("{:.*}", (p as i32 - 1 - e).max(0) as usize, v)
             };
-            // strip trailing zeros of the fraction
-            if let Some((m, ex)) = s.split_once('e') {
+            // strip trailing zeros of the fraction (not for %#g)
+            if spec == 'G' {
+                s
+            } else if let Some((m, ex)) = s.split_once('e') {
                 let m = if m.contains('.') { m.trim_end_matches('0').trim_end_matches('.') } else { m };
                 format!("{m}e{ex}")
             } else if s.contains('.') {

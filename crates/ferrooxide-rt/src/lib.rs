@@ -299,7 +299,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
                 args.iter()
                     .filter_map(|a| match a {
-                        FmtArg::Val { s, .. } | FmtArg::Str { s, .. } | FmtArg::Time { s } | FmtArg::Real { s } | FmtArg::SVar { s } => Some(*s),
+                        FmtArg::Val { s, .. } | FmtArg::Str { s, .. } | FmtArg::Time { s } | FmtArg::Real { s, .. } | FmtArg::SVar { s } => Some(*s),
                         _ => None,
                     })
                     .collect()
@@ -496,8 +496,9 @@ pub enum FmtArg {
     Time { s: u32 },
     /// a `string` value (a handle): printed, or used as a format, like a literal
     SVar { s: u32 },
-    /// a real value (f64 bits)
-    Real { s: u32 },
+    /// a real value (f64 bits); without a format `%#g`, or with `fixed` decimals (a bare
+    /// `$realtime`: the digits of the module's time precision below its unit, as the reference)
+    Real { s: u32, fixed: Option<u8> },
     Empty,
 }
 
