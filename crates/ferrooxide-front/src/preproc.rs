@@ -234,6 +234,8 @@ impl Preprocessor {
                         });
                         self.macros.insert(id, Macro { params, defaults, body: body.trim().to_string() });
                     }
+                    // IEEE 1800 22.5.3: every text macro is gone
+                    "undefineall" => self.macros.clear(),
                     "undef" => {
                         let id = read_ident(&s, &mut i);
                         self.macros.remove(&id);
@@ -242,14 +244,30 @@ impl Preprocessor {
                         while i < s.len() && s[i] == ' ' {
                             i += 1;
                         }
-                        let close = if i < s.len() && s[i] == '<' { '>' } else { '"' };
-                        i += 1;
-                        let st = i;
-                        while i < s.len() && s[i] != close && s[i] != '\n' {
+                        let inc: String = if i < s.len() && s[i] == '`' {
+                            // `include `NAME: the file name is what the macro expands to
+                            let st = i;
+                            while i < s.len() && s[i] != '\n' && !(s[i] == '/' && i + 1 < s.len() && s[i + 1] == '/') {
+                                i += 1;
+                            }
+                            let text: String = s[st..i].iter().collect();
+                            let x = self.process_text(&text, &cur_file, dir)?;
+                            let x = x.trim();
+                            match x.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| x.strip_prefix('<').and_then(|r| r.strip_suffix('>'))) {
+                                Some(n) => n.to_string(),
+                                None => return Err(err(format!("`include: '{x}' is not a file name in quotes"), line)),
+                            }
+                        } else {
+                            let close = if i < s.len() && s[i] == '<' { '>' } else { '"' };
                             i += 1;
-                        }
-                        let inc: String = s[st..i].iter().collect();
-                        i += 1;
+                            let st = i;
+                            while i < s.len() && s[i] != close && s[i] != '\n' {
+                                i += 1;
+                            }
+                            let inc: String = s[st..i].iter().collect();
+                            i += 1;
+                            inc
+                        };
                         let mut found = None;
                         let cwd = std::path::PathBuf::from(".");
                         for d in std::iter::once(dir.to_path_buf()).chain(self.incdirs.iter().cloned()).chain(std::iter::once(cwd)) {

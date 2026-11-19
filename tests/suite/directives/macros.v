@@ -1,7 +1,7 @@
 // Compiler directives (IEEE 1800 22): `define with and without arguments, default argument
 // values, `undef, `ifdef/`ifndef/`elsif/`else, `include with a guard (included twice),
 // line continuation, `` token pasting, `" stringification, `__FILE__/`__LINE__,
-// `resetall, `default_nettype
+// `resetall, `default_nettype, `undefineall
 `include "inc_defs.vh"
 `include "inc_defs.vh"
 `define W 8
@@ -48,6 +48,13 @@ module t;
 `endif
     check(`__LINE__, v, 2);
     check(`__LINE__, `__LINE__, 50);
+`undefineall
+`ifdef W
+    errors++;
+`endif
+`ifdef FROM_INCLUDE
+    errors++;
+`endif
     if (errors == 0) $display("PASSED");
   end
 endmodule
