@@ -12,4 +12,11 @@ module m(input clk, input rst, input a, input b, input [3:0] x);
   c1: cover property (if (a) b else $rose(a)) $display("covered");
   cover sequence ((a ##1 b) within (b[*3]));
   restrict property (a);
+  d1: assert #0 (a == b) else $display("d1");
+  cover final (x != 0);
+  always @(x) assume final (x < 9);
+endmodule
+module elab #(parameter N = 1) ();
+  if (N > 1) $error("N = %0d", N);
+  else $info;
 endmodule

@@ -1173,6 +1173,10 @@ impl<'a> Compiler<'a> {
                 }
                 self.self_expr(e, sid)?;
             }
+            Stmt::Deferred { final_, cover, cond, pass, fail, line } => {
+                self.line = *line;
+                self.deferred(*final_, *cover, cond, pass, fail, sid)?;
+            }
             Stmt::WaitFork { line } => {
                 self.line = *line;
                 self.emit(Instr::WaitFork);
@@ -1662,6 +1666,8 @@ impl<'a> Compiler<'a> {
         match st {
             Stmt::Null | Stmt::Disable { .. } | Stmt::Trigger { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::WaitFork { .. } => {}
             Stmt::Discard { e, .. } => self.reads_expr(e, sid, out),
+            // (the action runs in a process of its own)
+            Stmt::Deferred { cond, .. } => self.reads_expr(cond, sid, out),
             Stmt::Force { lhs, rhs, .. } => {
                 if let Some(r) = rhs {
                     self.reads_expr(r, sid, out);

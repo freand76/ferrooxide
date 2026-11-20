@@ -831,6 +831,9 @@ pub enum AssertOp {
     Disable { id: u32 },
     /// the process waits for the Reactive region of this time step (action blocks)
     Reactive,
+    /// action process `proc` of a deferred assertion runs (from its start) in the Reactive
+    /// region, or the Postponed one: once, also when scheduled again before it runs
+    Defer { proc: u32, postponed: bool },
 }
 
 /// Operations on class objects in `Instr::Obj`. An object is on the simulator's heap; a

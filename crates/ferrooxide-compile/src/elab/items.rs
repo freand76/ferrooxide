@@ -223,6 +223,7 @@ impl<'a> Compiler<'a> {
             }
             Item::Instances { module, params, insts, line } => self.instances(module, params, insts, *line, sid)?,
             Item::Assert(a) => self.code.jobs.push(Job::Assert { a, scope: sid }),
+            Item::ElabTask { name, args, line } => self.elab_task(name, args, *line, sid)?,
             Item::GenFor { .. } => self.gen_for(it, sid, genblk)?,
             Item::GenIf { .. } => self.gen_if(it, sid, genblk)?,
             Item::GenCase { .. } => self.gen_case(it, sid, genblk)?,
@@ -346,6 +347,48 @@ impl<'a> Compiler<'a> {
             let path = format!("{}.{}", self.scopes[sid].name, inst.name);
             let child = self.instantiate(m, path, &ovs, Some((&inst.conns, sid)))?;
             self.scopes[sid].children.insert(inst.name.clone(), child);
+        }
+        Ok(())
+    }
+
+    /// An elaboration system task (IEEE 1800-2017 20.11) reached in scope `sid`: its message,
+    /// as the reference words it; `$error` and `$fatal` make elaboration fail.
+    fn elab_task(&mut self, name: &str, args: &[Option<Expr>], line: u32, sid: usize) -> R<()> {
+        if self.diag.elab_fatal {
+            return Ok(());
+        }
+        self.line = line;
+        // (`$fatal`'s first argument, when not the message, is the finish number)
+        let args = match (name, args.first()) {
+            ("$fatal", Some(Some(e))) if !matches!(e.kind, ExprKind::Str(_)) => &args[1..],
+            _ => args,
+        };
+        let scope = self.scopes[sid].name.rsplit('.').next().unwrap_or_default().to_string();
+        let msg = if args.is_empty() {
+            String::new()
+        } else {
+            self.code.pb.push(PState { proc: NONE, ..Default::default() });
+            let fa = self.fmt_args(args, sid);
+            let st = self.code.pb.pop().unwrap();
+            let fa = fa?;
+            if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {
+                return self.err(m);
+            }
+            let texp = self.texp(sid);
+            String::from_utf8_lossy(&rt::fmt::format_args(&fa, &self.prog.mem, &scope, 'd', texp)).into_owned()
+        };
+        let kind = match name {
+            "$fatal" => "FATAL",
+            "$error" => "ERROR",
+            "$warning" => "WARNING",
+            _ => "INFO",
+        };
+        let pad = " ".repeat(kind.len() + 2);
+        let sep = if msg.is_empty() { "" } else { " " };
+        self.diag.elab_msgs.push(format!("{kind}: {}:{sep}{msg}\n{pad}During elaboration  Scope: {scope}", self.loc()));
+        if matches!(name, "$fatal" | "$error") {
+            self.diag.elab_errors.push((self.file.clone(), line));
+            self.diag.elab_fatal |= name == "$fatal";
         }
         Ok(())
     }

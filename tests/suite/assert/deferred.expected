@@ -1,0 +1,8 @@
+0 final pass
+10 final pass
+20 #0 fail c=0
+20 final fail
+30 q is 5 (reported once)
+30 final pass
+36 covered t.d1 q=3
+deferred.v:23: $finish called at 46 (1s)

@@ -303,10 +303,33 @@ impl Lower {
                 }
             }
             t::Item::Instances(i) => items.push(self.instances(i)?),
+            // (a deferred assertion outside a procedure is in an always_comb of its own,
+            // IEEE 1800-2017 16.4.3)
+            t::Item::Assertion(a) if matches!(a.body, t::AssertBody::Immediate { deferred: Some(_), .. }) => {
+                let body = self.deferred_assertion(a, a.label.as_ref())?;
+                items.push(Item::Process { kind: ProcKind::AlwaysComb, body, line: a.loc.line });
+            }
+            t::Item::Assertion(a) if matches!(a.body, t::AssertBody::Immediate { .. }) => {
+                return self.err(a.loc, "an immediate assertion outside a procedure (only deferred ones, `#0` or `final`)");
+            }
             t::Item::Assertion(a) => {
                 if let Some(a) = self.conc_assert(a)? {
                     items.push(Item::Assert(Box::new(a)));
                 }
+            }
+            t::Item::ElabTask { name, args, loc } => {
+                let mut v = Vec::new();
+                for a in args {
+                    v.push(match a {
+                        t::Arg::Pos(None) => None,
+                        t::Arg::Pos(Some(x)) => Some(self.arg(x)?),
+                        t::Arg::Named(..) => return self.unsupported(*loc, "a named argument"),
+                    });
+                }
+                if !matches!(name.as_str(), "$fatal" | "$error" | "$warning" | "$info") {
+                    return self.err(*loc, format!("'{name}' is not an elaboration system task"));
+                }
+                items.push(Item::ElabTask { name: name.clone(), args: v, line: loc.line });
             }
             t::Item::Property(_) | t::Item::Sequence(_) | t::Item::Clocking(_) | t::Item::ClockingRef { .. } | t::Item::DefaultDisable(..) => {
                 self.sva_item(it)?;

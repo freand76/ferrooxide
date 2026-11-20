@@ -842,11 +842,20 @@ pub enum AssertKind {
 #[derive(Clone, Debug)]
 pub enum AssertBody {
     /// immediate: `assert (e)`; deferred: `assert #0 (e)` / `assert final (e)`
-    Immediate { deferred: Option<Kw>, expr: Expr },
+    Immediate { deferred: Option<Deferral>, expr: Expr },
     /// `assert property (p)`
     Property(Prop),
     /// `cover sequence (s)`
     Sequence(Prop),
+}
+
+/// When a deferred assertion reports (IEEE 1800-2017 16.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deferral {
+    /// `#0`: in the Reactive region
+    Zero,
+    /// `final`: in the Postponed region
+    Final,
 }
 
 #[derive(Clone, Debug)]

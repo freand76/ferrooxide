@@ -660,3 +660,37 @@ impl<'a> Compiler<'a> {
         !reads.is_empty() && reads.iter().all(|(s, _)| self.sigs.two_state.contains(s))
     }
 }
+
+impl<'a> Compiler<'a> {
+    /// A deferred immediate assertion (IEEE 1800-2017 16.4): the outcome goes to a hidden bit
+    /// and an action process of its own is scheduled for the Reactive (`#0`) or Postponed
+    /// (`final`) region; scheduled again before it runs, it reports the latest outcome only
+    /// (16.4.2: an earlier report is flushed).
+    pub(crate) fn deferred(&mut self, final_: bool, cover: bool, cond: &Expr, pass: &Stmt, fail: &Stmt, sid: usize) -> R<()> {
+        let k = self.prog.procs.len();
+        let name = format!("$deferred{k}");
+        let full = format!("{}.{name}", self.scopes[sid].name);
+        let s = self.new_signal(full, 1, false, 0, 0, 0, 0, SigKind::Reg);
+        self.prog.names.pop();
+        self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
+        let one = || -> Expr { ExprKind::Num(Number { size: Some(1), signed: false, base: 2, based: true, digits: "1".into(), fill: false }).into() };
+        // (x or z is false)
+        let ok: Expr = ExprKind::Binary(BinOp::CaseEq, Box::new(ExprKind::Unary(UnOp::RedOr, Box::new(cond.clone())).into()), Box::new(one())).into();
+        let line = self.line;
+        self.stmt(&Stmt::Assign { lhs: ExprKind::Ident(name.clone()).into(), rhs: ok, nonblocking: false, timing: None, line }, sid)?;
+        // `cover`: only a success reports
+        if cover && matches!(pass, Stmt::Null) {
+            return Ok(());
+        }
+        let scope = self.scopes[sid].name.clone();
+        // (not started at time 0; `Defer` schedules it)
+        let p = self.begin_proc(scope, ProcClass::Postponed);
+        let act = Stmt::If { cond: ExprKind::Ident(name).into(), then_s: Box::new(pass.clone()), else_s: Some(Box::new(fail.clone())), line };
+        let r = self.stmt(&act, sid);
+        self.emit(Instr::Halt);
+        self.end_proc();
+        r?;
+        self.emit(Instr::Assert(rt::AssertOp::Defer { proc: p, postponed: final_ }));
+        Ok(())
+    }
+}

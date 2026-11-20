@@ -289,6 +289,9 @@ pub enum Item {
     },
     /// a concurrent assertion
     Assert(Box<ConcAssert>),
+    /// an elaboration system task (IEEE 1800-2017 20.11): `$fatal`, `$error`, `$warning`,
+    /// `$info` as an item, reported when its scope is elaborated
+    ElabTask { name: String, args: Vec<Option<Expr>>, line: Line },
 }
 
 /// A concurrent assertion (IEEE 1800-2017 16.14): `assert property`, `assume property`,
@@ -514,6 +517,10 @@ pub enum Stmt {
     Discard { e: Expr, line: Line },
     /// `wait fork`: until the fork branches the process started have ended
     WaitFork { line: Line },
+    /// a deferred immediate assertion (IEEE 1800-2017 16.4): the condition is evaluated
+    /// here, the action runs in the Reactive region (`#0`) or the Postponed region (`final`)
+    /// of the time step, once for the last evaluation in it
+    Deferred { final_: bool, cover: bool, cond: Expr, pass: Box<Stmt>, fail: Box<Stmt>, line: Line },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -526,6 +526,10 @@ impl Printer {
                 }
             }
             Item::Subroutine(f) => self.subroutine(f),
+            Item::ElabTask { name, args, .. } => {
+                let a: Vec<String> = args.iter().map(|a| a.as_ref().map(expr).unwrap_or_default()).collect();
+                self.line(format!("{name}({});", a.join(", ")))
+            }
             Item::Assert(a) => {
                 let kind = match a.kind {
                     AssertKind::Assert => "assert property",
@@ -812,6 +816,15 @@ impl Printer {
             Stmt::Discard { e: e @ Expr { kind: ExprKind::ArrayWith { .. }, .. }, .. } => self.line(format!("{};", expr(e))),
             Stmt::Discard { e, .. } => self.line(format!("void'({});", expr(e))),
             Stmt::WaitFork { .. } => self.line("wait fork;"),
+            Stmt::Deferred { final_, cover, cond, pass, fail, .. } => {
+                let kw = if *cover { "cover" } else { "assert" };
+                self.line(format!("{kw} {} ({})", if *final_ { "final" } else { "#0" }, expr(cond)));
+                self.ind += 1;
+                self.stmt(pass);
+                self.line("else");
+                self.stmt(fail);
+                self.ind -= 1;
+            }
         }
     }
 }

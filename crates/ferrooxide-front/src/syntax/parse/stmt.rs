@@ -615,9 +615,9 @@ impl Parser {
             let deferred = if self.is_p("#") && matches!(self.peek_at(1), T::Num(n) if n.digits == "0") {
                 self.bump();
                 self.bump();
-                Some(Kw::Final)
+                Some(Deferral::Zero)
             } else if self.eat_kw(Kw::Final) {
-                Some(Kw::Final)
+                Some(Deferral::Final)
             } else {
                 None
             };

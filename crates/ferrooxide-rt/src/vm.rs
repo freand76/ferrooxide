@@ -3282,6 +3282,20 @@ impl Sim {
                 self.asserts[id as usize].disable();
                 false
             }
+            AssertOp::Defer { proc, postponed } => {
+                self.procs[proc as usize].pc = 0;
+                if postponed {
+                    if !self.postponed.contains(&proc) {
+                        self.postponed.push(proc);
+                    }
+                } else {
+                    let g = self.procs[proc as usize].gen;
+                    if !self.reactive.iter().any(|r| r.0 == proc) {
+                        self.reactive.push((proc, g));
+                    }
+                }
+                false
+            }
             AssertOp::Reactive => {
                 let g = self.procs[p as usize].gen;
                 self.reactive.push((p, g));

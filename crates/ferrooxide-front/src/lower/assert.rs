@@ -105,7 +105,7 @@ impl Lower {
             (t::AssertKind::Assert, t::AssertBody::Property(p)) => (AssertKind::Assert, p),
             (t::AssertKind::Assume, t::AssertBody::Property(p)) => (AssertKind::Assume, p),
             (t::AssertKind::Cover, t::AssertBody::Property(p)) => (AssertKind::Cover, p),
-            (_, t::AssertBody::Immediate { .. }) => return self.unsupported(a.loc, "a deferred assertion"),
+            (_, t::AssertBody::Immediate { .. }) => unreachable!("a deferred assertion"),
         };
         let mut head = Head::default();
         let prop = self.sva_top(body, &mut head, a.loc)?;

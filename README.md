@@ -85,10 +85,11 @@ Verilog-2005 plus common SystemVerilog:
   `foreach`, `unique`/`priority`
 - concurrent assertions: `assert`/`assume`/`cover property`, `cover sequence`, sequence
   and property operators, named sequences and properties with arguments, default clocking,
-  `disable iff`, `$past`/`$rose`/`$fell`/`$stable`/`$changed`/`$sampled`
+  `disable iff`, `$past`/`$rose`/`$fell`/`$stable`/`$changed`/`$sampled`; deferred
+  assertions (`assert #0`, `assert final`); elaboration system tasks
 
-Not yet: clocking blocks with clocking signals, deferred assertions, assertions inside
-procedures, `%v` strength display, SDF, VPI.
+Not yet: clocking blocks with clocking signals, concurrent assertions inside procedures,
+`%v` strength display, SDF, VPI.
 The full list is "Unsupported (known)" in [PLAN.md](PLAN.md). Icarus's regression suite
 (ivtest) passes at about 91% (its SystemVerilog list at 92%); places where Icarus seems to
 deviate from the standard (ferrooxide matches Icarus) are listed in

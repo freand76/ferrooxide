@@ -53,8 +53,8 @@ impl Lower {
         let line = a.loc.line;
         let expr = match &a.body {
             t::AssertBody::Immediate { deferred: None, expr } => expr,
-            t::AssertBody::Immediate { .. } => return self.unsupported(a.loc, "a deferred assertion"),
-            _ => return self.unsupported(a.loc, "a concurrent assertion"),
+            t::AssertBody::Immediate { deferred: Some(_), .. } => return self.deferred_assertion(a, label),
+            _ => return self.unsupported(a.loc, "a concurrent assertion inside a procedure"),
         };
         if a.kind == t::AssertKind::Restrict {
             return self.unsupported(a.loc, "an immediate restrict");
@@ -72,6 +72,32 @@ impl Lower {
             None => Some(Stmt::SysTask { name: "$error".into(), args: Vec::new(), line }),
         };
         let st = Stmt::If { cond, then_s: Box::new(pass), else_s: fail.map(Box::new), line };
+        Ok(match label {
+            Some(l) => Stmt::Block { name: Some(self.name(l, a.loc)), decls: vec![], imports: vec![], params: vec![], stmts: vec![st], fork: None },
+            None => st,
+        })
+    }
+
+    /// A deferred immediate assertion (IEEE 1800-2017 16.4): `assert #0 (e)`, `assert final
+    /// (e)`; the default fail action is `$error`, `cover` has a pass action only.
+    pub(crate) fn deferred_assertion(&mut self, a: &t::Assertion, label: Option<&String>) -> Result<Stmt> {
+        let line = a.loc.line;
+        let t::AssertBody::Immediate { deferred: Some(k), expr } = &a.body else { unreachable!() };
+        if a.kind == t::AssertKind::Restrict {
+            return self.err(a.loc, "`restrict` takes a property");
+        }
+        let cover = a.kind == t::AssertKind::Cover;
+        let cond = self.expr(expr)?;
+        let pass = match &a.action.pass {
+            Some(st) => self.stmt(st)?,
+            None => Stmt::Null,
+        };
+        let fail = match &a.action.fail {
+            Some(st) => self.stmt(st)?,
+            None if cover => Stmt::Null,
+            None => Stmt::SysTask { name: "$error".into(), args: Vec::new(), line },
+        };
+        let st = Stmt::Deferred { final_: *k == t::Deferral::Final, cover, cond, pass: Box::new(pass), fail: Box::new(fail), line };
         Ok(match label {
             Some(l) => Stmt::Block { name: Some(self.name(l, a.loc)), decls: vec![], imports: vec![], params: vec![], stmts: vec![st], fork: None },
             None => st,

@@ -199,6 +199,12 @@ pub(crate) struct Hier<'a> {
 #[derive(Default)]
 pub(crate) struct Diag {
     pub(crate) warnings: Vec<String>,
+    /// messages of elaboration system tasks, printed when elaboration is done
+    pub(crate) elab_msgs: Vec<String>,
+    /// where `$error` / `$fatal` elaboration tasks were reached (elaboration fails)
+    pub(crate) elab_errors: Vec<(String, u32)>,
+    /// a `$fatal` elaboration task ended elaboration: later ones say nothing
+    pub(crate) elab_fatal: bool,
     /// lint findings (only collected with `lint_enabled`)
     pub(crate) lint: Vec<String>,
     pub(crate) lint_seen: HashSet<String>,
@@ -474,6 +480,13 @@ pub fn compile_dialect(
     }
     break c;
     };
+    for m in &c.diag.elab_msgs {
+        eprintln!("{m}");
+    }
+    if let Some((file, line)) = c.diag.elab_errors.first() {
+        let n = c.diag.elab_errors.len();
+        return Err(Error { msg: format!("{n} error(s) during elaboration ($error / $fatal)"), file: file.clone(), line: *line });
+    }
     if let Some(e) = c.sigs.mem_error.take() {
         return Err(e);
     }

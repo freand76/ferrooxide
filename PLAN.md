@@ -382,8 +382,14 @@ step (`Program::samples`); `$past` is a register chain shifted at every tick. Ac
 run in a Reactive region (`Sim::reactive`, after the NBAs), once per pass or failure;
 `disable iff` ends attempts between ticks through a second process. 27 more sv-tests pass;
 ariane now stops at elaboration system tasks. Left: see "Unsupported (known)"; next by
-value: assertions inside procedures, clocking blocks with signals (chapter 14), deferred
-assertions, global clocking.
+value: assertions inside procedures, clocking blocks with signals (chapter 14), global
+clocking. *Then (2026-11-20)*: elaboration system tasks (`Item::ElabTask`: `$info`/
+`$warning`/`$error`/`$fatal` in a module or generate scope print the reference's
+"During elaboration" lines when the scope is elaborated, after elaboration; `$error` and
+`$fatal` make it fail) and deferred assertions (`Stmt::Deferred`: the outcome in a hidden
+bit, an action process scheduled once per time step into the Reactive or Postponed region,
+so a later evaluation replaces the report; at module level in an always_comb): ariane now
+stops at automatic variables in static subroutines.
 
 1. **sv-tests, first part** (chipsalliance/sv-tests; results, error tables and the reasons
    in `SV_TESTS.md`). 3798 of 5110 tests pass at a3fa6b3 with the ferrooxide runner
@@ -764,7 +770,9 @@ SystemVerilog data types and testbench features:
   event control before a statement (not in intra-assignment controls).
 - nets of 2-state types (`wire bit`, `wire int`; a reference extension, 6.7.1 allows only
   4-state types) [implicit_cast4-13, br_gh337].
-- deferred assertions (`assert #0`, `assert final`) [sv_deferred_assert*]; of concurrent
+- deferred assertions: a deferred assertion run several times in one activation (a loop)
+  reports only the last outcome; the reference does not support them, its tests
+  [sv_deferred_assert*] hold its "sorry" messages. Of concurrent
   assertions (see Next steps): assertions inside procedures (clock inferred from the
   procedure), local variables of sequences and properties, match items, `first_match`,
   `nexttime`/`always`/`eventually`/`until`/`accept_on` & co., `#-#`/`#=#`, `case`

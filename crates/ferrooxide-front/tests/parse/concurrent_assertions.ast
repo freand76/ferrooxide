@@ -25,4 +25,31 @@ module m (clk, rst, a, b, x);
     ;
     else
     ;
+  always_comb begin : d1
+    assert #0 ((a == b))
+      ;
+      else
+      $display("d1");
+  end
+  always_comb
+    cover final ((x != 0))
+      ;
+      else
+      ;
+  always
+    @(x)
+      assert final ((x < 9))
+        ;
+        else
+        $error();
+endmodule
+module elab ();
+  // imports $unit
+  parameter N = 1;
+  if ((N > 1)) begin
+    $error("N = %0d", N);
+  end
+  else begin
+    $info();
+  end
 endmodule
