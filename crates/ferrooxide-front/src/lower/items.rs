@@ -545,8 +545,10 @@ impl Lower {
         self.in_subroutine = false;
         r?;
         let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts, fork: None } };
+        let written = decls.clone();
         let (decls, scalar_vec_ports) = super::merge_port_types(decls);
-        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, scalar_vec_ports, params, body, line })
+        let decls_written = if decls.len() != written.len() || decls.iter().zip(&written).any(|(a, b)| a.names.len() != b.names.len()) { written } else { Vec::new() };
+        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, scalar_vec_ports, decls_written, params, body, line })
     }
 }
 

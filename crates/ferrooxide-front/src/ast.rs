@@ -200,6 +200,9 @@ pub struct SubroutineDecl {
     /// ports declared without a range that a later declaration gives one (`input a;
     /// reg [3:0] a;`): the line of that declaration (the reference warns about them)
     pub scalar_vec_ports: Vec<(String, Line)>,
+    /// the port and type declarations as written, when `decls` merged some (for the checks
+    /// of names declared twice); empty: `decls` are as written
+    pub decls_written: Vec<Decl>,
     /// parameters declared in the subroutine (local to it)
     pub params: Vec<ParamDecl>,
     pub body: Stmt,

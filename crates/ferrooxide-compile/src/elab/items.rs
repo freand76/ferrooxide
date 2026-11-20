@@ -18,6 +18,61 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// Rejects names declared twice among `decls` (the declarations of one scope, or of one
+    /// subroutine; IEEE 1364-2005 12.3.3, 1800-2017 23.2.2.1): at most one direction and one
+    /// net or variable declaration each; a direction declaration with a data type declares
+    /// the port completely; with both, the ranges are the same (a typed declaration, or one
+    /// without a range, goes only with a direction declaration without a range).
+    pub(crate) fn check_redeclared<'d>(&mut self, decls: impl Iterator<Item = &'d Decl>, sid: usize) -> R<()> {
+        let mut seen: HashMap<&str, (Option<&Decl>, Option<&Decl>)> = HashMap::new();
+        for d in decls {
+            if d.kind == NetKind::Genvar {
+                continue;
+            }
+            for dl in &d.names {
+                let e = seen.entry(dl.name.as_str()).or_default();
+                let slot = if d.dir.is_some() { &mut e.0 } else { &mut e.1 };
+                if slot.is_some() {
+                    self.line = dl.line;
+                    let what = if d.dir.is_some() { "port " } else { "" };
+                    return self.err(format!("{what}'{}' is declared more than once", dl.name));
+                }
+                *slot = Some(d);
+                let (Some(p), Some(v)) = *e else { continue };
+                self.line = dl.line;
+                let lines = format!("lines {} and {}", p.line.min(v.line), p.line.max(v.line));
+                if p.explicit_kind {
+                    return self.err(format!(
+                        "port '{}' is declared twice ({lines}): a port declaration with a data type declares it completely",
+                        dl.name
+                    ));
+                }
+                if p.type_param.is_some() || v.type_param.is_some() || !p.range_written {
+                    continue; // (a range on the net only: the scalar port check)
+                }
+                // (ranges that cannot be evaluated here, e.g. with a subroutine's own
+                // parameters, are not compared)
+                let same = v.range_written && {
+                    let mut ranges = |d: &Decl| -> Option<Vec<(i64, i64)>> {
+                        let mut r = Vec::new();
+                        for (a, b) in d.range.iter().chain(&d.packed) {
+                            r.push((self.const_int(a, sid).ok()?, self.const_int(b, sid).ok()?));
+                        }
+                        Some(r)
+                    };
+                    match (ranges(p), ranges(v)) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => true,
+                    }
+                };
+                if !same {
+                    return self.err(format!("port '{}': its declarations ({lines}) have different ranges", dl.name));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn elab_items(
         &mut self,
         items: &'a [Item],
@@ -66,6 +121,7 @@ impl<'a> Compiler<'a> {
             }
         }
         // 2. declarations (merged by name: `output [3:0] q; reg [3:0] q;`)
+        self.check_redeclared(items.iter().filter_map(|it| if let Item::Decl(d) = it { Some(d) } else { None }), sid)?;
         struct Merged<'d> {
             dir: Option<Dir>,
             kind: NetKind,
@@ -510,6 +566,8 @@ impl<'a> Compiler<'a> {
         let mut subs: Vec<&SubroutineDecl> = items.iter().filter_map(|it| if let Item::Subroutine(f) = it { Some(f) } else { None }).collect();
         subs.sort_by(|a, b| a.name.cmp(&b.name));
         for f in subs {
+            let written = if f.decls_written.is_empty() { &f.decls } else { &f.decls_written };
+            self.check_redeclared(written.iter(), sid)?;
             for (n, l) in &f.scalar_vec_ports {
                 let Some((a, b)) = f.decls.iter().find(|d| d.dir.is_some() && d.names.iter().any(|x| &x.name == n)).and_then(|d| d.range.as_ref()) else { continue };
                 let (a, b) = (self.const_int(a, sid)?, self.const_int(b, sid)?);
