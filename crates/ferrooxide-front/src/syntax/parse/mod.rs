@@ -30,6 +30,8 @@ pub struct Parser {
     pub classes: HashMap<String, HashSet<String>>,
     /// in a constraint: `->` is an implication of constraint sets, not an operator
     in_constraint: bool,
+    /// nesting depth of generate regions and blocks (no specify block or specparam there)
+    in_generate: u32,
 }
 
 /// What a parser carries from one file to the next of the same compilation unit.
@@ -51,7 +53,7 @@ impl Parser {
             unit.insert(t.to_string());
             classes.entry(t.to_string()).or_default();
         }
-        Parser { toks, pos: 0, file, scopes: vec![unit], packages, classes, in_constraint: false }
+        Parser { toks, pos: 0, file, scopes: vec![unit], packages, classes, in_constraint: false, in_generate: 0 }
     }
 
     pub fn into_state(mut self) -> UnitState {

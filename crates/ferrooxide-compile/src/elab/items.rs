@@ -735,6 +735,9 @@ impl<'a> Compiler<'a> {
                     self.line = *line;
                     genblk += 1;
                     let bname = name.clone().unwrap_or_else(|| format!("genblk{genblk}"));
+                    for e in [init, cond, step] {
+                        self.no_specparam(e, sid)?;
+                    }
                     let mut v = self.const_int(init, sid)?;
                     let mut iters = 0;
                     loop {
@@ -766,6 +769,7 @@ impl<'a> Compiler<'a> {
                     let (mut cond, mut then_items, mut then_name, mut else_items, mut else_name) =
                         (cond, then_items, then_name, else_items, else_name);
                     loop {
+                        self.no_specparam(cond, sid)?;
                         let c = self.const_eval(cond, sid)?.is_true();
                         if c {
                             self.gen_scope(then_items, then_name, genblk, sid)?;
@@ -785,6 +789,10 @@ impl<'a> Compiler<'a> {
                 Item::GenCase { expr, arms, line, .. } => {
                     self.line = *line;
                     genblk += 1;
+                    self.no_specparam(expr, sid)?;
+                    for e in arms.iter().flat_map(|a| &a.0) {
+                        self.no_specparam(e, sid)?;
+                    }
                     let v = self.const_eval(expr, sid)?;
                     let mut chosen = None;
                     for (labels, nm, its) in arms {

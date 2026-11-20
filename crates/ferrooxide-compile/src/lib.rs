@@ -77,6 +77,8 @@ pub(crate) struct Scope<'a> {
     pub str_params: HashSet<String>,
     /// parameters declared `string` (typed as strings; the value is the text as a vector)
     pub string_params: HashSet<String>,
+    /// the specparams declared here
+    pub specparams: HashSet<String>,
     pub file: String,
     /// time unit and precision of the enclosing module (powers of ten of seconds)
     pub tunit: i32,
@@ -692,6 +694,7 @@ impl<'a> Compiler<'a> {
             param_ranges: HashMap::new(),
             str_params: HashSet::new(),
             string_params: HashSet::new(),
+            specparams: HashSet::new(),
             file,
             tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
             tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),

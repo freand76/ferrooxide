@@ -429,7 +429,7 @@ impl Lower {
                                 None => num(0),
                             },
                         };
-                        self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
+                        self.pending.push(Item::Param(ParamDecl { local: true, spec: false, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
                         names.push(name.clone());
                         prev = Some(name);
                     }
@@ -689,7 +689,7 @@ impl Lower {
         self.decl_type = pt.sv.clone().map(Rc::new);
         self.declare_var(&name, &[]);
         let ty = self.decl_type.clone();
-        Ok(ParamDecl { local, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, ty, name, value, enum_type: None, line: d.loc.line })
+        Ok(ParamDecl { local, spec: false, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, ty, name, value, enum_type: None, line: d.loc.line })
     }
 
     /// A declaration head: direction, net type, `var`, data type, strength and delay.

@@ -155,6 +155,8 @@ pub struct Decl {
 #[derive(Debug, Clone)]
 pub struct ParamDecl {
     pub local: bool,
+    /// a `specparam` (not allowed in parameter values and generate conditions)
+    pub spec: bool,
     pub signed: bool,
     pub range: Option<Range>,
     /// `integer` type

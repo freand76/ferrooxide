@@ -143,6 +143,7 @@ impl Parser {
         let loc = self.loc();
         match k {
             Kw::Timeunit | Kw::Timeprecision => out.push(self.timeunits()?),
+            Kw::Specparam if self.in_generate > 0 => return self.err("a specparam is not allowed in a generate block"),
             Kw::Parameter | Kw::Localparam | Kw::Specparam => {
                 let p = self.param_decl(true)?;
                 self.expect_p(";")?;
@@ -195,12 +196,14 @@ impl Parser {
             Kw::Generate => {
                 self.bump();
                 let mut v = Vec::new();
+                self.in_generate += 1;
                 while !self.eat_kw(Kw::Endgenerate) {
                     if self.at_eof() {
                         return self.err("unexpected end of file in generate region");
                     }
                     self.module_item(&mut v)?;
                 }
+                self.in_generate -= 1;
                 out.push(Item::Generate(v, loc));
             }
             Kw::For => out.push(self.gen_for()?),
@@ -222,6 +225,7 @@ impl Parser {
                 self.expect_p(";")?;
                 out.push(Item::Defparam(v, loc));
             }
+            Kw::Specify if self.in_generate > 0 => return self.err("a specify block is not allowed in a generate block"),
             Kw::Specify => out.push(self.specify()?),
             Kw::Genvar => {
                 self.bump();
@@ -1140,6 +1144,13 @@ impl Parser {
 
     /// A generate block: `[begin [: name] items end [: name]]` or a single item.
     pub(crate) fn gen_block(&mut self) -> Result<GenBlock> {
+        self.in_generate += 1;
+        let b = self.gen_block_inner();
+        self.in_generate -= 1;
+        b
+    }
+
+    fn gen_block_inner(&mut self) -> Result<GenBlock> {
         let loc = self.loc();
         if self.eat_kw(Kw::Begin) {
             let name = self.end_label()?;
@@ -1157,7 +1168,7 @@ impl Parser {
         if self.is_ident() && self.is_p_at(1, ":") && self.is_kw_at(2, Kw::Begin) {
             let label = self.ident()?;
             self.bump();
-            let mut b = self.gen_block()?;
+            let mut b = self.gen_block_inner()?;
             if b.name.is_none() {
                 b.name = Some(label);
             }

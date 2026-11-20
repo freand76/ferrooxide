@@ -148,6 +148,9 @@ impl<'a> Compiler<'a> {
 
     /// The value of a parameter (from its override if any): integer or real.
     pub(crate) fn param_value(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
+        if let (false, Some(v)) = (p.spec, &p.value) {
+            self.no_specparam(v, sid)?;
+        }
         let value = match (&p.value, &ov) {
             (Some(v), _) => v,
             (None, Some(_)) => &Expr::Num(ferrooxide_front::ast::dec(0)),
@@ -222,6 +225,9 @@ impl<'a> Compiler<'a> {
     /// its flat name.
     pub(crate) fn insert_param(&mut self, p: &ParamDecl, v: Sym, sid: usize) -> R<()> {
         self.enum_const(p, sid);
+        if p.spec {
+            self.scopes[sid].specparams.insert(p.name.clone());
+        }
         if let Some(t) = p.ty.as_ref().filter(|t| t.has_struct() || t.dims.len() > 1) {
             let t = self.resolve_type(t, sid)?;
             self.scopes[sid].syms.insert(format!("$type:{}", p.name), Sym::Type(Rc::new(t)));
@@ -230,6 +236,55 @@ impl<'a> Compiler<'a> {
         }
         self.scopes[sid].syms.insert(p.name.clone(), v);
         Ok(())
+    }
+
+    /// Reject a specparam in `e`: parameter values and generate conditions may not use one
+    /// (IEEE 1800 6.20.5).
+    pub(crate) fn no_specparam(&self, e: &Expr, sid: usize) -> R<()> {
+        let mut found = None;
+        self.find_specparam(e, sid, &mut found);
+        match found {
+            Some(n) => self.err(format!("specparam '{n}' cannot be used in a parameter value or a generate condition")),
+            None => Ok(()),
+        }
+    }
+
+    fn find_specparam(&self, e: &Expr, sid: usize, found: &mut Option<String>) {
+        let mut sub = |x: &Expr| self.find_specparam(x, sid, found);
+        match e {
+            Expr::Ident(n) => {
+                let mut s = Some(sid);
+                while let Some(i) = s {
+                    if self.scopes[i].syms.contains_key(n) {
+                        if self.scopes[i].specparams.contains(n) {
+                            *found = Some(n.clone());
+                        }
+                        return;
+                    }
+                    s = self.scopes[i].parent;
+                }
+            }
+            Expr::Index(a, b) => {
+                sub(a);
+                sub(b);
+            }
+            Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
+                sub(a);
+                sub(b);
+                sub(c);
+            }
+            Expr::Unary(_, a) | Expr::Member(a, _) => sub(a),
+            Expr::Binary(_, a, b) => {
+                sub(a);
+                sub(b);
+            }
+            Expr::Repl(a, v) => {
+                sub(a);
+                v.iter().for_each(sub);
+            }
+            Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter().for_each(sub),
+            _ => {}
+        }
     }
 
     /// evaluate a parameter override in the instantiating scope
