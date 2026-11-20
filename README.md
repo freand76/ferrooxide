@@ -17,10 +17,19 @@ CPU cycles (`perf stat`) on the same machine, Icarus Verilog 14 (`iverilog` + `v
 
 | benchmark | Icarus | ferrooxide | speed-up |
 |-----------|-------:|-----------:|---------:|
-| [`bench/cpuish.v`](bench/cpuish.v): 32 lanes of LFSR + ALU + accumulator, 200k clock cycles | 33.6 G | 2.82 G | **12x** |
-| [`bench/mixed.v`](bench/mixed.v): combinational chain, 128-bit datapath, memory, FSM, 300k cycles | 13.5 G | 0.68 G | **20x** |
+| [`bench/cpuish.v`](bench/cpuish.v): 32 lanes of LFSR + ALU + accumulator, 200k clock cycles | 33.6 G | 2.60 G | **13x** |
+| [`bench/mixed.v`](bench/mixed.v): combinational chain, 128-bit datapath, memory, FSM, 300k cycles | 13.2 G | 0.68 G | **19x** |
 
-Both produce output identical to Icarus.
+Both produce output identical to Icarus. (Measured 2026-11-20, median of three runs, with the
+`speed` build.)
+
+The numbers are for the `speed` profile, a release build with link-time optimisation (slower
+to build, a few percent faster):
+
+```sh
+cargo build --profile speed
+perf stat -e cycles target/speed/ferrooxide bench/cpuish.v
+```
 
 How: 4-state values as (value, unknown) word pairs with a 2-state fast path; processes lowered to
 specialised ops and JIT-compiled per *shape* (identical processes of different instances share

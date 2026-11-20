@@ -197,11 +197,11 @@ CPU cycles (`perf stat`, same machine):
 
 | benchmark | Icarus | ferrooxide JIT | ferrooxide `--no-jit` | speed-up |
 |-----------|--------|----------------|-----------------------|----------|
-| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 2.82 G | 5.0 G | **11.9x** |
-| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.5 G | 0.68 G | 1.4 G | **19.9x** |
+| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 2.60 G | 4.33 G | **12.9x** |
+| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.2 G | 0.68 G | 1.13 G | **19.4x** |
 
-(JIT column measured 2026-11-19 at ba4fb93: cpuish 6.92 G instructions, mixed 1.87 G; the
-other columns are from 2026-11-14.)
+(Measured 2026-11-20 at 296d2ef with `cargo build --profile speed` (`target/speed/`), median
+of three runs; outputs identical to the reference.)
 
 With a full VCD dump (all signals; wall time, same machine, 2026-11-13):
 
