@@ -14,7 +14,7 @@ mod stmt;
 mod types;
 
 use crate::ast::*;
-pub use types::{Package, SvType};
+pub use types::{minus_one, Package, SvType};
 use crate::syntax::kw::Kw;
 use crate::syntax::tree as t;
 use crate::{Error, Options, Result};

@@ -44,6 +44,15 @@ impl Const {
         self.b[n - 1] &= tmask(self.w);
     }
 
+    /// x and z bits as 0 (a value of a 2-state type).
+    pub fn two_state(mut self) -> Const {
+        for (a, b) in self.a.iter_mut().zip(self.b.iter_mut()) {
+            *a &= !*b;
+            *b = 0;
+        }
+        self
+    }
+
     pub fn is_known(&self) -> bool {
         self.b.iter().all(|&x| x == 0)
     }

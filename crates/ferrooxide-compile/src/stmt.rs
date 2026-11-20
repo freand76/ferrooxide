@@ -1798,8 +1798,8 @@ impl<'a> Compiler<'a> {
             };
             let v = self.param_value(p, ov, b)?;
             self.insert_param(p, v, b)?;
-            if p.range.is_some() && !p.real {
-                let r = self.range_vals(&p.range, b)?;
+            if p.range().is_some() {
+                let r = self.range_vals(&p.range(), b)?;
                 self.scopes[b].param_ranges.insert(p.name.clone(), r);
             }
         }

@@ -162,8 +162,8 @@ impl<'a> Compiler<'a> {
                     self.line = p.line;
                     let v = self.param_value(p, None, sid)?;
                     self.insert_param(p, v, sid)?;
-                if p.range.is_some() && !p.real {
-                    let r = self.range_vals(&p.range, sid)?;
+                if p.range().is_some() {
+                    let r = self.range_vals(&p.range(), sid)?;
                     self.scopes[sid].param_ranges.insert(p.name.clone(), r);
                 }
                 }

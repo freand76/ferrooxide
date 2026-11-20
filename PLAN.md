@@ -514,7 +514,13 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    `$cast`/`$typename`, pure methods, replication in assignment patterns.
 5. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
    positional assignment patterns for packed array parameters [sv_ap_parray2] and
-   index keys in patterns of packed arrays done 2026-11-20.
+   index keys in patterns of packed arrays done 2026-11-20. Slice 5 (2026-11-20):
+   a parameter has one declared type (`ParamDecl::ty`, None: the value's type; `range()`,
+   `integer()`, `real()` derived from it) instead of a flat form beside an optional type;
+   with it, values of 2-state parameter types lose x/z bits, `int unsigned` parameters
+   are unsigned and scalar `bit`/`logic` parameters are one bit wide (were the value's
+   type). Next candidate: `Decl`'s flat form (`kind`/`signed`/`range`/`packed` beside `ty`,
+   which the non-ANSI port merging reads).
 6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
    list: 14 compile errors, 105 wrong outputs): the Verilog items under "Unsupported
    (known)", e.g. `$countdrivers` (5 tests),
@@ -724,10 +730,9 @@ SystemVerilog data types and testbench features:
 - `static` variables at the top level of an automatic function or task (in its blocks they
   work since 2026-11-19: `Subr::static_vars`), static queues in subroutine blocks;
   multi-dimensional arrays in subroutines (arguments and variables), array
-  arguments of recursive calls; parameters without a default [parameter_no_default*].
+  arguments of recursive calls.
 - structs: members through hierarchical names (`inst.v.f`), unpacked array members, member
-  defaults, method calls on members (`s.name.len()`), `%p` of a whole struct; assignment
-  patterns for packed array parameters [sv_ap_parray2]; unpacked array slices with
+  defaults, method calls on members (`s.name.len()`), `%p` of a whole struct; unpacked array slices with
   run-time bounds, comparisons of whole unpacked arrays (`a == b`); `$is_signed` [struct_signed,
   struct_member_signed].
 - nested modules with ports instantiated from outside their module; multi-dimensional

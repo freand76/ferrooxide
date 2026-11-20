@@ -571,16 +571,16 @@ impl Printer {
     fn param_text(p: &ParamDecl) -> String {
         let kw = if p.local { "localparam" } else { "parameter" };
         let mut s = kw.to_string();
-        if p.integer {
+        if p.integer() {
             s.push_str(" integer");
         }
-        if p.real {
+        if p.real() {
             s.push_str(" real");
         }
         if p.signed {
             s.push_str(" signed");
         }
-        if let Some(r) = &p.range {
+        if let Some(r) = &p.range() {
             let _ = write!(s, " {}", range(r));
         }
         match &p.value {

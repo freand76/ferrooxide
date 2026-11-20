@@ -258,11 +258,12 @@ pub(crate) fn qualify_expr(e: &mut Expr, names: &std::collections::HashMap<Strin
     }
 }
 
+/// The type of a value parameter.
 pub(crate) struct PType {
     pub signed: bool,
-    pub integer: bool,
-    pub real: bool,
-    pub range: Option<Range>,
+    /// the declared type (None: the value's)
+    pub ty: Option<SvType>,
+    /// the type the lowering keeps for the name (members, methods, selects)
     pub sv: Option<SvType>,
 }
 
@@ -454,6 +455,9 @@ impl Lower {
                     },
                 };
                 let two_state = matches!(base.kind, NetKind::Bit | NetKind::Int(_));
+                // the type of the constants: a vector of the base type's range (a 1-bit base:
+                // the value's type)
+                let const_ty = range.clone().map(|r| Rc::new(SvType::vector(base.kind, signed, vec![r])));
                 for it in &et.items {
                     // `name[N]`: name0 .. name(N-1); `name[N:M]`: nameN .. nameM (6.19)
                     let base_name = self.name(&it.name, it.loc);
@@ -502,7 +506,7 @@ impl Lower {
                                 None => num(0),
                             },
                         };
-                        self.pending.push(Item::Param(ParamDecl { local: true, spec: false, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
+                        self.pending.push(Item::Param(ParamDecl { local: true, spec: false, signed, ty: const_ty.clone(), name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
                         names.push(name.clone());
                         prev = Some(name);
                     }
@@ -719,50 +723,38 @@ impl Lower {
         let svlike = self.is_sv_type(ty) || matches!(ty.kind, t::TypeKind::Int(t::IntKw::Byte | t::IntKw::Shortint | t::IntKw::Longint | t::IntKw::Time));
         if svlike {
             let t = self.data_type_req(ty)?;
-            let (kind, signed, range, packed) = t.decl_parts();
-            // a parameter has one range: the whole width
-            let range = if packed.is_empty() { range } else { Some((minus_one(t.width()), ExprKind::Num(dec(0)).into())) };
-            if t.int_kind && matches!(kind, NetKind::Int(_) | NetKind::Time) && !matches!(kind, NetKind::Int(32)) {
-                // byte, shortint, longint, time: their width
-                let range = Some((minus_one(t.width()), ExprKind::Num(dec(0)).into()));
-                return Ok(PType { signed, integer: false, real: false, range, sv: Some(t) });
-            }
-            let integer = matches!(kind, NetKind::Int(_) | NetKind::Integer) && range.is_none();
-            return Ok(PType { signed, integer, real: false, range, sv: Some(t) });
+            return Ok(PType { signed: t.signed, ty: Some(t.clone()), sv: Some(t) });
         }
-        let mut signed = ty.signed == Some(true);
-        let mut integer = false;
-        let mut real = false;
-        match &ty.kind {
-            t::TypeKind::Implicit | t::TypeKind::Int(t::IntKw::Logic | t::IntKw::Bit | t::IntKw::Reg) => {}
-            t::TypeKind::Int(t::IntKw::Integer | t::IntKw::Int) => {
-                integer = true;
-                signed = ty.signed != Some(false);
+        let signed = ty.signed;
+        let int = |kind: NetKind, signed: bool| SvType { int_kind: true, ..SvType::vector(kind, signed, vec![(num(31), num(0))]) };
+        let t = match &ty.kind {
+            t::TypeKind::Implicit | t::TypeKind::Int(t::IntKw::Logic | t::IntKw::Bit | t::IntKw::Reg) => {
+                let kind = if matches!(ty.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
+                let dims = self.packed_dims(&ty.packed, ty.loc)?;
+                let signed = signed == Some(true);
+                // `parameter P` / `parameter signed P`: the value's type
+                if dims.is_empty() && matches!(ty.kind, t::TypeKind::Implicit) {
+                    return Ok(PType { signed, ty: None, sv: None });
+                }
+                // (several packed dimensions: the lowering keeps the type of the name)
+                let t = SvType::vector(kind, signed, dims);
+                let sv = (t.dims.len() > 1).then(|| t.clone());
+                return Ok(PType { signed, ty: Some(t), sv });
             }
-            t::TypeKind::Real(_) => real = true,
+            t::TypeKind::Int(t::IntKw::Integer) => int(NetKind::Integer, signed != Some(false)),
+            t::TypeKind::Int(t::IntKw::Int) => int(NetKind::Int(32), signed != Some(false)),
+            t::TypeKind::Real(_) => SvType::vector(NetKind::Real, true, vec![]),
             t::TypeKind::String if ty.packed.is_empty() => {
                 // a string parameter (its value is the text, as a vector; typed `string`)
-                let st = SvType { kind: NetKind::String, signed: false, dims: vec![], fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None };
-                return Ok(PType { signed: false, integer: false, real: false, range: None, sv: Some(st) });
+                let st = SvType::vector(NetKind::String, false, vec![]);
+                return Ok(PType { signed: false, ty: Some(st.clone()), sv: Some(st) });
             }
             _ => return self.unsupported(ty.loc, "a parameter of this type"),
-        }
-        if ty.packed.len() > 1 {
-            // several packed dimensions: one range for the whole width, the type keeps them
-            if integer || real {
-                return self.err(ty.loc, "packed dimensions after a type that has a width");
-            }
-            let kind = if matches!(ty.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
-            let t = SvType::vector(kind, signed, self.packed_dims(&ty.packed, ty.loc)?);
-            let range = Some((minus_one(t.width()), ExprKind::Num(dec(0)).into()));
-            return Ok(PType { signed, integer: false, real: false, range, sv: Some(t) });
-        }
-        let range = match ty.packed.as_slice() {
-            [] => None,
-            [d] => Some(self.dim(d, ty.loc)?),
-            _ => unreachable!(),
         };
-        Ok(PType { signed, integer, real, range, sv: None })
+        if !ty.packed.is_empty() {
+            return self.err(ty.loc, "packed dimensions after a type that has a width");
+        }
+        Ok(PType { signed: t.signed && t.kind != NetKind::Real, ty: Some(t), sv: None })
     }
 
     /// One `name = value` of a value parameter; `port`: in a parameter port list.
@@ -780,8 +772,8 @@ impl Lower {
         };
         self.decl_type = pt.sv.clone().map(Rc::new);
         self.declare_var(&name, &[]);
-        let ty = self.decl_type.clone();
-        Ok(ParamDecl { local, spec: false, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, ty, name, value, enum_type: None, line: d.loc.line })
+        let ty = pt.ty.clone().map(Rc::new);
+        Ok(ParamDecl { local, spec: false, signed: pt.signed, ty, name, value, enum_type: None, line: d.loc.line })
     }
 
     /// A module port declaration `dir [net] [var] ty`: an inout port is a net (IEEE 1800-2017

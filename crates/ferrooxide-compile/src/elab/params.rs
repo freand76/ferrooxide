@@ -78,8 +78,8 @@ impl<'a> Compiler<'a> {
                 }
                 let v = self.param_value(p, ov, sid)?;
                 self.insert_param(p, v, sid)?;
-                if p.range.is_some() && !p.real {
-                    let r = self.range_vals(&p.range, sid)?;
+                if p.range().is_some() {
+                    let r = self.range_vals(&p.range(), sid)?;
                     self.scopes[sid].param_ranges.insert(p.name.clone(), r);
                 }
             }
@@ -194,28 +194,23 @@ impl<'a> Compiler<'a> {
             self.scopes[sid].str_params.insert(p.name.clone());
             return Ok(Sym::Const(c.with_sign(false)));
         }
-        if p.enum_type.is_some() && ov.is_none() && p.range.is_some() {
+        if p.enum_type.is_some() && ov.is_none() && p.range().is_some() {
             self.enum_in_range(p, value, sid)?;
         }
-        let untyped = !p.integer && p.range.is_none() && !p.signed;
+        let untyped = !p.integer() && p.range().is_none() && !p.signed;
         // a number given for a ranged parameter: widened like in an expression (`'bx` fills)
-        if let (None, ExprKind::Num(n), Some(_), false) = (&ov, &value.kind, &p.range, p.real) {
-            let (a, b) = self.range_vals(&p.range, sid)?;
+        if let (None, ExprKind::Num(n), Some(_), false) = (&ov, &value.kind, &p.range(), p.real()) {
+            let (a, b) = self.range_vals(&p.range(), sid)?;
             let w = ((a - b).abs() + 1) as u32;
             let c = Const::number_in(n, w, n.signed).or_else(|m| self.err(m))?;
-            return Ok(Sym::Const(c.with_sign(p.signed)));
+            return Ok(Sym::Const(self.param_type(p, c, sid)?));
         }
         let v = match ov {
             Some(v) => v,
             None => {
-                let layout = match (&p.ty, &p.range) {
-                    (Some(t), _) => Some(self.packed(t, sid)?),
-                    // a pattern for a vector parameter: one item per bit (IEEE 1800-2017
-                    // 10.9.1)
-                    (None, Some(r)) if matches!(value.kind, ExprKind::Pattern(None, _)) => {
-                        Some(self.packed(&SvType::vector(NetKind::Reg, p.signed, vec![r.clone()]), sid)?)
-                    }
-                    (None, _) => None,
+                let layout = match p.ty.as_ref().filter(|t| t.kind != NetKind::Real) {
+                    Some(t) => Some(self.packed(t, sid)?),
+                    None => None,
                 };
                 let r = self.with_target(value, layout.as_ref(), sid)?;
                 let value = r.as_ref().unwrap_or(value);
@@ -231,7 +226,7 @@ impl<'a> Compiler<'a> {
         if matches!(v, PVal::Type(_)) {
             return self.err(format!("parameter '{}' needs a value, not a type", p.name));
         }
-        if p.real || (untyped && matches!(v, PVal::Real(_))) {
+        if p.real() || (untyped && matches!(v, PVal::Real(_))) {
             let r = match v {
                 PVal::Real(r) => r,
                 PVal::Int(c) | PVal::Str(c) => c.to_i64().unwrap_or(0) as f64,
@@ -253,7 +248,7 @@ impl<'a> Compiler<'a> {
     /// The value of enum constant `p` fits its base type (IEEE 1800-2017 6.19): a wider
     /// value loses no bits and is not negative for an unsigned base.
     fn enum_in_range(&mut self, p: &ParamDecl, value: &Expr, sid: usize) -> R<()> {
-        let (a, b) = self.range_vals(&p.range, sid)?;
+        let (a, b) = self.range_vals(&p.range(), sid)?;
         let w = ((a - b).abs() + 1) as u32;
         if w >= 63 {
             return Ok(());
@@ -465,18 +460,21 @@ impl<'a> Compiler<'a> {
         Ok(r)
     }
 
+    /// Value `v` converted to the type of parameter `p` (IEEE 1800-2017 6.20.2): its width
+    /// and sign, no x or z bits in a 2-state type.
     pub(crate) fn param_type(&mut self, p: &ParamDecl, v: Const, sid: usize) -> R<Const> {
-        if p.integer {
-            return Ok(v.resize(32, v.signed).with_sign(true));
-        }
-        if p.range.is_some() {
-            let (a, b) = self.range_vals(&p.range, sid)?;
+        let v = if p.integer() {
+            v.resize(32, v.signed).with_sign(p.signed)
+        } else if let Some(r) = p.range() {
+            let (a, b) = self.range_vals(&Some(r), sid)?;
             let w = ((a - b).abs() + 1) as u32;
-            return Ok(v.resize(w, v.signed).with_sign(p.signed));
-        }
-        if p.signed {
-            return Ok(v.with_sign(true));
-        }
-        Ok(v)
+            v.resize(w, v.signed).with_sign(p.signed)
+        } else if p.signed {
+            v.with_sign(true)
+        } else {
+            v
+        };
+        let two_state = p.ty.as_ref().is_some_and(|t| matches!(t.kind, NetKind::Bit | NetKind::Int(_)));
+        Ok(if two_state { v.two_state() } else { v })
     }
 }

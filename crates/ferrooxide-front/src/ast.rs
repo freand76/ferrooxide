@@ -157,12 +157,9 @@ pub struct ParamDecl {
     pub local: bool,
     /// a `specparam` (not allowed in parameter values and generate conditions)
     pub spec: bool,
+    /// a signed value (`parameter signed P = v` has no type of its own, only this)
     pub signed: bool,
-    pub range: Option<Range>,
-    /// `integer` type
-    pub integer: bool,
-    pub real: bool,
-    /// the declared data type of a parameter with a struct or enum type (as `Decl::ty`)
+    /// the declared data type; None: the value's type (IEEE 1800-2017 6.20.2)
     pub ty: Option<std::rc::Rc<crate::lower::SvType>>,
     pub name: String,
     /// None: a parameter port without a default, which every instance must override
@@ -171,6 +168,34 @@ pub struct ParamDecl {
     /// enum_names`, which makes them the enum's identity)
     pub enum_type: Option<std::rc::Rc<Vec<String>>>,
     pub line: Line,
+}
+
+impl ParamDecl {
+    /// Of type `integer` or `int` (32 bits, signed, no range).
+    pub fn integer(&self) -> bool {
+        self.ty.as_ref().is_some_and(|t| t.int_kind && matches!(t.kind, NetKind::Integer | NetKind::Int(32)) && t.dims.len() <= 1)
+    }
+
+    pub fn real(&self) -> bool {
+        self.ty.as_ref().is_some_and(|t| t.kind == NetKind::Real)
+    }
+
+    /// The range of the value: the declared one, the whole width of a struct or of several
+    /// packed dimensions, that of `byte`, `shortint`, `longint` and `time`.
+    pub fn range(&self) -> Option<Range> {
+        let t = self.ty.as_ref()?;
+        if matches!(t.kind, NetKind::Real | NetKind::String) || self.integer() {
+            return None;
+        }
+        if t.has_struct() || t.dims.len() > 1 {
+            return Some((crate::lower::minus_one(t.width()), ExprKind::Num(dec(0)).into()));
+        }
+        // (a scalar `bit` or `logic`: one bit; a type parameter's type: the value's)
+        if t.dims.is_empty() && t.param.is_none() && t.class.is_none() && matches!(t.kind, NetKind::Bit | NetKind::Reg) {
+            return Some((ExprKind::Num(dec(0)).into(), ExprKind::Num(dec(0)).into()));
+        }
+        t.dims.first().cloned()
+    }
 }
 
 #[derive(Debug, Clone)]
