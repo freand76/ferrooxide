@@ -21,7 +21,10 @@ impl Lower {
         let name = b.name.as_ref().map(|n| self.name(n, b.loc));
         let mut items = Vec::new();
         let refs: Vec<&t::Item> = b.items.iter().collect();
-        self.item_list(&refs, &mut items)?;
+        self.wild.skip += 1;
+        let r = self.item_list(&refs, &mut items);
+        self.wild.skip -= 1;
+        r?;
         // a conditional that is the whole block, without begin-end: no scope of its own
         if let (false, None, [Item::GenIf { direct, .. } | Item::GenCase { direct, .. }]) = (b.begin, &name, &mut items[..]) {
             *direct = true;
@@ -134,7 +137,10 @@ impl Lower {
                 items.push(Item::Process { kind, body, line: p.loc.line });
             }
             t::Item::Class(c) => {
-                let c = self.class_decl(c)?;
+                self.wild.skip += 1;
+                let c = self.class_decl(c);
+                self.wild.skip -= 1;
+                let c = c?;
                 items.push(Item::Class(std::rc::Rc::new(c)));
                 items.append(&mut self.class_statics);
             }
@@ -540,10 +546,15 @@ impl Lower {
         }
         let mut stmts = Vec::new();
         self.in_subroutine = true;
+        let nlocals = self.wild.locals.len();
+        self.wild.locals.push(name.clone());
+        self.wild.locals.extend(decls.iter().flat_map(|d| d.names.iter().map(|n| n.name.clone())));
+        self.wild.locals.extend(params.iter().map(|p: &ParamDecl| p.name.clone()));
         let r = body_stmts.iter().try_for_each(|st| {
             stmts.push(self.stmt(st)?);
             Ok(())
         });
+        self.wild.locals.truncate(nlocals);
         self.in_subroutine = false;
         r?;
         let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts, fork: None } };

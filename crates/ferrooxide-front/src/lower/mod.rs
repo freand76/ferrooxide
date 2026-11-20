@@ -75,6 +75,26 @@ pub(crate) struct Lower {
     classes: HashMap<String, Rc<class::ClassNames>>,
     /// the variables of the static properties of the class just lowered
     class_statics: Vec<Item>,
+    /// the wildcard imports of the module being lowered and the names used through them
+    wild: WildCheck,
+}
+
+/// IEEE 1800-2017 26.3: a name a module uses through a wildcard import must come from one
+/// package only, and the module may not declare it after the use.
+#[derive(Default)]
+pub(crate) struct WildCheck {
+    /// checking a module's items (not a package, the file scope or a nested module)
+    on: bool,
+    /// the packages imported with `p::*`
+    pkgs: Vec<String>,
+    /// the module's own names declared so far
+    declared: HashSet<String>,
+    /// names a reference imported: (the package, the line of the first use)
+    used: HashMap<String, (String, Line)>,
+    /// names declared by the blocks and subroutines being lowered
+    pub(crate) locals: Vec<String>,
+    /// in a generate block or a class (their names are not the module's)
+    pub(crate) skip: usize,
 }
 
 /// While lowering a package: what its `export` items need.
@@ -155,6 +175,7 @@ impl Lower {
             body_params_local: false,
             classes: HashMap::new(),
             class_statics: Vec::new(),
+            wild: WildCheck::default(),
         }
     }
 
@@ -432,7 +453,27 @@ impl Lower {
             t::Ports::Ansi(v) => self.ansi_ports(v, &mut ports, &mut iface_ports, &mut items)?,
         }
         let refs: Vec<&t::Item> = m.items.iter().filter(|i| !matches!(i, t::Item::Module(_))).collect();
-        self.item_list(&refs, &mut items)?;
+        // (the names of a nested module are checked with the enclosing one's)
+        let saved_wild = (!nested).then(|| std::mem::take(&mut self.wild));
+        if !nested {
+            self.wild.on = true;
+            let wild: Vec<t::Import> = m.imports.iter().filter(|i| i.name.is_none()).cloned().collect();
+            self.wild.pkgs = wild.into_iter().map(|i| i.package).collect();
+            self.wild.declared.extend(ports.iter().cloned());
+            self.wild.declared.extend(iface_ports.iter().map(|p| p.0.clone()));
+        }
+        let r = self.wild_declared(&t::Item::Empty(m.loc), &items).and_then(|_| {
+            for (k, it) in refs.iter().enumerate() {
+                let n = items.len();
+                self.module_item(it, &refs[k + 1..], &mut items)?;
+                self.wild_declared(it, &items[n..])?;
+            }
+            Ok(())
+        });
+        if let Some(w) = saved_wild {
+            self.wild = w;
+        }
+        r?;
         if !port_exprs.is_empty() {
             self.port_exprs(port_exprs, &mut items)?;
         }
@@ -941,6 +982,9 @@ impl Lower {
                     }
                 }
             } else {
+                if self.wild.on && !file_scope && !self.wild.pkgs.contains(&via) {
+                    self.wild.pkgs.push(via.clone());
+                }
                 if let Some(c) = &mut self.pkg_ctx {
                     c.wildcard.push(via.clone());
                     c.imported_types.extend(p.types.keys().cloned());
@@ -1005,6 +1049,64 @@ impl Lower {
         if !self.mod_pkgs.iter().any(|p| p == pkg) {
             self.mod_pkgs.push(pkg.to_string());
         }
+    }
+
+    /// A simple name used in the module: when no declaration of the module (so far) or of
+    /// an enclosing block has it, it comes from a wildcard import, which must be unique.
+    pub(crate) fn wild_ref(&mut self, n: &str, loc: t::Loc) -> Result<()> {
+        let w = &self.wild;
+        if !w.on || w.pkgs.is_empty() || w.skip > 0 || w.declared.contains(n) || w.used.contains_key(n) || w.locals.iter().any(|l| l == n) {
+            return Ok(());
+        }
+        let mut from: Vec<(String, String)> = Vec::new();
+        for p in &w.pkgs {
+            if let Some(o) = self.origin(p, n) {
+                if !from.iter().any(|f| f.1 == o) {
+                    from.push((p.clone(), o));
+                }
+            }
+        }
+        match &from[..] {
+            [] => Ok(()),
+            [(p, _)] => {
+                self.wild.used.insert(n.to_string(), (p.clone(), loc.line));
+                Ok(())
+            }
+            [(a, _), (b, _), ..] => self.err(loc, format!("'{n}' is imported from both package '{a}' and package '{b}'")),
+        }
+    }
+
+    /// The names a module item declared (`items`: what it was lowered to): a name used
+    /// through a wildcard import before may not be declared now.
+    fn wild_declared(&mut self, it: &t::Item, items: &[Item]) -> Result<()> {
+        if !self.wild.on {
+            return Ok(());
+        }
+        let mut names: Vec<(String, Line)> = Vec::new();
+        for i in items {
+            match i {
+                Item::Decl(d) => names.extend(d.names.iter().map(|n| (n.name.clone(), n.line))),
+                Item::Param(p) => names.push((p.name.clone(), p.line)),
+                Item::TypeParam { name, line, .. } => names.push((name.clone(), *line)),
+                Item::Subroutine(s) => names.push((s.name.clone(), s.line)),
+                Item::Class(c) => names.push((c.name.clone(), c.line)),
+                _ => {}
+            }
+        }
+        if let t::Item::Typedef(t::Typedef::Type { name, loc, .. } | t::Typedef::Forward { name, loc, .. } | t::Typedef::IfaceType { name, loc, .. }) = it {
+            names.push((name.clone(), loc.line));
+        }
+        for (n, line) in names {
+            if let Some((p, used)) = self.wild.used.get(&n) {
+                return Err(Error {
+                    msg: format!("'{n}' is declared after its use at line {used} imported it from package '{p}'"),
+                    file: self.file.clone(),
+                    line,
+                });
+            }
+            self.wild.declared.insert(n);
+        }
+        Ok(())
     }
 }
 

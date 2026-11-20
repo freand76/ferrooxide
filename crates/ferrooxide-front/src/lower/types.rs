@@ -513,6 +513,9 @@ impl Lower {
                     self.use_package(&s.name);
                 }
                 self.note_ref(&n.name);
+                if n.scopes.is_empty() {
+                    self.wild_ref(&n.name, ty.loc)?;
+                }
                 let Some(t) = self.types.get(&n.name).cloned() else { return Ok(None) };
                 let mut t = (*t).clone();
                 t.signed = ty.signed.unwrap_or(t.signed);

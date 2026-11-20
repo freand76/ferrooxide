@@ -634,7 +634,13 @@ impl Lower {
                 }
             }
             Base::Name(n @ ("this" | "super"), loc) => (n.to_string(), loc),
-            Base::Name(n, loc) => (self.name(n, loc), loc),
+            Base::Name(n, loc) => {
+                // (a call may name a subroutine declared later in the module)
+                if !matches!(ops.first(), Some(Op::Call(..))) {
+                    self.wild_ref(n, loc)?;
+                }
+                (self.name(n, loc), loc)
+            }
         };
         let _ = loc;
         if self.is_class_var(&name) {

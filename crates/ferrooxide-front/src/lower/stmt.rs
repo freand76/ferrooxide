@@ -194,10 +194,16 @@ impl Lower {
                     }
                 }
                 let (decls, params) = self.block_decls(decls)?;
+                let nlocals = self.wild.locals.len();
+                self.wild.locals.extend(decls.iter().flat_map(|d| d.names.iter().map(|n| n.name.clone())));
+                self.wild.locals.extend(params.iter().map(|p| p.name.clone()));
                 let mut v = Vec::new();
-                for st in stmts {
+                let r = stmts.iter().try_for_each(|st| {
                     v.push(self.stmt(st)?);
-                }
+                    Ok(())
+                });
+                self.wild.locals.truncate(nlocals);
+                r?;
                 if let Some((types, vars)) = saved {
                     self.types = types;
                     self.vars = vars;
@@ -331,6 +337,9 @@ impl Lower {
                                 decls.push(d);
                             }
                             let name = self.name(name, *loc);
+                            // (kept to the end of the enclosing block: at worst a use of
+                            // an imported name goes unchecked)
+                            self.wild.locals.push(name.clone());
                             let v = self.expr(init)?;
                             let Some(d) = decls.last_mut() else { return self.unsupported(*loc, "this for-loop initialization") };
                             d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, init: None, line: loc.line });
@@ -749,6 +758,7 @@ impl Lower {
             return self.err(loc, format!("foreach: '{name}' is not an array declared here"));
         };
         let vars: Vec<Option<String>> = vars.iter().map(|v| v.as_ref().map(|n| self.name(n, loc))).collect();
+        self.wild.locals.extend(vars.iter().flatten().cloned());
         if vars.len() > dims.len() {
             return self.err(loc, format!("foreach: '{name}' has only {} dimensions", dims.len()));
         }

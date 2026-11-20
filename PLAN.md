@@ -420,9 +420,10 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    process, its code and signals dropped), so their errors are reported; class methods
    are not yet. With it, a constant array index with x bits reads x (was an error): 4552 of 5112.
    Unpacked arrays assigned to each other need equivalent element types: 4554 of 5112.
-   Left among the accepted invalid tests: wildcard import conflicts (a name from two
-   packages, a local declaration after an imported name was used), name collisions in a
-   class, `var` in a for
+   Wildcard imports in a module (`WildCheck` in the lowering): a name used through two of
+   them is an error, as is a module declaration of a name after a use imported it (calls
+   and generate blocks are not checked): 4556 of 5112.
+   Left among the accepted invalid tests: name collisions in a class, `var` in a for
    initialization (legal in 1800-2017, kept). Left: errors in
    class methods that are never called, the rest of the ACCEPT list
    in `target/svtests-baseline.res`. Interleave with the other steps.
