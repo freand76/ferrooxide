@@ -367,6 +367,10 @@ impl<'a> Compiler<'a> {
                         Edge::Pos => REdge::Pos,
                         Edge::Neg => REdge::Neg,
                     };
+                    // (IEEE 1800-2017 9.4.2: edges are of integral values)
+                    if re != REdge::Any && self.type_of(e, sid)?.is_real() {
+                        return self.err("an edge of a real value");
+                    }
                     match e {
                         Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
                             Some(expr::Base::Sig(s)) => trig.push((s, re, NONE)),

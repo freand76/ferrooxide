@@ -1,0 +1,12 @@
+module a (x);
+  // timescale 1e-9 / 1e-12
+  // default_nettype none
+  // unconnected_drive pull1
+  // imports $unit
+  input wire x;
+endmodule
+module b (x);
+  // timescale 1e0 / 1e0
+  // imports $unit
+  input wire(implicit) x;
+endmodule

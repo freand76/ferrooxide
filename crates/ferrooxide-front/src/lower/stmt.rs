@@ -181,6 +181,11 @@ impl Lower {
         Ok(match &s.kind {
             t::StmtKind::Null => Stmt::Null,
             t::StmtKind::Block { fork, name, decls, stmts } => {
+                // (IEEE 1800-2017 13.4.4: a function may only start processes that it does
+                // not wait for)
+                if self.in_function && matches!(fork, Some(t::Join::All | t::Join::Any)) {
+                    return self.err(s.loc, "a function can contain only fork-join_none");
+                }
                 let name = match (name, &s.label) {
                     (Some(n), _) | (None, Some(n)) => Some(self.name(n, s.loc)),
                     _ => None,

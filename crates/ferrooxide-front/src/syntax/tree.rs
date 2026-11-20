@@ -42,6 +42,8 @@ pub enum Directive {
     UnconnectedDrive(Option<bool>),
     /// `begin_keywords "version" (Some), `end_keywords (None)
     Keywords(Option<String>),
+    /// `resetall
+    ResetAll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

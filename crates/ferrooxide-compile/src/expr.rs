@@ -418,6 +418,9 @@ impl<'a> Compiler<'a> {
                 if info.depth > 0 {
                     return self.err(format!("array '{}' used without index", info.name));
                 }
+                if info.real {
+                    return self.err("bit select of a real value");
+                }
                 Ok((info.slot, info.width, info.msb, info.lsb))
             }
             Some(Base::Const(c)) => {
@@ -693,7 +696,11 @@ impl<'a> Compiler<'a> {
                 if !self.is_const_expr(width, sid) {
                     return self.err("the width of an indexed part-select is not a constant expression");
                 }
-                let pw = self.const_int(width, sid)? as u32;
+                let pw = self.const_int(width, sid)?;
+                if pw <= 0 {
+                    return self.err(format!("the width of an indexed part-select is {pw}; it must be positive"));
+                }
+                let pw = pw as u32;
                 let (bs, bw, msb, lsb) = self.vec_base(a, sid)?;
                 let (neg, k) = Self::index_part_map(msb, lsb, pw, *up);
                 let d = self.tmp(pw);

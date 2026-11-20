@@ -362,9 +362,8 @@ impl Preprocessor {
                         out.push_str(&format!(" __fx_timescale {} {} ; ", u, p));
                     }
                     "resetall" => {
-                        // back to the default timescale (1s / 1s)
                         if active(&conds) {
-                            out.push_str(" __fx_timescale 0 0 ; ");
+                            out.push_str(" __fx_resetall ; ");
                         }
                     }
                     "default_nettype" | "unconnected_drive" => {

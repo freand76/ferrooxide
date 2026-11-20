@@ -73,6 +73,8 @@ impl Lower {
         }
         match it {
             t::Item::Empty(_) => {}
+            // (IEEE 1800-2017 22.3)
+            t::Item::Directive(t::Directive::ResetAll, loc) => return self.err(*loc, "`resetall is not allowed inside a design element"),
             t::Item::Directive(d, _) => self.directive(d),
             t::Item::Timeunits { unit, precision, loc } => {
                 let (u, p) = self.timeunits(*unit, *precision, *loc)?;
@@ -584,6 +586,7 @@ impl Lower {
         }
         let mut stmts = Vec::new();
         self.in_subroutine = true;
+        let saved_fn = std::mem::replace(&mut self.in_function, !is_task);
         let nlocals = self.wild.locals.len();
         self.wild.locals.push(name.clone());
         self.wild.locals.extend(decls.iter().flat_map(|d| d.names.iter().map(|n| n.name.clone())));
@@ -593,6 +596,7 @@ impl Lower {
             Ok(())
         });
         self.wild.locals.truncate(nlocals);
+        self.in_function = saved_fn;
         self.in_subroutine = false;
         r?;
         let body = if stmts.len() == 1 { stmts.pop().unwrap() } else { Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts, fork: None } };

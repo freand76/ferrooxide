@@ -21,7 +21,7 @@ pub enum T {
     Str(String),
     Punct(&'static str),
     /// a directive from the preprocessor (`__fx_timescale`, `__fx_nettype`, `__fx_uncdrive`,
-    /// `__fx_keywords`)
+    /// `__fx_keywords`, `__fx_resetall`)
     Directive(String),
     Eof,
 }

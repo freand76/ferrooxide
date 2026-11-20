@@ -65,6 +65,8 @@ pub(crate) struct Lower {
     modports: Vec<String>,
     /// lowering a function or task body
     in_subroutine: bool,
+    /// lowering a function body
+    in_function: bool,
     /// in a `module automatic` / `package automatic`: subroutines are automatic by default
     default_automatic: bool,
     /// lowering the items of a program
@@ -174,6 +176,7 @@ impl Lower {
             pkg_ctx: None,
             modports: Vec::new(),
             in_subroutine: false,
+            in_function: false,
             default_automatic: false,
             in_program: false,
             body_params_local: false,
@@ -223,6 +226,12 @@ impl Lower {
             t::Directive::UnconnectedDrive(d) => self.unconnected_drive = *d,
             t::Directive::Keywords(Some(v)) => self.keywords.push(v.clone()),
             t::Directive::Keywords(None) => _ = self.keywords.pop(),
+            // (the default timescale is 1s / 1s)
+            t::Directive::ResetAll => {
+                self.timescale = Some((0, 0));
+                self.default_nettype = None;
+                self.unconnected_drive = None;
+            }
         }
     }
 

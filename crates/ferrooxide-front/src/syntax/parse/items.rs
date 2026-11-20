@@ -1537,6 +1537,7 @@ impl Parser {
                     _ => None,
                 })
             }
+            "__fx_resetall" => Directive::ResetAll,
             "__fx_keywords" => match self.peek() {
                 T::Str(_) => {
                     let T::Str(v) = self.bump() else { unreachable!() };

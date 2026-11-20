@@ -192,7 +192,14 @@ impl<'a> Compiler<'a> {
                 // an x/z bound: a 1-bit x
                 _ => v(1, false),
             },
-            Expr::IndexedRange(_, _, w, _) => v(self.const_int(w, sid)? as u32, false),
+            Expr::IndexedRange(_, _, w, _) => {
+                // (IEEE 1800-2017 11.5.1: a positive width)
+                let w = self.const_int(w, sid)?;
+                if w <= 0 {
+                    return self.err(format!("the width of an indexed part-select is {w}; it must be positive"));
+                }
+                v(w as u32, false)
+            }
             Expr::Unary(op, a) => match op {
                 UnOp::Plus | UnOp::Neg => match self.type_of(a, sid)? {
                     Type::Real => Type::Real,
