@@ -1211,6 +1211,13 @@ impl<'a> Compiler<'a> {
     pub(crate) fn fmt_args(&mut self, args: &[Option<Expr>], sid: usize) -> R<Vec<FmtArg>> {
         let mut v = Vec::new();
         for a in args {
+            // an array: printed as an assignment pattern
+            if let (Some(e), true) = (a, self.sigs.has_dyn) {
+                if let Some(f) = self.fmt_aggregate(e, sid)? {
+                    v.push(f);
+                    continue;
+                }
+            }
             v.push(match a {
                 None => FmtArg::Empty,
                 Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),

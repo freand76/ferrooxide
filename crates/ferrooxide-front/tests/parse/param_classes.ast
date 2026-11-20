@@ -5,17 +5,23 @@ module m ();
   initial begin
     inst = ext_cls#3::new();
     $display(base_cls#4::b, (base_cls#5::b + 1));
+    base_cls#6::twice();
   end
   // specialization ext_cls#2 = ext_cls #(15, type(int(32) signed))
   // specialization ext_cls#3 = ext_cls #(.e(3))
   // specialization base_cls#4 = base_cls #()
   // specialization base_cls#5 = base_cls #(4)
+  // specialization base_cls#6 = base_cls #(6)
 endmodule
 package $unit ();
   class base_cls;
     // parameter port
     parameter integer signed b = 20;
     int(32) signed a;
+    // static
+    function automatic integer signed twice;
+      return (2 * b);
+    endfunction
   endclass
   class ext_cls extends base_cls#1;
     // parameter port

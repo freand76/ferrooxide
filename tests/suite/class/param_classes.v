@@ -18,6 +18,9 @@ module test;
 
   class par_cls #(int a = 25);
     parameter int b = a + 1;
+    static function int twice();
+      return 2 * a;
+    endfunction
     function int f();
       return par_cls::b * 2;  // (inside the class: this specialization)
     endfunction
@@ -48,6 +51,14 @@ module test;
     endfunction
   endclass
 
+  class D #(int N = 2);
+    typedef logic [N-1:0] vec;
+    vec v;
+    function int w();
+      return $bits(v);
+    endfunction
+  endclass
+
   class need #(int N, type T);
     T v;
     function int n();
@@ -67,6 +78,9 @@ module test;
   box #() bi3;
   need #(3, byte) nd;
   par_cls #(1) p;
+  D #(5) dd;
+  D#(3)::vec v3;
+  D#()::vec v2;
   int fails = 0;
 
   task check(input bit ok, input string what);
@@ -82,6 +96,8 @@ module test;
     check(inst.get_e() == 15 && inst.get_b() == 16, "a specialization and its base");
     check(d.get_e() == 25 && d.get_b() == 26, "the defaults");
     check(par_cls#()::b == 26 && par_cls#(5)::b == 6, "C #(..)::P");
+    check(par_cls#(7)::twice() == 14, "C #(..)::f()");
+    void'(par_cls#(7)::twice());
     p = new;
     check(p.f() == 4, "C::P inside the class");
     super_obj = test_cls#(.t(23))::new(.def(41));
@@ -104,6 +120,8 @@ module test;
     nd = new;
     nd.v = 255;
     check(nd.n() == 3 && nd.v == -1, "parameters without a default");
+    dd = new;
+    check(dd.w() == 5 && $bits(v3) == 3 && $bits(v2) == 2, "a class's typedef in a specialization");
     if (fails == 0) $display("PASSED");
   end
 endmodule

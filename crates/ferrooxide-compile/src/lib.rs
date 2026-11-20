@@ -759,10 +759,9 @@ impl<'a> Compiler<'a> {
     /// The scope `p::` names from scope `sid`: a package or class; inside a class (or a
     /// specialization of it) its own name is that class (IEEE 1800-2017 8.25.1).
     pub(crate) fn prefix_scope(&self, p: &str, sid: usize) -> Option<usize> {
-        if let Some(c) = self.class_of_scope(sid) {
-            let ci = &self.classes.list[c as usize];
-            if ci.decl.name == p {
-                return Some(ci.scope);
+        if let Some((cs, name)) = self.enclosing_class_scope(sid) {
+            if name == p {
+                return Some(cs);
             }
         }
         self.hier.pkg_scopes.get(p).copied()
@@ -882,6 +881,14 @@ impl<'a> Compiler<'a> {
             }
             Some(cur)
         };
+        // inside a class (or a specialization of it), its name is that class
+        if let Some((cs, name)) = self.enclosing_class_scope(sid) {
+            if name == parts[0] {
+                if let Some(r) = down(cs) {
+                    return Some(r);
+                }
+            }
+        }
         // find the scope for parts[0]: a child of this scope or of an enclosing one, or an
         // enclosing scope by its name or (an instance) its module's name, upwards through
         // the instances (IEEE 1800 23.8); the first one the rest of the path resolves in

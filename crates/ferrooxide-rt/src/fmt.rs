@@ -357,6 +357,22 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                     let pad = explicit_w.is_none();
                     let arg = args.get(i);
                     i += 1;
+                    // %p: as an element of an assignment pattern (IEEE 1800-2017 21.2.1.7)
+                    if spec == 'p' {
+                        let t = match arg {
+                            Some(FmtArg::Pattern(t)) => t.as_bytes().to_vec(),
+                            Some(FmtArg::Lit(l)) => format!("\"{l}\"").into_bytes(),
+                            Some(FmtArg::Str { s, w }) => [&b"\""[..], &str_value(&view(*s, *w, false)), b"\""].concat(),
+                            Some(FmtArg::Real { s, .. }) => fmt_real(f64::from_bits(mem[*s as usize]), 'g', 6).into_bytes(),
+                            Some(FmtArg::Val { s, w, signed }) => fmt_dec(&view(*s, *w, *signed), false).into_bytes(),
+                            Some(FmtArg::Time { s }) => fmt_dec(&view(*s, 64, false), false).into_bytes(),
+                            // (an empty string)
+                            Some(FmtArg::Empty) => b"\"\"".to_vec(),
+                            _ => Vec::new(),
+                        };
+                        out.extend_from_slice(&t);
+                        continue;
+                    }
                     // a string literal consumed by a format: its characters' bits (also for %s:
                     // NUL bytes and the empty string "" (8'h00) print like those of a value)
                     let lit_bits: Option<(Vec<u64>, u32)> = match arg {
@@ -514,6 +530,12 @@ pub fn format_args<'m>(args: &[FmtArg], mem: &'m [u64], scope: &str, default_rad
                 out.extend_from_slice(&str_value(&view(*s, *w, false)));
                 i += 1;
             }
+            FmtArg::Pattern(t) => {
+                out.extend_from_slice(t.as_bytes());
+                i += 1;
+            }
+            // (the simulator makes these `Pattern`s first)
+            FmtArg::Agg { .. } | FmtArg::ArrAgg { .. } => i += 1,
             FmtArg::Time { s } => {
                 let v = view(*s, 64, false);
                 out.extend_from_slice(format!("{:>20}", fmt_dec(&v, false)).as_bytes());

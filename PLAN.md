@@ -452,7 +452,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    variables in subroutine blocks, class members through hierarchical names, functions
    returning handles, `extends P::B`, `this.super` done 2026-11-19): class handle ports, struct members through
    hierarchical names (`inst.v.f`); `static` variables at the top level of an automatic
-   subroutine; `%p`; deferred assertions [sv_deferred_*]. Array manipulation methods
+   subroutine; deferred assertions [sv_deferred_*]. Array manipulation methods
    of queues and dynamic arrays done 2026-11-20 (`compile/arrmeth.rs`: reductions and
    locators as loops in the process's code, the `with` iterator a variable of the element
    type in a scope of its own; `sort`/`rsort` (also `with`), `reverse`, `shuffle` as
@@ -473,9 +473,12 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    (2026-11-20): the package `std` in SystemVerilog (`front/src/std.sv`), parsed first
    where the sources name them and imported into every compilation unit; `wait` on a
    condition that reads objects wakes on every property write (`Program::obj_sig`; before,
-   it never woke): 4625. Left: static properties of
-   parameterized classes, body `parameter type` items, `C #(..)::f()` as a statement (the
-   parser takes it for a declaration), an untyped `mailbox`, `process`, a class's own
+   it never woke): 4625. `C #(..)::f()` as a statement, a class's typedefs through a
+   specialization (`C #(3)::T`, its parameters those of the specialization), `%p`
+   (assignment patterns of queues, dynamic and fixed-size arrays; values as their
+   elements) also done. Left: static properties of
+   parameterized classes, body `parameter type` items, an untyped `mailbox`, `process`,
+   `%p` of unpacked structs, associative arrays and class handles, a class's own
    specialization inside it naming a class other than itself (`this_type`), arguments
    that use names of a generate block or subroutine (evaluated in the module). UVM now
    stops at `TYPE::name` through a type parameter in a macro.
@@ -666,7 +669,7 @@ Kept up to date as features stop short; regression-suite test names in brackets.
 
 SystemVerilog data types and testbench features:
 - queues of structs as class properties (members of their elements), arrays of queues,
-  queue ports, `%p`,
+  queue ports, `%p` of unpacked structs and associative arrays,
   array methods of associative, multi-dimensional and struct arrays, assignments between
   multi-dimensional and dynamic arrays, queue element writes with `<=` (done at once), keyed patterns for associative
   arrays, class or wider keys (see R4 slice 4).

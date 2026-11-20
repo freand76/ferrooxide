@@ -3131,9 +3131,9 @@ impl Sim {
         self.strs.get(h as usize).cloned().unwrap_or_else(|| self.strs[0].clone())
     }
 
-    /// Display arguments with string values as literals.
+    /// Display arguments with string values as literals, arrays as assignment patterns.
     fn str_args<'x>(&mut self, args: &'x [FmtArg]) -> std::borrow::Cow<'x, [FmtArg]> {
-        if !args.iter().any(|a| matches!(a, FmtArg::SVar { .. })) {
+        if !args.iter().any(|a| matches!(a, FmtArg::SVar { .. } | FmtArg::Agg { .. } | FmtArg::ArrAgg { .. })) {
             return std::borrow::Cow::Borrowed(args);
         }
         let v = args
@@ -3144,10 +3144,47 @@ impl Sim {
                     // (an empty string prints nothing, unlike the literal "")
                     if t.is_empty() { FmtArg::Empty } else { FmtArg::Lit(String::from_utf8_lossy(&t).into_owned()) }
                 }
+                FmtArg::Agg { s, w, t, signed } => {
+                    let n = 2 * nw(*w);
+                    let arr = self.harr(*s).to_vec();
+                    let items: Vec<String> = arr.chunks(n).map(|e| self.pattern_elem(e, *w, *signed, t.elem)).collect();
+                    FmtArg::Pattern(format!("'{{{}}}", items.join(", ")))
+                }
+                FmtArg::ArrAgg { sig, desc, signed, elem } => {
+                    let r = self.sigs[*sig as usize];
+                    let n = 2 * nw(r.width) as usize;
+                    let base = r.slot as usize;
+                    let mut items: Vec<String> = (0..r.depth.max(1) as usize).map(|k| self.pattern_elem(&self.mem[base + k * n..base + (k + 1) * n], r.width, *signed, *elem)).collect();
+                    if *desc {
+                        items.reverse();
+                    }
+                    FmtArg::Pattern(format!("'{{{}}}", items.join(", ")))
+                }
                 _ => a.clone(),
             })
             .collect();
         std::borrow::Cow::Owned(v)
+    }
+
+    /// An element of an array in an assignment pattern (`%p`): a number in decimal, a real as
+    /// with %g, a string quoted.
+    fn pattern_elem(&self, e: &[u64], w: u32, signed: bool, kind: ElemKind) -> String {
+        match kind {
+            ElemKind::Vec => {
+                let n = nw(w);
+                crate::fmt::fmt_dec(&crate::fmt::Val { a: &e[..n], b: &e[n..2 * n], w, signed }, false)
+            }
+            ElemKind::Real => crate::fmt::fmt_real(f64::from_bits(e[0]), 'g', 6),
+            ElemKind::Str => {
+                let h = e[0] as usize;
+                let s: Vec<u8> = match self.strs.get(h) {
+                    Some(s) => s.to_vec(),
+                    None if self.strs.is_empty() => self.prog.strings.get(h).cloned().unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                format!("\"{}\"", String::from_utf8_lossy(&s))
+            }
+        }
     }
 
     fn put_str(&mut self, d: u32, b: &[u8]) {

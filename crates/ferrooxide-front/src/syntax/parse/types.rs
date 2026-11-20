@@ -125,8 +125,13 @@ impl Parser {
                             return c.contains(t.as_str());
                         }
                     }
-                    // `C #(...) x`: a parameterized class; `M #(...) u (...)` is an instance
+                    // `C #(...) x`: a parameterized class; `M #(...) u (...)` is an instance;
+                    // `C #(...)::f()` an expression
                     if self.is_p_at(k + 1, "#") {
+                        if let Some(j) = self.after_parens(k + 2).filter(|&j| self.is_p_at(k + 2, "(") && self.is_p_at(j, "::")) {
+                            // `C #(...)::T x`: a type only if T is one of class C's types
+                            return matches!((self.classes.get(n.as_str()), self.peek_at(j + 1)), (Some(c), T::Ident(t)) if c.contains(t.as_str()));
+                        }
                         return self.classes.contains_key(n.as_str());
                     }
                     return !matches!(self.peek_at(k + 1), T::Punct("(" | "." | "=" | "<=" | ";" | "'"));

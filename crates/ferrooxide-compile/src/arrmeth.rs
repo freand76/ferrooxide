@@ -651,4 +651,48 @@ impl<'a> Compiler<'a> {
         self.queue_to_fixed(a.slot, &f, StoreMode::Blocking, true);
         Ok(true)
     }
+
+    /// A queue, dynamic array or one-dimensional fixed-size array as a display argument (an
+    /// assignment pattern, `%p`); None for anything else.
+    pub(crate) fn fmt_aggregate(&mut self, e: &Expr, sid: usize) -> R<Option<rt::FmtArg>> {
+        let kind_of = |el: Elem| match el.leaf {
+            Leaf::Bits => rt::ElemKind::Vec,
+            Leaf::Real => rt::ElemKind::Real,
+            Leaf::Str => rt::ElemKind::Str,
+        };
+        // a locator method's queue
+        if let Some(am) = self.arr_method(e, sid)? {
+            if !LOCATE.contains(&am.m.as_str()) {
+                return Ok(None);
+            }
+            let Type::Dyn { elem, .. } = self.arr_method_type(&am, sid)? else { unreachable!() };
+            if elem.class != NONE {
+                return self.err("printing an array of class handles is not supported");
+            }
+            let s = self.arr_locate(&am, sid)?;
+            let t = Self::heap_ty_of(elem, DynKind::Queue(0));
+            return Ok(Some(rt::FmtArg::Agg { s, w: elem.w, t, signed: elem.signed }));
+        }
+        if let Some((kind, elem)) = self.dyn_arr_type(e, sid)? {
+            if matches!(e, Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..)) {
+                return Ok(None);
+            }
+            if matches!(kind, DynKind::Assoc(_)) {
+                return self.err("printing an associative array is not supported");
+            }
+            if elem.class != NONE {
+                return self.err("printing an array of class handles is not supported");
+            }
+            let a = self.dyn_arr(e, sid)?.unwrap();
+            let t = self.heap_ty(&a);
+            return Ok(Some(rt::FmtArg::Agg { s: a.slot, w: elem.w, t, signed: elem.signed }));
+        }
+        if let Some(f) = self.fixed_arr(e, sid)? {
+            if f.elem.class != NONE {
+                return self.err("printing an array of class handles is not supported");
+            }
+            return Ok(Some(rt::FmtArg::ArrAgg { sig: f.sig, desc: f.desc, signed: f.elem.signed, elem: kind_of(f.elem) }));
+        }
+        Ok(None)
+    }
 }

@@ -96,6 +96,8 @@ impl<'a> Compiler<'a> {
         let path = format!("{}.{name}", self.scopes[sid].name);
         let file = self.file.clone();
         let scope = self.new_scope(path.clone(), Some(sid), file.clone());
+        // (names of the class in its declarations are this class: `class_of_scope`)
+        self.classes.of_scope.insert(scope, id);
         // the parameter ports, then the specializations the class uses (their values may
         // use the parameters)
         self.eval_param_items(&c.params, overrides, scope)?;
@@ -373,6 +375,17 @@ impl<'a> Compiler<'a> {
                 if let Some(&c) = self.classes.by_name.get(&(p, name.to_string())) {
                     return Some(c);
                 }
+            }
+            sid = self.scopes[sid].parent?;
+        }
+    }
+
+    /// The class scope `sid` is in (its own scope, a method's or a property initializer's)
+    /// and the class's name as declared (also for a specialization being declared).
+    pub(crate) fn enclosing_class_scope(&self, mut sid: usize) -> Option<(usize, &str)> {
+        loop {
+            if let Some(&c) = self.classes.of_scope.get(&sid) {
+                return Some((sid, &self.classes.list[c as usize].decl.name));
             }
             sid = self.scopes[sid].parent?;
         }

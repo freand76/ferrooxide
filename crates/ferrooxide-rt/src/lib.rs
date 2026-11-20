@@ -302,7 +302,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             let fa = |args: &Vec<FmtArg>| -> Vec<u32> {
                 args.iter()
                     .filter_map(|a| match a {
-                        FmtArg::Val { s, .. } | FmtArg::Str { s, .. } | FmtArg::Time { s } | FmtArg::Real { s, .. } | FmtArg::SVar { s } => Some(*s),
+                        FmtArg::Val { s, .. } | FmtArg::Str { s, .. } | FmtArg::Time { s } | FmtArg::Real { s, .. } | FmtArg::SVar { s } | FmtArg::Agg { s, .. } => Some(*s),
                         _ => None,
                     })
                     .collect()
@@ -516,6 +516,14 @@ pub enum FmtArg {
     /// a real value (f64 bits); without a format `%#g`, or with `fixed` decimals (a bare
     /// `$realtime`: the digits of the module's time precision below its unit, as the reference)
     Real { s: u32, fixed: Option<u8> },
+    /// a queue or dynamic array (its handle in slot s, `w`-bit elements) printed as an
+    /// assignment pattern (`%p`, IEEE 1800-2017 21.2.1.7)
+    Agg { s: u32, w: u32, t: HeapTy, signed: bool },
+    /// a one-dimensional fixed-size array printed as an assignment pattern, its elements
+    /// from left to right (`desc`: the highest index first)
+    ArrAgg { sig: u32, desc: bool, signed: bool, elem: ElemKind },
+    /// a value formatted already (`'{1, 2}`: what the simulator makes of `Agg`, `ArrAgg`)
+    Pattern(String),
     Empty,
 }
 

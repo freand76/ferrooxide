@@ -196,6 +196,42 @@ pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
 }
 
 /// `n` -> `scope.n` for the names in `names`.
+/// `t` with names of class `from`'s scope (`from.P`, as `qualify_expr` writes them) naming
+/// specialization `to`'s instead.
+pub(crate) fn respec_type(t: &mut SvType, from: &str, to: &str) {
+    fn ex(e: &mut Expr, from: &str, to: &str) {
+        match e {
+            Expr::Hier(p) if p.len() == 2 && p[0] == from => p[0] = to.to_string(),
+            Expr::Index(a, b) | Expr::Binary(_, a, b) => {
+                ex(a, from, to);
+                ex(b, from, to);
+            }
+            Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
+                ex(a, from, to);
+                ex(b, from, to);
+                ex(c, from, to);
+            }
+            Expr::Unary(_, a) => ex(a, from, to),
+            Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter_mut().for_each(|x| ex(x, from, to)),
+            Expr::Repl(a, v) => {
+                ex(a, from, to);
+                v.iter_mut().for_each(|x| ex(x, from, to));
+            }
+            _ => {}
+        }
+    }
+    for d in t.dims.iter_mut().chain(t.unpacked.iter_mut()) {
+        ex(&mut d.0, from, to);
+        ex(&mut d.1, from, to);
+    }
+    if let Some(f) = &mut t.fields {
+        let f = Rc::make_mut(f);
+        for (_, ft) in &mut f.fields {
+            respec_type(ft, from, to);
+        }
+    }
+}
+
 pub(crate) fn qualify_expr(e: &mut Expr, names: &std::collections::HashMap<String, String>) {
     match e {
         Expr::Ident(n) if names.contains_key(n.as_str()) => *e = Expr::Hier(vec![names[n.as_str()].clone(), n.clone()]),
@@ -524,6 +560,11 @@ impl Lower {
                     // `C::T`: a typedef of class C
                     if let Some(t) = self.classes.get(&s.name).and_then(|c| c.types.get(&n.name)) {
                         let mut t = (**t).clone();
+                        // of a specialization: the class's parameters are the specialization's
+                        if let Some((_, g)) = self.spec_of.iter().find(|(sp, _)| *sp == s.name) {
+                            let g = g.rsplit("::").next().unwrap_or(g).to_string();
+                            respec_type(&mut t, &g, &s.name);
+                        }
                         t.signed = ty.signed.unwrap_or(t.signed);
                         if !ty.packed.is_empty() {
                             return self.unsupported(ty.loc, "packed dimensions after a class type");
