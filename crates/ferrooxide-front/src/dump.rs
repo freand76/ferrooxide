@@ -653,9 +653,10 @@ impl Printer {
         if let Some(r) = &p.range() {
             let _ = write!(s, " {}", range(r));
         }
+        let dims = ranges(&p.unpacked);
         match &p.value {
-            Some(v) => _ = write!(s, " {} = {};", p.name, expr(v)),
-            None => _ = write!(s, " {};", p.name),
+            Some(v) => _ = write!(s, " {}{dims} = {};", p.name, expr(v)),
+            None => _ = write!(s, " {}{dims};", p.name),
         }
         s
     }

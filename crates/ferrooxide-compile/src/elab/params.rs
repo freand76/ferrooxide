@@ -170,6 +170,12 @@ impl<'a> Compiler<'a> {
 
     /// The value of a parameter (from its override if any): integer or real.
     pub(crate) fn param_value(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
+        if !p.unpacked.is_empty() {
+            return self.array_param(p, ov, sid);
+        }
+        if matches!(ov, Some(PVal::Array(_))) {
+            return self.err(format!("parameter '{}' is not an array: its value cannot be one", p.name));
+        }
         if let (false, Some(v)) = (p.spec, &p.value) {
             self.no_specparam(v, sid)?;
         }
@@ -230,7 +236,7 @@ impl<'a> Compiler<'a> {
             let r = match v {
                 PVal::Real(r) => r,
                 PVal::Int(c) | PVal::Str(c) => c.to_i64().unwrap_or(0) as f64,
-                PVal::Type(_) | PVal::Default => unreachable!(),
+                PVal::Type(_) | PVal::Default | PVal::Array(_) => unreachable!(),
             };
             return Ok(Sym::Real(r));
         }
@@ -240,7 +246,7 @@ impl<'a> Compiler<'a> {
         let c = match v {
             PVal::Int(c) | PVal::Str(c) => c,
             PVal::Real(r) => Const::from_i64(r.round() as i64, 32, true),
-            PVal::Type(_) | PVal::Default => unreachable!(),
+            PVal::Type(_) | PVal::Default | PVal::Array(_) => unreachable!(),
         };
         Ok(Sym::Const(self.param_type(p, c, sid)?))
     }
@@ -272,7 +278,71 @@ impl<'a> Compiler<'a> {
     /// Declare parameter `p` with value `v` in scope `sid`; one with a struct type or several
     /// packed dimensions also gets its type (`$type:p`, for member and element selects) and
     /// its flat name.
+    /// An unpacked array parameter (IEEE 1800-2017 6.20.2): a read-only array signal named by
+    /// the parameter, its elements written at elaboration (constant in constant expressions).
+    fn array_param(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
+        let ty = p.ty.clone().unwrap();
+        let (kind, signed, range, packed) = ty.decl_parts();
+        let decl = Decl {
+            dir: None,
+            kind,
+            net: NetType::Wire,
+            explicit_kind: true,
+            real_net: false,
+            strength: None,
+            delay: None,
+            signed,
+            range,
+            range_written: false,
+            packed,
+            type_param: ty.param.clone(),
+            ty: Some(ty.clone()),
+            names: vec![Declarator { name: p.name.clone(), dims: p.unpacked.clone(), heap: None, init: None, line: p.line }],
+            automatic: false,
+            static_: false,
+            line: p.line,
+        };
+        // (the declaration lives as long as the elaboration)
+        let items: &'a [Item] = Box::leak(vec![Item::Decl(decl)].into_boxed_slice());
+        self.declarations(items, sid, false, &HashMap::new(), None)?;
+        let Some(Sym::Sig(s)) = self.scopes[sid].syms.get(&p.name).cloned() else {
+            return self.err(format!("parameter '{}': this array type is not supported", p.name));
+        };
+        self.sigs.const_arrays.insert(s);
+        let i = self.sig(s).clone();
+        let words = 2 * rt::nw(i.width) as usize * i.depth.max(1) as usize;
+        match ov {
+            Some(PVal::Array(w)) => {
+                if w.len() != words {
+                    return self.err(format!("parameter '{}': the array given has another shape", p.name));
+                }
+                let at = i.slot as usize;
+                self.prog.mem[at..at + words].copy_from_slice(&w);
+            }
+            Some(PVal::Default) | None => {
+                let Some(v) = &p.value else {
+                    return self.err(format!("parameter '{}' has no value: it must be overridden", p.name));
+                };
+                // `P = v`, run now
+                self.code.pb.push(PState { proc: NONE, ..Default::default() });
+                let st = Stmt::Assign { lhs: ExprKind::Ident(p.name.clone()).into(), rhs: v.clone(), nonblocking: false, timing: None, line: p.line };
+                let r = self.stmt(&st, sid).and_then(|_| self.finish_subs());
+                let code = self.code.pb.pop().unwrap().code;
+                r?;
+                if let Err(m) = rt::vm::eval_const(&code, &mut self.prog.mem, &self.prog.signals) {
+                    return self.err(m);
+                }
+            }
+            Some(_) => return self.err(format!("parameter '{}' is an array: its value must be an array", p.name)),
+        }
+        Ok(Sym::Sig(s))
+    }
+
     pub(crate) fn insert_param(&mut self, p: &ParamDecl, v: Sym, sid: usize) -> R<()> {
+        if !p.unpacked.is_empty() {
+            self.scopes[sid].syms.insert(p.name.clone(), v);
+            return Ok(());
+        }
         self.enum_const(p, sid);
         self.enum_value(p, &v, sid)?;
         if p.spec {
@@ -341,6 +411,18 @@ impl<'a> Compiler<'a> {
     pub(crate) fn pval(&mut self, e: &Expr, sid: usize) -> R<PVal> {
         if let ExprKind::Type(t) = &e.kind {
             return Ok(PVal::Type(Rc::new(self.resolve_type(t, sid)?)));
+        }
+        // another unpacked array parameter: its elements
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid),
+            ExprKind::Hier(p) => self.lookup_hier(p, sid),
+            _ => None,
+        };
+        if let Some(Sym::Sig(s)) = sym.filter(|x| matches!(x, Sym::Sig(s) if self.sigs.const_arrays.contains(s))) {
+            let i = self.sig(s);
+            let words = 2 * rt::nw(i.width) as usize * i.depth.max(1) as usize;
+            let at = i.slot as usize;
+            return Ok(PVal::Array(Rc::new(self.prog.mem[at..at + words].to_vec())));
         }
         if self.type_of(e, sid)?.is_real() {
             Ok(PVal::Real(self.const_real(e, sid)?))

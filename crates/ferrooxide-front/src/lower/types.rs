@@ -506,7 +506,7 @@ impl Lower {
                                 None => num(0),
                             },
                         };
-                        self.pending.push(Item::Param(ParamDecl { local: true, spec: false, signed, ty: const_ty.clone(), name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
+                        self.pending.push(Item::Param(ParamDecl { local: true, spec: false, signed, ty: const_ty.clone(), unpacked: vec![], name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
                         names.push(name.clone());
                         prev = Some(name);
                     }
@@ -760,9 +760,17 @@ impl Lower {
     /// One `name = value` of a value parameter; `port`: in a parameter port list.
     pub(crate) fn param_assign(&mut self, local: bool, port: bool, pt: &PType, d: &t::Declarator) -> Result<ParamDecl> {
         let name = self.name(&d.name, d.loc);
-        if !d.dims.is_empty() {
-            return self.unsupported(d.loc, "an unpacked array parameter");
-        }
+        let unpacked = if d.dims.is_empty() {
+            Vec::new()
+        } else {
+            if pt.ty.as_ref().is_none_or(|t| matches!(t.kind, NetKind::Real | NetKind::String)) {
+                return self.unsupported(d.loc, "an unpacked array parameter without an integral data type");
+            }
+            match self.unpacked_dims(&d.dims, d.loc)? {
+                (u, None) => u,
+                (_, Some(_)) => return self.unsupported(d.loc, "a queue or dynamic array parameter"),
+            }
+        };
         // a parameter port may leave out its default (IEEE 1800 6.20.1); its instances must
         // override it
         let value = match &d.init {
@@ -770,10 +778,11 @@ impl Lower {
             None if port && !local => None,
             None => return self.err(d.loc, format!("parameter '{name}' needs a value (only a parameter port may leave it out)")),
         };
-        self.decl_type = pt.sv.clone().map(Rc::new);
-        self.declare_var(&name, &[]);
+        // (an array parameter is known with its element type, as an array variable)
+        self.decl_type = if unpacked.is_empty() { pt.sv.clone() } else { pt.ty.clone() }.map(Rc::new);
+        self.declare_var(&name, &unpacked);
         let ty = pt.ty.clone().map(Rc::new);
-        Ok(ParamDecl { local, spec: false, signed: pt.signed, ty, name, value, enum_type: None, line: d.loc.line })
+        Ok(ParamDecl { local, spec: false, signed: pt.signed, ty, unpacked, name, value, enum_type: None, line: d.loc.line })
     }
 
     /// A module port declaration `dir [net] [var] ty`: an inout port is a net (IEEE 1800-2017

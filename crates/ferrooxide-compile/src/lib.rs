@@ -65,6 +65,8 @@ pub(crate) enum PVal {
     Default,
     Real(f64),
     Type(Rc<SvType>),
+    /// the value of an unpacked array parameter: its memory words
+    Array(Rc<Vec<u64>>),
 }
 
 pub(crate) struct Scope<'a> {
@@ -311,6 +313,8 @@ pub(crate) struct Nets {
 pub(crate) struct Sigs {
     /// the sampled copies of signals read by concurrent assertions
     pub(crate) sampled: HashMap<u32, u32>,
+    /// unpacked array parameters: read-only arrays, constant in constant expressions
+    pub(crate) const_arrays: HashSet<u32>,
     /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
     pub(crate) two_state: HashSet<u32>,
     /// automatic variables (of automatic subroutines and automatic blocks)
@@ -1017,8 +1021,8 @@ impl<'a> Compiler<'a> {
     pub(crate) fn is_const_expr(&self, e: &Expr, sid: usize) -> bool {
         let all = |c: &Self, v: &[Expr]| v.iter().all(|x| c.is_const_expr(x, sid));
         match &e.kind {
-            ExprKind::Ident(n) => !matches!(self.lookup(n, sid), Some(Sym::Sig(_))),
-            ExprKind::Hier(p) => !matches!(self.lookup_hier(p, sid), Some(Sym::Sig(_))),
+            ExprKind::Ident(n) => !matches!(self.lookup(n, sid), Some(Sym::Sig(s)) if !self.sigs.const_arrays.contains(&s)),
+            ExprKind::Hier(p) => !matches!(self.lookup_hier(p, sid), Some(Sym::Sig(s)) if !self.sigs.const_arrays.contains(&s)),
             ExprKind::Unary(_, a) | ExprKind::Member(a, _) => self.is_const_expr(a, sid),
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => self.is_const_expr(a, sid) && self.is_const_expr(b, sid),
             ExprKind::Cond(a, b, c) | ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) => {

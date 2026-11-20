@@ -161,6 +161,8 @@ pub struct ParamDecl {
     pub signed: bool,
     /// the declared data type; None: the value's type (IEEE 1800-2017 6.20.2)
     pub ty: Option<std::rc::Rc<crate::lower::SvType>>,
+    /// the unpacked dimensions of an array parameter (`ty` is its element type)
+    pub unpacked: Vec<Range>,
     pub name: String,
     /// None: a parameter port without a default, which every instance must override
     pub value: Option<Expr>,
@@ -183,6 +185,10 @@ impl ParamDecl {
     /// The range of the value: the declared one, the whole width of a struct or of several
     /// packed dimensions, that of `byte`, `shortint`, `longint` and `time`.
     pub fn range(&self) -> Option<Range> {
+        // (an array parameter is no vector)
+        if !self.unpacked.is_empty() {
+            return None;
+        }
         let t = self.ty.as_ref()?;
         if matches!(t.kind, NetKind::Real | NetKind::String) || self.integer() {
             return None;

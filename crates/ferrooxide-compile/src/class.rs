@@ -257,6 +257,7 @@ impl<'a> Compiler<'a> {
             PVal::Default => "default".into(),
             PVal::Real(r) => format!("{}", r.to_bits()),
             PVal::Type(t) => format!("{t:?}"),
+            PVal::Array(w) => format!("{w:?}"),
         }
     }
 

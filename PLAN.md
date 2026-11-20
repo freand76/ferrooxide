@@ -388,8 +388,13 @@ clocking. *Then (2026-11-20)*: elaboration system tasks (`Item::ElabTask`: `$inf
 "During elaboration" lines when the scope is elaborated, after elaboration; `$error` and
 `$fatal` make it fail) and deferred assertions (`Stmt::Deferred`: the outcome in a hidden
 bit, an action process scheduled once per time step into the Reactive or Postponed region,
-so a later evaluation replaces the report; at module level in an always_comb): ariane now
-stops at automatic variables in static subroutines.
+so a later evaluation replaces the report; at module level in an always_comb). Then
+`automatic` variables in static subroutines and unpacked array parameters (`ParamDecl::
+unpacked`: a read-only array signal declared like a variable, its value written at
+elaboration by a constant-context assignment, constant in constant expressions
+(`sigs.const_arrays`); an override by another array parameter passes its words,
+`PVal::Array`; a pattern as an override is not supported yet): ariane now stops at
+streaming concatenations.
 
 1. **sv-tests, first part** (chipsalliance/sv-tests; results, error tables and the reasons
    in `SV_TESTS.md`). 3798 of 5110 tests pass at a3fa6b3 with the ferrooxide runner

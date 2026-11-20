@@ -1272,6 +1272,10 @@ impl<'a> Compiler<'a> {
             _ => None,
         };
         if let Some(Sym::Sig(s)) = sym {
+            if self.sigs.const_arrays.contains(&s) {
+                let n = self.sig(s).name.rsplit('.').next().unwrap_or_default().to_string();
+                return self.err(format!("assignment to parameter '{n}'"));
+            }
             if self.sig(s).kind == SigKind::Wire {
                 let n = self.sig(s).name.rsplit('.').next().unwrap_or_default().to_string();
                 return self.err(format!("procedural assignment to net '{n}' (only variables take procedural assignments)"));
