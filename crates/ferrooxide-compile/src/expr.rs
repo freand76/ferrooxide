@@ -19,6 +19,20 @@ pub(crate) fn has_call(e: &Expr) -> bool {
     }
 }
 
+/// Whether an expression may read class objects: a member select (a property through a
+/// handle) or a call (of a method or a function that reads one).
+pub(crate) fn may_read_objects(e: &Expr) -> bool {
+    match e {
+        Expr::Member(..) | Expr::Call(..) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::ArrayWith { .. } => true,
+        Expr::Index(a, b) | Expr::Binary(_, a, b) => may_read_objects(a) || may_read_objects(b),
+        Expr::Range(a, b, c) | Expr::Cond(a, b, c) | Expr::IndexedRange(a, b, c, _) => may_read_objects(a) || may_read_objects(b) || may_read_objects(c),
+        Expr::Unary(_, a) => may_read_objects(a),
+        Expr::Concat(v) | Expr::SysCall(_, v) => v.iter().any(may_read_objects),
+        Expr::Repl(n, v) => may_read_objects(n) || v.iter().any(may_read_objects),
+        _ => false,
+    }
+}
+
 /// What an identifier-like base expression refers to.
 pub(crate) enum Base {
     Sig(u32),

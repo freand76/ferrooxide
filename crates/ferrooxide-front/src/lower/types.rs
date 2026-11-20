@@ -511,6 +511,11 @@ impl Lower {
             }
             t::TypeKind::Named(n) => {
                 // `C #(..)`: a specialization of a parameterized class
+                // (the parameter of `std::mailbox` has a type as default: an untyped mailbox
+                // would take only those values)
+                if n.name == "mailbox" && n.params.is_none() && n.scopes.is_empty() && self.in_class.as_deref() != Some("mailbox") && self.classes.get("mailbox").is_some_and(|c| c.parameterized) {
+                    return self.unsupported(ty.loc, "an untyped mailbox (give its type: `mailbox #(T)`)");
+                }
                 let n = &self.despec(n, ty.loc)?;
                 if n.scopes.len() > 1 {
                     return self.unsupported(ty.loc, "a type name with more than one scope");

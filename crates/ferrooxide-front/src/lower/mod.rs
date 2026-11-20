@@ -132,6 +132,22 @@ struct PkgCtx {
 pub fn lower_files(files: &[t::SourceFile], opts: &Options) -> Result<Vec<Module>> {
     let mut l = Lower::new();
     let mut modules = Vec::new();
+    // the built-in package `std`, imported (`import std::*`) into every compilation unit
+    let (std, files) = match files.split_first() {
+        Some((f, rest)) if f.name == crate::syntax::STD_FILE => (Some(f), rest),
+        _ => (None, files),
+    };
+    if let Some(f) = std {
+        l.file = f.name.clone();
+        modules.extend(l.source(&f.items)?);
+    }
+    let import_std = |l: &mut Lower| -> Result<()> {
+        if std.is_some() {
+            l.import(&[t::Import { package: "std".into(), name: None, loc: t::Loc { line: 1 } }], true)?;
+        }
+        Ok(())
+    };
+    import_std(&mut l)?;
     for (k, f) in files.iter().enumerate() {
         if opts.separate_units && k > 0 {
             modules.extend(l.unit_module());
@@ -145,6 +161,7 @@ pub fn lower_files(files: &[t::SourceFile], opts: &Options) -> Result<Vec<Module
             l.unit_var_types = HashMap::new();
             l.file_tu = (None, None);
             l.unit_name = format!("$unit#{k}");
+            import_std(&mut l)?;
         }
         l.file = f.name.clone();
         l.unnamed = 0;

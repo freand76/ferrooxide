@@ -975,6 +975,11 @@ impl<'a> Compiler<'a> {
                 self.patch(jz, h);
                 let mut reads = Vec::new();
                 self.reads_expr(cond, sid, &mut reads);
+                // a condition on objects: woken by every write of a property (it is evaluated
+                // again)
+                if !self.classes.list.is_empty() && crate::expr::may_read_objects(cond) {
+                    reads.push((self.obj_sig(), NONE));
+                }
                 let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
                 self.emit(Instr::Wait { ctl });
                 self.emit(Instr::Jmp { to: top });

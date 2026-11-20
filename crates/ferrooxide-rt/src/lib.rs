@@ -154,6 +154,9 @@ pub struct Program {
     pub udps: Vec<UdpTable>,
     /// classes (`Instr::Obj`): the words of a new object (its properties' start values)
     pub classes: Vec<ClassDef>,
+    /// a signal every write of an object property touches (for `wait` on conditions that
+    /// read objects), if some code waits on it
+    pub obj_sig: Option<u32>,
 }
 
 /// A class: an object holds its properties flat, `nw(width)` value words then as many

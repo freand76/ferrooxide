@@ -735,7 +735,9 @@ impl Lower {
         let var = self.vars.get(&name).map(|v| v.0.clone());
         // a variable whose type has members (a struct, or a type parameter): members are
         // resolved in elaboration
-        if var.as_ref().is_some_and(|t| t.has_struct() || t.param.is_some()) && !matches!(ops.first(), Some(Op::Call(..))) {
+        // (a queue's method call, `q.size()`, is not a member)
+        let queue_call = var.as_ref().is_some_and(|t| t.heap.is_some()) && ops.iter().any(|o| matches!(o, Op::Call(..)));
+        if var.as_ref().is_some_and(|t| t.has_struct() || t.param.is_some()) && !matches!(ops.first(), Some(Op::Call(..))) && !queue_call {
             return self.members(Expr::Ident(name), ops);
         }
         if lvalue {

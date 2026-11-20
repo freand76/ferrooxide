@@ -68,6 +68,17 @@ pub(crate) struct Classes<'a> {
 const UNDECLARED: usize = usize::MAX;
 
 impl<'a> Compiler<'a> {
+    /// The signal that object property writes touch (`Program::obj_sig`), made on first use.
+    pub(crate) fn obj_sig(&mut self) -> u32 {
+        if let Some(s) = self.prog.obj_sig {
+            return s;
+        }
+        let s = self.new_signal("$objects".into(), 1, false, 0, 0, 0, 0, SigKind::Reg);
+        self.prog.names.pop();
+        self.prog.obj_sig = Some(s);
+        s
+    }
+
     /// The id of a class to be declared (`declare_class`): a placeholder until then.
     pub(crate) fn reserve_class(&mut self, c: &'a ClassDecl, name: &str, sid: usize) -> u32 {
         let id = self.classes.list.len() as u32;
@@ -310,7 +321,14 @@ impl<'a> Compiler<'a> {
             _ => (64, false),
         };
         let kind = self.dyn_kind(h, sid)?;
-        let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), sid)?;
+        let elem = match d.ty.as_ref().filter(|t| t.param.is_some()) {
+            // elements of a type parameter's type
+            Some(t) => {
+                let r = self.resolve_type(t, sid)?;
+                self.elem_for(r.kind, w, r.signed, Some(&r), sid)?
+            }
+            None => self.elem_for(d.kind, w, signed, d.ty.as_deref(), sid)?,
+        };
         if elem.leaf == crate::types::Leaf::Str || matches!(kind, DynKind::Assoc(rt::KeyKind::Str)) {
             self.intern(b"");
         }

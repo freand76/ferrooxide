@@ -3246,6 +3246,11 @@ impl Sim {
             }
             ObjOp::Set => {
                 let Some(i) = obj(self) else { return };
+                if let Some(s) = self.prog.obj_sig {
+                    let r = self.sigs[s as usize];
+                    let cur = lsb_code(&self.mem, r.slot, r.width);
+                    self.notify(s, cur);
+                }
                 let n = nw(w);
                 let vals: Vec<(u64, u64)> = (0..n).map(|k| (self.mem[b + k], self.mem[b + n + k])).collect();
                 let o = self.heap[i].as_mut().unwrap();

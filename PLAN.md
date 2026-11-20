@@ -469,14 +469,18 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    parameters as for modules (also for subroutine arguments and results, which were wrong
    before in modules too); `C #(..)::x`, `C #(..)::new`, `extends B #(..)`, typedefs of
    specializations, forward-declared ones, a class's own name inside it meaning the
-   current specialization: 4623 of 5112 sv-tests. Left: static properties of
+   current specialization: 4623 of 5112 sv-tests. `mailbox #(T)` and `semaphore`
+   (2026-11-20): the package `std` in SystemVerilog (`front/src/std.sv`), parsed first
+   where the sources name them and imported into every compilation unit; `wait` on a
+   condition that reads objects wakes on every property write (`Program::obj_sig`; before,
+   it never woke): 4625. Left: static properties of
    parameterized classes, body `parameter type` items, `C #(..)::f()` as a statement (the
-   parser takes it for a declaration), `mailbox`/`semaphore`, a class's own
+   parser takes it for a declaration), an untyped `mailbox`, `process`, a class's own
    specialization inside it naming a class other than itself (`this_type`), arguments
    that use names of a generate block or subroutine (evaluated in the module). UVM now
    stops at `TYPE::name` through a type parameter in a macro.
    From sv-tests (`SV_TESTS.md` priorities 7-11, by tests won): concurrent assertions, `sequence`,
-   `property`, `expect` and clocking blocks (58, used by ariane); `mailbox #(T)`; constraints, `randomize`, `randsequence`, `randcase`,
+   `property`, `expect` and clocking blocks (58, used by ariane); constraints, `randomize`, `randsequence`, `randcase`,
    `$dist_*` (51); then interface classes (21), streaming concatenation (14), extern
    methods (12), tagged unions (10), assignment in an expression (8), the `process` class,
    `$cast`/`$typename`, pure methods, replication in assignment patterns.
