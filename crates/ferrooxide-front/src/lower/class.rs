@@ -34,6 +34,14 @@ pub(crate) struct ClassNames {
 }
 
 impl Lower {
+    /// A name class `class` declares: an error when it declares it already.
+    fn own_name(&self, own: &mut HashSet<String>, n: &str, line: Line, class: &str) -> Result<()> {
+        if !own.insert(n.to_string()) {
+            return Err(crate::Error { msg: format!("'{n}' is already declared in class '{class}'"), file: self.file.clone(), line });
+        }
+        Ok(())
+    }
+
     /// `class name [extends base]; items endclass`
     pub(crate) fn class_decl(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
         let line = c.loc.line;
@@ -99,6 +107,8 @@ impl Lower {
         let mut statics = Vec::new();
         let mut consts = Vec::new();
         let mut hidden: Vec<(String, bool)> = Vec::new();
+        // the names the class itself declares (one item each, IEEE 1800-2017 8.3)
+        let mut own: HashSet<String> = HashSet::new();
         let vis = |quals: &[Kw]| {
             if quals.contains(&Kw::Local) {
                 Some(true)
@@ -123,9 +133,15 @@ impl Lower {
                 r?;
                 for x in v.into_iter().chain(std::mem::take(&mut self.pending)) {
                     match x {
-                        Item::Param(p) => consts.push(p),
+                        Item::Param(p) => {
+                            self.own_name(&mut own, &p.name, p.line, &name)?;
+                            consts.push(p)
+                        }
                         _ => return self.unsupported(super::item_loc(i), &format!("{} in a class", super::item_what(i))),
                     }
+                }
+                if let t::Item::Typedef(t::Typedef::Type { name: n, loc, .. }) = i {
+                    self.own_name(&mut own, n, loc.line, &name)?;
                 }
                 for (k, t) in &self.types {
                     if before.get(k).is_none_or(|o| !Rc::ptr_eq(o, t)) {
@@ -146,11 +162,17 @@ impl Lower {
             // an enum type declared here: its constants belong to the class
             for x in std::mem::take(&mut self.pending) {
                 match x {
-                    Item::Param(p) => consts.push(p),
+                    Item::Param(p) => {
+                        self.own_name(&mut own, &p.name, p.line, &name)?;
+                        consts.push(p)
+                    }
                     _ => return self.unsupported(v.loc, "this property type"),
                 }
             }
             d.names = self.declarators(&v.decls)?;
+            for n in &d.names {
+                self.own_name(&mut own, &n.name, n.line, &name)?;
+            }
             if is_static {
                 for n in &mut d.names {
                     let var = format!("{name}${}", n.name);
@@ -173,6 +195,7 @@ impl Lower {
         for it in &c.items {
             if let t::ClassItem::Method(m) = it {
                 let n = &m.name.name;
+                self.own_name(&mut own, n, m.loc.line, &name)?;
                 names.methods.insert(n.clone());
                 if let Some(l) = vis(&m.quals) {
                     hidden.push((n.clone(), l));

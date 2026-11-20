@@ -423,7 +423,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    Wildcard imports in a module (`WildCheck` in the lowering): a name used through two of
    them is an error, as is a module declaration of a name after a use imported it (calls
    and generate blocks are not checked): 4556 of 5112.
-   Left among the accepted invalid tests: name collisions in a class, `var` in a for
+   Two declarations of one name in a class: 4557 of 5112.
+   Left among the accepted invalid tests: `var` in a for
    initialization (legal in 1800-2017, kept). Left: errors in
    class methods that are never called, the rest of the ACCEPT list
    in `target/svtests-baseline.res`. Interleave with the other steps.
