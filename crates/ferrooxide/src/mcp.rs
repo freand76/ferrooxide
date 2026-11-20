@@ -125,6 +125,7 @@ impl Server {
                 io_range_warn: false,
                 no_anachronisms: false,
                 top_params: Vec::new(),
+                no_top_ok: false,
             },
             jit: true,
             fuse: true,

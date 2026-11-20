@@ -274,6 +274,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, f: SysFn::UrandomRange(a, b) } => vec![*d, *a, *b],
+        Instr::SysF { d, f: SysFn::RandRange { lo, hi, .. } } => vec![*d, *lo, *hi],
         Instr::CallSub { dsts, .. } => dsts.to_vec(),
         Instr::RetSub { srcs } => srcs.iter().map(|x| x.0).collect(),
         Instr::SaveFrame { .. } => vec![],
@@ -499,6 +500,9 @@ pub enum SysFn {
     UrandomSeed(u32),
     /// $urandom_range(max, min): slots of the two 32-bit bounds
     UrandomRange(u32, u32),
+    /// a random `w`-bit value between the 64-bit bounds in slots lo and hi (`signed`
+    /// bounds; lo > hi gives lo; more than 64 bits: all bits random) for `randomize`
+    RandRange { lo: u32, hi: u32, w: u32, signed: bool },
 }
 
 #[derive(Clone, Debug)]

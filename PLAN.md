@@ -482,8 +482,19 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    specialization inside it naming a class other than itself (`this_type`), arguments
    that use names of a generate block or subroutine (evaluated in the module). UVM now
    stops at `TYPE::name` through a type parameter in a macro.
+   Constraints and `randomize()` done 2026-11-20 (`front/lower/constraint.rs`,
+   `compile/random.rs`): `rand` properties, constraint blocks (relations, `inside`, `dist`,
+   implication, if-else, `foreach` over fixed-size arrays, `unique`, soft, inheritance and
+   overriding by name), `obj.randomize()` (virtual: the object's class), `randomize(v)`,
+   `with {...}` (`local::`), `std::randomize`, pre/post_randomize, and `randcase` (an
+   expansion in the lowering). The solver works at the call: values in a dependency order
+   from simple rules, then a check of all constraints, retried; without a solution the
+   values stay, 0 and a warning. `--elab-only` elaborates sources without a top-level
+   module (their packages and file scope): 4660 of 5112. Left: `randc`, `rand_mode`,
+   `constraint_mode`, extern/pure constraints, `disable soft`, rand dynamic arrays and
+   real/string/class rand properties, `randomize(null)`, `randsequence` (12 sv-tests).
    From sv-tests (`SV_TESTS.md` priorities 7-11, by tests won): concurrent assertions, `sequence`,
-   `property`, `expect` and clocking blocks (58, used by ariane); constraints, `randomize`, `randsequence`, `randcase`,
+   `property`, `expect` and clocking blocks (58, used by ariane); the rest of constraints, `randomize`, `randsequence`, `randcase`,
    `$dist_*` (51); then interface classes (21), streaming concatenation (14), extern
    methods (12), tagged unions (10), assignment in an expression (8), the `process` class,
    `$cast`/`$typename`, pure methods, replication in assignment patterns.

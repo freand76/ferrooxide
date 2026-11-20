@@ -7,6 +7,7 @@
 //! line.
 
 mod class;
+mod constraint;
 mod expr;
 mod items;
 mod stmt;
@@ -43,6 +44,9 @@ pub(crate) struct Lower {
     pub(crate) in_class: Option<String>,
     /// the specializations made: (specialization, class)
     pub(crate) spec_of: Vec<(String, String)>,
+    /// lowering the arguments and constraints of `obj.randomize()`: the object and its
+    /// class's names (they name its properties)
+    pub(crate) with_obj: Option<(Expr, std::rc::Rc<class::ClassNames>)>,
     /// typedefs lowered ahead of their place for a forward declaration (node addresses)
     early: HashSet<usize>,
     /// items at file scope ($unit): added to every module that follows
@@ -190,6 +194,7 @@ impl Lower {
             spec_count: 0,
             in_class: None,
             spec_of: Vec::new(),
+            with_obj: None,
             early: HashSet::new(),
             unit_items: Vec::new(),
             unit_vars: Vec::new(),

@@ -293,7 +293,54 @@ pub struct ClassDecl {
     pub abstract_: bool,
     /// properties and methods declared `local` (true) or `protected` (false)
     pub hidden: Vec<(String, bool)>,
+    /// the `rand` properties (`randc`: true)
+    pub rand: Vec<(String, bool)>,
+    /// constraint blocks (IEEE 1800-2017 18.5); in their expressions the class's properties
+    /// are reached through `this`
+    pub constraints: Vec<Constraint>,
     pub line: Line,
+}
+
+/// `constraint name { items }`.
+#[derive(Debug, Clone)]
+pub struct Constraint {
+    pub name: String,
+    pub static_: bool,
+    pub items: Vec<CItem>,
+    pub line: Line,
+}
+
+/// A constraint item (IEEE 1800-2017 18.5).
+#[derive(Debug, Clone)]
+pub enum CItem {
+    /// an expression that must be true (`soft`: unless it conflicts with others)
+    Expr { soft: bool, e: Expr },
+    /// `e inside {set}`: values and ranges `[lo:hi]`
+    Inside { soft: bool, e: Expr, set: Vec<(Expr, Option<Expr>)> },
+    /// `e dist {items}`
+    Dist { soft: bool, e: Expr, items: Vec<DistItem> },
+    /// `guard -> items`
+    Implies(Expr, Vec<CItem>),
+    /// `if (cond) items else items`
+    If(Expr, Vec<CItem>, Vec<CItem>),
+    /// `foreach (arr[i, j]) items`
+    Foreach { arr: Expr, vars: Vec<Option<String>>, items: Vec<CItem> },
+    /// `unique {values}`
+    Unique(Vec<Expr>),
+    /// `solve a before b`: it changes only how likely the solutions are
+    SolveBefore,
+    /// `disable soft e`
+    DisableSoft(Expr),
+}
+
+/// A `dist` item: a value or range `[lo:hi]` with its weight (`per_value`: `:=`, each value
+/// of the range has it; else `:/`, the range shares it).
+#[derive(Debug, Clone)]
+pub struct DistItem {
+    pub lo: Expr,
+    pub hi: Option<Expr>,
+    pub per_value: bool,
+    pub weight: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,6 +508,11 @@ pub enum Expr {
     /// element; in `e` the element is `$it<depth>` and its index `$ix<depth>` (`depth`:
     /// of `with` expressions nested in one another, from 0)
     ArrayWith { arr: Box<Expr>, method: String, depth: usize, with: Box<Expr> },
+    /// `obj.randomize(vars) with {constraints}` (IEEE 1800-2017 18.6, 18.7): obj None: of
+    /// `this` (in a method), or `std::randomize(vars)` of variables (`std`); `vars`: the
+    /// properties (variables) to randomize, all `rand` ones if empty; a 32-bit value, 1 on
+    /// success
+    Randomize { obj: Option<Box<Expr>>, vars: Vec<Expr>, with: Option<Vec<CItem>>, std: bool },
     /// `$` in an index of a queue: its last index
     Last,
     /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value

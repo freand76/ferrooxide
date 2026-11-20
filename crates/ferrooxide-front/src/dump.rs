@@ -89,6 +89,44 @@ fn list(es: &[Expr]) -> String {
     es.iter().map(expr).collect::<Vec<_>>().join(", ")
 }
 
+/// Constraint items on one line, each ended by `;`.
+pub fn citems(v: &[CItem]) -> String {
+    let mut s = String::new();
+    for it in v {
+        s.push_str(&citem(it));
+        s.push(' ');
+    }
+    s
+}
+
+fn citem(it: &CItem) -> String {
+    let soft = |b: bool| if b { "soft " } else { "" };
+    let range = |(a, b): &(Expr, Option<Expr>)| match b {
+        Some(b) => format!("[{}:{}]", expr(a), expr(b)),
+        None => expr(a),
+    };
+    match it {
+        CItem::Expr { soft: s, e } => format!("{}{};", soft(*s), expr(e)),
+        CItem::Inside { soft: s, e, set } => format!("{}{} inside {{{}}};", soft(*s), expr(e), set.iter().map(range).collect::<Vec<_>>().join(", ")),
+        CItem::Dist { soft: s, e, items } => {
+            let v: Vec<String> = items
+                .iter()
+                .map(|d| format!("{} {} {}", range(&(d.lo.clone(), d.hi.clone())), if d.per_value { ":=" } else { ":/" }, expr(&d.weight)))
+                .collect();
+            format!("{}{} dist {{{}}};", soft(*s), expr(e), v.join(", "))
+        }
+        CItem::Implies(g, v) => format!("{} -> {{ {}}}", expr(g), citems(v)),
+        CItem::If(g, a, b) => format!("if ({}) {{ {}}} else {{ {}}}", expr(g), citems(a), citems(b)),
+        CItem::Foreach { arr, vars, items } => {
+            let vs: Vec<&str> = vars.iter().map(|v| v.as_deref().unwrap_or("")).collect();
+            format!("foreach ({}[{}]) {{ {}}}", expr(arr), vs.join(", "), citems(items))
+        }
+        CItem::Unique(v) => format!("unique {{{}}};", list(v)),
+        CItem::SolveBefore => "solve ... before ...;".into(),
+        CItem::DisableSoft(e) => format!("disable soft {};", expr(e)),
+    }
+}
+
 pub fn expr(e: &Expr) -> String {
     match e {
         Expr::Num(n) => number(n),
@@ -126,6 +164,15 @@ pub fn expr(e: &Expr) -> String {
         Expr::NewTyped(c, args) => format!("{c}::new({})", list(args)),
         Expr::NewCopy(x) => format!("new {}", expr(x)),
         Expr::MethodCall(o, m, args) => format!("{}.{m}({})", expr(o), list(args)),
+        Expr::Randomize { obj, vars, with, std } => {
+            let f = match (obj, std) {
+                (Some(o), _) => format!("{}.randomize", expr(o)),
+                (None, true) => "std::randomize".to_string(),
+                (None, false) => "this.randomize".to_string(),
+            };
+            let w = with.as_ref().map(|v| format!(" with {{ {}}}", citems(v))).unwrap_or_default();
+            format!("{f}({}){w}", list(vars))
+        }
         Expr::ArrayWith { arr, method, depth, with } => format!("{}.{method}($it{depth}) with ({})", expr(arr), expr(with)),
         Expr::StaticCall(c, m, args) => format!("{c}::{m}({})", list(args)),
         Expr::Pattern(t, items) => {
@@ -454,6 +501,12 @@ impl Printer {
                 }
                 for d in &c.props {
                     self.line(Self::decl_text(d));
+                }
+                for (r, cyclic) in &c.rand {
+                    self.line(format!("// {} {r}", if *cyclic { "randc" } else { "rand" }));
+                }
+                for k in &c.constraints {
+                    self.line(format!("{}constraint {} {{ {}}}", if k.static_ { "static " } else { "" }, k.name, citems(&k.items)));
                 }
                 for f in &c.methods {
                     if c.virtuals.contains(&f.name) {

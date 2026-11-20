@@ -147,6 +147,7 @@ impl<'a> Compiler<'a> {
         let v = Type::vec;
         Ok(match e {
             Expr::Type(_) => return self.err("a data type is not a value"),
+            Expr::Randomize { .. } => Type::vec(32, true),
             Expr::ArrayWith { method, .. } => return self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
             Expr::Member(..) => return self.member_error(e, sid),
             Expr::NewArray(..) => return self.err("new[] needs a dynamic array to assign to"),

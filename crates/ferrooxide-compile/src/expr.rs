@@ -386,7 +386,7 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last | Expr::IncDec { .. } => false,
             Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::EmptyArg | Expr::NamedArg(..) => false,
-            Expr::ArrayWith { .. } => false,
+            Expr::ArrayWith { .. } | Expr::Randomize { .. } => false,
             // a member of a struct parameter
             Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
@@ -617,6 +617,10 @@ impl<'a> Compiler<'a> {
         }
         match e {
             Expr::Type(_) => self.err("a data type is not a value"),
+            Expr::Randomize { .. } => {
+                let r = self.randomize(e, sid)?;
+                Ok(self.resize(r, 32, w, true))
+            }
             Expr::ArrayWith { method, .. } => self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
             Expr::Member(..) => self.member_error(e, sid),
             Expr::Pattern(..) => {
@@ -1991,6 +1995,11 @@ impl<'a> Compiler<'a> {
             Expr::New(v) | Expr::NewTyped(_, v) | Expr::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             Expr::NewCopy(x) => self.reads_expr(x, sid, out),
             Expr::ArrayWith { arr, .. } => self.reads_expr(arr, sid, out),
+            Expr::Randomize { obj, .. } => {
+                if let Some(o) = obj {
+                    self.reads_expr(o, sid, out);
+                }
+            }
             Expr::MethodCall(o, _, args) => {
                 self.reads_expr(o, sid, out);
                 args.iter().for_each(|x| self.reads_expr(x, sid, out));

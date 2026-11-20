@@ -145,7 +145,10 @@ fn main() -> ExitCode {
             "--dump-code" => dump_code = true,
             "--dump-ast" => dump_ast = true,
             "--parse-only" => parse_only = true,
-            "--elab-only" => elab_only = true,
+            "--elab-only" => {
+                elab_only = true;
+                dialect.no_top_ok = true;
+            }
             "--dump-syntax" => dump_syntax = true,
             "--no-jit" => jit = false,
             "--no-fuse" => fuse = false,

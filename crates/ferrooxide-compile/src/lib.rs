@@ -12,6 +12,7 @@ mod arrmeth;
 mod heap;
 mod konst;
 mod lint;
+mod random;
 mod stmt;
 mod strings;
 mod types;
@@ -353,6 +354,9 @@ pub struct Dialect {
     /// `-P<top>.<param>=<value>`: parameter values of top-level modules (a number, a real or
     /// a string literal)
     pub top_params: Vec<(String, String)>,
+    /// `--elab-only`: sources without a top-level module elaborate their packages and file
+    /// scope (classes, for example) instead of being an error
+    pub no_top_ok: bool,
 }
 
 /// Compile and, with `lint`, also collect lint findings: (program, warnings, lint findings).
@@ -410,7 +414,7 @@ pub fn compile_dialect(
         }
         v
     };
-    if top_mods.is_empty() {
+    if top_mods.is_empty() && !(dialect.no_top_ok && modules.iter().any(|m| m.package)) {
         return Err(Error { msg: "no top-level module found".into(), file: String::new(), line: 0 });
     }
     // a keyword used as a name (IEEE 1800-2017 5.6.2); Verilog-2005 code keeps the names

@@ -220,6 +220,7 @@ impl Lower {
         let mut props = Vec::new();
         let mut statics = Vec::new();
         let mut consts = Vec::new();
+        let mut rands: Vec<(String, bool)> = Vec::new();
         let mut hidden: Vec<(String, bool)> = Vec::new();
         // (the names the class itself declares, one item each, IEEE 1800-2017 8.3: `own`)
         let vis = |quals: &[Kw]| {
@@ -265,6 +266,7 @@ impl Lower {
             }
             let t::ClassItem::Property { quals, decl } = it else { continue };
             let is_static = quals.contains(&Kw::Static);
+            let rand = quals.iter().find(|q| matches!(q, Kw::Rand | Kw::Randc)).map(|q| *q == Kw::Randc);
             let t::Item::Var(v) = decl else {
                 return self.unsupported(super::item_loc(decl), &format!("{} in a class", super::item_what(decl)));
             };
@@ -285,6 +287,12 @@ impl Lower {
             d.names = self.declarators(&v.decls)?;
             for n in &d.names {
                 self.own_name(&mut own, &n.name, n.line, &name)?;
+            }
+            if let Some(cyclic) = rand {
+                if is_static {
+                    return self.unsupported(v.loc, "a static rand property");
+                }
+                rands.extend(d.names.iter().map(|n| (n.name.clone(), cyclic)));
             }
             if is_static {
                 if c.params.is_some() {
@@ -349,6 +357,9 @@ impl Lower {
             }
         }
         let mut methods = Vec::new();
+        let mut constraints = Vec::new();
+        // (constraint names are the class's names too)
+        let mut own_c = own.clone();
         for it in &c.items {
             match it {
                 t::ClassItem::Property { .. } => {}
@@ -376,7 +387,14 @@ impl Lower {
                     this_stmt(&mut f.body, &names, &mut locals);
                     methods.push(f);
                 }
-                t::ClassItem::Constraint(k) => return self.unsupported(k.loc, "a constraint"),
+                t::ClassItem::Constraint(k) => {
+                    let mut k = self.constraint_decl(k)?;
+                    self.own_name(&mut own_c, &k.name, k.line, &name)?;
+                    for it in &mut k.items {
+                        this_citem(it, &names, &mut Vec::new());
+                    }
+                    constraints.push(k);
+                }
                 t::ClassItem::Item(t::Item::Empty(_) | t::Item::Param(_) | t::Item::Typedef(_)) => {}
                 t::ClassItem::Item(i) => return self.unsupported(super::item_loc(i), &format!("{} in a class", super::item_what(i))),
             }
@@ -392,7 +410,7 @@ impl Lower {
             }
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
-        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, line })
+        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, rand: rands, constraints, line })
     }
 
     /// The type of handles of class `name`.
@@ -483,6 +501,20 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
             this_expr(o, c, locals);
             args.iter_mut().for_each(|a| this_expr(a, c, locals));
         }
+        Expr::ArrayWith { arr, with, .. } => {
+            this_expr(arr, c, locals);
+            this_expr(with, c, locals);
+        }
+        Expr::Randomize { obj, vars, with, .. } => {
+            if let Some(o) = obj {
+                this_expr(o, c, locals);
+            }
+            vars.iter_mut().for_each(|a| this_expr(a, c, locals));
+            let mut l = locals.to_vec();
+            for it in with.iter_mut().flatten() {
+                this_citem(it, c, &mut l);
+            }
+        }
         Expr::NewArray(n, init) => {
             this_expr(n, c, locals);
             if let Some(i) = init {
@@ -529,6 +561,49 @@ fn this_call(n: &str, c: &ClassNames, locals: &[String]) -> Option<(Expr, String
 }
 
 /// `this.` before the class's names in a statement; `locals` grows with block declarations.
+/// `this_expr` of a constraint item (the variables of `foreach` are locals).
+fn this_citem(it: &mut CItem, c: &ClassNames, locals: &mut Vec<String>) {
+    match it {
+        CItem::Expr { e, .. } | CItem::DisableSoft(e) => this_expr(e, c, locals),
+        CItem::Inside { e, set, .. } => {
+            this_expr(e, c, locals);
+            for (a, b) in set {
+                this_expr(a, c, locals);
+                if let Some(b) = b {
+                    this_expr(b, c, locals);
+                }
+            }
+        }
+        CItem::Dist { e, items, .. } => {
+            this_expr(e, c, locals);
+            for d in items {
+                this_expr(&mut d.lo, c, locals);
+                if let Some(h) = &mut d.hi {
+                    this_expr(h, c, locals);
+                }
+                this_expr(&mut d.weight, c, locals);
+            }
+        }
+        CItem::Implies(g, v) => {
+            this_expr(g, c, locals);
+            v.iter_mut().for_each(|x| this_citem(x, c, locals));
+        }
+        CItem::If(g, a, b) => {
+            this_expr(g, c, locals);
+            a.iter_mut().chain(b.iter_mut()).for_each(|x| this_citem(x, c, locals));
+        }
+        CItem::Foreach { arr, vars, items } => {
+            this_expr(arr, c, locals);
+            let n = locals.len();
+            locals.extend(vars.iter().flatten().cloned());
+            items.iter_mut().for_each(|x| this_citem(x, c, locals));
+            locals.truncate(n);
+        }
+        CItem::Unique(v) => v.iter_mut().for_each(|x| this_expr(x, c, locals)),
+        CItem::SolveBefore => {}
+    }
+}
+
 fn this_stmt(s: &mut Stmt, c: &ClassNames, locals: &mut Vec<String>) {
     let ex = |e: &mut Expr, l: &[String]| this_expr(e, c, l);
     match s {

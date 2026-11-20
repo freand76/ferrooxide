@@ -425,7 +425,7 @@ impl Lower {
             }
             t::StmtKind::WaitFork => Stmt::WaitFork { line },
             t::StmtKind::WaitOrder { .. } => return self.unsupported(s.loc, "wait_order"),
-            t::StmtKind::RandCase(_) => return self.unsupported(s.loc, "randcase"),
+            t::StmtKind::RandCase(arms) => self.randcase(arms, line)?,
             t::StmtKind::RandSequence { .. } => return self.unsupported(s.loc, "randsequence"),
             t::StmtKind::Assertion(a) => self.immediate_assertion(a, s.label.as_ref().or(a.label.as_ref()))?,
             // `expect(e);` in Verilog code: a call of a task named `expect`
@@ -461,6 +461,8 @@ impl Lower {
                 }
                 self.simple_assign(&t::Stmt { kind: t::StmtKind::Expr(e.clone()), label: None, loc })
             }
+            // `obj.randomize();`: its value is not used
+            t::ExprKind::Call { func, .. } if Self::randomize_form(func).is_some() => Ok(Stmt::Discard { e: self.expr(e)?, line }),
             t::ExprKind::Call { with_: None, .. } | t::ExprKind::Member(..) if self.class_call(e) => match self.expr(e)? {
                 Expr::MethodCall(obj, name, args) => Ok(Stmt::MethodCall { obj: *obj, name, args, line }),
                 Expr::Member(obj, name) => Ok(Stmt::MethodCall { obj: *obj, name, args: vec![], line }),
@@ -659,6 +661,67 @@ impl Lower {
     /// dimension, with int loop variables.
     /// `foreach (aa[k])` of an associative array: `k` of the key type through the keys in
     /// order (`for (ok = aa.first(k); ok; ok = aa.next(k))`).
+    /// `randcase w1: s1; ... endcase` (IEEE 1800-2017 18.16): a block with a random number
+    /// below the sum of the weights, `r`, running the arm whose running sum of weights first
+    /// exceeds it; none when the weights add up to 0.
+    fn randcase(&mut self, arms: &[(t::Expr, t::Stmt)], line: u32) -> Result<Stmt> {
+        let mut ws = Vec::new();
+        let mut bodies = Vec::new();
+        for (w, s) in arms {
+            ws.push(self.expr(w)?);
+            bodies.push(self.stmt(s)?);
+        }
+        self.spec_count += 1;
+        let r = format!("$randcase{}", self.spec_count);
+        let bin = |op, a: Expr, b: Expr| Expr::Binary(op, Box::new(a), Box::new(b));
+        // (the sums take the 64 bits of the comparison with r)
+        let wide = |w: &Expr| w.clone();
+        let mut sums = Vec::new();
+        let mut acc: Option<Expr> = None;
+        for w in &ws {
+            let s = match acc {
+                None => wide(w),
+                Some(a) => bin(BinOp::Add, a, wide(w)),
+            };
+            sums.push(s.clone());
+            acc = Some(s);
+        }
+        let total = acc.unwrap_or(Expr::Num(dec(0)));
+        let mut chain: Option<Stmt> = None;
+        for (s, b) in sums.into_iter().zip(bodies).rev() {
+            chain = Some(Stmt::If { cond: bin(BinOp::Lt, Expr::Ident(r.clone()), s), then_s: Box::new(b), else_s: chain.map(Box::new), line });
+        }
+        let pick = Stmt::Assign {
+            lhs: Expr::Ident(r.clone()),
+            rhs: Expr::SysCall("$urandom_range".into(), vec![bin(BinOp::Sub, total.clone(), Expr::Num(dec(1))), Expr::Num(dec(0))]),
+            nonblocking: false,
+            timing: None,
+            line,
+        };
+        let body = Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: chain.into_iter().collect(), fork: None };
+        let run = Stmt::If { cond: bin(BinOp::Ne, total, Expr::Num(dec(0))), then_s: Box::new(Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: vec![pick, body], fork: None }), else_s: None, line };
+        let d = Decl {
+            dir: None,
+            kind: NetKind::Reg,
+            net: NetType::Wire,
+            explicit_kind: true,
+            real_net: false,
+            strength: None,
+            delay: None,
+            signed: false,
+            range: Some((Expr::Num(dec(63)), Expr::Num(dec(0)))),
+            range_written: false,
+            packed: vec![],
+            type_param: None,
+            ty: None,
+            names: vec![Declarator { name: r, dims: vec![], heap: None, init: None, line }],
+            automatic: true,
+            static_: false,
+            line,
+        };
+        Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![run], fork: None })
+    }
+
     fn foreach_assoc(&mut self, name: &str, v: &str, key: Option<&super::SvType>, body: Stmt, line: u32) -> Stmt {
         let ok = format!("{v}$ok");
         let call = |m: &str| Expr::Call(format!("{name}.{m}"), vec![Expr::Ident(v.to_string())]);

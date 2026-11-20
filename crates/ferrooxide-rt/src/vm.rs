@@ -2672,6 +2672,39 @@ impl Sim {
                             self.mem[d] = v as u64;
                             self.mem[d + 1] = 0;
                         }
+                        SysFn::RandRange { lo, hi, w, signed } => {
+                            let n = nw(*w);
+                            let r64 = |me: &mut Self| ((urandom(&mut me.useed, 0, u32::MAX) as u64) << 32) | urandom(&mut me.useed, 0, u32::MAX) as u64;
+                            if *w > 64 {
+                                for k in 0..n {
+                                    let full = if k == n - 1 { ops::mask(*w - 64 * k as u32) } else { !0 };
+                                    self.mem[d + k] = r64(self) & full;
+                                    self.mem[d + n + k] = 0;
+                                }
+                            } else {
+                                // (bounds with x bits: no bound)
+                                let known = |me: &Self, s: u32| me.mem[s as usize + 1] == 0;
+                                let (a, b) = (self.mem[*lo as usize], self.mem[*hi as usize]);
+                                let v = if !known(self, *lo) || !known(self, *hi) {
+                                    r64(self)
+                                } else if *signed {
+                                    let (a, b) = (a as i64, b as i64);
+                                    if a >= b {
+                                        a as u64
+                                    } else {
+                                        let span = (b as i128 - a as i128 + 1) as u128;
+                                        (a as i128 + (r64(self) as u128 % span) as i128) as u64
+                                    }
+                                } else if a >= b {
+                                    a
+                                } else {
+                                    let span = (b - a) as u128 + 1;
+                                    a + (r64(self) as u128 % span) as u64
+                                };
+                                self.mem[d] = v & ops::mask(*w);
+                                self.mem[d + 1] = 0;
+                            }
+                        }
                         SysFn::RandomSeed(sig) | SysFn::UrandomSeed(sig) => {
                             let r = self.sigs[*sig as usize];
                             let mut seed = self.mem[r.slot as usize] as u32 as i32;

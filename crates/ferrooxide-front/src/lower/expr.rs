@@ -144,6 +144,7 @@ impl Lower {
                 let (b, ops) = flatten(e);
                 self.chain(b, &ops, false)?
             }
+            t::ExprKind::Call { func, args, with_, .. } if Self::randomize_form(func).is_some() => self.randomize(func, args, with_.as_deref(), loc)?,
             t::ExprKind::Call { with_: None, parens: true, .. } => {
                 let (b, ops) = flatten(e);
                 self.chain(b, &ops, false)?
@@ -589,6 +590,24 @@ impl Lower {
 
     fn chain(&mut self, b: Base, ops: &[Op], lvalue: bool) -> Result<Expr> {
         // the iterator of an array method's `with` expression: `item`, `item.index`
+        // in `obj.randomize() with {...}`: a property of obj (unless a local name hides it)
+        if let (Base::Name(n, nloc), Some((o, names))) = (b, &self.with_obj) {
+            if (names.props.contains(n) || names.methods.contains(n)) && !self.wild.locals.iter().any(|l| l == n) {
+                let o = o.clone();
+                let mut v = vec![Op::Member(n, nloc)];
+                v.extend(ops.iter().cloned());
+                return self.class_chain(o, &v, lvalue);
+            }
+        }
+        // `local::x` there: the caller's x
+        if let Base::Other(t::Expr { kind: t::ExprKind::Scoped(n), loc: sloc }) = b {
+            if n.scopes.len() == 1 && n.scopes[0].name == "local" && n.scopes[0].params.is_none() && n.params.is_none() {
+                let saved = self.with_obj.take();
+                let r = self.chain(Base::Name(&n.name, *sloc), ops, lvalue);
+                self.with_obj = saved;
+                return r;
+            }
+        }
         // (the element is a variable `$it<k>` of the element's type, see `ArrayWith`)
         let mut iter = None;
         if let Base::Name(n, _) = b {
