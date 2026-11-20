@@ -8,13 +8,13 @@ use ferrooxide_rt::{BinOp as RB, CmpOp, Index, RedOp, ShOp, SysFn, Target, UnOp 
 /// Whether an expression contains a (user) function or method call or an increment: it may
 /// have side effects, so only what the operators select may run.
 pub(crate) fn has_call(e: &Expr) -> bool {
-    match e {
-        Expr::Call(..) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::IncDec { .. } => true,
-        Expr::Index(a, b) | Expr::Binary(_, a, b) => has_call(a) || has_call(b),
-        Expr::Range(a, b, c) | Expr::Cond(a, b, c) | Expr::IndexedRange(a, b, c, _) => has_call(a) || has_call(b) || has_call(c),
-        Expr::Unary(_, a) => has_call(a),
-        Expr::Concat(v) | Expr::SysCall(_, v) => v.iter().any(has_call),
-        Expr::Repl(n, v) => has_call(n) || v.iter().any(has_call),
+    match &e.kind {
+        ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::IncDec { .. } => true,
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => has_call(a) || has_call(b),
+        ExprKind::Range(a, b, c) | ExprKind::Cond(a, b, c) | ExprKind::IndexedRange(a, b, c, _) => has_call(a) || has_call(b) || has_call(c),
+        ExprKind::Unary(_, a) => has_call(a),
+        ExprKind::Concat(v) | ExprKind::SysCall(_, v) => v.iter().any(has_call),
+        ExprKind::Repl(n, v) => has_call(n) || v.iter().any(has_call),
         _ => false,
     }
 }
@@ -22,13 +22,13 @@ pub(crate) fn has_call(e: &Expr) -> bool {
 /// Whether an expression may read class objects: a member select (a property through a
 /// handle) or a call (of a method or a function that reads one).
 pub(crate) fn may_read_objects(e: &Expr) -> bool {
-    match e {
-        Expr::Member(..) | Expr::Call(..) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::ArrayWith { .. } => true,
-        Expr::Index(a, b) | Expr::Binary(_, a, b) => may_read_objects(a) || may_read_objects(b),
-        Expr::Range(a, b, c) | Expr::Cond(a, b, c) | Expr::IndexedRange(a, b, c, _) => may_read_objects(a) || may_read_objects(b) || may_read_objects(c),
-        Expr::Unary(_, a) => may_read_objects(a),
-        Expr::Concat(v) | Expr::SysCall(_, v) => v.iter().any(may_read_objects),
-        Expr::Repl(n, v) => may_read_objects(n) || v.iter().any(may_read_objects),
+    match &e.kind {
+        ExprKind::Member(..) | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::ArrayWith { .. } => true,
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => may_read_objects(a) || may_read_objects(b),
+        ExprKind::Range(a, b, c) | ExprKind::Cond(a, b, c) | ExprKind::IndexedRange(a, b, c, _) => may_read_objects(a) || may_read_objects(b) || may_read_objects(c),
+        ExprKind::Unary(_, a) => may_read_objects(a),
+        ExprKind::Concat(v) | ExprKind::SysCall(_, v) => v.iter().any(may_read_objects),
+        ExprKind::Repl(n, v) => may_read_objects(n) || v.iter().any(may_read_objects),
         _ => false,
     }
 }
@@ -42,12 +42,12 @@ pub(crate) enum Base {
 
 impl<'a> Compiler<'a> {
     pub(crate) fn resolve_base(&mut self, e: &Expr, sid: usize) -> R<Option<Base>> {
-        let sym = match e {
-            Expr::Ident(n) => match self.lookup(n, sid) {
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => match self.lookup(n, sid) {
                 Some(s) => s,
                 None => return self.err(format!("undeclared identifier '{n}'")),
             },
-            Expr::Hier(p) => match self.lookup_hier(p, sid) {
+            ExprKind::Hier(p) => match self.lookup_hier(p, sid) {
                 Some(s) => s,
                 None => {
                     self.fixed_arr_method(p, sid)?;
@@ -89,28 +89,28 @@ impl<'a> Compiler<'a> {
         if let Some(m) = self.hier_member(e, sid) {
             return Some(m);
         }
-        if self.sigs.has_structs && matches!(e, Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..) | Expr::Member(..)) {
+        if self.sigs.has_structs && matches!(&e.kind, ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..) | ExprKind::Member(..)) {
             if let Some(Ok(w)) = self.struct_walk(e, sid, lvalue) {
                 return Some(w.expr);
             }
         }
         // `ev.triggered` (IEEE 1800 15.5.3): the event was triggered in this time step
         if self.sigs.has_events {
-            if let Expr::Hier(p) = e {
+            if let ExprKind::Hier(p) = &e.kind {
                 if p.len() >= 2 && p.last().unwrap() == "triggered" {
                     let mut t = p[..p.len() - 1].to_vec();
-                    let ev = if t.len() == 1 { Expr::Ident(t[0].clone()) } else { Expr::Hier(t.clone()) };
+                    let ev = if t.len() == 1 { ExprKind::Ident(t[0].clone()) } else { ExprKind::Hier(t.clone()) };
                     let sym = match &ev {
-                        Expr::Ident(n) => self.lookup(n, sid),
-                        Expr::Hier(p) => self.lookup_hier(p, sid),
+                        ExprKind::Ident(n) => self.lookup(n, sid),
+                        ExprKind::Hier(p) => self.lookup_hier(p, sid),
                         _ => None,
                     };
                     if let Some(Sym::Sig(s)) = sym {
                         if self.sig(s).event {
                             let l = t.last_mut().unwrap();
                             *l = format!("{l}$trig");
-                            let h = if t.len() == 1 { Expr::Ident(t[0].clone()) } else { Expr::Hier(t) };
-                            return Some(Expr::Binary(BinOp::CaseEq, Box::new(h), Box::new(Expr::SysCall("$__ticks".into(), Vec::new()))));
+                            let h = if t.len() == 1 { ExprKind::Ident(t[0].clone()) } else { ExprKind::Hier(t) };
+                            return Some(ExprKind::Binary(BinOp::CaseEq, Box::new(h.into()), Box::new(ExprKind::SysCall("$__ticks".into(), Vec::new()).into())).into());
                         }
                     }
                 }
@@ -123,29 +123,29 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.packed_slice(e, sid) {
             return Some(n);
         }
-        match e {
-            Expr::Range(a, m, l) => return Some(Expr::Range(b(self.md_norm(a, sid)?), m.clone(), l.clone())),
-            Expr::IndexedRange(a, base, w, up) => {
-                return Some(Expr::IndexedRange(b(self.md_norm(a, sid)?), base.clone(), w.clone(), *up))
+        match &e.kind {
+            ExprKind::Range(a, m, l) => return Some(ExprKind::Range(b(self.md_norm(a, sid)?), m.clone(), l.clone()).into()),
+            ExprKind::IndexedRange(a, base, w, up) => {
+                return Some(ExprKind::IndexedRange(b(self.md_norm(a, sid)?), base.clone(), w.clone(), *up).into())
             }
-            Expr::Index(..) => {}
+            ExprKind::Index(..) => {}
             _ => return None,
         }
         let mut idx = Vec::new();
         let mut cur = e;
-        while let Expr::Index(a, i) = cur {
+        while let ExprKind::Index(a, i) = &cur.kind {
             idx.push(&**i);
             cur = a;
         }
         idx.reverse();
         // already flat: the base names the storage (`$flat:m`)
-        let flat = match cur {
-            Expr::Ident(n) if !n.starts_with("$flat:") => Expr::Ident(format!("$flat:{n}")),
-            Expr::Hier(p) if !p.last()?.starts_with("$flat:") => {
+        let flat = match &cur.kind {
+            ExprKind::Ident(n) if !n.starts_with("$flat:") => Expr::from(ExprKind::Ident(format!("$flat:{n}"))),
+            ExprKind::Hier(p) if !p.last()?.starts_with("$flat:") => {
                 let mut p = p.clone();
                 let l = p.last_mut()?;
                 *l = format!("$flat:{l}");
-                Expr::Hier(p)
+                ExprKind::Hier(p).into()
             }
             _ => return None,
         };
@@ -158,45 +158,45 @@ impl<'a> Compiler<'a> {
             return None;
         }
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
-                Expr::Unary(UnOp::Neg, b(n))
+                ExprKind::Unary(UnOp::Neg, b(n.into())).into()
             } else {
-                n
+                n.into()
             }
         };
         let mut lin: Option<Expr> = None;
         for (k, &(lo, n, _)) in dims.iter().enumerate() {
-            let term = Expr::Binary(BinOp::Sub, b(idx[k].clone()), b(num(lo)));
+            let term = ExprKind::Binary(BinOp::Sub, b(idx[k].clone()), b(num(lo)));
             lin = Some(match lin {
-                None => term,
-                Some(l) => Expr::Binary(BinOp::Add, b(Expr::Binary(BinOp::Mul, b(l), b(num(n as i64)))), b(term)),
+                None => term.into(),
+                Some(l) => ExprKind::Binary(BinOp::Add, b(ExprKind::Binary(BinOp::Mul, b(l), b(num(n as i64))).into()), b(term.into())).into(),
             });
         }
-        let mut out = Expr::Index(b(flat), b(lin.unwrap()));
+        let mut out = ExprKind::Index(b(flat.into()), b(lin.unwrap()));
         for i in &idx[dims.len()..] {
-            out = Expr::Index(b(out), b((*i).clone()));
+            out = ExprKind::Index(b(out.into()), b((*i).clone()));
         }
-        Some(out)
+        Some(out.into())
     }
 
     /// Selects of a vector with several packed dimensions: `x[i]` is a slice of the flat
     /// vector, `x[i][j]` (all dimensions) a bit, further indices select inside an element.
     fn packed_norm(&self, base: &Expr, flat: &Expr, idx: &[&Expr], sid: usize) -> Option<Expr> {
-        let sym = match base {
-            Expr::Ident(n) => self.lookup(n, sid)?,
-            Expr::Hier(p) => self.lookup_hier(p, sid)?,
+        let sym = match &base.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid)?,
+            ExprKind::Hier(p) => self.lookup_hier(p, sid)?,
             _ => return None,
         };
         let Sym::Sig(s) = sym else { return None };
         let dims = self.sigs.packed_dims.get(&s)?;
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
-                Expr::Unary(UnOp::Neg, b(n))
+                ExprKind::Unary(UnOp::Neg, b(n.into())).into()
             } else {
-                n
+                n.into()
             }
         };
         // an array of packed vectors (`reg [1:0][3:0] pm [0:1]`): the first index is the
@@ -206,7 +206,7 @@ impl<'a> Compiler<'a> {
             if self.sigs.md_dims.contains_key(&s) || idx.is_empty() {
                 return None;
             }
-            elem = Expr::Index(b(flat.clone()), b(idx[0].clone()));
+            elem = ExprKind::Index(b(flat.clone()), b(idx[0].clone())).into();
             if idx.len() == 1 {
                 return Some(elem);
             }
@@ -222,42 +222,42 @@ impl<'a> Compiler<'a> {
             let stride: i64 = dims[t + 1..].iter().map(width).product();
             // position from the right end of the dimension
             let pos = if l >= r {
-                Expr::Binary(BinOp::Sub, b(idx[t].clone()), b(num(r)))
+                ExprKind::Binary(BinOp::Sub, b(idx[t].clone()), b(num(r)))
             } else {
-                Expr::Binary(BinOp::Sub, b(num(r)), b(idx[t].clone()))
+                ExprKind::Binary(BinOp::Sub, b(num(r)), b(idx[t].clone()))
             };
-            let term = Expr::Binary(BinOp::Mul, b(pos), b(num(stride)));
+            let term = ExprKind::Binary(BinOp::Mul, b(pos.into()), b(num(stride)));
             off = Some(match off {
-                None => term,
-                Some(o) => Expr::Binary(BinOp::Add, b(o), b(term)),
+                None => term.into(),
+                Some(o) => ExprKind::Binary(BinOp::Add, b(o), b(term.into())).into(),
             });
         }
         let rem: i64 = dims[k..].iter().map(width).product();
         let mut out = if rem == 1 {
-            Expr::Index(b(flat.clone()), b(off?))
+            ExprKind::Index(b(flat.clone()), b(off?))
         } else {
-            Expr::IndexedRange(b(flat.clone()), b(off?), b(num(rem)), true)
+            ExprKind::IndexedRange(b(flat.clone()), b(off?), b(num(rem)), true)
         };
         for i in &idx[k..] {
-            out = Expr::Index(b(out), b((*i).clone()));
+            out = ExprKind::Index(b(out.into()), b((*i).clone()));
         }
-        Some(out)
+        Some(out.into())
     }
 
     /// `x[m:l]`, `x[b +: w]`, `x[b -: w]` on a vector with several packed dimensions: whole
     /// elements of the first dimension, as a part of the flat vector.
     fn packed_slice(&self, e: &Expr, sid: usize) -> Option<Expr> {
-        let base = match e {
-            Expr::Range(a, ..) | Expr::IndexedRange(a, ..) => &**a,
+        let base = match &e.kind {
+            ExprKind::Range(a, ..) | ExprKind::IndexedRange(a, ..) => &**a,
             _ => return None,
         };
         // an element of an array of packed vectors: m[k][hi:lo] selects in its first packed
         // dimension
-        let arr_elem = match base {
-            Expr::Index(a, k) => match &**a {
-                Expr::Ident(n) if !n.starts_with("$flat:") => match self.lookup(n, sid) {
+        let arr_elem = match &base.kind {
+            ExprKind::Index(a, k) => match &a.kind {
+                ExprKind::Ident(n) if !n.starts_with("$flat:") => match self.lookup(n, sid) {
                     Some(Sym::Sig(s)) if self.sig(s).depth > 0 && !self.sigs.md_dims.contains_key(&s) && self.sigs.packed_dims.contains_key(&s) => {
-                        Some((Expr::Index(Box::new(Expr::Ident(format!("$flat:{n}"))), k.clone()), s))
+                        Some((ExprKind::Index(Box::new(ExprKind::Ident(format!("$flat:{n}")).into()), k.clone()), s))
                     }
                     _ => None,
                 },
@@ -267,14 +267,14 @@ impl<'a> Compiler<'a> {
         };
         // a part of an element of the last dimension: x[i][m:l], x[i][b +: w]
         if arr_elem.is_none() {
-            if let Expr::Index(..) = base {
+            if let ExprKind::Index(..) = &base.kind {
                 return self.packed_elem_part(e, base, sid);
             }
         }
-        let (flat, s) = match (base, arr_elem) {
+        let (flat, s) = match (&base.kind, arr_elem) {
             (_, Some(x)) => x,
-            (Expr::Ident(n), None) if !n.starts_with("$flat:") => match self.lookup(n, sid)? {
-                Sym::Sig(s) => (Expr::Ident(format!("$flat:{n}")), s),
+            (ExprKind::Ident(n), None) if !n.starts_with("$flat:") => match self.lookup(n, sid)? {
+                Sym::Sig(s) => (ExprKind::Ident(format!("$flat:{n}")), s),
                 _ => return None,
             },
             _ => return None,
@@ -285,31 +285,31 @@ impl<'a> Compiler<'a> {
         let pos = |i: i64| if l0 >= r0 { i - r0 } else { r0 - i };
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
-                Expr::Unary(UnOp::Neg, b(n))
+                ExprKind::Unary(UnOp::Neg, b(n.into())).into()
             } else {
-                n
+                n.into()
             }
         };
-        match e {
-            Expr::Range(_, m, l) => {
+        match &e.kind {
+            ExprKind::Range(_, m, l) => {
                 let (m, l) = (self.const_value(m, sid)?, self.const_value(l, sid)?);
                 let lo = pos(m).min(pos(l));
                 let n = (m - l).abs() + 1;
-                Some(Expr::IndexedRange(b(flat), b(num(lo * ew)), b(num(n * ew)), true))
+                Some(ExprKind::IndexedRange(b(flat.into()), b(num(lo * ew)), b(num(n * ew)), true).into())
             }
-            Expr::IndexedRange(_, bx, w, up) => {
+            ExprKind::IndexedRange(_, bx, w, up) => {
                 let w = self.const_value(w, sid)?;
                 // the lowest position of the selected elements
                 let first = match (l0 >= r0, *up) {
-                    (true, true) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r0))),
-                    (true, false) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r0 + w - 1))),
-                    (false, true) => Expr::Binary(BinOp::Sub, b(num(r0 - w + 1)), bx.clone()),
-                    (false, false) => Expr::Binary(BinOp::Sub, b(num(r0)), bx.clone()),
+                    (true, true) => ExprKind::Binary(BinOp::Sub, bx.clone(), b(num(r0))),
+                    (true, false) => ExprKind::Binary(BinOp::Sub, bx.clone(), b(num(r0 + w - 1))),
+                    (false, true) => ExprKind::Binary(BinOp::Sub, b(num(r0 - w + 1)), bx.clone()),
+                    (false, false) => ExprKind::Binary(BinOp::Sub, b(num(r0)), bx.clone()),
                 };
-                let off = Expr::Binary(BinOp::Mul, b(first), b(num(ew)));
-                Some(Expr::IndexedRange(b(flat), b(off), b(num(w * ew)), true))
+                let off = ExprKind::Binary(BinOp::Mul, b(first.into()), b(num(ew)));
+                Some(ExprKind::IndexedRange(b(flat.into()), b(off.into()), b(num(w * ew)), true).into())
             }
             _ => None,
         }
@@ -319,12 +319,12 @@ impl<'a> Compiler<'a> {
     fn packed_elem_part(&self, e: &Expr, inner: &Expr, sid: usize) -> Option<Expr> {
         let mut idx = Vec::new();
         let mut cur = inner;
-        while let Expr::Index(a, i) = cur {
+        while let ExprKind::Index(a, i) = &cur.kind {
             idx.push(&**i);
             cur = a;
         }
         idx.reverse();
-        let Expr::Ident(n) = cur else { return None };
+        let ExprKind::Ident(n) = &cur.kind else { return None };
         if n.starts_with("$flat:") {
             return None;
         }
@@ -336,44 +336,44 @@ impl<'a> Compiler<'a> {
             return None;
         }
         // the element's offset (as an expression), then the part inside it
-        let Some(Expr::IndexedRange(flat, off, _, _)) = self.md_norm(inner, sid) else { return None };
+        let Some(Expr { kind: ExprKind::IndexedRange(flat, off, _, _), .. }) = self.md_norm(inner, sid) else { return None };
         let (l, r) = dims[dims.len() - 1];
         let pos = |i: i64| if l >= r { i - r } else { r - i };
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
-                Expr::Unary(UnOp::Neg, b(n))
+                ExprKind::Unary(UnOp::Neg, b(n.into())).into()
             } else {
-                n
+                n.into()
             }
         };
-        match e {
-            Expr::Range(_, m, lx) => {
+        match &e.kind {
+            ExprKind::Range(_, m, lx) => {
                 let (m, lx) = (self.const_value(m, sid)?, self.const_value(lx, sid)?);
                 let lo = pos(m).min(pos(lx));
-                let off = Expr::Binary(BinOp::Add, off, b(num(lo)));
-                Some(Expr::IndexedRange(flat, b(off), b(num((m - lx).abs() + 1)), true))
+                let off = ExprKind::Binary(BinOp::Add, off, b(num(lo)));
+                Some(ExprKind::IndexedRange(flat, b(off.into()), b(num((m - lx).abs() + 1)), true).into())
             }
-            Expr::IndexedRange(_, bx, w, up) => {
+            ExprKind::IndexedRange(_, bx, w, up) => {
                 let w = self.const_value(w, sid)?;
                 let first = match (l >= r, *up) {
-                    (true, true) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r))),
-                    (true, false) => Expr::Binary(BinOp::Sub, bx.clone(), b(num(r + w - 1))),
-                    (false, true) => Expr::Binary(BinOp::Sub, b(num(r - w + 1)), bx.clone()),
-                    (false, false) => Expr::Binary(BinOp::Sub, b(num(r)), bx.clone()),
+                    (true, true) => ExprKind::Binary(BinOp::Sub, bx.clone(), b(num(r))),
+                    (true, false) => ExprKind::Binary(BinOp::Sub, bx.clone(), b(num(r + w - 1))),
+                    (false, true) => ExprKind::Binary(BinOp::Sub, b(num(r - w + 1)), bx.clone()),
+                    (false, false) => ExprKind::Binary(BinOp::Sub, b(num(r)), bx.clone()),
                 };
-                let off = Expr::Binary(BinOp::Add, off, b(first));
-                Some(Expr::IndexedRange(flat, b(off), b(num(w)), true))
+                let off = ExprKind::Binary(BinOp::Add, off, b(first.into()));
+                Some(ExprKind::IndexedRange(flat, b(off.into()), b(num(w)), true).into())
             }
             _ => None,
         }
     }
 
     pub(crate) fn array_of(&self, e: &Expr, sid: usize) -> Option<u32> {
-        let sym = match e {
-            Expr::Ident(n) => self.lookup(n, sid)?,
-            Expr::Hier(p) => self.lookup_hier(p, sid)?,
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid)?,
+            ExprKind::Hier(p) => self.lookup_hier(p, sid)?,
             _ => return None,
         };
         match sym {
@@ -383,26 +383,26 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
-        match e {
-            Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last | Expr::IncDec { .. } => false,
-            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::EmptyArg | Expr::NamedArg(..) => false,
-            Expr::ArrayWith { .. } | Expr::Randomize { .. } => false,
+        match &e.kind {
+            ExprKind::Type(_) | ExprKind::Pattern(..) | ExprKind::NewArray(..) | ExprKind::Last | ExprKind::IncDec { .. } => false,
+            ExprKind::Null | ExprKind::New(_) | ExprKind::NewTyped(..) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::EmptyArg | ExprKind::NamedArg(..) => false,
+            ExprKind::ArrayWith { .. } | ExprKind::Randomize { .. } => false,
             // a member of a struct parameter
-            Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
-            Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
-            Expr::Ident(n) => matches!(self.lookup(n, sid), Some(Sym::Const(_))),
-            Expr::Hier(_) => false,
-            Expr::Index(a, b) => self.is_const(a, sid) && self.is_const(b, sid),
-            Expr::Range(a, b, c) | Expr::Cond(a, b, c) => {
+            ExprKind::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
+            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Real(_) => true,
+            ExprKind::Ident(n) => matches!(self.lookup(n, sid), Some(Sym::Const(_))),
+            ExprKind::Hier(_) => false,
+            ExprKind::Index(a, b) => self.is_const(a, sid) && self.is_const(b, sid),
+            ExprKind::Range(a, b, c) | ExprKind::Cond(a, b, c) => {
                 self.is_const(a, sid) && self.is_const(b, sid) && self.is_const(c, sid)
             }
-            Expr::IndexedRange(a, b, c, _) => self.is_const(a, sid) && self.is_const(b, sid) && self.is_const(c, sid),
-            Expr::Unary(_, a) => self.is_const(a, sid),
-            Expr::Binary(_, a, b) => self.is_const(a, sid) && self.is_const(b, sid),
-            Expr::Concat(v) => v.iter().all(|x| self.is_const(x, sid)),
-            Expr::Repl(n, v) => self.is_const(n, sid) && v.iter().all(|x| self.is_const(x, sid)),
-            Expr::Call(..) => false,
-            Expr::SysCall(n, args) => {
+            ExprKind::IndexedRange(a, b, c, _) => self.is_const(a, sid) && self.is_const(b, sid) && self.is_const(c, sid),
+            ExprKind::Unary(_, a) => self.is_const(a, sid),
+            ExprKind::Binary(_, a, b) => self.is_const(a, sid) && self.is_const(b, sid),
+            ExprKind::Concat(v) => v.iter().all(|x| self.is_const(x, sid)),
+            ExprKind::Repl(n, v) => self.is_const(n, sid) && v.iter().all(|x| self.is_const(x, sid)),
+            ExprKind::Call(..) => false,
+            ExprKind::SysCall(n, args) => {
                 matches!(n.as_str(), "$clog2" | "$signed" | "$unsigned" | "$bits" | "$__cast" | "$__str")
                     && args.iter().all(|x| self.is_const(x, sid))
             }
@@ -421,7 +421,7 @@ impl<'a> Compiler<'a> {
     /// Value of a vector base for bit/part selection: (slot, width, msb, lsb)
     fn vec_base(&mut self, e: &Expr, sid: usize) -> R<(u32, u32, i64, i64)> {
         // array element as base: mem[i][3:0]
-        if let Expr::Index(a, i) = e {
+        if let ExprKind::Index(a, i) = &e.kind {
             if let Some(arr) = self.array_of(a, sid) {
                 let info = self.sig(arr).clone();
                 let ix = self.index_of(i, sid, false, -info.arr_lo)?;
@@ -443,8 +443,8 @@ impl<'a> Compiler<'a> {
             }
             Some(Base::Const(c)) => {
                 let s = self.const_slot(&c);
-                let (m, l) = match e {
-                    Expr::Ident(n) => self.param_range(n, sid).unwrap_or((c.w as i64 - 1, 0)),
+                let (m, l) = match &e.kind {
+                    ExprKind::Ident(n) => self.param_range(n, sid).unwrap_or((c.w as i64 - 1, 0)),
                     _ => (c.w as i64 - 1, 0),
                 };
                 Ok((s, c.w, m, l))
@@ -452,10 +452,10 @@ impl<'a> Compiler<'a> {
             Some(Base::Real(_)) => self.err("bit select of a real value"),
             None => {
                 // a select of one bit of a vector: nothing more to select from
-                if let Expr::Index(a, _) = e {
+                if let ExprKind::Index(a, _) = &e.kind {
                     // (the vector: a signal, or an element of a one-dimensional array)
-                    let vec = match &**a {
-                        Expr::Index(m, _) => self.array_of(m, sid).filter(|arr| !self.sigs.md_dims.contains_key(arr)),
+                    let vec = match &a.kind {
+                        ExprKind::Index(m, _) => self.array_of(m, sid).filter(|arr| !self.sigs.md_dims.contains_key(arr)),
                         _ => match self.resolve_base(a, sid)? {
                             Some(Base::Sig(s)) if self.sig(s).depth == 0 => Some(s),
                             _ => None,
@@ -517,9 +517,9 @@ impl<'a> Compiler<'a> {
         };
         let old = if prefix { None } else { Some(read(self)?) };
         let op = if inc { BinOp::Add } else { BinOp::Sub };
-        let one = Expr::Num(ferrooxide_front::ast::dec(1));
+        let one = ExprKind::Num(ferrooxide_front::ast::dec(1));
         let line = self.line;
-        let st = Stmt::Assign { lhs: t.clone(), rhs: Expr::Binary(op, Box::new(t.clone()), Box::new(one)), nonblocking: false, timing: None, line };
+        let st = Stmt::Assign { lhs: t.clone(), rhs: ExprKind::Binary(op, Box::new(t.clone()), Box::new(one.into())).into(), nonblocking: false, timing: None, line };
         self.stmt(&st, sid)?;
         match old {
             Some(d) => Ok(d),
@@ -545,8 +545,12 @@ impl<'a> Compiler<'a> {
 
     /// Compile `e` to a value of width `w`, with expression signedness `s` (IEEE context propagation).
     pub(crate) fn expr(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
+        self.at(e.line, |c| c.expr_here(e, sid, w, s))
+    }
+
+    fn expr_here(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
         // a property of an object, a method's result, null
-        if !self.classes.list.is_empty() || matches!(e, Expr::Null | Expr::New(_)) {
+        if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_)) {
             if let Some((v, t)) = self.obj_value(e, sid)? {
                 return self.dyn_to_vec(v, t, w, s);
             }
@@ -559,13 +563,13 @@ impl<'a> Compiler<'a> {
             return self.expr(&n, sid, w, s);
         }
         let ty = self.type_of(e, sid)?;
-        if !self.code.str_ids.is_empty() || matches!(e, Expr::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
+        if !self.code.str_ids.is_empty() || matches!(&e.kind, ExprKind::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
             // a string where a vector is needed: its characters
             if !self.code.str_raw && ty.is_str() {
                 return self.str_to_vec(e, sid, w);
             }
             // s[i] of a string: its character; s.len() and co.
-            if let Expr::Index(a, i) = e {
+            if let ExprKind::Index(a, i) = &e.kind {
                 if self.is_string_scalar(a, sid) {
                     let h = self.str_expr(a, sid)?;
                     let iv = self.expr(i, sid, 32, true)?;
@@ -573,7 +577,7 @@ impl<'a> Compiler<'a> {
                     return Ok(self.resize(d, 8, w, false));
                 }
             }
-            if let Expr::Call(name, args) = e {
+            if let ExprKind::Call(name, args) = &e.kind {
                 if let Some((base, m)) = self.str_method(name, sid) {
                     if let Some((mw, ms)) = Self::str_method_width(m) {
                         let d = self.str_method_call(&base, m, args, sid)?;
@@ -600,7 +604,7 @@ impl<'a> Compiler<'a> {
             if let Some(c) = self.const_str_cmp(e, sid) {
                 return Ok(self.const_slot(&c.resize(w, s)));
             }
-            if !matches!(e, Expr::Num(_) | Expr::Ident(_)) {
+            if !matches!(&e.kind, ExprKind::Num(_) | ExprKind::Ident(_)) {
                 // evaluate in the context width and signedness (operands are extended first)
                 self.code.pb.push(PState { proc: NONE, ..Default::default() });
                 let r = self.expr(e, sid, w, s);
@@ -615,39 +619,39 @@ impl<'a> Compiler<'a> {
                 return Ok(self.const_slot(&c));
             }
         }
-        match e {
-            Expr::Type(_) => self.err("a data type is not a value"),
-            Expr::Randomize { .. } => {
+        match &e.kind {
+            ExprKind::Type(_) => self.err("a data type is not a value"),
+            ExprKind::Randomize { .. } => {
                 let r = self.randomize(e, sid)?;
                 Ok(self.resize(r, 32, w, true))
             }
-            Expr::ArrayWith { method, .. } => self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
-            Expr::Member(..) => self.member_error(e, sid),
-            Expr::Pattern(..) => {
+            ExprKind::ArrayWith { method, .. } => self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
+            ExprKind::Member(..) => self.member_error(e, sid),
+            ExprKind::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
                 self.expr(&r, sid, w, s)
             }
-            Expr::NewArray(..) | Expr::Last => self.type_of(e, sid).map(|_| NONE),
-            Expr::IncDec { prefix, inc, e: t } => {
+            ExprKind::NewArray(..) | ExprKind::Last => self.type_of(e, sid).map(|_| NONE),
+            ExprKind::IncDec { prefix, inc, e: t } => {
                 let (tw, ts) = self.type_of(t, sid)?.ws();
                 let r = self.inc_dec(*prefix, *inc, t, sid, false)?;
                 Ok(self.resize(r, tw, w, s && ts))
             }
-            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) => {
+            ExprKind::Null | ExprKind::New(_) | ExprKind::NewTyped(..) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) => {
                 self.err("no classes are declared")
             }
-            Expr::EmptyArg => self.err("an empty argument is allowed only in a call of a function or task"),
-            Expr::NamedArg(..) => self.err("a named argument is allowed only in a call of a function or task"),
-            Expr::Num(n) => {
+            ExprKind::EmptyArg => self.err("an empty argument is allowed only in a call of a function or task"),
+            ExprKind::NamedArg(..) => self.err("a named argument is allowed only in a call of a function or task"),
+            ExprKind::Num(n) => {
                 let c = Const::number_in(n, w, s).or_else(|m| self.err(m))?;
                 Ok(self.const_slot(&c))
             }
-            Expr::Real(_) => self.err("real numbers are not supported"),
-            Expr::Str(st) => {
+            ExprKind::Real(_) => self.err("real numbers are not supported"),
+            ExprKind::Str(st) => {
                 let c = Const::from_str_lit(st).resize(w, false);
                 Ok(self.const_slot(&c))
             }
-            Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
+            ExprKind::Ident(_) | ExprKind::Hier(_) => match self.resolve_base(e, sid)? {
                 Some(Base::Sig(sg)) => {
                     let i = self.sig(sg).clone();
                     if i.depth > 0 {
@@ -662,7 +666,7 @@ impl<'a> Compiler<'a> {
                 }
                 None => unreachable!(),
             },
-            Expr::Index(a, i) => {
+            ExprKind::Index(a, i) => {
                 if let Some(arr) = self.array_of(a, sid) {
                     let info = self.sig(arr).clone();
                     if self.is_const(i, sid) {
@@ -706,7 +710,7 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(self.resize(d, 1, w, false))
             }
-            Expr::Range(a, m, l) => {
+            ExprKind::Range(a, m, l) => {
                 let (Some(mv), Some(lv)) = (self.select_bound(m, sid)?, self.select_bound(l, sid)?) else {
                     // an x/z bound: all x (also in a wider context, like Icarus)
                     let n = rt::nw(w);
@@ -732,7 +736,7 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(self.resize(d, pw, w, false))
             }
-            Expr::IndexedRange(a, base, width, up) => {
+            ExprKind::IndexedRange(a, base, width, up) => {
                 if !self.is_const_expr(width, sid) {
                     return self.err("the width of an indexed part-select is not a constant expression");
                 }
@@ -748,7 +752,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::DynSlice { d, s: bs, sw: bw, ix, w: pw });
                 Ok(self.resize(d, pw, w, false))
             }
-            Expr::Unary(op, a) => match op {
+            ExprKind::Unary(op, a) => match op {
                 UnOp::Plus => self.expr(a, sid, w, s),
                 UnOp::Neg | UnOp::Not => {
                     let v = self.expr(a, sid, w, s)?;
@@ -773,8 +777,8 @@ impl<'a> Compiler<'a> {
                     Ok(self.resize(d, 1, w, false))
                 }
             },
-            Expr::Binary(op, a, b) => self.binary(*op, a, b, sid, w, s),
-            Expr::Cond(c, t, f) => {
+            ExprKind::Binary(op, a, b) => self.binary(*op, a, b, sid, w, s),
+            ExprKind::Cond(c, t, f) => {
                 let (cv, cw) = self.truth(c, sid)?;
                 if has_call(t) || has_call(f) {
                     // branches with function calls (recursion!): only the selected side runs;
@@ -808,7 +812,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Mux { d, c: cv, cw, t: tv, f: fv, w });
                 Ok(d)
             }
-            Expr::Concat(v) => {
+            ExprKind::Concat(v) => {
                 let mut parts = Vec::new();
                 let mut tw = 0;
                 for x in v {
@@ -832,7 +836,7 @@ impl<'a> Compiler<'a> {
                 self.emit_concat(d, tw, &parts);
                 Ok(self.resize(d, tw, w, false))
             }
-            Expr::Repl(n, v) => {
+            ExprKind::Repl(n, v) => {
                 let n = self.const_int(n, sid)?;
                 // (a zero count is allowed only for an operand of a concatenation, which skips
                 // it: IEEE 1800-2017 11.4.12.1)
@@ -865,7 +869,7 @@ impl<'a> Compiler<'a> {
                 self.emit_concat(d, tw, &parts);
                 Ok(self.resize(d, tw, w, false))
             }
-            Expr::Call(name, args) => {
+            ExprKind::Call(name, args) => {
                 let (slot, rw, rs) = self.call(name, args, sid, false)?;
                 let Some(slot) = slot else {
                     return self.err(format!("void function '{name}' has no value"));
@@ -875,7 +879,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Copy { d, s: slot, w: rw });
                 Ok(self.resize(d, rw, w, s && rs))
             }
-            Expr::SysCall(name, args) => self.sys_func(name, args, sid, w, s),
+            ExprKind::SysCall(name, args) => self.sys_func(name, args, sid, w, s),
         }
     }
 
@@ -883,7 +887,7 @@ impl<'a> Compiler<'a> {
     /// nothing. Its operands are evaluated all the same (function calls run, as in the
     /// reference).
     fn zero_repl(&mut self, e: &Expr, sid: usize) -> R<bool> {
-        let Expr::Repl(n, v) = e else { return Ok(false) };
+        let ExprKind::Repl(n, v) = &e.kind else { return Ok(false) };
         if self.const_int(n, sid)? != 0 {
             return Ok(false);
         }
@@ -1185,8 +1189,8 @@ impl<'a> Compiler<'a> {
             }
             "$random" | "$urandom" => {
                 let d = self.tmp(32);
-                let f = match args.first() {
-                    Some(Expr::Ident(n)) => match self.lookup(n, sid) {
+                let f = match args.first().map(|a| &a.kind) {
+                    Some(ExprKind::Ident(n)) => match self.lookup(n, sid) {
                         Some(Sym::Sig(sg)) if name == "$random" => SysFn::RandomSeed(sg),
                         Some(Sym::Sig(sg)) => SysFn::UrandomSeed(sg),
                         _ => return self.err(format!("{name} seed must be a variable")),
@@ -1231,13 +1235,13 @@ impl<'a> Compiler<'a> {
             // any bit x or z: the reduction xor is x exactly then
             "$isunknown" => {
                 let Some(a) = args.first() else { return self.err("$isunknown needs an argument") };
-                let x = Expr::Num(ferrooxide_front::ast::Number { size: Some(1), signed: false, base: 2, based: true, digits: "x".into(), fill: false });
-                let e = Expr::Binary(BinOp::CaseEq, Box::new(Expr::Unary(UnOp::RedXor, Box::new(a.clone()))), Box::new(x));
+                let x = ExprKind::Num(ferrooxide_front::ast::Number { size: Some(1), signed: false, base: 2, based: true, digits: "x".into(), fill: false });
+                let e = ExprKind::Binary(BinOp::CaseEq, Box::new(ExprKind::Unary(UnOp::RedXor, Box::new(a.clone())).into()), Box::new(x.into())).into();
                 self.expr(&e, sid, w, s)
             }
             "$__cast" => {
                 // the operand is evaluated as if assigned to a variable of the cast's width
-                let (cw, _) = self.type_of(&Expr::SysCall(name.into(), args.to_vec()), sid)?.ws();
+                let (cw, _) = self.type_of(&Expr::from(ExprKind::SysCall(name.into(), args.to_vec())), sid)?.ws();
                 let (ew, es) = match self.type_of(&args[2], sid)? {
                     Type::Real => (cw, true),
                     t => t.ws(),
@@ -1266,27 +1270,27 @@ impl<'a> Compiler<'a> {
                 }
                 // a queue or dynamic array: [0:size-1] at run time
                 if let Type::Dyn { .. } = self.type_of(a, sid)? {
-                    let size = match a {
-                        Expr::Ident(n) => Expr::Call(format!("{n}.size"), vec![]),
-                        Expr::Hier(p) => Expr::Call(format!("{}.size", p.join(".")), vec![]),
+                    let size = match &a.kind {
+                        ExprKind::Ident(n) => ExprKind::Call(format!("{n}.size"), vec![]),
+                        ExprKind::Hier(p) => ExprKind::Call(format!("{}.size", p.join(".")), vec![]),
                         _ => return self.err(format!("{name} of this array is not supported")),
                     };
-                    let last = Expr::Binary(BinOp::Sub, Box::new(size.clone()), Box::new(Expr::Num(ferrooxide_front::ast::dec(1))));
-                    let zero = Expr::Num(ferrooxide_front::ast::dec(0));
+                    let last = ExprKind::Binary(BinOp::Sub, Box::new(size.clone().into()), Box::new(ExprKind::Num(ferrooxide_front::ast::dec(1)).into()));
+                    let zero = ExprKind::Num(ferrooxide_front::ast::dec(0));
                     let e = match name {
                         "$size" => size,
                         "$left" | "$low" => zero,
                         "$right" | "$high" => last,
-                        "$increment" => Expr::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(Expr::Num(ferrooxide_front::ast::dec(1)))),
+                        "$increment" => ExprKind::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(ExprKind::Num(ferrooxide_front::ast::dec(1)).into())),
                         "$dimensions" | "$unpacked_dimensions" => {
                             return self.err(format!("{name} of a queue or dynamic array is not supported"));
                         }
                         _ => unreachable!(),
                     };
-                    return self.expr(&e, sid, w, s);
+                    return self.expr(&e.into(), sid, w, s);
                 }
-                let range = match a {
-                    Expr::Ident(n) => self.param_range(n, sid),
+                let range = match &a.kind {
+                    ExprKind::Ident(n) => self.param_range(n, sid),
                     _ => None,
                 };
                 let (l, r) = match range {
@@ -1326,7 +1330,7 @@ impl<'a> Compiler<'a> {
             }
             "$bits" => {
                 // a type parameter
-                if let Some(Expr::Ident(n)) = args.first() {
+                if let Some(ExprKind::Ident(n)) = args.first().map(|a| &a.kind) {
                     if let Some(Sym::Type(t)) = self.lookup(n, sid) {
                         let bw = self.const_int(&t.bits(), sid)?;
                         return Ok(self.const_slot(&Const::from_i64(bw, w, false)));
@@ -1340,8 +1344,8 @@ impl<'a> Compiler<'a> {
                     Some(e) => self.file_name(e, sid)?,
                     None => return self.err("$fopen needs a file name"),
                 };
-                let mode = match args.get(1) {
-                    Some(Expr::Str(m)) => m.clone(),
+                let mode = match args.get(1).map(|a| &a.kind) {
+                    Some(ExprKind::Str(m)) => m.clone(),
                     Some(_) => return self.err("$fopen mode must be a string literal"),
                     // no mode: a multichannel descriptor
                     None => String::new(),
@@ -1363,7 +1367,7 @@ impl<'a> Compiler<'a> {
                 let (Some(f), Some(var)) = (args.first(), args.get(1)) else {
                     return self.err("$value$plusargs needs a format string and a variable");
                 };
-                if matches!(f, Expr::Str(s) if !s.contains('%')) {
+                if matches!(&f.kind, ExprKind::Str(s) if !s.contains('%')) {
                     return self.err("$value$plusargs format has no conversion");
                 }
                 let fmt = self.file_name(f, sid)?;
@@ -1593,13 +1597,13 @@ impl<'a> Compiler<'a> {
         // named arguments (IEEE 1800 13.5.4): in the order of the ports, after the
         // positional ones
         let ordered: Vec<Expr>;
-        let args: &[Expr] = if args.iter().any(|a| matches!(a, Expr::NamedArg(..))) {
+        let args: &[Expr] = if args.iter().any(|a| matches!(&a.kind, ExprKind::NamedArg(..))) {
             let names: Vec<&str> = f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|n| n.name.as_str())).collect();
             let mut v: Vec<Option<Expr>> = vec![None; names.len()];
             let mut named = false;
             for (k, a) in args.iter().enumerate() {
-                match a {
-                    Expr::NamedArg(n, e) => {
+                match &a.kind {
+                    ExprKind::NamedArg(n, e) => {
                         named = true;
                         let Some(i) = names.iter().position(|x| x == n) else {
                             return self.err(format!("'{name}' has no argument '{n}'"));
@@ -1614,7 +1618,7 @@ impl<'a> Compiler<'a> {
                     _ => v[k] = Some(a.clone()),
                 }
             }
-            ordered = v.into_iter().map(|x| x.unwrap_or(Expr::EmptyArg)).collect();
+            ordered = v.into_iter().map(|x| x.unwrap_or(ExprKind::EmptyArg.into())).collect();
             &ordered
         } else {
             args
@@ -1626,13 +1630,13 @@ impl<'a> Compiler<'a> {
             let defaults: Vec<Option<&Expr>> =
                 f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter().map(|n| n.init.as_ref())).collect();
             // (`f()` of a function with one argument: no argument)
-            let args = if let [Expr::EmptyArg] = args { &[][..] } else { args };
-            if args.len() < defaults.len() || args.iter().any(|a| matches!(a, Expr::EmptyArg)) {
+            let args = if let [Expr { kind: ExprKind::EmptyArg, .. }] = args { &[][..] } else { args };
+            if args.len() < defaults.len() || args.iter().any(|a| matches!(&a.kind, ExprKind::EmptyArg)) {
                 let mut v = Vec::new();
                 for k in 0..defaults.len().max(args.len()) {
                     match (args.get(k), defaults.get(k)) {
-                        (Some(Expr::EmptyArg) | None, Some(Some(d))) => v.push((*d).clone()),
-                        (Some(Expr::EmptyArg) | None, _) => {
+                        (Some(Expr { kind: ExprKind::EmptyArg, .. }) | None, Some(Some(d))) => v.push((*d).clone()),
+                        (Some(Expr { kind: ExprKind::EmptyArg, .. }) | None, _) => {
                             let missing = f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter()).nth(k).map(|n| n.name.clone());
                             return self.err(match missing {
                                 Some(m) => format!("argument '{m}' of '{name}' has no default value"),
@@ -1650,7 +1654,7 @@ impl<'a> Compiler<'a> {
         };
         // (an event is no value: it cannot be passed to a subroutine)
         for a in args {
-            if let Expr::Ident(n) = a {
+            if let ExprKind::Ident(n) = &a.kind {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
                     if self.sig(s).event {
                         let what = if f.is_task { "task" } else { "function" };
@@ -1777,7 +1781,7 @@ impl<'a> Compiler<'a> {
     /// it to the argument (7.6: arrays of the same shape, elements left to right).
     fn array_arg(&mut self, ps: u32, fscope: usize, a: &Expr, sid: usize, into: bool) -> R<()> {
         let pname = self.sig(ps).name.rsplit('.').next().unwrap_or_default().to_string();
-        let port = Expr::Ident(pname.clone());
+        let port: Expr = ExprKind::Ident(pname.clone()).into();
         let Some((_, lshape, li)) = self.array_elems(&port, fscope)? else {
             return self.err(format!("argument '{pname}': an array of this kind is not supported as an argument"));
         };
@@ -1809,7 +1813,7 @@ impl<'a> Compiler<'a> {
         for d in f.decls.iter().filter(|d| d.dir.is_none()) {
             for n in &d.names {
                 if let Some(init) = &n.init {
-                    let st = Stmt::Assign { lhs: Expr::Ident(n.name.clone()), rhs: init.clone(), nonblocking: false, timing: None, line: n.line };
+                    let st = Stmt::Assign { lhs: ExprKind::Ident(n.name.clone()).into(), rhs: init.clone(), nonblocking: false, timing: None, line: n.line };
                     self.stmt(&st, fscope)?;
                 }
             }
@@ -1989,29 +1993,29 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.reads_expr(&n, sid, out);
         }
-        match e {
-            Expr::Type(_) | Expr::Last | Expr::Null | Expr::EmptyArg => {}
-            Expr::IncDec { e, .. } | Expr::NamedArg(_, e) => self.reads_expr(e, sid, out),
-            Expr::New(v) | Expr::NewTyped(_, v) | Expr::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
-            Expr::NewCopy(x) => self.reads_expr(x, sid, out),
-            Expr::ArrayWith { arr, .. } => self.reads_expr(arr, sid, out),
-            Expr::Randomize { obj, .. } => {
+        match &e.kind {
+            ExprKind::Type(_) | ExprKind::Last | ExprKind::Null | ExprKind::EmptyArg => {}
+            ExprKind::IncDec { e, .. } | ExprKind::NamedArg(_, e) => self.reads_expr(e, sid, out),
+            ExprKind::New(v) | ExprKind::NewTyped(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
+            ExprKind::NewCopy(x) => self.reads_expr(x, sid, out),
+            ExprKind::ArrayWith { arr, .. } => self.reads_expr(arr, sid, out),
+            ExprKind::Randomize { obj, .. } => {
                 if let Some(o) = obj {
                     self.reads_expr(o, sid, out);
                 }
             }
-            Expr::MethodCall(o, _, args) => {
+            ExprKind::MethodCall(o, _, args) => {
                 self.reads_expr(o, sid, out);
                 args.iter().for_each(|x| self.reads_expr(x, sid, out));
             }
-            Expr::NewArray(n, init) => {
+            ExprKind::NewArray(n, init) => {
                 self.reads_expr(n, sid, out);
                 if let Some(i) = init {
                     self.reads_expr(i, sid, out);
                 }
             }
-            Expr::Member(a, _) => self.reads_expr(a, sid, out),
-            Expr::Pattern(_, items) => {
+            ExprKind::Member(a, _) => self.reads_expr(a, sid, out),
+            ExprKind::Pattern(_, items) => {
                 for it in items {
                     if let PatItem::Index(k, _) = it {
                         self.reads_expr(k, sid, out);
@@ -2020,17 +2024,17 @@ impl<'a> Compiler<'a> {
                     self.reads_expr(v, sid, out);
                 }
             }
-            Expr::Ident(n) => {
+            ExprKind::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
                     out.push((s, NONE))
                 }
             }
-            Expr::Hier(p) => {
+            ExprKind::Hier(p) => {
                 if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
                     out.push((s, NONE))
                 }
             }
-            Expr::Index(a, b) => {
+            ExprKind::Index(a, b) => {
                 // a constant-index array element is its own node for sensitivity
                 if let Some(arr) = self.array_of(a, sid) {
                     if self.is_const(b, sid) {
@@ -2047,28 +2051,28 @@ impl<'a> Compiler<'a> {
                 self.reads_expr(a, sid, out);
                 self.reads_expr(b, sid, out);
             }
-            Expr::Range(a, b, c) | Expr::Cond(a, b, c) | Expr::IndexedRange(a, b, c, _) => {
+            ExprKind::Range(a, b, c) | ExprKind::Cond(a, b, c) | ExprKind::IndexedRange(a, b, c, _) => {
                 self.reads_expr(a, sid, out);
                 self.reads_expr(b, sid, out);
                 self.reads_expr(c, sid, out);
             }
-            Expr::Unary(_, a) => self.reads_expr(a, sid, out),
-            Expr::Binary(_, a, b) => {
+            ExprKind::Unary(_, a) => self.reads_expr(a, sid, out),
+            ExprKind::Binary(_, a, b) => {
                 self.reads_expr(a, sid, out);
                 self.reads_expr(b, sid, out);
             }
-            Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => {
+            ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) => {
                 for x in v {
                     self.reads_expr(x, sid, out);
                 }
                 // a method of a queue reads the queue
-                if let Expr::Call(name, _) = e {
+                if let ExprKind::Call(name, _) = &e.kind {
                     if let Some((_, s, _, _)) = self.dyn_method(name, sid) {
                         out.push((s, NONE));
                     }
                 }
                 // default values of missing arguments are evaluated at the call
-                if let Expr::Call(name, args) = e {
+                if let ExprKind::Call(name, args) = &e.kind {
                     if let Some((f, _)) = self.lookup_func(name, sid) {
                         let defaults: Vec<&Expr> = f
                             .decls
@@ -2086,7 +2090,7 @@ impl<'a> Compiler<'a> {
                 // signals a function reads besides its arguments: they do not count for
                 // sensitivity (Icarus's continuous assignments and @* follow the arguments
                 // only), but the lint check (synthesis view) includes them
-                if let (Expr::Call(name, _), true) = (e, self.subr.func_reads.get()) {
+                if let (ExprKind::Call(name, _), true) = (&e.kind, self.subr.func_reads.get()) {
                     if let Some((f, fs)) = self.lookup_func(name, sid) {
                         // (functions calling each other: each is followed once)
                         let key = (fs, f.name.clone());
@@ -2108,13 +2112,13 @@ impl<'a> Compiler<'a> {
                     }
                 }
             }
-            Expr::Repl(n, v) => {
+            ExprKind::Repl(n, v) => {
                 self.reads_expr(n, sid, out);
                 for x in v {
                     self.reads_expr(x, sid, out);
                 }
             }
-            Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => {}
+            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Real(_) => {}
         }
     }
 
@@ -2123,19 +2127,19 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.lv_norm(e, sid) {
             return self.reads_lvalue(&n, sid, out);
         }
-        match e {
-            Expr::Index(a, b) => {
-                if !matches!(&**a, Expr::Ident(_) | Expr::Hier(_)) {
+        match &e.kind {
+            ExprKind::Index(a, b) => {
+                if !matches!(&a.kind, ExprKind::Ident(_) | ExprKind::Hier(_)) {
                     self.reads_lvalue(a, sid, out);
                 }
                 self.reads_expr(b, sid, out);
             }
-            Expr::Range(a, _, _) => self.reads_lvalue(a, sid, out),
-            Expr::IndexedRange(a, b, _, _) => {
+            ExprKind::Range(a, _, _) => self.reads_lvalue(a, sid, out),
+            ExprKind::IndexedRange(a, b, _, _) => {
                 self.reads_lvalue(a, sid, out);
                 self.reads_expr(b, sid, out);
             }
-            Expr::Concat(v) => {
+            ExprKind::Concat(v) => {
                 for x in v {
                     self.reads_lvalue(x, sid, out);
                 }
@@ -2147,10 +2151,14 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------ real numbers
     /// Compile an expression as a real value: slot holding f64 bits (unknown word 0).
     pub(crate) fn rexpr(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        self.at(e.line, |c| c.rexpr_here(e, sid))
+    }
+
+    fn rexpr_here(&mut self, e: &Expr, sid: usize) -> R<u32> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.rexpr(&n, sid);
         }
-        if let Expr::IncDec { prefix, inc, e: t } = e {
+        if let ExprKind::IncDec { prefix, inc, e: t } = &e.kind {
             if self.type_of(t, sid)?.is_real() {
                 return self.inc_dec(*prefix, *inc, t, sid, true);
             }
@@ -2173,19 +2181,19 @@ impl<'a> Compiler<'a> {
             }
         }
         let rconst = |c: &mut Self, r: f64| c.const_slot(&Const { w: 64, signed: false, a: vec![r.to_bits()], b: vec![0] });
-        if let Expr::Call(name, args) = e {
+        if let ExprKind::Call(name, args) = &e.kind {
             if let Some((base, m)) = self.str_method(name, sid) {
                 return self.str_method_call(&base, m, args, sid);
             }
         }
-        match e {
-            Expr::Real(r) => Ok(rconst(self, *r)),
-            Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
+        match &e.kind {
+            ExprKind::Real(r) => Ok(rconst(self, *r)),
+            ExprKind::Ident(_) | ExprKind::Hier(_) => match self.resolve_base(e, sid)? {
                 Some(Base::Sig(s)) => Ok(self.sig(s).slot),
                 Some(Base::Real(r)) => Ok(rconst(self, r)),
                 _ => self.err("not a real value"),
             },
-            Expr::Index(a, i) => {
+            ExprKind::Index(a, i) => {
                 let arr = self.array_of(a, sid).unwrap();
                 let info = self.sig(arr).clone();
                 if self.is_const(i, sid) {
@@ -2200,14 +2208,14 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::ArrRead { d, sig: arr, ix });
                 Ok(d)
             }
-            Expr::Unary(UnOp::Plus, a) => self.rexpr(a, sid),
-            Expr::Unary(_, a) => {
+            ExprKind::Unary(UnOp::Plus, a) => self.rexpr(a, sid),
+            ExprKind::Unary(_, a) => {
                 let v = self.rexpr(a, sid)?;
                 let d = self.tmp(64);
                 self.emit(Instr::RNeg { d, s: v });
                 Ok(d)
             }
-            Expr::Binary(op, a, b) => {
+            ExprKind::Binary(op, a, b) => {
                 let (va, vb) = (self.rexpr(a, sid)?, self.rexpr(b, sid)?);
                 let rop = match op {
                     B::Add => rt::RealOp::Add,
@@ -2220,20 +2228,20 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::RBin { op: rop, d, a: va, b: vb });
                 Ok(d)
             }
-            Expr::Cond(c, t, f) => {
+            ExprKind::Cond(c, t, f) => {
                 let (cv, cw) = self.truth(c, sid)?;
                 let (tv, fv) = (self.rexpr(t, sid)?, self.rexpr(f, sid)?);
                 let d = self.tmp(64);
                 self.emit(Instr::Mux { d, c: cv, cw, t: tv, f: fv, w: 64 });
                 Ok(d)
             }
-            Expr::Call(name, args) => {
+            ExprKind::Call(name, args) => {
                 let (slot, _, _) = self.call(name, args, sid, false)?;
                 let d = self.tmp(64);
                 self.emit(Instr::Copy { d, s: slot.unwrap(), w: 64 });
                 Ok(d)
             }
-            Expr::SysCall(name, args) => match name.as_str() {
+            ExprKind::SysCall(name, args) => match name.as_str() {
                 "$realtime" => {
                     let d = self.tmp(64);
                     let e = self.texp(sid);
@@ -2303,7 +2311,7 @@ impl<'a> Compiler<'a> {
 
     /// Evaluate a constant real expression at elaboration time.
     pub(crate) fn const_real(&mut self, e: &Expr, sid: usize) -> R<f64> {
-        if let Expr::Real(r) = e {
+        if let ExprKind::Real(r) = &e.kind {
             return Ok(*r);
         }
         self.code.pb.push(PState { proc: NONE, ..Default::default() });
@@ -2334,7 +2342,7 @@ impl<'a> Compiler<'a> {
 
     /// A delay in the scope's time unit converted to simulation ticks (slot of a 64-bit value).
     pub(crate) fn delay_ticks(&mut self, d: &Expr, sid: usize) -> R<u32> {
-        if let Expr::SysCall(n, v) = d {
+        if let ExprKind::SysCall(n, v) = &d.kind {
             if n == "$__delays" || n == "$__pathdelays" {
                 // (rise, fall, ...) where one delay is needed: the first
                 return self.delay_ticks(&v[0], sid);
@@ -2371,9 +2379,9 @@ impl<'a> Compiler<'a> {
     /// Rise, fall and turn-off delays (ticks) as one 192-bit value for `StoreMode::Inertial`;
     /// a missing turn-off delay is all ones (the runtime takes the smaller of rise and fall).
     pub(crate) fn delays3(&mut self, d: &Expr, sid: usize) -> R<u32> {
-        let (ds, lsb_rule): (Vec<Expr>, bool) = match d {
-            Expr::SysCall(n, v) if n == "$__delays" => (v.clone(), false),
-            Expr::SysCall(n, v) if n == "$__pathdelays" => (v.clone(), true),
+        let (ds, lsb_rule): (Vec<Expr>, bool) = match &d.kind {
+            ExprKind::SysCall(n, v) if n == "$__delays" => (v.clone(), false),
+            ExprKind::SysCall(n, v) if n == "$__pathdelays" => (v.clone(), true),
             _ => (vec![d.clone()], false),
         };
         let out = self.tmp(256);
@@ -2395,7 +2403,7 @@ impl<'a> Compiler<'a> {
 
     /// A file name argument: a string literal, or a variable holding the characters.
     pub(crate) fn file_name(&mut self, e: &Expr, sid: usize) -> R<rt::FileName> {
-        if let Expr::Str(s) = e {
+        if let ExprKind::Str(s) = &e.kind {
             return Ok(rt::FileName::Lit(s.clone()));
         }
         if self.type_of(e, sid)?.is_str() {

@@ -352,7 +352,12 @@ deterministic, long runs cancellable, a memory budget for history.
 **Next: R6** (decided 2026-11-20), before concurrent assertions and the other large
 features: spans on `Expr`/`Stmt` instead of `self.line` (an inlined call moving
 `self.line` gave `randomize()` warnings the wrong line), then splitting `elab_items`, then
-the rest of R4 in slices (step 5 below).
+the rest of R4 in slices (step 5 below). *Spans done 2026-11-20*: `ast::Expr` is
+`{ kind: ExprKind, line }` (0: made by the compiler; `{:?}` prints only the kind, it keys
+expressions in places); the lowering gives each expression its tree `Loc` (`fill_line`
+for the parts made for it); the compiler's `at(line, f)` runs `expr`/`rexpr`/`str_expr`/
+`type_of`/`dyn_value`/`stmt` at their line and returns to the location before, so an
+inlined call no longer moves it. `self.line` stays as the current location.
 
 Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in elaboration
 (A1 = R4 slices 1-4), heap objects (A2: queues, dynamic and associative arrays), classes
@@ -587,9 +592,9 @@ Each step ended with all tests in all three modes and no regression-suite test w
 - **R5** (2026-11-15): `elab/{hier,params,decls,items,nets,udp,specify}.rs` and
   `codegen.rs`; `lib.rs` keeps state, scopes, lookup and constant evaluation; fields grouped
   in `hier`, `diag`, `code`, `subr`, `nets`, `sigs`.
-- **R6** (spans on `Expr`/`Stmt` instead of `self.line`) is part of the rest of R4: the
-  syntax tree has a `Loc` on every expression and statement; spans come when the compiler
-  reads the tree instead of the old AST.
+- **R6** (spans on `Expr`/`Stmt` instead of `self.line`): lines on AST expressions and a
+  scoped current location in the compiler done 2026-11-20 (see Next steps); the rest of R4
+  (the compiler reading the syntax tree) keeps the tree's `Loc`s.
 
 ### Architecture changes ahead (review 2026-11-14)
 

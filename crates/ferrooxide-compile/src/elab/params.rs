@@ -175,7 +175,7 @@ impl<'a> Compiler<'a> {
         }
         let value = match (&p.value, &ov) {
             (Some(v), _) => v,
-            (None, Some(_)) => &Expr::Num(ferrooxide_front::ast::dec(0)),
+            (None, Some(_)) => &Expr::from(ExprKind::Num(ferrooxide_front::ast::dec(0))),
             (None, None) => return self.err(format!("parameter '{}' has no value: it must be overridden", p.name)),
         };
         if p.value.is_none() && self.dialect.v2005 {
@@ -199,7 +199,7 @@ impl<'a> Compiler<'a> {
         }
         let untyped = !p.integer && p.range.is_none() && !p.signed;
         // a number given for a ranged parameter: widened like in an expression (`'bx` fills)
-        if let (None, Expr::Num(n), Some(_), false) = (&ov, value, &p.range, p.real) {
+        if let (None, ExprKind::Num(n), Some(_), false) = (&ov, &value.kind, &p.range, p.real) {
             let (a, b) = self.range_vals(&p.range, sid)?;
             let w = ((a - b).abs() + 1) as u32;
             let c = Const::number_in(n, w, n.signed).or_else(|m| self.err(m))?;
@@ -301,8 +301,8 @@ impl<'a> Compiler<'a> {
 
     fn find_specparam(&self, e: &Expr, sid: usize, found: &mut Option<String>) {
         let mut sub = |x: &Expr| self.find_specparam(x, sid, found);
-        match e {
-            Expr::Ident(n) => {
+        match &e.kind {
+            ExprKind::Ident(n) => {
                 let mut s = Some(sid);
                 while let Some(i) = s {
                     if self.scopes[i].syms.contains_key(n) {
@@ -314,32 +314,32 @@ impl<'a> Compiler<'a> {
                     s = self.scopes[i].parent;
                 }
             }
-            Expr::Index(a, b) => {
+            ExprKind::Index(a, b) => {
                 sub(a);
                 sub(b);
             }
-            Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
+            ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) | ExprKind::Cond(a, b, c) => {
                 sub(a);
                 sub(b);
                 sub(c);
             }
-            Expr::Unary(_, a) | Expr::Member(a, _) => sub(a),
-            Expr::Binary(_, a, b) => {
+            ExprKind::Unary(_, a) | ExprKind::Member(a, _) => sub(a),
+            ExprKind::Binary(_, a, b) => {
                 sub(a);
                 sub(b);
             }
-            Expr::Repl(a, v) => {
+            ExprKind::Repl(a, v) => {
                 sub(a);
                 v.iter().for_each(sub);
             }
-            Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter().for_each(sub),
+            ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) => v.iter().for_each(sub),
             _ => {}
         }
     }
 
     /// evaluate a parameter override in the instantiating scope
     pub(crate) fn pval(&mut self, e: &Expr, sid: usize) -> R<PVal> {
-        if let Expr::Type(t) = e {
+        if let ExprKind::Type(t) = &e.kind {
             return Ok(PVal::Type(Rc::new(self.resolve_type(t, sid)?)));
         }
         if self.type_of(e, sid)?.is_real() {
@@ -376,10 +376,10 @@ impl<'a> Compiler<'a> {
 
     /// `e` is a string literal, a concatenation of such, or a parameter with one.
     pub(crate) fn is_str_valued(&self, e: &Expr, sid: usize) -> bool {
-        match e {
-            Expr::Str(_) => true,
-            Expr::Concat(v) => !v.is_empty() && v.iter().all(|x| self.is_str_valued(x, sid)),
-            Expr::Ident(n) => self.is_str_param(n, sid),
+        match &e.kind {
+            ExprKind::Str(_) => true,
+            ExprKind::Concat(v) => !v.is_empty() && v.iter().all(|x| self.is_str_valued(x, sid)),
+            ExprKind::Ident(n) => self.is_str_param(n, sid),
             _ => false,
         }
     }
@@ -422,8 +422,8 @@ impl<'a> Compiler<'a> {
     /// their types there).
     pub(crate) fn resolve_type(&mut self, t: &SvType, sid: usize) -> R<SvType> {
         let lit = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
-            if v < 0 { Expr::Unary(UnOp::Neg, Box::new(n)) } else { n }
+            let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            if v < 0 { ExprKind::Unary(UnOp::Neg, Box::new(n.into())).into() } else { n.into() }
         };
         let mut dims = Vec::new();
         for (a, b) in &t.dims {

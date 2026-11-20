@@ -36,12 +36,12 @@ impl<'a> Compiler<'a> {
                 _ => None,
             }
         };
-        match e {
-            Expr::Ident(_) | Expr::Hier(_) => {
+        match &e.kind {
+            ExprKind::Ident(_) | ExprKind::Hier(_) => {
                 let s = base(self, e)?;
                 Some(vec![(s, 0, self.sig(s).width)])
             }
-            Expr::Index(b, i) => {
+            ExprKind::Index(b, i) => {
                 let s = base(self, b)?;
                 let i = self.const_value(i, sid)?;
                 let info = self.sig(s);
@@ -49,7 +49,7 @@ impl<'a> Compiler<'a> {
                 let off = if neg { k - i } else { i + k };
                 (off >= 0 && off < info.width as i64).then(|| vec![(s, off as u32, 1)])
             }
-            Expr::Range(b, m, l) => {
+            ExprKind::Range(b, m, l) => {
                 let s = base(self, b)?;
                 let (m, l) = (self.const_value(m, sid)?, self.const_value(l, sid)?);
                 let info = self.sig(s);
@@ -58,7 +58,7 @@ impl<'a> Compiler<'a> {
                 let (lo, hi) = (om.min(ol), om.max(ol));
                 (lo >= 0 && hi < info.width as i64).then(|| vec![(s, lo as u32, (hi - lo + 1) as u32)])
             }
-            Expr::Concat(v) => {
+            ExprKind::Concat(v) => {
                 let mut out = Vec::new();
                 for x in v {
                     out.extend(self.net_segs(x, sid)?);
@@ -102,7 +102,7 @@ impl<'a> Compiler<'a> {
             return Ok(());
         }
         let b = |e: &Expr| Box::new(e.clone());
-        let z = || Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "z".into(), fill: true });
+        let z = || ExprKind::Num(Number { size: None, signed: false, base: 2, based: true, digits: "z".into(), fill: true });
         match kind {
             "pullup" | "pulldown" => {
                 // the pulled bits: (net, lsb, width, up)
@@ -131,39 +131,39 @@ impl<'a> Compiler<'a> {
                 }
                 // bufif/notif turn a z input into x; the switches pass it through
                 let data = if kind.starts_with("notif") {
-                    Expr::Unary(UnOp::Not, b(&terms[1]))
+                    ExprKind::Unary(UnOp::Not, b(&terms[1])).into()
                 } else if kind.starts_with("bufif") {
-                    Expr::Binary(BinOp::And, b(&terms[1]), b(&terms[1]))
+                    ExprKind::Binary(BinOp::And, b(&terms[1]), b(&terms[1])).into()
                 } else {
                     terms[1].clone()
                 };
                 let on_high = matches!(kind, "bufif1" | "notif1" | "nmos" | "rnmos");
                 let rhs = if on_high {
-                    Expr::Cond(b(&terms[2]), Box::new(data), Box::new(z()))
+                    ExprKind::Cond(b(&terms[2]), Box::new(data), Box::new(z().into()))
                 } else {
-                    Expr::Cond(b(&terms[2]), Box::new(z()), Box::new(data))
+                    ExprKind::Cond(b(&terms[2]), Box::new(z().into()), Box::new(data))
                 };
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.nets.cur_delay.clone(), scope: sid, line });
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: rhs.into(), delay: self.nets.cur_delay.clone(), scope: sid, line });
             }
             "cmos" | "rcmos" => {
                 // (out, in, ncontrol, pcontrol)
                 if terms.len() != 4 {
                     return self.err(format!("{kind} needs four terminals"));
                 }
-                let p_side = Expr::Cond(b(&terms[3]), Box::new(z()), b(&terms[1]));
-                let rhs = Expr::Cond(b(&terms[2]), b(&terms[1]), Box::new(p_side));
-                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs, delay: self.nets.cur_delay.clone(), scope: sid, line });
+                let p_side = ExprKind::Cond(b(&terms[3]), Box::new(z().into()), b(&terms[1]));
+                let rhs = ExprKind::Cond(b(&terms[2]), b(&terms[1]), Box::new(p_side.into()));
+                self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: rhs.into(), delay: self.nets.cur_delay.clone(), scope: sid, line });
             }
             "not" | "buf" => {
                 let input = terms.last().unwrap();
                 for out in &terms[..terms.len() - 1] {
                     // a buffer turns z into x: `in & in`
                     let rhs = if kind == "not" {
-                        Expr::Unary(UnOp::Not, b(input))
+                        ExprKind::Unary(UnOp::Not, b(input))
                     } else {
-                        Expr::Binary(BinOp::And, b(input), b(input))
+                        ExprKind::Binary(BinOp::And, b(input), b(input))
                     };
-                    self.push_job(Job::Assign { lhs: out.clone(), rhs, delay: self.nets.cur_delay.clone(), scope: sid, line });
+                    self.push_job(Job::Assign { lhs: out.clone(), rhs: rhs.into(), delay: self.nets.cur_delay.clone(), scope: sid, line });
                 }
             }
             _ => {
@@ -177,10 +177,10 @@ impl<'a> Compiler<'a> {
                 };
                 let mut e = terms[1].clone();
                 for t in &terms[2..] {
-                    e = Expr::Binary(op, Box::new(e), b(t));
+                    e = ExprKind::Binary(op, Box::new(e), b(t)).into();
                 }
                 if inv {
-                    e = Expr::Unary(UnOp::Not, Box::new(e));
+                    e = ExprKind::Unary(UnOp::Not, Box::new(e)).into();
                 }
                 self.push_job(Job::Assign { lhs: terms[0].clone(), rhs: e, delay: self.nets.cur_delay.clone(), scope: sid, line });
             }
@@ -192,17 +192,17 @@ impl<'a> Compiler<'a> {
     /// target's name), in all modules.
     pub(crate) fn forced_names(&self) -> HashSet<String> {
         fn expr_name(e: &Expr, out: &mut HashSet<String>) {
-            match e {
-                Expr::Ident(n) => {
+            match &e.kind {
+                ExprKind::Ident(n) => {
                     out.insert(n.clone());
                 }
-                Expr::Hier(p) => {
+                ExprKind::Hier(p) => {
                     if let Some(n) = p.last() {
                         out.insert(n.clone());
                     }
                 }
-                Expr::Index(a, _) | Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) => expr_name(a, out),
-                Expr::Concat(v) => v.iter().for_each(|x| expr_name(x, out)),
+                ExprKind::Index(a, _) | ExprKind::Range(a, _, _) | ExprKind::IndexedRange(a, _, _, _) => expr_name(a, out),
+                ExprKind::Concat(v) => v.iter().for_each(|x| expr_name(x, out)),
                 _ => {}
             }
         }
@@ -359,13 +359,13 @@ impl<'a> Compiler<'a> {
                 return None;
             }
         }
-        if !matches!(lhs, Expr::Ident(_) | Expr::Hier(_)) {
+        if !matches!(&lhs.kind, ExprKind::Ident(_) | ExprKind::Hier(_)) {
             return None;
         }
         let Ok(Some(expr::Base::Sig(z))) = self.resolve_base(lhs, sid) else { return None };
         let z = self.canon(z);
         let mut rhs = rhs;
-        while let Expr::Concat(v) = rhs {
+        while let ExprKind::Concat(v) = &rhs.kind {
             if v.len() != 1 {
                 return None;
             }
@@ -374,13 +374,13 @@ impl<'a> Compiler<'a> {
         let width = self.sig(z).width;
         let zdepth = self.sig(z).depth;
         let shape = |c: &Self, s: u32| (c.sig(s).depth, c.sig(s).arr_lo, c.sigs.desc_arrays.contains(&s), c.sigs.md_dims.contains_key(&s));
-        let a = match rhs {
+        let a = match &rhs.kind {
             // (a whole array: from one of the same shape)
-            Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(rhs, sid) {
+            ExprKind::Ident(_) | ExprKind::Hier(_) => match self.resolve_base(rhs, sid) {
                 Ok(Some(expr::Base::Sig(a))) if self.sig(a).depth == zdepth && (zdepth == 0 || shape(self, a) == shape(self, z)) => a,
                 _ => return None,
             },
-            Expr::Index(..) if zdepth == 0 => {
+            ExprKind::Index(..) if zdepth == 0 => {
                 let name = format!("{}$alias", self.sig(z).name);
                 let a = self.elem_port_alias(rhs, sid, width, &name)?;
                 self.prog.names.retain(|n| n.1 != a);
@@ -479,7 +479,7 @@ impl<'a> Compiler<'a> {
             let mut ctl_net: Vec<Option<u32>> = Vec::new();
             for &k in &ks {
                 let own = match &links[k].ctl {
-                    Some((ce @ (Expr::Ident(_) | Expr::Hier(_)), cs, _)) => match self.resolve_base(ce, *cs)? {
+                    Some((ce @ Expr { kind: ExprKind::Ident(_) | ExprKind::Hier(_), .. }, cs, _)) => match self.resolve_base(ce, *cs)? {
                         Some(expr::Base::Sig(s)) if nets.contains(&s) => Some(s),
                         _ => None,
                     },

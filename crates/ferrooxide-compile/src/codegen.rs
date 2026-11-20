@@ -225,7 +225,7 @@ impl<'a> Compiler<'a> {
     /// left to right (the order elements pair up in an array assignment, IEEE 1800-2017
     /// 7.6). None for anything else.
     pub(crate) fn whole_array(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Vec<i64>)>> {
-        if !matches!(e, Expr::Ident(_) | Expr::Hier(_)) {
+        if !matches!(&e.kind, ExprKind::Ident(_) | ExprKind::Hier(_)) {
             return Ok(None);
         }
         let Some(crate::expr::Base::Sig(s)) = self.resolve_base(e, sid)? else { return Ok(None) };
@@ -257,15 +257,15 @@ impl<'a> Compiler<'a> {
     /// spans, each (lowest index, size, descending).
     #[allow(clippy::type_complexity)]
     fn array_dims(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Expr, Vec<(i64, u32, bool)>)>> {
-        if let Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) = e {
-            if matches!(**a, Expr::Range(..) | Expr::IndexedRange(..)) {
+        if let ExprKind::Range(a, _, _) | ExprKind::IndexedRange(a, _, _, _) = &e.kind {
+            if matches!(a.kind, ExprKind::Range(..) | ExprKind::IndexedRange(..)) {
                 return Ok(None); // a slice of a slice
             }
             let Some((s, base, mut dims)) = self.array_dims(a, sid)? else { return Ok(None) };
             let desc = dims[0].2;
-            let (left, right) = match e {
-                Expr::Range(_, m, l) => (self.const_int(m, sid)?, self.const_int(l, sid)?),
-                Expr::IndexedRange(_, b, w, up) => {
+            let (left, right) = match &e.kind {
+                ExprKind::Range(_, m, l) => (self.const_int(m, sid)?, self.const_int(l, sid)?),
+                ExprKind::IndexedRange(_, b, w, up) => {
                     let (b, w) = (self.const_int(b, sid)?, self.const_int(w, sid)?);
                     let far = if *up { b + w - 1 } else { b - w + 1 };
                     if (far > b) == desc {
@@ -288,11 +288,11 @@ impl<'a> Compiler<'a> {
         }
         let mut nidx = 0;
         let mut base = e;
-        while let Expr::Index(a, _) = base {
+        while let ExprKind::Index(a, _) = &base.kind {
             nidx += 1;
             base = a;
         }
-        if !matches!(base, Expr::Ident(_) | Expr::Hier(_)) {
+        if !matches!(&base.kind, ExprKind::Ident(_) | ExprKind::Hier(_)) {
             return Ok(None);
         }
         let Some(crate::expr::Base::Sig(s)) = self.resolve_base(base, sid)? else { return Ok(None) };
@@ -331,7 +331,7 @@ impl<'a> Compiler<'a> {
                     default = Some(v);
                     continue;
                 }
-                PatItem::Key(k, v) => (self.const_int(&Expr::Ident(k.clone()), sid)?, v),
+                PatItem::Key(k, v) => (self.const_int(&Expr::from(ExprKind::Ident(k.clone())), sid)?, v),
                 PatItem::Index(k, v) => (self.const_int(k, sid)?, v),
             };
             let Some(p) = idx.iter().position(|&i| i == k) else {
@@ -361,7 +361,7 @@ impl<'a> Compiler<'a> {
             out.push((el, v.clone()));
             return Ok(());
         }
-        if let Expr::Pattern(None, items) = v {
+        if let ExprKind::Pattern(None, items) = &v.kind {
             return self.pattern_pairs(&el, dims, items, sid, out);
         }
         if default && self.array_dims(v, sid)?.is_none() {
@@ -403,7 +403,7 @@ impl<'a> Compiler<'a> {
     /// (None if `lhs` is not an array).
     pub(crate) fn array_pairs(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<Option<Vec<(Expr, Expr)>>> {
         let Some((ls, lshape, li)) = self.array_elems(lhs, sid)? else { return Ok(None) };
-        if let Expr::Pattern(None, items) = rhs {
+        if let ExprKind::Pattern(None, items) = &rhs.kind {
             let (_, base, dims) = self.array_dims(lhs, sid)?.unwrap();
             let mut out = Vec::new();
             self.pattern_pairs(&base, &dims, items, sid, &mut out)?;
@@ -444,19 +444,19 @@ impl<'a> Compiler<'a> {
 
     /// Signals an lvalue writes (whole signals; part selects count as the signal).
     pub(crate) fn lvalue_bases(&self, e: &Expr, sid: usize, out: &mut Vec<u32>) {
-        match e {
-            Expr::Ident(n) => {
+        match &e.kind {
+            ExprKind::Ident(n) => {
                 if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
                     out.push(self.canon(s));
                 }
             }
-            Expr::Hier(p) => {
+            ExprKind::Hier(p) => {
                 if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
                     out.push(self.canon(s));
                 }
             }
-            Expr::Index(a, _) | Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) => self.lvalue_bases(a, sid, out),
-            Expr::Concat(v) => {
+            ExprKind::Index(a, _) | ExprKind::Range(a, _, _) | ExprKind::IndexedRange(a, _, _, _) => self.lvalue_bases(a, sid, out),
+            ExprKind::Concat(v) => {
                 for x in v {
                     self.lvalue_bases(x, sid, out);
                 }
@@ -526,9 +526,9 @@ impl<'a> Compiler<'a> {
         let mut whole: Vec<(u32, usize, u32)> = Vec::new();
         for job in &jobs {
             if let Job::Assign { lhs, scope, line, .. } | Job::PortOut { lhs, scope, line, .. } = job {
-                let sym = match lhs {
-                    Expr::Ident(n) => self.lookup(n, *scope),
-                    Expr::Hier(p) => self.lookup_hier(p, *scope),
+                let sym = match &lhs.kind {
+                    ExprKind::Ident(n) => self.lookup(n, *scope),
+                    ExprKind::Hier(p) => self.lookup_hier(p, *scope),
                     _ => None,
                 };
                 if let Some(Sym::Sig(s)) = sym {
@@ -680,7 +680,7 @@ impl<'a> Compiler<'a> {
     /// A continuous assignment of a constant to a whole net (or net driver) sets its initial
     /// value, so processes see it already at time 0, as with Icarus.
     pub(crate) fn const_assign_init(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<()> {
-        if !matches!(lhs, Expr::Ident(_) | Expr::Hier(_)) || !self.is_const(rhs, sid) || self.type_of(rhs, sid)?.is_real() {
+        if !matches!(&lhs.kind, ExprKind::Ident(_) | ExprKind::Hier(_)) || !self.is_const(rhs, sid) || self.type_of(rhs, sid)?.is_real() {
             return Ok(());
         }
         let Some(expr::Base::Sig(s0)) = self.resolve_base(lhs, sid)? else { return Ok(()) };
@@ -852,9 +852,9 @@ fn dim_indexes((lo, n, desc): (i64, u32, bool)) -> impl Iterator<Item = i64> {
 
 /// `e[v]` with a constant index.
 fn index_expr(e: &Expr, v: i64) -> Expr {
-    let num = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
-    let num = if v < 0 { Expr::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(num)) } else { num };
-    Expr::Index(Box::new(e.clone()), Box::new(num))
+    let num = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+    let num = if v < 0 { ExprKind::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(num.into())) } else { num };
+    ExprKind::Index(Box::new(e.clone()), Box::new(num.into())).into()
 }
 
 impl<'a> Compiler<'a> {
@@ -862,15 +862,15 @@ impl<'a> Compiler<'a> {
     /// assign) are constant (IEEE 1800-2017 10.3.1, 10.6: a net, a constant bit- or
     /// part-select of it, an element at a constant index).
     pub(crate) fn check_const_selects(&mut self, lhs: &Expr, sid: usize) -> R<()> {
-        match lhs {
-            Expr::Index(a, i) | Expr::IndexedRange(a, i, _, _) => {
+        match &lhs.kind {
+            ExprKind::Index(a, i) | ExprKind::IndexedRange(a, i, _, _) => {
                 if !self.is_const_expr(i, sid) {
                     return self.err("a select in the target of a continuous assignment or force is not a constant expression");
                 }
                 self.check_const_selects(a, sid)
             }
-            Expr::Range(a, ..) | Expr::Member(a, _) => self.check_const_selects(a, sid),
-            Expr::Concat(v) => v.iter().try_for_each(|x| self.check_const_selects(x, sid)),
+            ExprKind::Range(a, ..) | ExprKind::Member(a, _) => self.check_const_selects(a, sid),
+            ExprKind::Concat(v) => v.iter().try_for_each(|x| self.check_const_selects(x, sid)),
             _ => Ok(()),
         }
     }

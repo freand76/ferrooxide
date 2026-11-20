@@ -71,7 +71,7 @@ impl<'a> Compiler<'a> {
         if kind == SigKind::Wire {
             self.nets.cur_strength = strength;
             self.push_job(Job::Assign {
-                lhs: Expr::Ident(name.to_string()),
+                lhs: ExprKind::Ident(name.to_string()).into(),
                 rhs: init.clone(),
                 delay: delay.cloned(),
                 scope: sid,
@@ -84,7 +84,7 @@ impl<'a> Compiler<'a> {
         // assigned at time 0, before the processes start
         if self.decl_init_const(init, s, nkind, is_real, depth, width, sid).is_err() {
             let line = self.line;
-            self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.to_string()), rhs: init.clone(), scope: sid, line });
+            self.code.jobs.push(Job::Init { lhs: ExprKind::Ident(name.to_string()).into(), rhs: init.clone(), scope: sid, line });
         }
         Ok(())
     }
@@ -94,10 +94,10 @@ impl<'a> Compiler<'a> {
     fn decl_init_const(&mut self, init: &Expr, s: u32, nkind: NetKind, is_real: bool, depth: u32, width: u32, sid: usize) -> R<()> {
         if nkind == NetKind::String {
             // the initial text
-            let text = match init {
-                Expr::Str(t) => t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect(),
-                e => {
-                    let c = self.const_eval(e, sid)?;
+            let text = match &init.kind {
+                ExprKind::Str(t) => t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect(),
+                _ => {
+                    let c = self.const_eval(init, sid)?;
                     let mut v = Vec::new();
                     for k in (0..c.w.div_ceil(8)).rev() {
                         let ch = (c.a[(8 * k / 64) as usize] >> (8 * k % 64)) as u8;

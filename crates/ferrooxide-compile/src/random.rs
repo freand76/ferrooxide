@@ -71,33 +71,34 @@ fn key(e: &Expr) -> String {
 }
 
 fn num(v: i64) -> Expr {
-    let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
-    if v < 0 { Expr::Unary(UnOp::Neg, Box::new(n)) } else { n }
+    let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+    if v < 0 { ExprKind::Unary(UnOp::Neg, Box::new(n.into())).into() } else { n.into() }
 }
 
 fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
-    Expr::Binary(op, Box::new(a), Box::new(b))
+    ExprKind::Binary(op, Box::new(a), Box::new(b)).into()
 }
 
 /// `e` with identifier `name` replaced by `v` (a `foreach` variable by its index).
 fn subst(e: &Expr, name: &str, v: i64) -> Expr {
     let s = |x: &Expr| Box::new(subst(x, name, v));
-    match e {
-        Expr::Ident(n) if n == name => num(v),
-        Expr::Index(a, b) => Expr::Index(s(a), s(b)),
-        Expr::Range(a, b, c) => Expr::Range(s(a), s(b), s(c)),
-        Expr::IndexedRange(a, b, c, up) => Expr::IndexedRange(s(a), s(b), s(c), *up),
-        Expr::Cond(a, b, c) => Expr::Cond(s(a), s(b), s(c)),
-        Expr::Binary(op, a, b) => Expr::Binary(*op, s(a), s(b)),
-        Expr::Unary(op, a) => Expr::Unary(*op, s(a)),
-        Expr::Member(a, m) => Expr::Member(s(a), m.clone()),
-        Expr::Concat(v2) => Expr::Concat(v2.iter().map(|x| subst(x, name, v)).collect()),
-        Expr::Call(f, v2) => Expr::Call(f.clone(), v2.iter().map(|x| subst(x, name, v)).collect()),
-        Expr::SysCall(f, v2) => Expr::SysCall(f.clone(), v2.iter().map(|x| subst(x, name, v)).collect()),
-        Expr::MethodCall(o, m, v2) => Expr::MethodCall(s(o), m.clone(), v2.iter().map(|x| subst(x, name, v)).collect()),
-        Expr::Repl(n, v2) => Expr::Repl(s(n), v2.iter().map(|x| subst(x, name, v)).collect()),
-        _ => e.clone(),
-    }
+    let k = match &e.kind {
+        ExprKind::Ident(n) if n == name => return num(v),
+        ExprKind::Index(a, b) => ExprKind::Index(s(a), s(b)),
+        ExprKind::Range(a, b, c) => ExprKind::Range(s(a), s(b), s(c)),
+        ExprKind::IndexedRange(a, b, c, up) => ExprKind::IndexedRange(s(a), s(b), s(c), *up),
+        ExprKind::Cond(a, b, c) => ExprKind::Cond(s(a), s(b), s(c)),
+        ExprKind::Binary(op, a, b) => ExprKind::Binary(*op, s(a), s(b)),
+        ExprKind::Unary(op, a) => ExprKind::Unary(*op, s(a)),
+        ExprKind::Member(a, m) => ExprKind::Member(s(a), m.clone()),
+        ExprKind::Concat(v2) => ExprKind::Concat(v2.iter().map(|x| subst(x, name, v)).collect()),
+        ExprKind::Call(f, v2) => ExprKind::Call(f.clone(), v2.iter().map(|x| subst(x, name, v)).collect()),
+        ExprKind::SysCall(f, v2) => ExprKind::SysCall(f.clone(), v2.iter().map(|x| subst(x, name, v)).collect()),
+        ExprKind::MethodCall(o, m, v2) => ExprKind::MethodCall(s(o), m.clone(), v2.iter().map(|x| subst(x, name, v)).collect()),
+        ExprKind::Repl(n, v2) => ExprKind::Repl(s(n), v2.iter().map(|x| subst(x, name, v)).collect()),
+        _ => return e.clone(),
+    };
+    Expr::new(k, e.line)
 }
 
 fn subst_item(it: &CItem, name: &str, v: i64) -> CItem {
@@ -127,9 +128,9 @@ fn subst_item(it: &CItem, name: &str, v: i64) -> CItem {
 }
 
 impl<'a> Compiler<'a> {
-    /// `randomize()` (`Expr::Randomize`): the slot of its 32-bit result.
+    /// `randomize()` (`ExprKind::Randomize`): the slot of its 32-bit result.
     pub(crate) fn randomize(&mut self, e: &Expr, sid: usize) -> R<u32> {
-        let Expr::Randomize { obj, vars, with, std } = e else { unreachable!() };
+        let ExprKind::Randomize { obj, vars, with, std } = &e.kind else { unreachable!() };
         let res = self.tmp(32);
         if *std {
             let items: Vec<Item> = with.iter().flatten().map(|it| Item { it: it.clone(), sid }).collect();
@@ -153,7 +154,7 @@ impl<'a> Compiler<'a> {
             }
             None => {
                 let Some(c) = self.class_of_scope(sid) else { return self.err("randomize() outside a class needs variables to randomize") };
-                (self.handle_value(&Expr::Ident("this".into()), sid)?, c)
+                (self.handle_value(&Expr::from(ExprKind::Ident("this".into())), sid)?, c)
             }
         };
         // the object's own class decides (randomize() is virtual): its variables and
@@ -214,15 +215,15 @@ impl<'a> Compiler<'a> {
             }
         } else {
             for v in vars {
-                match v {
-                    Expr::Member(_, p) => names.push((p.clone(), false)),
+                match &v.kind {
+                    ExprKind::Member(_, p) => names.push((p.clone(), false)),
                     _ => return self.err("randomize() of something that is not a property of the object is not supported"),
                 }
             }
         }
         let props = self.classes.list[d as usize].props.clone();
-        let this_k = |p: &str| key(&Expr::Member(Box::new(Expr::Ident("this".into())), p.into()));
-        let obj_k = |p: &str| obj.map(|o| key(&Expr::Member(Box::new(o.clone()), p.into())));
+        let this_k = |p: &str| key(&Expr::from(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), p.into())));
+        let obj_k = |p: &str| obj.map(|o| key(&Expr::from(ExprKind::Member(Box::new(o.clone()), p.into()))));
         let mut rv = Vec::new();
         for (n, cyclic) in &names {
             if *cyclic {
@@ -243,10 +244,10 @@ impl<'a> Compiler<'a> {
                 }
                 [(lo, cnt)] => {
                     for e in 0..*cnt {
-                        let ix = |b: Expr| key(&Expr::Index(Box::new(b), Box::new(num(*lo + e as i64))));
-                        let mut k = vec![ix(Expr::Member(Box::new(Expr::Ident("this".into())), n.clone()))];
+                        let ix = |b: Expr| key(&Expr::from(ExprKind::Index(Box::new(b), Box::new(num(*lo + e as i64)))));
+                        let mut k = vec![ix(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), n.clone()).into())];
                         if let Some(o) = obj {
-                            k.push(ix(Expr::Member(Box::new(o.clone()), n.clone())));
+                            k.push(ix(ExprKind::Member(Box::new(o.clone()), n.clone()).into()));
                         }
                         rv.push(RVar { names: k, w, signed, home: Home::Prop { off: p.off + e * w } });
                     }
@@ -322,7 +323,7 @@ impl<'a> Compiler<'a> {
     /// The lowest index and the number of elements of the one-dimensional fixed-size array
     /// `arr` (a property through a handle, a variable) names.
     fn array_bounds(&mut self, arr: &Expr, sid: usize) -> R<(i64, u32)> {
-        if let Expr::Member(o, p) = arr {
+        if let ExprKind::Member(o, p) = &arr.kind {
             if let Type::Class(c) = self.type_of(o, sid)? {
                 if let Some(pr) = self.classes.list[c as usize].props.iter().rev().find(|x| &x.name == p) {
                     if let [(lo, n)] = pr.dims.as_slice() {
@@ -344,18 +345,18 @@ impl<'a> Compiler<'a> {
         if rv.iter().any(|v| v.names.contains(&k)) {
             return true;
         }
-        match e {
-            Expr::Member(a, _) => {
+        match &e.kind {
+            ExprKind::Member(a, _) => {
                 // (a whole rand array: its elements' names start with it)
                 let m = format!("Index({k}");
                 rv.iter().any(|v| v.names.iter().any(|n| n.starts_with(&m))) || Self::reads_rand(a, rv)
             }
-            Expr::Index(a, b) | Expr::Binary(_, a, b) => Self::reads_rand(a, rv) || Self::reads_rand(b, rv),
-            Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => Self::reads_rand(a, rv) || Self::reads_rand(b, rv) || Self::reads_rand(c, rv),
-            Expr::Unary(_, a) => Self::reads_rand(a, rv),
-            Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) | Expr::StaticCall(_, _, v) => v.iter().any(|x| Self::reads_rand(x, rv)),
-            Expr::MethodCall(o, _, v) => Self::reads_rand(o, rv) || v.iter().any(|x| Self::reads_rand(x, rv)),
-            Expr::Repl(n, v) => Self::reads_rand(n, rv) || v.iter().any(|x| Self::reads_rand(x, rv)),
+            ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => Self::reads_rand(a, rv) || Self::reads_rand(b, rv),
+            ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) | ExprKind::Cond(a, b, c) => Self::reads_rand(a, rv) || Self::reads_rand(b, rv) || Self::reads_rand(c, rv),
+            ExprKind::Unary(_, a) => Self::reads_rand(a, rv),
+            ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().any(|x| Self::reads_rand(x, rv)),
+            ExprKind::MethodCall(o, _, v) => Self::reads_rand(o, rv) || v.iter().any(|x| Self::reads_rand(x, rv)),
+            ExprKind::Repl(n, v) => Self::reads_rand(n, rv) || v.iter().any(|x| Self::reads_rand(x, rv)),
             _ => false,
         }
     }
@@ -391,7 +392,7 @@ impl<'a> Compiler<'a> {
                     // (a conjunction: each part)
                     let mut parts = vec![e];
                     while let Some(x) = parts.pop() {
-                        let Expr::Binary(op, a, b) = x else { continue };
+                        let ExprKind::Binary(op, a, b) = &x.kind else { continue };
                         if *op == BinOp::LAnd {
                             parts.push(a);
                             parts.push(b);
@@ -481,7 +482,7 @@ impl<'a> Compiler<'a> {
     fn rule_guard(&mut self, r: &Rule, soft_on: u32) -> R<Vec<usize>> {
         let mut skips = Vec::new();
         for &(g, pol, gs) in &r.guards {
-            let e = if pol { g.clone() } else { Expr::Unary(UnOp::LNot, Box::new(g.clone())) };
+            let e = if pol { g.clone() } else { ExprKind::Unary(UnOp::LNot, Box::new(g.clone())).into() };
             let (c, cw) = self.truth(&e, gs)?;
             skips.push(self.emit(Instr::Jz { c, w: cw, to: 0 }));
         }
@@ -812,8 +813,8 @@ impl<'a> Compiler<'a> {
                 .map(|d| bin(BinOp::LAnd, bin(BinOp::Ne, d.weight.clone(), num(0)), in_range(e, &d.lo, &d.hi)))
                 .reduce(|a, b| bin(BinOp::LOr, a, b))
                 .unwrap_or(num(0)),
-            CItem::Implies(g, v) => bin(BinOp::LOr, Expr::Unary(UnOp::LNot, Box::new(g.clone())), all(v)),
-            CItem::If(g, a, b) => Expr::Cond(Box::new(g.clone()), Box::new(all(a)), Box::new(all(b))),
+            CItem::Implies(g, v) => bin(BinOp::LOr, ExprKind::Unary(UnOp::LNot, Box::new(g.clone())).into(), all(v)),
+            CItem::If(g, a, b) => ExprKind::Cond(Box::new(g.clone()), Box::new(all(a)), Box::new(all(b))).into(),
             CItem::Unique(v) => {
                 let mut acc = num(1);
                 for i in 0..v.len() {

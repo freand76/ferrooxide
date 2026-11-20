@@ -30,12 +30,12 @@ pub(crate) fn assign_binop(op: t::AssignOp) -> Option<BinOp> {
 
 /// Whether evaluating an expression assigns something (an increment in it).
 pub(crate) fn side_effects(e: &Expr) -> bool {
-    match e {
-        Expr::IncDec { .. } => true,
-        Expr::Index(a, b) | Expr::Binary(_, a, b) => side_effects(a) || side_effects(b),
-        Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => side_effects(a) || side_effects(b) || side_effects(c),
-        Expr::Unary(_, a) | Expr::Member(a, _) => side_effects(a),
-        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) | Expr::StaticCall(_, _, v) => v.iter().any(side_effects),
+    match &e.kind {
+        ExprKind::IncDec { .. } => true,
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => side_effects(a) || side_effects(b),
+        ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) | ExprKind::Cond(a, b, c) => side_effects(a) || side_effects(b) || side_effects(c),
+        ExprKind::Unary(_, a) | ExprKind::Member(a, _) => side_effects(a),
+        ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().any(side_effects),
         _ => false,
     }
 }
@@ -234,7 +234,7 @@ impl Lower {
                     };
                     // @(e iff g) s: wait again while g is false when e happens
                     let again = Stmt::While {
-                        cond: Expr::Unary(UnOp::LNot, Box::new(g)),
+                        cond: ExprKind::Unary(UnOp::LNot, Box::new(g)).into(),
                         body: Box::new(Stmt::Timed { timing: Timing::Event(ec.clone()), body: Box::new(Stmt::Null), line }),
                         line,
                     };
@@ -247,9 +247,9 @@ impl Lower {
                 let p = match self.dotted(target)? {
                     Some(p) => p,
                     // `-> P::e`: an event of a package; `-> a.g[1].e`: through an indexed scope
-                    None => match self.expr(target)? {
-                        Expr::Hier(parts) => parts.join("."),
-                        Expr::Ident(n) if n.contains("::") => n,
+                    None => match self.expr(target)?.kind {
+                        ExprKind::Hier(parts) => parts.join("."),
+                        ExprKind::Ident(n) if n.contains("::") => n,
                         _ => return self.unsupported(s.loc, "this event trigger"),
                     },
                 };
@@ -292,8 +292,8 @@ impl Lower {
                     t::CaseMode::Normal => None,
                     t::CaseMode::Inside if kind == CaseKind::Case => {
                         // an item matches when `e inside {item}`: `case (1'b1)` with the tests
-                        let one = Expr::Num(Number { size: Some(1), signed: false, base: 2, based: true, digits: "1".into(), fill: false });
-                        Some(std::mem::replace(&mut e, one))
+                        let one = ExprKind::Num(Number { size: Some(1), signed: false, base: 2, based: true, digits: "1".into(), fill: false });
+                        Some(std::mem::replace(&mut e, one.into()))
                     }
                     t::CaseMode::Inside => return self.unsupported(s.loc, "casez/casex inside"),
                     t::CaseMode::Matches => return self.unsupported(s.loc, "case matches"),
@@ -348,14 +348,14 @@ impl Lower {
                             let v = self.expr(init)?;
                             let Some(d) = decls.last_mut() else { return self.unsupported(*loc, "this for-loop initialization") };
                             d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, init: None, line: loc.line });
-                            inits.push(Stmt::Assign { lhs: Expr::Ident(name), rhs: v, nonblocking: false, timing: None, line: loc.line });
+                            inits.push(Stmt::Assign { lhs: ExprKind::Ident(name).into(), rhs: v, nonblocking: false, timing: None, line: loc.line });
                         }
                         t::ForInit::Assign(st) => inits.push(self.simple_assign(st)?),
                     }
                 }
                 let cond = match cond {
                     Some(c) => self.expr(c)?,
-                    None => Expr::Num(dec(1)),
+                    None => ExprKind::Num(dec(1)).into(),
                 };
                 let mut steps = Vec::new();
                 for st in step {
@@ -463,13 +463,13 @@ impl Lower {
             }
             // `obj.randomize();`: its value is not used
             t::ExprKind::Call { func, .. } if Self::randomize_form(func).is_some() => Ok(Stmt::Discard { e: self.expr(e)?, line }),
-            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Member(..) if self.class_call(e) => match self.expr(e)? {
-                Expr::MethodCall(obj, name, args) => Ok(Stmt::MethodCall { obj: *obj, name, args, line }),
-                Expr::Member(obj, name) => Ok(Stmt::MethodCall { obj: *obj, name, args: vec![], line }),
+            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Member(..) if self.class_call(e) => match self.expr(e)?.kind {
+                ExprKind::MethodCall(obj, name, args) => Ok(Stmt::MethodCall { obj: *obj, name, args, line }),
+                ExprKind::Member(obj, name) => Ok(Stmt::MethodCall { obj: *obj, name, args: vec![], line }),
                 _ => self.unsupported(loc, "this expression as a statement"),
             },
-            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Scoped(..) if self.class_scoped(e) => match self.expr(e)? {
-                Expr::StaticCall(class, name, args) => Ok(Stmt::StaticCall { class, name, args, line }),
+            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Scoped(..) if self.class_scoped(e) => match self.expr(e)?.kind {
+                ExprKind::StaticCall(class, name, args) => Ok(Stmt::StaticCall { class, name, args, line }),
                 _ => self.unsupported(loc, "this expression as a statement"),
             },
             // `q.sort with (e);`: an array method with `with` called for its effect
@@ -575,8 +575,8 @@ impl Lower {
                     return self.unsupported(s.loc, "an increment of a target with side effects");
                 }
                 let op = if *inc { BinOp::Add } else { BinOp::Sub };
-                let rhs = Expr::Binary(op, Box::new(lhs.clone()), Box::new(Expr::Num(dec(1))));
-                Ok(Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line })
+                let rhs = ExprKind::Binary(op, Box::new(lhs.clone()), Box::new(ExprKind::Num(dec(1)).into()));
+                Ok(Stmt::Assign { lhs, rhs: rhs.into(), nonblocking: false, timing: None, line })
             }
             t::StmtKind::Assign { lhs, op, timing, rhs } if *op != t::AssignOp::Eq => {
                 if timing.is_some() {
@@ -587,8 +587,8 @@ impl Lower {
                     return self.unsupported(s.loc, "a compound assignment to a target with side effects");
                 }
                 let r = self.expr(rhs)?;
-                let rhs = Expr::Binary(assign_binop(*op).unwrap(), Box::new(lhs.clone()), Box::new(r));
-                Ok(Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line })
+                let rhs = ExprKind::Binary(assign_binop(*op).unwrap(), Box::new(lhs.clone()), Box::new(r));
+                Ok(Stmt::Assign { lhs, rhs: rhs.into(), nonblocking: false, timing: None, line })
             }
             t::StmtKind::Assign { lhs, timing, rhs, .. } | t::StmtKind::NonBlocking { lhs, timing, rhs } => {
                 let nonblocking = matches!(s.kind, t::StmtKind::NonBlocking { .. });
@@ -673,7 +673,7 @@ impl Lower {
         }
         self.spec_count += 1;
         let r = format!("$randcase{}", self.spec_count);
-        let bin = |op, a: Expr, b: Expr| Expr::Binary(op, Box::new(a), Box::new(b));
+        let bin = |op, a: Expr, b: Expr| ExprKind::Binary(op, Box::new(a), Box::new(b));
         // (the sums take the 64 bits of the comparison with r)
         let wide = |w: &Expr| w.clone();
         let mut sums = Vec::new();
@@ -681,25 +681,25 @@ impl Lower {
         for w in &ws {
             let s = match acc {
                 None => wide(w),
-                Some(a) => bin(BinOp::Add, a, wide(w)),
+                Some(a) => bin(BinOp::Add, a, wide(w)).into(),
             };
             sums.push(s.clone());
             acc = Some(s);
         }
-        let total = acc.unwrap_or(Expr::Num(dec(0)));
+        let total = acc.unwrap_or(ExprKind::Num(dec(0)).into());
         let mut chain: Option<Stmt> = None;
         for (s, b) in sums.into_iter().zip(bodies).rev() {
-            chain = Some(Stmt::If { cond: bin(BinOp::Lt, Expr::Ident(r.clone()), s), then_s: Box::new(b), else_s: chain.map(Box::new), line });
+            chain = Some(Stmt::If { cond: bin(BinOp::Lt, ExprKind::Ident(r.clone()).into(), s).into(), then_s: Box::new(b), else_s: chain.map(Box::new), line });
         }
         let pick = Stmt::Assign {
-            lhs: Expr::Ident(r.clone()),
-            rhs: Expr::SysCall("$urandom_range".into(), vec![bin(BinOp::Sub, total.clone(), Expr::Num(dec(1))), Expr::Num(dec(0))]),
+            lhs: ExprKind::Ident(r.clone()).into(),
+            rhs: ExprKind::SysCall("$urandom_range".into(), vec![bin(BinOp::Sub, total.clone(), ExprKind::Num(dec(1)).into()).into(), ExprKind::Num(dec(0)).into()]).into(),
             nonblocking: false,
             timing: None,
             line,
         };
         let body = Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: chain.into_iter().collect(), fork: None };
-        let run = Stmt::If { cond: bin(BinOp::Ne, total, Expr::Num(dec(0))), then_s: Box::new(Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: vec![pick, body], fork: None }), else_s: None, line };
+        let run = Stmt::If { cond: bin(BinOp::Ne, total, ExprKind::Num(dec(0)).into()).into(), then_s: Box::new(Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: vec![pick, body], fork: None }), else_s: None, line };
         let d = Decl {
             dir: None,
             kind: NetKind::Reg,
@@ -709,7 +709,7 @@ impl Lower {
             strength: None,
             delay: None,
             signed: false,
-            range: Some((Expr::Num(dec(63)), Expr::Num(dec(0)))),
+            range: Some((ExprKind::Num(dec(63)).into(), ExprKind::Num(dec(0)).into())),
             range_written: false,
             packed: vec![],
             type_param: None,
@@ -724,12 +724,12 @@ impl Lower {
 
     fn foreach_assoc(&mut self, name: &str, v: &str, key: Option<&super::SvType>, body: Stmt, line: u32) -> Stmt {
         let ok = format!("{v}$ok");
-        let call = |m: &str| Expr::Call(format!("{name}.{m}"), vec![Expr::Ident(v.to_string())]);
-        let set = |rhs: Expr| Stmt::Assign { lhs: Expr::Ident(ok.clone()), rhs, nonblocking: false, timing: None, line };
+        let call = |m: &str| ExprKind::Call(format!("{name}.{m}"), vec![ExprKind::Ident(v.to_string()).into()]);
+        let set = |rhs: Expr| Stmt::Assign { lhs: ExprKind::Ident(ok.clone()).into(), rhs, nonblocking: false, timing: None, line };
         let lp = Stmt::For {
-            init: Box::new(set(call("first"))),
-            cond: Expr::Ident(ok.clone()),
-            step: Box::new(set(call("next"))),
+            init: Box::new(set(call("first").into())),
+            cond: ExprKind::Ident(ok.clone()).into(),
+            step: Box::new(set(call("next").into())),
             body: Box::new(body),
             line,
         };
@@ -757,10 +757,10 @@ impl Lower {
             Some(k) if k.kind == NetKind::String => decl(NetKind::String, false, None, v),
             Some(k) => {
                 let (kind, signed, range, _) = k.decl_parts();
-                let range = range.or_else(|| Some((super::types::minus_one(k.width()), Expr::Num(dec(0)))));
+                let range = range.or_else(|| Some((super::types::minus_one(k.width()), ExprKind::Num(dec(0)).into())));
                 decl(if kind == NetKind::Bit { NetKind::Bit } else { NetKind::Reg }, signed, range, v)
             }
-            None => decl(NetKind::Reg, false, Some((Expr::Num(dec(63)), Expr::Num(dec(0)))), v),
+            None => decl(NetKind::Reg, false, Some((ExprKind::Num(dec(63)).into(), ExprKind::Num(dec(0)).into())), v),
         };
         Stmt::Block { name: None, decls: vec![kd, decl(NetKind::Int(32), true, None, &ok)], imports: vec![], params: vec![], stmts: vec![lp], fork: None }
     }
@@ -778,14 +778,14 @@ impl Lower {
         if let Some(HeapKind::Assoc(key)) = heap {
             return Ok(self.foreach_assoc(name, &v, key.as_deref(), body, line));
         }
-        let var = || Box::new(Expr::Ident(v.clone()));
-        let size = Box::new(Expr::Call(format!("{name}.size"), vec![]));
+        let var = || Box::new(Expr::from(ExprKind::Ident(v.clone())));
+        let size = Box::new(Expr::from(ExprKind::Call(format!("{name}.size"), vec![])));
         let lp = Stmt::For {
-            init: Box::new(Stmt::Assign { lhs: Expr::Ident(v.clone()), rhs: Expr::Num(dec(0)), nonblocking: false, timing: None, line }),
-            cond: Expr::Binary(BinOp::Lt, var(), size),
+            init: Box::new(Stmt::Assign { lhs: ExprKind::Ident(v.clone()).into(), rhs: ExprKind::Num(dec(0)).into(), nonblocking: false, timing: None, line }),
+            cond: ExprKind::Binary(BinOp::Lt, var(), size).into(),
             step: Box::new(Stmt::Assign {
-                lhs: Expr::Ident(v.clone()),
-                rhs: Expr::Binary(BinOp::Add, var(), Box::new(Expr::Num(dec(1)))),
+                lhs: ExprKind::Ident(v.clone()).into(),
+                rhs: ExprKind::Binary(BinOp::Add, var(), Box::new(ExprKind::Num(dec(1)).into())).into(),
                 nonblocking: false,
                 timing: None,
                 line,
@@ -841,22 +841,22 @@ impl Lower {
         for (d, v) in vars.iter().enumerate().rev() {
             let Some(v) = v else { continue };
             let (l, r) = dims[d].clone();
-            let var = || Box::new(Expr::Ident(v.clone()));
-            let down = Expr::Binary(BinOp::Ge, Box::new(l.clone()), Box::new(r.clone()));
-            let cond = Expr::Cond(
-                Box::new(down.clone()),
-                Box::new(Expr::Binary(BinOp::Ge, var(), Box::new(r.clone()))),
-                Box::new(Expr::Binary(BinOp::Le, var(), Box::new(r))),
+            let var = || Box::new(Expr::from(ExprKind::Ident(v.clone())));
+            let down = ExprKind::Binary(BinOp::Ge, Box::new(l.clone()), Box::new(r.clone()));
+            let cond = ExprKind::Cond(
+                Box::new(down.clone().into()),
+                Box::new(ExprKind::Binary(BinOp::Ge, var(), Box::new(r.clone())).into()),
+                Box::new(ExprKind::Binary(BinOp::Le, var(), Box::new(r)).into()),
             );
-            let step = Expr::Cond(
-                Box::new(down),
-                Box::new(Expr::Binary(BinOp::Sub, var(), Box::new(Expr::Num(dec(1))))),
-                Box::new(Expr::Binary(BinOp::Add, var(), Box::new(Expr::Num(dec(1))))),
+            let step = ExprKind::Cond(
+                Box::new(down.into()),
+                Box::new(ExprKind::Binary(BinOp::Sub, var(), Box::new(ExprKind::Num(dec(1)).into())).into()),
+                Box::new(ExprKind::Binary(BinOp::Add, var(), Box::new(ExprKind::Num(dec(1)).into())).into()),
             );
             body = Stmt::For {
-                init: Box::new(Stmt::Assign { lhs: Expr::Ident(v.clone()), rhs: l, nonblocking: false, timing: None, line }),
-                cond,
-                step: Box::new(Stmt::Assign { lhs: Expr::Ident(v.clone()), rhs: step, nonblocking: false, timing: None, line }),
+                init: Box::new(Stmt::Assign { lhs: ExprKind::Ident(v.clone()).into(), rhs: l, nonblocking: false, timing: None, line }),
+                cond: cond.into(),
+                step: Box::new(Stmt::Assign { lhs: ExprKind::Ident(v.clone()).into(), rhs: step.into(), nonblocking: false, timing: None, line }),
                 body: Box::new(body),
                 line,
             };

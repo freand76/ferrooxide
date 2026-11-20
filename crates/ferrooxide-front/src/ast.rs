@@ -265,8 +265,8 @@ pub enum Item {
 }
 
 /// A class declaration. Inside its methods, the class's properties and methods (also
-/// inherited ones) are reached through `this` (`Expr::Member(this, p)`,
-/// `Expr::MethodCall(this, m, ..)`); `super` names `this` as the base class.
+/// inherited ones) are reached through `this` (`ExprKind::Member(this, p)`,
+/// `ExprKind::MethodCall(this, m, ..)`); `super` names `this` as the base class.
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
     pub name: String,
@@ -459,8 +459,143 @@ pub enum BinOp {
     AShr,
 }
 
+/// An expression with the line it starts on (0: synthesized, no location of its own).
+#[derive(Clone)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub line: Line,
+}
+
+/// Only the expression itself: `{:?}` serves as a key of an expression in places, where
+/// two equal expressions on different lines are the same.
+impl std::fmt::Debug for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, line: Line) -> Expr {
+        Expr { kind, line }
+    }
+}
+
+impl Expr {
+    /// Calls `f` for each direct subexpression (also those of patterns and of the constraints
+    /// of `randomize() with`).
+    pub fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        use ExprKind as K;
+        match &mut self.kind {
+            K::Num(_) | K::Real(_) | K::Str(_) | K::Ident(_) | K::Hier(_) | K::Type(_) | K::Null | K::EmptyArg | K::Last => {}
+            K::Index(a, b) | K::Binary(_, a, b) => {
+                f(a);
+                f(b);
+            }
+            K::Range(a, b, c) | K::IndexedRange(a, b, c, _) | K::Cond(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
+            }
+            K::Unary(_, a) | K::Member(a, _) | K::NamedArg(_, a) | K::NewCopy(a) | K::IncDec { e: a, .. } => f(a),
+            K::Concat(v) | K::Call(_, v) | K::SysCall(_, v) | K::New(v) | K::NewTyped(_, v) | K::StaticCall(_, _, v) => v.iter_mut().for_each(f),
+            K::Repl(a, v) | K::MethodCall(a, _, v) => {
+                f(a);
+                v.iter_mut().for_each(f);
+            }
+            K::Pattern(_, items) => {
+                for it in items {
+                    match it {
+                        PatItem::Pos(e) | PatItem::Key(_, e) | PatItem::Default(e) => f(e),
+                        PatItem::Index(a, b) => {
+                            f(a);
+                            f(b);
+                        }
+                    }
+                }
+            }
+            K::NewArray(a, b) => {
+                f(a);
+                if let Some(b) = b {
+                    f(b);
+                }
+            }
+            K::ArrayWith { arr, with, .. } => {
+                f(arr);
+                f(with);
+            }
+            K::Randomize { obj, vars, with, .. } => {
+                if let Some(o) = obj {
+                    f(o);
+                }
+                vars.iter_mut().for_each(&mut *f);
+                for it in with.iter_mut().flatten() {
+                    it.for_each_expr_mut(f);
+                }
+            }
+        }
+    }
+
+    /// Gives this expression and the subexpressions without a line of their own `line`.
+    pub fn fill_line(&mut self, line: Line) {
+        if self.line != 0 || line == 0 {
+            return;
+        }
+        self.line = line;
+        self.for_each_child_mut(&mut |c| c.fill_line(line));
+    }
+}
+
+impl CItem {
+    /// Calls `f` for each expression of the item (and of the items inside it).
+    pub fn for_each_expr_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            CItem::Expr { e, .. } | CItem::DisableSoft(e) => f(e),
+            CItem::Inside { e, set, .. } => {
+                f(e);
+                for (a, b) in set {
+                    f(a);
+                    if let Some(b) = b {
+                        f(b);
+                    }
+                }
+            }
+            CItem::Dist { e, items, .. } => {
+                f(e);
+                for d in items {
+                    f(&mut d.lo);
+                    if let Some(h) = &mut d.hi {
+                        f(h);
+                    }
+                    f(&mut d.weight);
+                }
+            }
+            CItem::Implies(g, items) => {
+                f(g);
+                items.iter_mut().for_each(|i| i.for_each_expr_mut(f));
+            }
+            CItem::If(c, a, b) => {
+                f(c);
+                a.iter_mut().chain(b.iter_mut()).for_each(|i| i.for_each_expr_mut(f));
+            }
+            CItem::Foreach { arr, items, .. } => {
+                f(arr);
+                items.iter_mut().for_each(|i| i.for_each_expr_mut(f));
+            }
+            CItem::Unique(v) => v.iter_mut().for_each(f),
+            CItem::SolveBefore => {}
+        }
+    }
+}
+
+impl From<ExprKind> for Expr {
+    /// an expression without a location (made by the compiler)
+    fn from(kind: ExprKind) -> Expr {
+        Expr { kind, line: 0 }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub enum ExprKind {
     Num(Number),
     Real(f64),
     Str(String),

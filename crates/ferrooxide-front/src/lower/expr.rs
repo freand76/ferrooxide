@@ -116,10 +116,10 @@ const ARRAY_QUERIES: &[&str] = &["$left", "$right", "$low", "$high", "$size", "$
 
 /// The value of a literal index (no x/z), possibly negated.
 pub(crate) fn lit_index(e: &Expr) -> Option<i64> {
-    match e {
-        Expr::Num(n) if !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok(),
-        Expr::Unary(UnOp::Neg, b) => match &**b {
-            Expr::Num(n) => i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok().map(|v| -v),
+    match &e.kind {
+        ExprKind::Num(n) if !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok(),
+        ExprKind::Unary(UnOp::Neg, b) => match &b.kind {
+            ExprKind::Num(n) => i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok().map(|v| -v),
             _ => None,
         },
         _ => None,
@@ -127,13 +127,20 @@ pub(crate) fn lit_index(e: &Expr) -> Option<i64> {
 }
 
 impl Lower {
+    /// An expression, with its line (and that of the parts made for it).
     pub(crate) fn expr(&mut self, e: &t::Expr) -> Result<Expr> {
+        let mut x = self.expr_at(e)?;
+        x.fill_line(e.loc.line);
+        Ok(x)
+    }
+
+    fn expr_at(&mut self, e: &t::Expr) -> Result<Expr> {
         let loc = e.loc;
         Ok(match &e.kind {
-            t::ExprKind::Num(n) => Expr::Num(n.clone()),
-            t::ExprKind::Real(r) => Expr::Real(*r),
+            t::ExprKind::Num(n) => ExprKind::Num(n.clone()).into(),
+            t::ExprKind::Real(r) => ExprKind::Real(*r).into(),
             t::ExprKind::Time(v, u) => self.time_literal(*v, *u),
-            t::ExprKind::Str(s) => Expr::Str(s.clone()),
+            t::ExprKind::Str(s) => ExprKind::Str(s.clone()).into(),
             t::ExprKind::Ident(_)
             | t::ExprKind::Member(..)
             | t::ExprKind::Index(..)
@@ -165,8 +172,8 @@ impl Lower {
                 // the iterator's type, for its members and methods: the element type of an
                 // array variable (otherwise none: members are resolved in elaboration)
                 let it = format!("$it{depth}");
-                let elem = match &arr {
-                    Expr::Ident(n) => match self.vars.get(n) {
+                let elem = match &arr.kind {
+                    ExprKind::Ident(n) => match self.vars.get(n) {
                         // a queue or dynamic array (`heap`), a fixed-size array (one dimension)
                         Some((t, u)) if t.heap.is_some() && u.is_empty() => {
                             let mut t = (**t).clone();
@@ -189,33 +196,33 @@ impl Lower {
                     Some(v) => self.vars.insert(it, v),
                     None => self.vars.remove(&it),
                 };
-                Expr::ArrayWith { arr: Box::new(arr), method: m.clone(), depth, with: Box::new(with?) }
+                ExprKind::ArrayWith { arr: Box::new(arr), method: m.clone(), depth, with: Box::new(with?) }.into()
             }
             t::ExprKind::SysCall { name, args, .. } => self.sys_call(name, args, loc)?,
-            t::ExprKind::Unary(op, a) => Expr::Unary(unop(*op), Box::new(self.expr(a)?)),
+            t::ExprKind::Unary(op, a) => ExprKind::Unary(unop(*op), Box::new(self.expr(a)?)).into(),
             t::ExprKind::Binary(op, a, b) => {
                 let Some(bop) = binop(*op) else {
                     // `a -> b` is `!a || b`, `a <-> b` is `(a -> b) && (b -> a)` (IEEE 1800-2017
                     // 11.4.7)
                     let (a, b) = (self.expr(a)?, self.expr(b)?);
-                    let imp = |x: &Expr, y: &Expr| Expr::Binary(BinOp::LOr, Box::new(Expr::Unary(UnOp::LNot, Box::new(x.clone()))), Box::new(y.clone()));
+                    let imp = |x: &Expr, y: &Expr| ExprKind::Binary(BinOp::LOr, Box::new(ExprKind::Unary(UnOp::LNot, Box::new(x.clone())).into()), Box::new(y.clone()));
                     if *op == t::BinOp::LImpl {
-                        return Ok(imp(&a, &b));
+                        return Ok(imp(&a, &b).into());
                     }
                     if super::stmt::side_effects(&a) || super::stmt::side_effects(&b) {
                         return self.unsupported(loc, "`<->` with an increment in an operand");
                     }
-                    return Ok(Expr::Binary(BinOp::LAnd, Box::new(imp(&a, &b)), Box::new(imp(&b, &a))));
+                    return Ok(ExprKind::Binary(BinOp::LAnd, Box::new(imp(&a, &b).into()), Box::new(imp(&b, &a).into())).into());
                 };
                 let a = self.expr(a)?;
                 let b = self.expr(b)?;
-                Expr::Binary(bop, Box::new(a), Box::new(b))
+                ExprKind::Binary(bop, Box::new(a), Box::new(b)).into()
             }
             t::ExprKind::Cond(c, a, b) => {
                 let c = self.expr(c)?;
                 let a = self.expr(a)?;
                 let b = self.expr(b)?;
-                Expr::Cond(Box::new(c), Box::new(a), Box::new(b))
+                ExprKind::Cond(Box::new(c), Box::new(a), Box::new(b)).into()
             }
             // min:typ:max: typ
             t::ExprKind::MinTypMax(_, ty, _) => self.expr(ty)?,
@@ -224,7 +231,7 @@ impl Lower {
                 for x in v {
                     out.push(self.expr(x)?);
                 }
-                Expr::Concat(out)
+                ExprKind::Concat(out).into()
             }
             t::ExprKind::Repl(n, v) if !v.is_empty() => {
                 let n = self.expr(n)?;
@@ -232,7 +239,7 @@ impl Lower {
                 for x in v {
                     out.push(self.expr(x)?);
                 }
-                Expr::Repl(Box::new(n), out)
+                ExprKind::Repl(Box::new(n), out).into()
             }
             t::ExprKind::Inside(a, set) => {
                 let a = self.expr(a)?;
@@ -241,7 +248,7 @@ impl Lower {
                     let x = self.set_item(&a, r)?;
                     acc = Some(match acc {
                         None => x,
-                        Some(p) => Expr::Binary(BinOp::LOr, Box::new(p), Box::new(x)),
+                        Some(p) => ExprKind::Binary(BinOp::LOr, Box::new(p), Box::new(x)).into(),
                     });
                 }
                 acc.unwrap()
@@ -252,7 +259,7 @@ impl Lower {
                     Some(dt) => Some(Rc::new(self.data_type_req(dt)?)),
                     None => None,
                 };
-                Expr::Pattern(ty, items)
+                ExprKind::Pattern(ty, items).into()
             }
             t::ExprKind::Cast(target, x) => match target {
                 t::CastTarget::Size(s) => {
@@ -260,8 +267,8 @@ impl Lower {
                     let x = self.expr(x)?;
                     cast(s, x, 2)
                 }
-                t::CastTarget::Signed => Expr::SysCall("$signed".into(), vec![self.expr(x)?]),
-                t::CastTarget::Unsigned => Expr::SysCall("$unsigned".into(), vec![self.expr(x)?]),
+                t::CastTarget::Signed => ExprKind::SysCall("$signed".into(), vec![self.expr(x)?]).into(),
+                t::CastTarget::Unsigned => ExprKind::SysCall("$unsigned".into(), vec![self.expr(x)?]).into(),
                 t::CastTarget::Const => return self.unsupported(loc, "a const cast"),
                 t::CastTarget::Type(dt) => {
                     let string = match &dt.kind {
@@ -270,7 +277,7 @@ impl Lower {
                         _ => false,
                     };
                     if string {
-                        return Ok(Expr::SysCall("$__tostring".into(), vec![self.expr(x)?]));
+                        return Ok(ExprKind::SysCall("$__tostring".into(), vec![self.expr(x)?]).into());
                     }
                     if matches!(dt.kind, t::TypeKind::Real(_)) {
                         return self.unsupported(loc, "a cast to a real type");
@@ -280,24 +287,24 @@ impl Lower {
                     cast(t.width(), x, if t.signed { 1 } else { 0 })
                 }
             },
-            t::ExprKind::Type(dt) => Expr::Type(Rc::new(self.data_type_req(dt)?)),
+            t::ExprKind::Type(dt) => ExprKind::Type(Rc::new(self.data_type_req(dt)?)).into(),
             // `{}`: an empty queue
-            t::ExprKind::Concat(_) => Expr::Concat(vec![]),
+            t::ExprKind::Concat(_) => ExprKind::Concat(vec![]).into(),
             t::ExprKind::Repl(..) => return self.unsupported(loc, "an empty replication"),
-            t::ExprKind::Null => Expr::Null,
+            t::ExprKind::Null => ExprKind::Null.into(),
             // (the last index of a queue; elsewhere an error in elaboration)
-            t::ExprKind::Dollar => Expr::Last,
+            t::ExprKind::Dollar => ExprKind::Last.into(),
             t::ExprKind::Step => return self.unsupported(loc, "1step"),
             t::ExprKind::Default => return self.unsupported(loc, "`default` here"),
             t::ExprKind::Root => return self.unsupported(loc, "$root alone"),
-            t::ExprKind::IncDec { prefix, inc, e } => Expr::IncDec { prefix: *prefix, inc: *inc, e: Box::new(self.lvalue(e)?) },
+            t::ExprKind::IncDec { prefix, inc, e } => ExprKind::IncDec { prefix: *prefix, inc: *inc, e: Box::new(self.lvalue(e)?) }.into(),
             t::ExprKind::Assign(..) => return self.unsupported(loc, "an assignment in an expression"),
             t::ExprKind::Dist(..) => return self.unsupported(loc, "dist"),
             t::ExprKind::Matches(..) | t::ExprKind::TripleAnd(..) => return self.unsupported(loc, "pattern matching"),
             t::ExprKind::Stream { .. } => return self.unsupported(loc, "a streaming concatenation"),
             t::ExprKind::Tagged(..) => return self.unsupported(loc, "a tagged union expression"),
             // Verilog code may name a variable `new`
-            t::ExprKind::New { size: None, args: None, copy: None } if self.vars.contains_key("new") => Expr::Ident(self.name("new", loc)),
+            t::ExprKind::New { size: None, args: None, copy: None } if self.vars.contains_key("new") => ExprKind::Ident(self.name("new", loc)).into(),
             t::ExprKind::New { size: Some(n), args, copy: None } => {
                 let n = self.expr(n)?;
                 let init = match args.as_deref() {
@@ -305,13 +312,13 @@ impl Lower {
                     Some([t::Arg::Pos(Some(x))]) => Some(Box::new(self.expr(x)?)),
                     Some(_) => return self.unsupported(loc, "these arguments of new[]"),
                 };
-                Expr::NewArray(Box::new(n), init)
+                ExprKind::NewArray(Box::new(n), init).into()
             }
-            t::ExprKind::New { size: None, args, copy: None } => Expr::New(match args {
+            t::ExprKind::New { size: None, args, copy: None } => ExprKind::New(match args {
                 Some(a) => self.call_args(a)?,
                 None => vec![],
-            }),
-            t::ExprKind::New { size: None, args: None, copy: Some(x) } => Expr::NewCopy(Box::new(self.expr(x)?)),
+            }).into(),
+            t::ExprKind::New { size: None, args: None, copy: Some(x) } => ExprKind::NewCopy(Box::new(self.expr(x)?)).into(),
             t::ExprKind::New { .. } => return self.unsupported(loc, "new"),
             t::ExprKind::TypedNew { class, args } => {
                 // `C #(..)::new`: of a specialization
@@ -331,7 +338,7 @@ impl Lower {
                     Some(a) => self.call_args(a)?,
                     None => Vec::new(),
                 };
-                Expr::NewTyped(c, args)
+                ExprKind::NewTyped(c, args).into()
             }
             t::ExprKind::Prop(_) => return self.unsupported(loc, "a property expression"),
         })
@@ -339,12 +346,18 @@ impl Lower {
 
     /// An assignment target.
     pub(crate) fn lvalue(&mut self, e: &t::Expr) -> Result<Expr> {
+        let mut x = self.lvalue_at(e)?;
+        x.fill_line(e.loc.line);
+        Ok(x)
+    }
+
+    fn lvalue_at(&mut self, e: &t::Expr) -> Result<Expr> {
         if let t::ExprKind::Concat(v) = &e.kind {
             let mut out = Vec::new();
             for x in v {
                 out.push(self.lvalue(x)?);
             }
-            return Ok(Expr::Concat(out));
+            return Ok(ExprKind::Concat(out).into());
         }
         let (b, ops) = flatten(e);
         if ops.iter().any(|o| matches!(o, Op::Call(..))) {
@@ -357,8 +370,8 @@ impl Lower {
             }
             // `C::p = ...`: a static property
             Base::Other(t::Expr { kind: t::ExprKind::Scoped(n), loc }) if n.scopes.len() == 1 && n.params.is_none() && n.scopes[0].params.is_none() => {
-                match self.static_prop(&Expr::Ident(n.scopes[0].name.clone()), &n.name) {
-                    Some(v) => self.selects(Expr::Ident(v), &ops),
+                match self.static_prop(&ExprKind::Ident(n.scopes[0].name.clone()).into(), &n.name) {
+                    Some(v) => self.selects(ExprKind::Ident(v).into(), &ops),
                     // `P::v = ...`: a variable of a package
                     None if self.packages.contains_key(&n.scopes[0].name) => self.chain(b, &ops, true),
                     None => self.unsupported(*loc, "this assignment target"),
@@ -376,17 +389,17 @@ impl Lower {
             t::ValueRange::Range(lo, hi) => {
                 let lo = if matches!(lo.kind, t::ExprKind::Dollar) { None } else { Some(self.expr(lo)?) };
                 let hi = if matches!(hi.kind, t::ExprKind::Dollar) { None } else { Some(self.expr(hi)?) };
-                let ge = lo.map(|lo| Expr::Binary(BinOp::Ge, b(e), Box::new(lo)));
-                let le = hi.map(|hi| Expr::Binary(BinOp::Le, b(e), Box::new(hi)));
+                let ge = lo.map(|lo| ExprKind::Binary(BinOp::Ge, b(e), Box::new(lo)));
+                let le = hi.map(|hi| ExprKind::Binary(BinOp::Le, b(e), Box::new(hi)));
                 Ok(match (ge, le) {
-                    (Some(g), Some(l)) => Expr::Binary(BinOp::LAnd, Box::new(g), Box::new(l)),
-                    (Some(t), None) | (None, Some(t)) => t,
-                    (None, None) => Expr::Num(crate::ast::dec(1)),
+                    (Some(g), Some(l)) => ExprKind::Binary(BinOp::LAnd, Box::new(g.into()), Box::new(l.into())).into(),
+                    (Some(t), None) | (None, Some(t)) => t.into(),
+                    (None, None) => ExprKind::Num(crate::ast::dec(1)).into(),
                 })
             }
             t::ValueRange::Value(v) => {
                 let v = self.expr(v)?;
-                Ok(Expr::Binary(BinOp::WildEq, b(e), Box::new(v)))
+                Ok(ExprKind::Binary(BinOp::WildEq, b(e), Box::new(v)).into())
             }
         }
     }
@@ -422,13 +435,13 @@ impl Lower {
         for a in args {
             match a {
                 t::Arg::Pos(Some(e)) => v.push(self.arg(e)?),
-                t::Arg::Pos(None) => v.push(Expr::EmptyArg),
+                t::Arg::Pos(None) => v.push(ExprKind::EmptyArg.into()),
                 t::Arg::Named(n, e) => {
                     let e = match e {
                         Some(e) => self.arg(e)?,
-                        None => Expr::EmptyArg,
+                        None => ExprKind::EmptyArg.into(),
                     };
-                    v.push(Expr::NamedArg(n.clone(), Box::new(e)));
+                    v.push(ExprKind::NamedArg(n.clone(), Box::new(e)).into());
                 }
             }
         }
@@ -438,6 +451,12 @@ impl Lower {
     /// An argument: a bare type keyword or type name the parser took for a type is a name
     /// there (`$display(bit)` with a variable `bit`, Verilog-2005), except for `$bits`.
     pub(crate) fn arg(&mut self, e: &t::Expr) -> Result<Expr> {
+        let mut x = self.arg_at(e)?;
+        x.fill_line(e.loc.line);
+        Ok(x)
+    }
+
+    fn arg_at(&mut self, e: &t::Expr) -> Result<Expr> {
         if let t::ExprKind::Type(dt) = &e.kind {
             // `C #(..)::P` (parsed as a type): a constant of a specialization, unless the class
             // declares a type of that name
@@ -492,14 +511,14 @@ impl Lower {
             return self.unsupported(loc, "a named argument of a system function");
         }
         let args = self.call_args(args)?;
-        Ok(Expr::SysCall(name.to_string(), args))
+        Ok(ExprKind::SysCall(name.to_string(), args).into())
     }
 
     /// Selects and members after a variable whose type has members.
     fn members(&mut self, mut e: Expr, ops: &[Op]) -> Result<Expr> {
         for (k, op) in ops.iter().enumerate() {
             e = match op {
-                Op::Member(m, _) => Expr::Member(Box::new(e), m.to_string()),
+                Op::Member(m, _) => ExprKind::Member(Box::new(e), m.to_string()).into(),
                 _ => self.selects(e, &ops[k..k + 1])?,
             };
         }
@@ -517,13 +536,13 @@ impl Lower {
                     }
                     let args = self.call_args(a)?;
                     k += 1;
-                    Expr::MethodCall(Box::new(e), m.to_string(), args)
+                    ExprKind::MethodCall(Box::new(e), m.to_string(), args).into()
                 }
                 // `this.super` is `super`
-                (Op::Member(m, _), _) if *m == "super" && matches!(&e, Expr::Ident(n) if n == "this") => Expr::Ident("super".into()),
+                (Op::Member(m, _), _) if *m == "super" && matches!(&e.kind, ExprKind::Ident(n) if n == "this") => ExprKind::Ident("super".into()).into(),
                 (Op::Member(m, _), _) => match self.static_prop(&e, m) {
-                    Some(v) => Expr::Ident(v),
-                    None => Expr::Member(Box::new(e), m.to_string()),
+                    Some(v) => ExprKind::Ident(v).into(),
+                    None => ExprKind::Member(Box::new(e), m.to_string()).into(),
                 },
                 (Op::Call(_, l), _) => return self.unsupported(*l, "a call here"),
                 _ => self.selects(e, &ops[k..k + 1])?,
@@ -537,14 +556,14 @@ impl Lower {
     fn selects(&mut self, mut e: Expr, ops: &[Op]) -> Result<Expr> {
         for op in ops {
             e = match op {
-                Op::Index(i) => Expr::Index(Box::new(e), Box::new(self.expr(i)?)),
+                Op::Index(i) => ExprKind::Index(Box::new(e), Box::new(self.expr(i)?)).into(),
                 Op::Range(k, a, b) => {
                     let a = self.expr(a)?;
                     let b = self.expr(b)?;
                     match k {
-                        t::RangeKind::Colon => Expr::Range(Box::new(e), Box::new(a), Box::new(b)),
-                        t::RangeKind::Plus => Expr::IndexedRange(Box::new(e), Box::new(a), Box::new(b), true),
-                        t::RangeKind::Minus => Expr::IndexedRange(Box::new(e), Box::new(a), Box::new(b), false),
+                        t::RangeKind::Colon => ExprKind::Range(Box::new(e), Box::new(a), Box::new(b)).into(),
+                        t::RangeKind::Plus => ExprKind::IndexedRange(Box::new(e), Box::new(a), Box::new(b), true).into(),
+                        t::RangeKind::Minus => ExprKind::IndexedRange(Box::new(e), Box::new(a), Box::new(b), false).into(),
                     }
                 }
                 Op::Member(m, loc) => return self.unsupported(*loc, &format!("the member '.{m}' here")),
@@ -617,7 +636,7 @@ impl Lower {
                         [Op::Call(a, _), rest @ ..] if a.is_empty() => rest,
                         rest => rest,
                     };
-                    return self.selects(Expr::Ident(format!("$ix{k}")), rest);
+                    return self.selects(ExprKind::Ident(format!("$ix{k}")).into(), rest);
                 }
                 iter = Some(format!("$it{k}"));
             }
@@ -659,13 +678,13 @@ impl Lower {
                     }
                     let has_struct = v.0.has_struct();
                     self.use_package(&p);
-                    let base = Expr::Hier(vec![p, n.name.clone()]);
-                    return if has_struct { self.members(base, ops) } else { self.selects(base, ops) };
+                    let base = ExprKind::Hier(vec![p, n.name.clone()]);
+                    return if has_struct { self.members(base.into(), ops) } else { self.selects(base.into(), ops) };
                 }
                 self.check_unspecialized(&p, e.loc)?;
                 // `C::p`: a static property of class C
-                if let Some(v) = self.static_prop(&Expr::Ident(p.clone()), &n.name) {
-                    return self.selects(Expr::Ident(v), ops);
+                if let Some(v) = self.static_prop(&ExprKind::Ident(p.clone()).into(), &n.name) {
+                    return self.selects(ExprKind::Ident(v).into(), ops);
                 }
                 // `C::f(args)`: a static method of class C
                 if self.classes.get(&p).is_some_and(|c| c.methods.contains(&n.name)) && n.name != "new" {
@@ -676,11 +695,11 @@ impl Lower {
                     if !rest.is_empty() {
                         return self.unsupported(e.loc, "a select of a call");
                     }
-                    return Ok(Expr::StaticCall(p, n.name.clone(), args));
+                    return Ok(ExprKind::StaticCall(p, n.name.clone(), args).into());
                 }
                 // `C::P`: a parameter or enum constant of class C (in its scope)
                 if self.classes.get(&p).is_some_and(|c| c.consts.contains(&n.name)) && !matches!(ops.first(), Some(Op::Call(..))) {
-                    return self.selects(Expr::Ident(format!("{p}::{}", n.name)), ops);
+                    return self.selects(ExprKind::Ident(format!("{p}::{}", n.name)).into(), ops);
                 }
                 let Some(mut pk) = self.packages.get(&p).cloned() else {
                     return self.err(e.loc, format!("unknown package '{p}'"));
@@ -694,10 +713,10 @@ impl Lower {
                 if let Some(v) = pk.vars.get(&n.name).filter(|_| !call) {
                     let t = &v.0;
                     if !matches!(ops.first(), Some(Op::Member(..))) || !(t.has_struct() || t.enum_names.is_some() || t.class.is_some()) {
-                        return self.selects(Expr::Hier(vec![p, n.name.clone()]), ops);
+                        return self.selects(ExprKind::Hier(vec![p, n.name.clone()]).into(), ops);
                     }
                     if t.has_struct() {
-                        return self.members(Expr::Hier(vec![p, n.name.clone()]), ops);
+                        return self.members(ExprKind::Hier(vec![p, n.name.clone()]).into(), ops);
                     }
                     // `P::v.m`: members and methods as for a variable of this scope, under the
                     // name `P::v` (its enum constants are the package's)
@@ -720,7 +739,7 @@ impl Lower {
                     if !rest.is_empty() {
                         return self.unsupported(e.loc, "a select of a call");
                     }
-                    return Ok(Expr::Call(format!("{p}.{}", n.name), args));
+                    return Ok(ExprKind::Call(format!("{p}.{}", n.name), args).into());
                 }
                 self.use_package(&p);
                 if let Some(t) = pk.types.get(&n.name) {
@@ -747,9 +766,9 @@ impl Lower {
             // `f()` of a function returning a class handle: a call (`f().m` a member of it)
             if let Some((Op::Call(a, _), rest)) = ops.split_first() {
                 let args = self.call_args(a)?;
-                return self.class_chain(Expr::Call(name, args), rest, lvalue);
+                return self.class_chain(ExprKind::Call(name, args).into(), rest, lvalue);
             }
-            return self.class_chain(Expr::Ident(name), ops, lvalue);
+            return self.class_chain(ExprKind::Ident(name).into(), ops, lvalue);
         }
         let var = self.vars.get(&name).map(|v| v.0.clone());
         // a variable whose type has members (a struct, or a type parameter): members are
@@ -757,12 +776,12 @@ impl Lower {
         // (a queue's method call, `q.size()`, is not a member)
         let queue_call = var.as_ref().is_some_and(|t| t.heap.is_some()) && ops.iter().any(|o| matches!(o, Op::Call(..)));
         if var.as_ref().is_some_and(|t| t.has_struct() || t.param.is_some()) && !matches!(ops.first(), Some(Op::Call(..))) && !queue_call {
-            return self.members(Expr::Ident(name), ops);
+            return self.members(ExprKind::Ident(name).into(), ops);
         }
         if lvalue {
             let (parts, k) = self.hier_tail(&name, ops)?;
-            let base = if parts.len() == 1 { Expr::Ident(name) } else { Expr::Hier(parts) };
-            return self.selects(base, &ops[k..]);
+            let base = if parts.len() == 1 { ExprKind::Ident(name) } else { ExprKind::Hier(parts) };
+            return self.selects(base.into(), &ops[k..]);
         }
         if let (Some(t), Some(Op::Member(m, mloc))) = (&var, ops.first()) {
             if t.enum_names.is_some() && ENUM_METHODS.contains(m) {
@@ -785,7 +804,7 @@ impl Lower {
             if !rest.is_empty() {
                 return self.unsupported(*l, "a select of a call");
             }
-            return Ok(Expr::Call(name, args));
+            return Ok(ExprKind::Call(name, args).into());
         }
         let (parts, k) = self.hier_tail(&name, ops)?;
         if parts.len() > 1 {
@@ -795,20 +814,21 @@ impl Lower {
                 if !rest.is_empty() {
                     return self.unsupported(*l, "a select of a call");
                 }
-                return Ok(Expr::Call(parts.join("."), args));
+                return Ok(ExprKind::Call(parts.join("."), args).into());
             }
-            return self.selects(Expr::Hier(parts), &ops[k..]);
+            return self.selects(ExprKind::Hier(parts).into(), &ops[k..]);
         }
-        self.selects(Expr::Ident(name), &ops[k..])
+        self.selects(ExprKind::Ident(name).into(), &ops[k..])
     }
 }
 
 /// `T'(e)` of an assignment pattern: the pattern gets type `T` (also in a conditional's
 /// branches).
 fn typed_patterns(e: Expr, t: &Rc<super::SvType>) -> Expr {
-    match e {
-        Expr::Pattern(None, items) => Expr::Pattern(Some(t.clone()), items),
-        Expr::Cond(c, a, b) => Expr::Cond(c, Box::new(typed_patterns(*a, t)), Box::new(typed_patterns(*b, t))),
-        e => e,
-    }
+    let kind = match e.kind {
+        ExprKind::Pattern(None, items) => ExprKind::Pattern(Some(t.clone()), items),
+        ExprKind::Cond(c, a, b) => ExprKind::Cond(c, Box::new(typed_patterns(*a, t)), Box::new(typed_patterns(*b, t))),
+        k => k,
+    };
+    Expr::new(kind, e.line)
 }

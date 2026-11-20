@@ -18,8 +18,8 @@ impl<'a> Compiler<'a> {
         let mut listed: HashSet<u32> = HashSet::new();
         for (_, e) in items {
             let mut v = Vec::new();
-            match e {
-                Expr::Ident(_) | Expr::Hier(_) => self.lvalue_bases(e, sid, &mut v),
+            match &e.kind {
+                ExprKind::Ident(_) | ExprKind::Hier(_) => self.lvalue_bases(e, sid, &mut v),
                 _ => {
                     let mut r = Vec::new();
                     self.reads_expr(e, sid, &mut r);

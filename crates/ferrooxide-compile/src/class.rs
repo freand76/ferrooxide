@@ -229,9 +229,7 @@ impl<'a> Compiler<'a> {
                 let id = self.reserve_class(decl, &own, dscope);
                 // (the class may use this specialization itself: `typedef C #(T) this_type;`)
                 self.classes.specs.insert(written.clone(), id);
-                let saved = self.line;
-                self.declare_class(decl, dscope, &own, &ovs, id)?;
-                self.line = saved;
+                self.at(0, |c| c.declare_class(decl, dscope, &own, &ovs, id))?;
                 // the same parameter values as the class itself or another specialization:
                 // that class (the new one goes unused)
                 let key = self.spec_key(g, id);
@@ -481,11 +479,11 @@ impl<'a> Compiler<'a> {
     pub(crate) fn prop_elem<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(&'e Expr, Prop, Vec<&'e Expr>)>> {
         let mut idx = Vec::new();
         let mut cur = e;
-        while let Expr::Index(a, i) = cur {
+        while let ExprKind::Index(a, i) = &cur.kind {
             idx.push(&**i);
             cur = a;
         }
-        let Expr::Member(b, m) = cur else { return Ok(None) };
+        let ExprKind::Member(b, m) = &cur.kind else { return Ok(None) };
         if idx.is_empty() {
             return Ok(None);
         }
@@ -509,19 +507,19 @@ impl<'a> Compiler<'a> {
     fn prop_index(&mut self, p: &Prop, idx: &[&Expr], sid: usize) -> R<u32> {
         let b = |x: Expr| Box::new(x);
         let num = |v: i64| -> Expr {
-            let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
-                Expr::Unary(UnOp::Neg, b(n))
+                ExprKind::Unary(UnOp::Neg, b(n.into())).into()
             } else {
-                n
+                n.into()
             }
         };
         let mut lin: Option<Expr> = None;
         for (k, &(lo, n)) in p.dims.iter().enumerate() {
-            let term = Expr::Binary(BinOp::Sub, b(idx[k].clone()), b(num(lo)));
+            let term = ExprKind::Binary(BinOp::Sub, b(idx[k].clone()), b(num(lo)));
             lin = Some(match lin {
-                None => term,
-                Some(l) => Expr::Binary(BinOp::Add, b(Expr::Binary(BinOp::Mul, b(l), b(num(n as i64)))), b(term)),
+                None => term.into(),
+                Some(l) => ExprKind::Binary(BinOp::Add, b(ExprKind::Binary(BinOp::Mul, b(l), b(num(n as i64))).into()), b(term.into())).into(),
             });
         }
         self.expr(&lin.unwrap(), sid, 32, true)
@@ -529,7 +527,7 @@ impl<'a> Compiler<'a> {
 
     /// The class of a handle expression (`super`: the base class of the method's class).
     pub(crate) fn handle_class(&mut self, e: &Expr, sid: usize) -> R<Option<u32>> {
-        if let Expr::Ident(n) = e {
+        if let ExprKind::Ident(n) = &e.kind {
             if n == "super" {
                 let Some(c) = self.class_of_scope(sid) else { return self.err("`super` outside a class") };
                 return match self.classes.list[c as usize].base {
@@ -538,7 +536,7 @@ impl<'a> Compiler<'a> {
                 };
             }
         }
-        if !matches!(e, Expr::Ident(_) | Expr::Hier(_) | Expr::Member(..) | Expr::MethodCall(..) | Expr::Index(..) | Expr::Call(..)) {
+        if !matches!(&e.kind, ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Member(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Call(..)) {
             return Ok(None);
         }
         Ok(match self.type_of(e, sid)? {
@@ -549,20 +547,20 @@ impl<'a> Compiler<'a> {
 
     /// The slot of a handle's value (`super`: `this`).
     pub(crate) fn handle_value(&mut self, e: &Expr, sid: usize) -> R<u32> {
-        let e = match e {
-            Expr::Ident(n) if n == "super" => &Expr::Ident("this".into()),
-            e => e,
+        let e = match &e.kind {
+            ExprKind::Ident(n) if n == "super" => &Expr::new(ExprKind::Ident("this".into()), e.line),
+            _ => e,
         };
         self.expr(e, sid, 64, false)
     }
 
     /// The type of a property access or a method call, None for other expressions.
     pub(crate) fn obj_type_of(&mut self, e: &Expr, sid: usize) -> R<Option<Type>> {
-        match e {
-            Expr::Null | Expr::New(_) => Ok(Some(Type::Class(NONE))),
-            Expr::NewCopy(x) => self.type_of(x, sid).map(Some),
-            Expr::NewTyped(c, _) => Ok(Some(Type::Class(self.named_class(c, sid)?))),
-            Expr::StaticCall(cn, m, _) => {
+        match &e.kind {
+            ExprKind::Null | ExprKind::New(_) => Ok(Some(Type::Class(NONE))),
+            ExprKind::NewCopy(x) => self.type_of(x, sid).map(Some),
+            ExprKind::NewTyped(c, _) => Ok(Some(Type::Class(self.named_class(c, sid)?))),
+            ExprKind::StaticCall(cn, m, _) => {
                 let (f, owner) = self.static_method(cn, m, sid)?;
                 if f.is_task || f.ret_kind == NetKind::Int(0) {
                     return self.err(format!("'{m}' gives no value"));
@@ -570,7 +568,7 @@ impl<'a> Compiler<'a> {
                 let scope = self.classes.list[owner as usize].scope;
                 self.func_ret_type(f, scope).map(Some)
             }
-            Expr::Member(b, m) => match self.handle_class(b, sid)? {
+            ExprKind::Member(b, m) => match self.handle_class(b, sid)? {
                 Some(c) => Ok(Some(match self.class_const(c, m) {
                     Some(Sym::Const(k)) => Type::vec(k.w, k.signed),
                     Some(Sym::Real(_)) => Type::Real,
@@ -578,8 +576,8 @@ impl<'a> Compiler<'a> {
                 })),
                 None => Ok(None),
             },
-            Expr::Index(..) => Ok(self.prop_elem(e, sid)?.map(|(_, p, _)| p.ty)),
-            Expr::MethodCall(o, m, _) => {
+            ExprKind::Index(..) => Ok(self.prop_elem(e, sid)?.map(|(_, p, _)| p.ty)),
+            ExprKind::MethodCall(o, m, _) => {
                 let Some(c) = self.handle_class(o, sid)? else {
                     // (a method of an array property: `heap.rs`)
                     if let Type::Dyn { .. } = self.type_of(o, sid)? {
@@ -602,19 +600,19 @@ impl<'a> Compiler<'a> {
 
     /// A property read or a method call: (slot, type); None for other expressions.
     pub(crate) fn obj_value(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Type)>> {
-        match e {
-            Expr::Null => Ok(Some((self.const_slot(&Const::zero(64)), Type::Class(NONE)))),
-            Expr::New(_) => self.err("`new` needs a class handle to assign to"),
-            Expr::NewTyped(c, args) => {
+        match &e.kind {
+            ExprKind::Null => Ok(Some((self.const_slot(&Const::zero(64)), Type::Class(NONE)))),
+            ExprKind::New(_) => self.err("`new` needs a class handle to assign to"),
+            ExprKind::NewTyped(c, args) => {
                 let c = self.named_class(c, sid)?;
                 Ok(Some((self.construct(c, args, sid)?, Type::Class(c))))
             }
-            Expr::StaticCall(cn, m, args) => {
+            ExprKind::StaticCall(cn, m, args) => {
                 let t = self.obj_type_of(e, sid)?.unwrap();
                 let (r, _, _) = self.static_call(cn, m, args, sid)?;
                 Ok(Some((r.unwrap(), t)))
             }
-            Expr::NewCopy(x) => {
+            ExprKind::NewCopy(x) => {
                 let Some(c) = self.handle_class(x, sid)? else { return self.err("`new` copies an object") };
                 let h = self.handle_value(x, sid)?;
                 let d = self.tmp(64);
@@ -631,7 +629,7 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(Some((d, Type::Class(c))))
             }
-            Expr::Member(b, m) => {
+            ExprKind::Member(b, m) => {
                 let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
                 // a parameter or enum constant of the class
                 match self.class_const(c, m) {
@@ -647,7 +645,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Obj { op: ObjOp::Get, d, a: h, b: NONE, off: p.off, w });
                 Ok(Some((d, p.ty)))
             }
-            Expr::Index(..) => {
+            ExprKind::Index(..) => {
                 let Some((b, p, idx)) = self.prop_elem(e, sid)? else { return Ok(None) };
                 let h = self.handle_value(b, sid)?;
                 let ix = self.prop_index(&p, &idx, sid)?;
@@ -656,7 +654,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Obj { op: ObjOp::GetAt(p.count()), d, a: h, b: ix, off: p.off, w });
                 Ok(Some((d, p.ty)))
             }
-            Expr::MethodCall(o, m, args) => {
+            ExprKind::MethodCall(o, m, args) => {
                 let Some(t) = self.obj_type_of(e, sid)? else { return Ok(None) };
                 let (r, _, _) = self.method_call(o, m, args, sid)?;
                 Ok(Some((r.unwrap(), t)))
@@ -667,9 +665,9 @@ impl<'a> Compiler<'a> {
 
     /// A handle value for a target of class `c` (`new(args)` makes an object of class `c`).
     pub(crate) fn handle_for(&mut self, e: &Expr, c: u32, sid: usize) -> R<u32> {
-        match e {
-            Expr::New(args) => self.construct(c, args, sid),
-            Expr::Null => Ok(self.const_slot(&Const::zero(64))),
+        match &e.kind {
+            ExprKind::New(args) => self.construct(c, args, sid),
+            ExprKind::Null => Ok(self.const_slot(&Const::zero(64))),
             _ => match self.type_of(e, sid)? {
                 Type::Class(x) if x == c || x == NONE || self.derives(x, c) => self.handle_value(e, sid),
                 Type::Class(x) => self.err(format!(
@@ -750,7 +748,7 @@ impl<'a> Compiler<'a> {
             for d in &decl.props {
                 for n in &d.names {
                     if let Some(init) = &n.init {
-                        let lhs = Expr::Member(Box::new(Expr::Ident("this".into())), n.name.clone());
+                        let lhs: Expr = ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), n.name.clone()).into();
                         self.prop_assign(&lhs, init, init_scope)?;
                     }
                 }
@@ -765,7 +763,7 @@ impl<'a> Compiler<'a> {
         loop {
             match s {
                 Stmt::Block { stmts, fork: None, .. } if !stmts.is_empty() => s = &stmts[0],
-                Stmt::MethodCall { obj: Expr::Ident(o), name, .. } => return o == "super" && name == "new",
+                Stmt::MethodCall { obj: Expr { kind: ExprKind::Ident(o), .. }, name, .. } => return o == "super" && name == "new",
                 _ => return false,
             }
         }
@@ -773,7 +771,7 @@ impl<'a> Compiler<'a> {
 
     /// `obj.m(args)`: (result slot, width, signed).
     pub(crate) fn method_call(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
-        let is_super = matches!(obj, Expr::Ident(n) if n == "super");
+        let is_super = matches!(&obj.kind, ExprKind::Ident(n) if n == "super");
         if is_super && m == "new" {
             // the base part of the object being constructed, then this class's initializers
             let Some(c) = self.class_of_scope(sid) else { return self.err("`super` outside a class") };
@@ -822,19 +820,19 @@ impl<'a> Compiler<'a> {
             return None;
         }
         match self.lookup_hier(&parts, sid)? {
-            Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) => Some((Expr::Hier(parts), m.to_string())),
+            Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) => Some((ExprKind::Hier(parts).into(), m.to_string())),
             _ => None,
         }
     }
 
     /// `inst.obj.p` (a hierarchical name that resolves to nothing else) as a member access.
     pub(crate) fn hier_member(&self, e: &Expr, sid: usize) -> Option<Expr> {
-        let Expr::Hier(p) = e else { return None };
+        let ExprKind::Hier(p) = &e.kind else { return None };
         if self.lookup_hier(p, sid).is_some() {
             return None;
         }
         let (obj, m) = self.hier_handle(&p.join("."), sid)?;
-        Some(Expr::Member(Box::new(obj), m))
+        Some(ExprKind::Member(Box::new(obj), m).into())
     }
 
     /// Static method `m` of the class named `cn` (or of a base class): (method, the class
@@ -968,7 +966,7 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::Obj { op: ObjOp::SetAt(p.count()), d: ix, a: h, b: v, off: p.off, w: p.ty.width() });
             return Ok(true);
         }
-        let Expr::Member(b, m) = lhs else { return Ok(false) };
+        let ExprKind::Member(b, m) = &lhs.kind else { return Ok(false) };
         let Some(c) = self.handle_class(b, sid)? else { return Ok(false) };
         self.check_access(c, m, sid)?;
         let p = self.scalar_prop(c, m)?;
@@ -987,10 +985,10 @@ impl<'a> Compiler<'a> {
         if let Some(m) = self.hier_member(e, sid) {
             return self.has_prop(&m, sid);
         }
-        Ok(match e {
-            Expr::Member(b, _) => self.handle_class(b, sid)?.is_some() || self.has_prop(b, sid)?,
-            Expr::Index(a, _) | Expr::Range(a, ..) | Expr::IndexedRange(a, ..) => self.has_prop(a, sid)?,
-            Expr::Concat(v) => {
+        Ok(match &e.kind {
+            ExprKind::Member(b, _) => self.handle_class(b, sid)?.is_some() || self.has_prop(b, sid)?,
+            ExprKind::Index(a, _) | ExprKind::Range(a, ..) | ExprKind::IndexedRange(a, ..) => self.has_prop(a, sid)?,
+            ExprKind::Concat(v) => {
                 for x in v {
                     if self.has_prop(x, sid)? {
                         return Ok(true);

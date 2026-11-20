@@ -125,12 +125,12 @@ impl<'a> Compiler<'a> {
 
     /// The enum type of `e`.
     pub(crate) fn enum_of(&mut self, e: &Expr, sid: usize) -> R<EnumOf> {
-        Ok(match e {
-            Expr::Ident(_) | Expr::Hier(_) | Expr::Index(..) => {
+        Ok(match &e.kind {
+            ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Index(..) => {
                 // an enum constant (also through a hierarchical name: `top.A`)
-                let konst = match e {
-                    Expr::Ident(n) if matches!(self.lookup(n, sid), Some(Sym::Const(_))) => self.const_scope(n, sid),
-                    Expr::Hier(p) if matches!(self.lookup_hier(p, sid), Some(Sym::Const(_))) => {
+                let konst = match &e.kind {
+                    ExprKind::Ident(n) if matches!(self.lookup(n, sid), Some(Sym::Const(_))) => self.const_scope(n, sid),
+                    ExprKind::Hier(p) if matches!(self.lookup_hier(p, sid), Some(Sym::Const(_))) => {
                         self.hier_scope(&p[..p.len() - 1], sid).map(|s| (s, p[p.len() - 1].clone()))
                     }
                     _ => None,
@@ -141,13 +141,13 @@ impl<'a> Compiler<'a> {
                 // a variable, or a whole element of an array
                 let mut nidx = 0;
                 let mut base = e;
-                while let Expr::Index(a, _) = base {
+                while let ExprKind::Index(a, _) = &base.kind {
                     nidx += 1;
                     base = a;
                 }
-                let sym = match base {
-                    Expr::Ident(n) => self.lookup(n, sid),
-                    Expr::Hier(p) => self.lookup_hier(p, sid),
+                let sym = match &base.kind {
+                    ExprKind::Ident(n) => self.lookup(n, sid),
+                    ExprKind::Hier(p) => self.lookup_hier(p, sid),
                     _ => None,
                 };
                 if let Some(Sym::Sig(s)) = sym {
@@ -158,13 +158,13 @@ impl<'a> Compiler<'a> {
                     }
                     return Ok(EnumOf::No);
                 }
-                if matches!(e, Expr::Index(..)) {
+                if matches!(&e.kind, ExprKind::Index(..)) {
                     self.prop_enum(e, sid)?
                 } else {
                     EnumOf::No
                 }
             }
-            Expr::Member(..) => {
+            ExprKind::Member(..) => {
                 let p = self.prop_enum(e, sid)?;
                 if p != EnumOf::No {
                     return Ok(p);
@@ -177,7 +177,7 @@ impl<'a> Compiler<'a> {
                     None => EnumOf::No,
                 }
             }
-            Expr::Cond(_, a, b) => {
+            ExprKind::Cond(_, a, b) => {
                 let (x, y) = (self.enum_of(a, sid)?, self.enum_of(b, sid)?);
                 match (x, y) {
                     (EnumOf::Cast, y) => y,
@@ -186,8 +186,8 @@ impl<'a> Compiler<'a> {
                     _ => EnumOf::No,
                 }
             }
-            Expr::SysCall(n, _) if n == "$__cast" => EnumOf::Cast,
-            Expr::Call(n, _) => match self.lookup_func(n, sid) {
+            ExprKind::SysCall(n, _) if n == "$__cast" => EnumOf::Cast,
+            ExprKind::Call(n, _) => match self.lookup_func(n, sid) {
                 Some((f, fs)) => match f.ret_ty.as_ref().and_then(|t| t.enum_names.clone().filter(|_| t.dims.len() <= 1 && t.unpacked.is_empty())) {
                     Some(names) => match self.enum_id(&names, fs) {
                         NONE => EnumOf::No,
@@ -206,8 +206,8 @@ impl<'a> Compiler<'a> {
         if self.classes.list.is_empty() {
             return Ok(EnumOf::No);
         }
-        let id = match e {
-            Expr::Member(b, m) => match self.handle_class(b, sid)? {
+        let id = match &e.kind {
+            ExprKind::Member(b, m) => match self.handle_class(b, sid)? {
                 Some(c) if self.classes.list[c as usize].props.iter().any(|p| p.name == *m) => self.scalar_prop(c, m)?.enum_id,
                 // a constant of the class (`obj.A`)
                 Some(c) => {
@@ -216,7 +216,7 @@ impl<'a> Compiler<'a> {
                 }
                 None => NONE,
             },
-            Expr::Index(..) => match self.prop_elem(e, sid)? {
+            ExprKind::Index(..) => match self.prop_elem(e, sid)? {
                 Some((_, p, _)) => p.enum_id,
                 None => NONE,
             },
@@ -270,7 +270,7 @@ impl<'a> Compiler<'a> {
     /// Argument `a` of port `ps`: an enum input takes a value of its type (`into`); an output
     /// copied to an enum argument must be of the argument's type.
     pub(crate) fn check_enum_arg(&mut self, ps: u32, a: &Expr, sid: usize, into: bool) -> R<()> {
-        if self.enums.ids.is_empty() || matches!(a, Expr::EmptyArg) {
+        if self.enums.ids.is_empty() || matches!(&a.kind, ExprKind::EmptyArg) {
             return Ok(());
         }
         let port = self.enums.sigs.get(&ps).copied().unwrap_or(NONE);

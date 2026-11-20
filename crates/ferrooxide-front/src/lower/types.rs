@@ -3,7 +3,7 @@
 //!
 //! A type without a struct becomes the declaration's kind, sign and packed ranges; a type
 //! containing a struct is declared as one flat vector `[W-1:0]`. Declarations keep their type
-//! (`Decl::ty`): struct members (`Expr::Member`) and assignment patterns (`Expr::Pattern`)
+//! (`Decl::ty`): struct members (`ExprKind::Member`) and assignment patterns (`ExprKind::Pattern`)
 //! are resolved against it in elaboration. Enum constants become `localparam`s of the base
 //! type; `T'(e)`, `N'(e)` are `$__cast(width, sign, e)` (sign 0, 1 or 2: keep).
 
@@ -63,20 +63,20 @@ pub struct Struct {
 
 /// The value of a plain literal (no x/z), possibly negated.
 pub(crate) fn lit(e: &Expr) -> Option<i64> {
-    match e {
-        Expr::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
+    match &e.kind {
+        ExprKind::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
             i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok()
         }
-        Expr::Unary(UnOp::Neg, a) => lit(a).map(|v| -v),
+        ExprKind::Unary(UnOp::Neg, a) => lit(a).map(|v| -v),
         _ => None,
     }
 }
 
 pub(crate) fn num(v: i64) -> Expr {
     if v < 0 {
-        Expr::Unary(UnOp::Neg, Box::new(Expr::Num(dec(-v as u64))))
+        ExprKind::Unary(UnOp::Neg, Box::new(ExprKind::Num(dec(-v as u64)).into())).into()
     } else {
-        Expr::Num(dec(v as u64))
+        ExprKind::Num(dec(v as u64)).into()
     }
 }
 
@@ -96,7 +96,7 @@ fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
         (BinOp::Mul, _, Some(1)) => return a,
         _ => {}
     }
-    Expr::Binary(op, Box::new(a), Box::new(b))
+    ExprKind::Binary(op, Box::new(a), Box::new(b)).into()
 }
 
 pub(crate) fn add(a: Expr, b: Expr) -> Expr {
@@ -114,9 +114,9 @@ pub(crate) fn dim_size(r: &Range) -> Expr {
     if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
         return num((a - b).abs() + 1);
     }
-    let ge = Expr::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
-    let d = Expr::Cond(Box::new(ge), Box::new(sub(r.0.clone(), r.1.clone())), Box::new(sub(r.1.clone(), r.0.clone())));
-    add(d, num(1))
+    let ge = ExprKind::Binary(BinOp::Ge, Box::new(r.0.clone()), Box::new(r.1.clone()));
+    let d = ExprKind::Cond(Box::new(ge.into()), Box::new(sub(r.0.clone(), r.1.clone())), Box::new(sub(r.1.clone(), r.0.clone())));
+    add(d.into(), num(1))
 }
 
 impl SvType {
@@ -127,7 +127,7 @@ impl SvType {
     /// Width of one element after the packed dimensions.
     pub fn leaf_width(&self) -> Expr {
         if let Some(p) = &self.param {
-            return Expr::SysCall("$bits".into(), vec![Expr::Ident(p.clone())]);
+            return ExprKind::SysCall("$bits".into(), vec![ExprKind::Ident(p.clone()).into()]).into();
         }
         match &self.fields {
             None => num(1),
@@ -192,7 +192,7 @@ pub fn minus_one(w: Expr) -> Expr {
 
 /// `$__cast(width, sign, e)`: sign 0 unsigned, 1 signed, 2 the expression's.
 pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
-    Expr::SysCall("$__cast".into(), vec![width, Expr::Num(dec(sign)), e])
+    ExprKind::SysCall("$__cast".into(), vec![width, ExprKind::Num(dec(sign)).into(), e]).into()
 }
 
 /// `n` -> `scope.n` for the names in `names`.
@@ -200,20 +200,20 @@ pub fn cast(width: Expr, e: Expr, sign: u64) -> Expr {
 /// specialization `to`'s instead.
 pub(crate) fn respec_type(t: &mut SvType, from: &str, to: &str) {
     fn ex(e: &mut Expr, from: &str, to: &str) {
-        match e {
-            Expr::Hier(p) if p.len() == 2 && p[0] == from => p[0] = to.to_string(),
-            Expr::Index(a, b) | Expr::Binary(_, a, b) => {
+        match &mut e.kind {
+            ExprKind::Hier(p) if p.len() == 2 && p[0] == from => p[0] = to.to_string(),
+            ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => {
                 ex(a, from, to);
                 ex(b, from, to);
             }
-            Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
+            ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) | ExprKind::Cond(a, b, c) => {
                 ex(a, from, to);
                 ex(b, from, to);
                 ex(c, from, to);
             }
-            Expr::Unary(_, a) => ex(a, from, to),
-            Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter_mut().for_each(|x| ex(x, from, to)),
-            Expr::Repl(a, v) => {
+            ExprKind::Unary(_, a) => ex(a, from, to),
+            ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) => v.iter_mut().for_each(|x| ex(x, from, to)),
+            ExprKind::Repl(a, v) => {
                 ex(a, from, to);
                 v.iter_mut().for_each(|x| ex(x, from, to));
             }
@@ -233,24 +233,24 @@ pub(crate) fn respec_type(t: &mut SvType, from: &str, to: &str) {
 }
 
 pub(crate) fn qualify_expr(e: &mut Expr, names: &std::collections::HashMap<String, String>) {
-    match e {
-        Expr::Ident(n) if names.contains_key(n.as_str()) => *e = Expr::Hier(vec![names[n.as_str()].clone(), n.clone()]),
-        Expr::Index(a, b) => {
+    match &mut e.kind {
+        ExprKind::Ident(n) if names.contains_key(n.as_str()) => *e = ExprKind::Hier(vec![names[n.as_str()].clone(), n.clone()]).into(),
+        ExprKind::Index(a, b) => {
             qualify_expr(a, names);
             qualify_expr(b, names);
         }
-        Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) | Expr::Cond(a, b, c) => {
+        ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) | ExprKind::Cond(a, b, c) => {
             qualify_expr(a, names);
             qualify_expr(b, names);
             qualify_expr(c, names);
         }
-        Expr::Unary(_, a) | Expr::IncDec { e: a, .. } => qualify_expr(a, names),
-        Expr::Binary(_, a, b) => {
+        ExprKind::Unary(_, a) | ExprKind::IncDec { e: a, .. } => qualify_expr(a, names),
+        ExprKind::Binary(_, a, b) => {
             qualify_expr(a, names);
             qualify_expr(b, names);
         }
-        Expr::Concat(v) | Expr::Call(_, v) | Expr::SysCall(_, v) => v.iter_mut().for_each(|x| qualify_expr(x, names)),
-        Expr::Repl(a, v) => {
+        ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) => v.iter_mut().for_each(|x| qualify_expr(x, names)),
+        ExprKind::Repl(a, v) => {
             qualify_expr(a, names);
             v.iter_mut().for_each(|x| qualify_expr(x, names));
         }
@@ -296,7 +296,7 @@ impl Lower {
             t::Dim::Range(a, b) => Ok((self.expr(a)?, self.expr(b)?)),
             t::Dim::Size(n) => {
                 let n = self.expr(n)?;
-                Ok((Expr::Num(dec(0)), Expr::Binary(BinOp::Sub, Box::new(n), Box::new(Expr::Num(dec(1))))))
+                Ok((ExprKind::Num(dec(0)).into(), ExprKind::Binary(BinOp::Sub, Box::new(n), Box::new(ExprKind::Num(dec(1)).into())).into()))
             }
             t::Dim::Unsized => self.unsupported(loc, "a dynamic array"),
             t::Dim::Queue(_) => self.unsupported(loc, "a queue"),
@@ -348,7 +348,7 @@ impl Lower {
     pub(crate) fn packed_dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<Vec<Range>> {
         let out = self.dims(v, loc)?;
         for (d, r) in v.iter().zip(&out) {
-            if let (t::Dim::Size(_), Expr::Binary(BinOp::Sub, n, _)) = (d, &r.1) {
+            if let (t::Dim::Size(_), ExprKind::Binary(BinOp::Sub, n, _)) = (d, &r.1.kind) {
                 if let Some(n) = lit(n).filter(|n| *n <= 0) {
                     return self.err(loc, format!("a packed dimension of size {n}"));
                 }
@@ -485,7 +485,7 @@ impl Lower {
                         let value = match (&it.value, k) {
                             (Some(e), 0) => {
                                 let v = self.expr(e)?;
-                                if let Expr::Num(n) = &v {
+                                if let ExprKind::Num(n) = &v.kind {
                                     if two_state && n.digits.contains(['x', 'z']) {
                                         return self.err(it.loc, format!("enum constant '{name}': a 2-state enum cannot have an x or z value"));
                                     }
@@ -498,7 +498,7 @@ impl Lower {
                                 v
                             }
                             _ => match &prev {
-                                Some(p) => add(Expr::Ident(p.clone()), num(1)),
+                                Some(p) => add(ExprKind::Ident(p.clone()).into(), num(1)),
                                 None => num(0),
                             },
                         };
@@ -721,10 +721,10 @@ impl Lower {
             let t = self.data_type_req(ty)?;
             let (kind, signed, range, packed) = t.decl_parts();
             // a parameter has one range: the whole width
-            let range = if packed.is_empty() { range } else { Some((minus_one(t.width()), Expr::Num(dec(0)))) };
+            let range = if packed.is_empty() { range } else { Some((minus_one(t.width()), ExprKind::Num(dec(0)).into())) };
             if t.int_kind && matches!(kind, NetKind::Int(_) | NetKind::Time) && !matches!(kind, NetKind::Int(32)) {
                 // byte, shortint, longint, time: their width
-                let range = Some((minus_one(t.width()), Expr::Num(dec(0))));
+                let range = Some((minus_one(t.width()), ExprKind::Num(dec(0)).into()));
                 return Ok(PType { signed, integer: false, real: false, range, sv: Some(t) });
             }
             let integer = matches!(kind, NetKind::Int(_) | NetKind::Integer) && range.is_none();
@@ -754,7 +754,7 @@ impl Lower {
             }
             let kind = if matches!(ty.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
             let t = SvType::vector(kind, signed, self.packed_dims(&ty.packed, ty.loc)?);
-            let range = Some((minus_one(t.width()), Expr::Num(dec(0))));
+            let range = Some((minus_one(t.width()), ExprKind::Num(dec(0)).into()));
             return Ok(PType { signed, integer: false, real: false, range, sv: Some(t) });
         }
         let range = match ty.packed.as_slice() {
@@ -843,7 +843,7 @@ impl Lower {
                         let integer = *k == t::IntKw::Integer;
                         let w = if integer { 31 } else { 63 };
                         let mut d = self.decl_head(dir, net, var, &t::DataType { kind: t::TypeKind::Implicit, signed: Some(ty.signed.unwrap_or(integer)), packed: vec![], loc: ty.loc }, None, None, loc)?;
-                        d.range = Some((Expr::Num(dec(w)), Expr::Num(dec(0))));
+                        d.range = Some((ExprKind::Num(dec(w)).into(), ExprKind::Num(dec(0)).into()));
                         d.strength = strength;
                         d.delay = delay;
                         let mut t = SvType::vector(NetKind::Wire, d.signed, vec![d.range.clone().unwrap()]);
@@ -903,7 +903,7 @@ impl Lower {
             };
             let mut t = SvType::vector(kind, signed, vec![]);
             if let Some(w) = iw.filter(|_| range.is_none()) {
-                t.dims.push((Expr::Num(dec(w as u64 - 1)), Expr::Num(dec(0))));
+                t.dims.push((ExprKind::Num(dec(w as u64 - 1)).into(), ExprKind::Num(dec(0)).into()));
                 t.int_kind = true;
             }
             t.dims.extend(range.iter().cloned());
@@ -985,17 +985,17 @@ impl Lower {
             None => None,
         };
         let n = names.len();
-        let v = Expr::Ident(name.clone());
+        let v = ExprKind::Ident(name.clone());
         let chain = |val: &dyn Fn(usize) -> Expr, dflt: Expr| {
             (0..n).rev().fold(dflt, |acc, i| {
-                let c = Expr::Binary(BinOp::CaseEq, Box::new(v.clone()), Box::new(Expr::Ident(names[i].clone())));
-                Expr::Cond(Box::new(c), Box::new(val(i)), Box::new(acc))
+                let c = ExprKind::Binary(BinOp::CaseEq, Box::new(v.clone().into()), Box::new(ExprKind::Ident(names[i].clone()).into()));
+                ExprKind::Cond(Box::new(c.into()), Box::new(val(i)), Box::new(acc)).into()
             })
         };
-        let x = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "x".into(), fill: true });
+        let x = ExprKind::Num(Number { size: None, signed: false, base: 2, based: true, digits: "x".into(), fill: true });
         Ok(match m {
-            "first" => Expr::Ident(names[0].clone()),
-            "last" => Expr::Ident(names[n - 1].clone()),
+            "first" => ExprKind::Ident(names[0].clone()).into(),
+            "last" => ExprKind::Ident(names[n - 1].clone()).into(),
             "num" => num(n as i64),
             "next" | "prev" => {
                 let k = match &arg {
@@ -1010,29 +1010,29 @@ impl Lower {
                                 return self.unsupported(loc, &format!("this count of .{m}()"));
                             }
                             let bx = |e: Expr| Box::new(e);
-                            let r = Expr::Binary(BinOp::Mod, bx(e.clone()), bx(num(n as i64)));
+                            let r = ExprKind::Binary(BinOp::Mod, bx(e.clone()), bx(num(n as i64)));
                             let t = self.vars[&name].0.clone();
                             let val = |i: usize| {
                                 let pos = if m == "next" {
-                                    Expr::Binary(BinOp::Add, bx(num(i as i64)), bx(r.clone()))
+                                    ExprKind::Binary(BinOp::Add, bx(num(i as i64)), bx(r.clone().into()))
                                 } else {
-                                    Expr::Binary(BinOp::Sub, bx(num((i + n) as i64)), bx(r.clone()))
+                                    ExprKind::Binary(BinOp::Sub, bx(num((i + n) as i64)), bx(r.clone().into()))
                                 };
-                                let pos = Expr::Binary(BinOp::Mod, bx(pos), bx(num(n as i64)));
-                                (0..n).rev().fold(x.clone(), |acc, j| {
-                                    let c = Expr::Binary(BinOp::Eq, bx(pos.clone()), bx(num(j as i64)));
-                                    Expr::Cond(bx(c), bx(Expr::Ident(names[j].clone())), bx(acc))
+                                let pos = ExprKind::Binary(BinOp::Mod, bx(pos.into()), bx(num(n as i64)));
+                                (0..n).rev().fold(x.clone().into(), |acc: Expr, j| {
+                                    let c = ExprKind::Binary(BinOp::Eq, bx(pos.clone().into()), bx(num(j as i64)));
+                                    ExprKind::Cond(bx(c.into()), bx(ExprKind::Ident(names[j].clone()).into()), bx(acc)).into()
                                 })
                             };
-                            return Ok(cast(t.width(), chain(&val, x.clone()), u64::from(t.signed)));
+                            return Ok(cast(t.width(), chain(&val, x.clone().into()), u64::from(t.signed)));
                         }
                     },
                 };
                 let step = if m == "next" { k % n } else { n - k % n };
                 let t = self.vars[&name].0.clone();
-                cast(t.width(), chain(&|i| Expr::Ident(names[(i + step) % n].clone()), x), u64::from(t.signed))
+                cast(t.width(), chain(&|i| ExprKind::Ident(names[(i + step) % n].clone()).into(), x.into()), u64::from(t.signed))
             }
-            _ => Expr::SysCall("$__str".into(), vec![chain(&|i| Expr::Str(names[i].rsplit("::").next().unwrap().to_string()), Expr::Str(String::new()))]),
+            _ => ExprKind::SysCall("$__str".into(), vec![chain(&|i| ExprKind::Str(names[i].rsplit("::").next().unwrap().to_string()).into(), ExprKind::Str(String::new()).into())]).into(),
         })
     }
 
@@ -1061,17 +1061,17 @@ impl Lower {
             None => 1,
         };
         if f == "$size" && self.vars[&name].0.kind == NetKind::String && self.vars[&name].1.is_empty() {
-            return Ok(Expr::Call(format!("{name}.len"), Vec::new()));
+            return Ok(ExprKind::Call(format!("{name}.len"), Vec::new()).into());
         }
         let unpacked = self.vars[&name].1.len();
         let dims = self.var_dims(&name).unwrap();
-        let x = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: "x".into(), fill: true });
+        let x = ExprKind::Num(Number { size: None, signed: false, base: 2, based: true, digits: "x".into(), fill: true });
         match f {
             "$dimensions" => return Ok(num(dims.len() as i64)),
             "$unpacked_dimensions" => return Ok(num(unpacked as i64)),
             _ => {}
         }
-        let Some((l, r)) = (k >= 1).then(|| dims.get(k as usize - 1)).flatten().cloned() else { return Ok(x) };
+        let Some((l, r)) = (k >= 1).then(|| dims.get(k as usize - 1)).flatten().cloned() else { return Ok(x.into()) };
         let cmp = |op: BinOp, a: &Expr, b: &Expr, t: Expr, e: Expr| match (lit(a), lit(b)) {
             (Some(x), Some(y)) => {
                 let c = match op {
@@ -1084,7 +1084,7 @@ impl Lower {
                     e
                 }
             }
-            _ => Expr::Cond(Box::new(Expr::Binary(op, Box::new(a.clone()), Box::new(b.clone()))), Box::new(t), Box::new(e)),
+            _ => ExprKind::Cond(Box::new(ExprKind::Binary(op, Box::new(a.clone()), Box::new(b.clone())).into()), Box::new(t), Box::new(e)).into(),
         };
         Ok(match f {
             "$left" => l,

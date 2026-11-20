@@ -567,6 +567,18 @@ impl<'a> Compiler<'a> {
         Err(Error { msg: msg.into(), file: self.file.clone(), line: self.line })
     }
 
+    /// Runs `f` at `line` (0: at the current location) and returns to the current location
+    /// after it, so that code compiled inside (an inlined call) does not move it.
+    pub(crate) fn at<T>(&mut self, line: u32, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.line;
+        if line != 0 {
+            self.line = line;
+        }
+        let r = f(self);
+        self.line = saved;
+        r
+    }
+
     /// `file:line` of the current location in the source (through includes).
     pub(crate) fn loc(&self) -> String {
         ferrooxide_front::loc_str(&self.file, self.line)
@@ -930,13 +942,13 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------------ constant evaluation
     pub(crate) fn const_eval(&mut self, e: &Expr, sid: usize) -> R<Const> {
-        if let Expr::Num(n) = e {
+        if let ExprKind::Num(n) = &e.kind {
             return Const::from_number(n).or_else(|m| self.err(m));
         }
         if let Some(c) = self.const_str_cmp(e, sid) {
             return Ok(c);
         }
-        if let Expr::Real(r) = e {
+        if let ExprKind::Real(r) = &e.kind {
             return Ok(Const::from_i64(r.round() as i64, 64, false));
         }
         self.code.pb.push(PState { proc: NONE, ..Default::default() });
@@ -954,13 +966,13 @@ impl<'a> Compiler<'a> {
 
     /// Value of a constant expression without emitting code or errors (None if not evaluable).
     pub(crate) fn const_value(&self, e: &Expr, sid: usize) -> Option<i64> {
-        match e {
-            Expr::Num(n) => Const::from_number(n).ok()?.to_i64(),
-            Expr::Ident(n) => match self.lookup(n, sid)? {
+        match &e.kind {
+            ExprKind::Num(n) => Const::from_number(n).ok()?.to_i64(),
+            ExprKind::Ident(n) => match self.lookup(n, sid)? {
                 Sym::Const(c) => c.to_i64(),
                 _ => None,
             },
-            Expr::Binary(op, a, b) => {
+            ExprKind::Binary(op, a, b) => {
                 let (a, b) = (self.const_value(a, sid)?, self.const_value(b, sid)?);
                 match op {
                     BinOp::Add => Some(a + b),
@@ -976,7 +988,7 @@ impl<'a> Compiler<'a> {
                     _ => None,
                 }
             }
-            Expr::Unary(UnOp::Neg, a) => Some(-self.const_value(a, sid)?),
+            ExprKind::Unary(UnOp::Neg, a) => Some(-self.const_value(a, sid)?),
             _ => None,
         }
     }
@@ -986,19 +998,19 @@ impl<'a> Compiler<'a> {
     /// (Names not found are left to the error at their use.)
     pub(crate) fn is_const_expr(&self, e: &Expr, sid: usize) -> bool {
         let all = |c: &Self, v: &[Expr]| v.iter().all(|x| c.is_const_expr(x, sid));
-        match e {
-            Expr::Ident(n) => !matches!(self.lookup(n, sid), Some(Sym::Sig(_))),
-            Expr::Hier(p) => !matches!(self.lookup_hier(p, sid), Some(Sym::Sig(_))),
-            Expr::Unary(_, a) | Expr::Member(a, _) => self.is_const_expr(a, sid),
-            Expr::Binary(_, a, b) | Expr::Index(a, b) => self.is_const_expr(a, sid) && self.is_const_expr(b, sid),
-            Expr::Cond(a, b, c) | Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) => {
+        match &e.kind {
+            ExprKind::Ident(n) => !matches!(self.lookup(n, sid), Some(Sym::Sig(_))),
+            ExprKind::Hier(p) => !matches!(self.lookup_hier(p, sid), Some(Sym::Sig(_))),
+            ExprKind::Unary(_, a) | ExprKind::Member(a, _) => self.is_const_expr(a, sid),
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => self.is_const_expr(a, sid) && self.is_const_expr(b, sid),
+            ExprKind::Cond(a, b, c) | ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) => {
                 self.is_const_expr(a, sid) && self.is_const_expr(b, sid) && self.is_const_expr(c, sid)
             }
-            Expr::Concat(v) => all(self, v),
-            Expr::Repl(n, v) => self.is_const_expr(n, sid) && all(self, v),
-            Expr::Call(_, args) => all(self, args),
+            ExprKind::Concat(v) => all(self, v),
+            ExprKind::Repl(n, v) => self.is_const_expr(n, sid) && all(self, v),
+            ExprKind::Call(_, args) => all(self, args),
             // queries of a declaration are constant whatever they name
-            Expr::SysCall(n, _)
+            ExprKind::SysCall(n, _)
                 if matches!(
                     n.as_str(),
                     "$bits" | "$size" | "$left" | "$right" | "$low" | "$high" | "$increment" | "$dimensions" | "$unpacked_dimensions" | "$typename" | "$isunbounded"
@@ -1006,8 +1018,8 @@ impl<'a> Compiler<'a> {
             {
                 true
             }
-            Expr::SysCall(n, _) if matches!(n.as_str(), "$time" | "$stime" | "$realtime" | "$random" | "$urandom" | "$urandom_range") => false,
-            Expr::SysCall(_, args) => all(self, args),
+            ExprKind::SysCall(n, _) if matches!(n.as_str(), "$time" | "$stime" | "$realtime" | "$random" | "$urandom" | "$urandom_range") => false,
+            ExprKind::SysCall(_, args) => all(self, args),
             _ => true,
         }
     }

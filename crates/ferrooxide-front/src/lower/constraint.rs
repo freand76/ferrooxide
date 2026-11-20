@@ -64,17 +64,17 @@ impl Lower {
         })();
         self.with_obj = saved;
         let (vars, with) = r?;
-        if vars.iter().any(|v| matches!(v, Expr::Null)) {
+        if vars.iter().any(|v| matches!(&v.kind, ExprKind::Null)) {
             return self.unsupported(loc, "randomize(null)");
         }
-        Ok(Expr::Randomize { obj, vars, with, std })
+        Ok(ExprKind::Randomize { obj, vars, with, std }.into())
     }
 
     /// The names of the class of a class handle expression (a variable, `this`).
     fn class_of_expr(&self, e: &Expr) -> Option<std::rc::Rc<super::class::ClassNames>> {
-        let c = match e {
-            Expr::Ident(n) if n == "this" => self.in_class.clone()?,
-            Expr::Ident(n) => self.vars.get(n)?.0.class.clone()?,
+        let c = match &e.kind {
+            ExprKind::Ident(n) if n == "this" => self.in_class.clone()?,
+            ExprKind::Ident(n) => self.vars.get(n)?.0.class.clone()?,
             _ => return None,
         };
         self.classes.get(&c).cloned()
@@ -100,7 +100,7 @@ impl Lower {
                         for x in items {
                             let (lo, hi) = self.value_range(&x.range)?;
                             let (per_value, weight) = match &x.weight {
-                                None => (true, Expr::Num(dec(1))),
+                                None => (true, ExprKind::Num(dec(1)).into()),
                                 Some((per_range, w)) => (!per_range, self.expr(w)?),
                             };
                             d.push(DistItem { lo, hi, per_value, weight });

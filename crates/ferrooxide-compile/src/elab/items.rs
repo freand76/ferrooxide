@@ -364,7 +364,7 @@ impl<'a> Compiler<'a> {
                 self.dyn_layout(s, layout.as_ref());
                 if let Some(init) = mg.init {
                     let line = self.line;
-                    self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.clone()), rhs: init.clone(), scope: sid, line });
+                    self.code.jobs.push(Job::Init { lhs: ExprKind::Ident(name.clone()).into(), rhs: init.clone(), scope: sid, line });
                 }
                 continue;
             }
@@ -394,7 +394,7 @@ impl<'a> Compiler<'a> {
                 self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
                 if let Some(init) = mg.init {
                     let line = self.line;
-                    self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.clone()), rhs: init.clone(), scope: sid, line });
+                    self.code.jobs.push(Job::Init { lhs: ExprKind::Ident(name.clone()).into(), rhs: init.clone(), scope: sid, line });
                 }
                 continue;
             }
@@ -404,7 +404,7 @@ impl<'a> Compiler<'a> {
                     if let Some(Some(conn)) = port_conns.get(&name) {
                         let mut aliased = None;
                         if depth == 0 {
-                            if let Expr::Ident(pn) = conn {
+                            if let ExprKind::Ident(pn) = &conn.kind {
                                 let sym = match self.lookup(pn, ps) {
                                     Some(s) => Some(s),
                                     None => {
@@ -504,7 +504,7 @@ impl<'a> Compiler<'a> {
                             Dir::Output => {
                                 self.code.jobs.push(Job::PortOut { lhs: conn.clone(), child_sig: s, scope: ps, line })
                             }
-                            Dir::Inout if self.link_exprs(&Expr::Ident(name.clone()), sid, conn, ps, None) => {}
+                            Dir::Inout if self.link_exprs(&Expr::from(ExprKind::Ident(name.clone())), sid, conn, ps, None) => {}
                             Dir::Inout => self.warn(format!(
                                 "inout port '{name}' connected to an expression: connection ignored"
                             )),
@@ -561,10 +561,10 @@ impl<'a> Compiler<'a> {
                 self.nets.net_types.insert(s, mg.net);
                 if matches!(mg.net, NetType::Supply0 | NetType::Supply1) {
                     let d = if mg.net == NetType::Supply1 { "1" } else { "0" };
-                    let rhs = Expr::Num(Number { size: None, signed: false, base: 2, based: true, digits: d.into(), fill: true });
+                    let rhs = ExprKind::Num(Number { size: None, signed: false, base: 2, based: true, digits: d.into(), fill: true });
                     let line = self.line;
                     self.nets.cur_strength = Some((7, 7));
-                    self.push_job(Job::Assign { lhs: Expr::Ident(name.clone()), rhs, delay: None, scope: sid, line });
+                    self.push_job(Job::Assign { lhs: ExprKind::Ident(name.clone()).into(), rhs: rhs.into(), delay: None, scope: sid, line });
                     self.nets.cur_strength = None;
                 }
             }
@@ -597,9 +597,9 @@ impl<'a> Compiler<'a> {
         // terminals become 1-bit wires
         let mut implicit: Vec<&String> = Vec::new();
         fn lhs_names<'e>(e: &'e Expr, out: &mut Vec<&'e String>) {
-            match e {
-                Expr::Ident(n) => out.push(n),
-                Expr::Concat(v) => v.iter().for_each(|x| lhs_names(x, out)),
+            match &e.kind {
+                ExprKind::Ident(n) => out.push(n),
+                ExprKind::Concat(v) => v.iter().for_each(|x| lhs_names(x, out)),
                 _ => {}
             }
         }

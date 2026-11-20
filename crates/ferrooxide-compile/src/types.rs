@@ -128,7 +128,11 @@ impl<'a> Compiler<'a> {
     /// string where an operand of a concatenation, replication or condition is one; a real
     /// where an operand of an arithmetic operator or a condition is real; otherwise a vector.
     pub(crate) fn type_of(&mut self, e: &Expr, sid: usize) -> R<Type> {
-        if !self.classes.list.is_empty() || matches!(e, Expr::Null | Expr::New(_) | Expr::NewCopy(_) | Expr::MethodCall(..)) {
+        self.at(e.line, |c| c.type_of_here(e, sid))
+    }
+
+    fn type_of_here(&mut self, e: &Expr, sid: usize) -> R<Type> {
+        if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..)) {
             if let Some(t) = self.obj_type_of(e, sid)? {
                 return Ok(t);
             }
@@ -145,24 +149,24 @@ impl<'a> Compiler<'a> {
             return self.type_of(&n, sid);
         }
         let v = Type::vec;
-        Ok(match e {
-            Expr::Type(_) => return self.err("a data type is not a value"),
-            Expr::Randomize { .. } => Type::vec(32, true),
-            Expr::ArrayWith { method, .. } => return self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
-            Expr::Member(..) => return self.member_error(e, sid),
-            Expr::NewArray(..) => return self.err("new[] needs a dynamic array to assign to"),
-            Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) => {
+        Ok(match &e.kind {
+            ExprKind::Type(_) => return self.err("a data type is not a value"),
+            ExprKind::Randomize { .. } => Type::vec(32, true),
+            ExprKind::ArrayWith { method, .. } => return self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
+            ExprKind::Member(..) => return self.member_error(e, sid),
+            ExprKind::NewArray(..) => return self.err("new[] needs a dynamic array to assign to"),
+            ExprKind::Null | ExprKind::New(_) | ExprKind::NewTyped(..) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) => {
                 return self.err("no classes are declared")
             }
-            Expr::EmptyArg => return self.err("an empty argument is allowed only in a call of a function or task"),
-            Expr::NamedArg(..) => return self.err("a named argument is allowed only in a call of a function or task"),
-            Expr::Last => return self.err("`$` outside an index of a queue"),
-            Expr::IncDec { e, .. } => return self.type_of(e, sid),
-            Expr::Pattern(..) => {
+            ExprKind::EmptyArg => return self.err("an empty argument is allowed only in a call of a function or task"),
+            ExprKind::NamedArg(..) => return self.err("a named argument is allowed only in a call of a function or task"),
+            ExprKind::Last => return self.err("`$` outside an index of a queue"),
+            ExprKind::IncDec { e, .. } => return self.type_of(e, sid),
+            ExprKind::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
                 return self.type_of(&r, sid);
             }
-            Expr::Num(n) => {
+            ExprKind::Num(n) => {
                 if n.fill {
                     v(1, false)
                 } else {
@@ -170,16 +174,16 @@ impl<'a> Compiler<'a> {
                     v(c.w, c.signed)
                 }
             }
-            Expr::Real(_) => Type::Real,
-            Expr::Str(s) => v((8 * s.len()).max(8) as u32, false),
-            Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
+            ExprKind::Real(_) => Type::Real,
+            ExprKind::Str(s) => v((8 * s.len()).max(8) as u32, false),
+            ExprKind::Ident(_) | ExprKind::Hier(_) => match self.resolve_base(e, sid)? {
                 Some(Base::Sig(s)) => self.sig_type(s),
-                Some(Base::Const(_)) if matches!(e, Expr::Ident(n) if self.is_string_param(n, sid)) => Type::Str,
+                Some(Base::Const(_)) if matches!(&e.kind, ExprKind::Ident(n) if self.is_string_param(n, sid)) => Type::Str,
                 Some(Base::Const(c)) => v(c.w, c.signed),
                 Some(Base::Real(_)) => Type::Real,
                 None => unreachable!(),
             },
-            Expr::Index(a, _) => {
+            ExprKind::Index(a, _) => {
                 if self.is_string_scalar(a, sid) {
                     // a character of a string
                     v(8, false)
@@ -189,12 +193,12 @@ impl<'a> Compiler<'a> {
                     v(1, false)
                 }
             }
-            Expr::Range(_, m, l) => match (self.const_index(m, sid)?, self.const_index(l, sid)?) {
+            ExprKind::Range(_, m, l) => match (self.const_index(m, sid)?, self.const_index(l, sid)?) {
                 (Some(m), Some(l)) => v(((m - l).abs() + 1) as u32, false),
                 // an x/z bound: a 1-bit x
                 _ => v(1, false),
             },
-            Expr::IndexedRange(_, _, w, _) => {
+            ExprKind::IndexedRange(_, _, w, _) => {
                 // (IEEE 1800-2017 11.5.1: a positive width)
                 let w = self.const_int(w, sid)?;
                 if w <= 0 {
@@ -202,7 +206,7 @@ impl<'a> Compiler<'a> {
                 }
                 v(w as u32, false)
             }
-            Expr::Unary(op, a) => match op {
+            ExprKind::Unary(op, a) => match op {
                 UnOp::Plus | UnOp::Neg => match self.type_of(a, sid)? {
                     Type::Real => Type::Real,
                     t => t.as_vec(),
@@ -210,7 +214,7 @@ impl<'a> Compiler<'a> {
                 UnOp::Not => self.type_of(a, sid)?.as_vec(),
                 _ => v(1, false),
             },
-            Expr::Binary(op, a, b) => match op {
+            ExprKind::Binary(op, a, b) => match op {
                 B::Add | B::Sub | B::Mul | B::Div | B::Mod | B::And | B::Or | B::Xor | B::Xnor => {
                     let (ta, tb) = (self.type_of(a, sid)?, self.type_of(b, sid)?);
                     if matches!(op, B::Add | B::Sub | B::Mul | B::Div) && (ta.is_real() || tb.is_real()) {
@@ -230,7 +234,7 @@ impl<'a> Compiler<'a> {
                 B::Shl | B::Shr | B::AShl | B::AShr => self.type_of(a, sid)?.as_vec(),
                 _ => v(1, false),
             },
-            Expr::Cond(_, t, f) => {
+            ExprKind::Cond(_, t, f) => {
                 let (tt, tf) = (self.type_of(t, sid)?, self.type_of(f, sid)?);
                 if tt.is_str() || tf.is_str() {
                     Type::Str
@@ -240,7 +244,7 @@ impl<'a> Compiler<'a> {
                     v(tt.width().max(tf.width()), tt.signed() && tf.signed())
                 }
             }
-            Expr::Concat(xs) | Expr::Repl(_, xs) => {
+            ExprKind::Concat(xs) | ExprKind::Repl(_, xs) => {
                 let mut w = 0;
                 let mut str = false;
                 let mut dynt = None;
@@ -252,7 +256,7 @@ impl<'a> Compiler<'a> {
                     }
                     w += t.width();
                 }
-                if let (Some(t), Expr::Concat(_)) = (dynt, e) {
+                if let (Some(t), ExprKind::Concat(_)) = (dynt, &e.kind) {
                     // (a concatenation with a queue makes a queue)
                     return Ok(t);
                 }
@@ -261,14 +265,14 @@ impl<'a> Compiler<'a> {
                 }
                 if str {
                     Type::Str
-                } else if let Expr::Repl(n, _) = e {
+                } else if let ExprKind::Repl(n, _) = &e.kind {
                     let n = self.const_int(n, sid)?;
                     v((w as i64 * n.max(0)) as u32, false)
                 } else {
                     v(w, false)
                 }
             }
-            Expr::Call(name, args) => {
+            ExprKind::Call(name, args) => {
                 if let Some((_, m)) = self.str_method(name, sid) {
                     if STR_METHODS.contains(&m) {
                         return Ok(Type::Str);
@@ -282,7 +286,7 @@ impl<'a> Compiler<'a> {
                 }
                 let Some((f, fs)) = self.lookup_func(name, sid) else {
                     if let Some((obj, m)) = self.hier_handle(name, sid) {
-                        return self.type_of(&Expr::MethodCall(Box::new(obj), m, args.clone()), sid);
+                        return self.type_of(&Expr::from(ExprKind::MethodCall(Box::new(obj), m, args.clone())), sid);
                     }
                     return self.err(format!("unknown function '{name}'"));
                 };
@@ -291,7 +295,7 @@ impl<'a> Compiler<'a> {
                 }
                 self.func_ret_type(f, fs)?
             }
-            Expr::SysCall(name, args) => match name.as_str() {
+            ExprKind::SysCall(name, args) => match name.as_str() {
                 "$sformatf" | "$psprintf" | "$__tostring" => Type::Str,
                 n if REAL_FUNCS.contains(&n) => Type::Real,
                 "$time" => v(64, false),
@@ -401,7 +405,7 @@ impl<'a> Compiler<'a> {
                 NetKind::Event => return self.err("a function returning an event is not supported"),
                 _ => {
                     let w = packed_of(&r).width();
-                    (NetKind::Reg, Some((Expr::Num(ferrooxide_front::ast::dec(w as u64 - 1)), Expr::Num(ferrooxide_front::ast::dec(0)))))
+                    (NetKind::Reg, Some((ExprKind::Num(ferrooxide_front::ast::dec(w as u64 - 1)).into(), ExprKind::Num(ferrooxide_front::ast::dec(0)).into())))
                 }
             };
             g.signed = r.signed;
@@ -528,20 +532,20 @@ fn chain(e: &Expr) -> (&Expr, Vec<Sel<'_>>) {
     let mut ops = Vec::new();
     let mut cur = e;
     loop {
-        match cur {
-            Expr::Index(a, i) => {
+        match &cur.kind {
+            ExprKind::Index(a, i) => {
                 ops.push(Sel::Index(i));
                 cur = a;
             }
-            Expr::Range(a, m, l) => {
+            ExprKind::Range(a, m, l) => {
                 ops.push(Sel::Range(m, l));
                 cur = a;
             }
-            Expr::IndexedRange(a, b, w, up) => {
+            ExprKind::IndexedRange(a, b, w, up) => {
                 ops.push(Sel::Part(b, w, *up));
                 cur = a;
             }
-            Expr::Member(a, m) => {
+            ExprKind::Member(a, m) => {
                 ops.push(Sel::Member(m));
                 cur = a;
             }
@@ -555,28 +559,28 @@ fn chain(e: &Expr) -> (&Expr, Vec<Sel<'_>>) {
 fn apply(e: Expr, op: Sel) -> Expr {
     let b = Box::new;
     match op {
-        Sel::Index(i) => Expr::Index(b(e), b(i.clone())),
-        Sel::Range(m, l) => Expr::Range(b(e), b(m.clone()), b(l.clone())),
-        Sel::Part(x, w, up) => Expr::IndexedRange(b(e), b(x.clone()), b(w.clone()), up),
-        Sel::Member(m) => Expr::Member(b(e), m.to_string()),
+        Sel::Index(i) => ExprKind::Index(b(e), b(i.clone())).into(),
+        Sel::Range(m, l) => ExprKind::Range(b(e), b(m.clone()), b(l.clone())).into(),
+        Sel::Part(x, w, up) => ExprKind::IndexedRange(b(e), b(x.clone()), b(w.clone()), up).into(),
+        Sel::Member(m) => ExprKind::Member(b(e), m.to_string()).into(),
     }
 }
 
 fn num(v: i64) -> Expr {
-    let n = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+    let n = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
     if v < 0 {
-        Expr::Unary(UnOp::Neg, Box::new(n))
+        ExprKind::Unary(UnOp::Neg, Box::new(n.into())).into()
     } else {
-        n
+        n.into()
     }
 }
 
 fn lit(e: &Expr) -> Option<i64> {
-    match e {
-        Expr::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
+    match &e.kind {
+        ExprKind::Num(n) if !n.fill && !n.digits.contains(['x', 'z', 'X', 'Z', '?']) => {
             i64::from_str_radix(&n.digits.replace('_', ""), n.base).ok()
         }
-        Expr::Unary(UnOp::Neg, a) => lit(a).map(|v| -v),
+        ExprKind::Unary(UnOp::Neg, a) => lit(a).map(|v| -v),
         _ => None,
     }
 }
@@ -589,7 +593,7 @@ fn arith(op: B, a: Expr, b: Expr) -> Expr {
         (B::Mul, Some(x), Some(y)) => num(x * y),
         (B::Add, Some(0), _) | (B::Mul, Some(1), _) => b,
         (B::Add | B::Sub, _, Some(0)) | (B::Mul, _, Some(1)) => a,
-        _ => Expr::Binary(op, Box::new(a), Box::new(b)),
+        _ => ExprKind::Binary(op, Box::new(a), Box::new(b)).into(),
     }
 }
 
@@ -604,7 +608,7 @@ fn dim_pos(d: (i64, i64), k: Expr) -> Expr {
 
 /// `$__cast(width, unsigned, v)`: `v` as a value of `w` bits.
 fn cast(w: i64, v: Expr) -> Expr {
-    Expr::SysCall("$__cast".into(), vec![num(w), num(0), v])
+    ExprKind::SysCall("$__cast".into(), vec![num(w), num(0), v]).into()
 }
 
 /// A member chain of a signal with a struct type in its flat form.
@@ -679,19 +683,21 @@ impl<'a> Compiler<'a> {
     pub(crate) fn struct_walk(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<Result<Walk, String>> {
         let (base, ops) = chain(e);
         // `base` with its last name prefixed (`$flat:v`, `$type:p`)
-        let renamed = |pre: &str| match base {
-            Expr::Ident(n) => Expr::Ident(format!("{pre}{n}")),
-            Expr::Hier(p) => {
-                let mut p = p.clone();
-                let l = p.last_mut().unwrap();
-                *l = format!("{pre}{l}");
-                Expr::Hier(p)
+        let renamed = |pre: &str| -> Expr {
+            match &base.kind {
+                ExprKind::Ident(n) => ExprKind::Ident(format!("{pre}{n}")).into(),
+                ExprKind::Hier(p) => {
+                    let mut p = p.clone();
+                    let l = p.last_mut().unwrap();
+                    *l = format!("{pre}{l}");
+                    ExprKind::Hier(p).into()
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
         };
-        let sym = match base {
-            Expr::Ident(n) if !n.starts_with("$flat:") => self.lookup(n, sid)?,
-            Expr::Hier(p) if !p.last()?.starts_with("$flat:") => self.lookup_hier(p, sid)?,
+        let sym = match &base.kind {
+            ExprKind::Ident(n) if !n.starts_with("$flat:") => self.lookup(n, sid)?,
+            ExprKind::Hier(p) if !p.last()?.starts_with("$flat:") => self.lookup_hier(p, sid)?,
             _ => return None,
         };
         let is_param = matches!(sym, Sym::Const(_));
@@ -707,9 +713,9 @@ impl<'a> Compiler<'a> {
             }
             // a parameter with a struct type
             Sym::Const(_) => {
-                let t = match renamed("$type:") {
-                    Expr::Ident(n) => self.lookup(&n, sid)?,
-                    Expr::Hier(p) => self.lookup_hier(&p, sid)?,
+                let t = match renamed("$type:").kind {
+                    ExprKind::Ident(n) => self.lookup(&n, sid)?,
+                    ExprKind::Hier(p) => self.lookup_hier(&p, sid)?,
                     _ => unreachable!(),
                 };
                 let Sym::Type(t) = t else { return None };
@@ -734,8 +740,8 @@ impl<'a> Compiler<'a> {
         }
         let elem = match nun {
             0 => flat_base,
-            1 => match elem {
-                Expr::Index(_, i) => Expr::Index(Box::new(flat_base), i),
+            1 => match elem.kind {
+                ExprKind::Index(_, i) => ExprKind::Index(Box::new(flat_base), i).into(),
                 _ => unreachable!(),
             },
             _ => self.md_norm(&elem, sid)?,
@@ -765,13 +771,13 @@ impl<'a> Compiler<'a> {
                             let n = match (lit(a), lit(b)) {
                                 (Some(a), Some(b)) => num(dim_size((a, b))),
                                 _ => {
-                                    let ge = Expr::Binary(B::Ge, Box::new(a.clone()), Box::new(b.clone()));
-                                    let d = Expr::Cond(
-                                        Box::new(ge),
+                                    let ge = ExprKind::Binary(B::Ge, Box::new(a.clone()), Box::new(b.clone()));
+                                    let d = ExprKind::Cond(
+                                        Box::new(ge.into()),
                                         Box::new(arith(B::Sub, a.clone(), b.clone())),
                                         Box::new(arith(B::Sub, b.clone(), a.clone())),
                                     );
-                                    arith(B::Add, d, num(1))
+                                    arith(B::Add, d.into(), num(1))
                                 }
                             };
                             width = arith(B::Mul, n, num(el));
@@ -821,16 +827,16 @@ impl<'a> Compiler<'a> {
         if !touched {
             return None;
         }
-        let mut out = Expr::IndexedRange(Box::new(elem), Box::new(off), Box::new(width), true);
+        let mut out: Expr = ExprKind::IndexedRange(Box::new(elem), Box::new(off), Box::new(width), true).into();
         let leaf = if whole && di == 0 { cur.leaf } else { Leaf::Bits };
         if !lvalue && whole && di == 0 {
             match cur.leaf {
                 // a real member read: its bits as a real
-                Leaf::Real => out = Expr::SysCall("$bitstoreal".into(), vec![out]),
+                Leaf::Real => out = ExprKind::SysCall("$bitstoreal".into(), vec![out]).into(),
                 // (a string member: see `member_type`)
                 Leaf::Str => {}
                 // a whole signed member reads as signed
-                Leaf::Bits if cur.signed => out = Expr::SysCall("$signed".into(), vec![out]),
+                Leaf::Bits if cur.signed => out = ExprKind::SysCall("$signed".into(), vec![out]).into(),
                 Leaf::Bits => {}
             }
         }
@@ -844,7 +850,7 @@ impl<'a> Compiler<'a> {
     /// The type of a member chain that selects a whole real or string member of an unpacked
     /// struct.
     pub(crate) fn member_type(&self, e: &Expr, sid: usize) -> Option<Type> {
-        if !self.sigs.has_struct_values || !matches!(e, Expr::Member(..) | Expr::Index(..)) {
+        if !self.sigs.has_struct_values || !matches!(&e.kind, ExprKind::Member(..) | ExprKind::Index(..)) {
             return None;
         }
         match self.struct_walk(e, sid, true)?.ok()?.leaf {
@@ -868,7 +874,7 @@ impl<'a> Compiler<'a> {
         match self.struct_walk(e, sid, false) {
             Some(Err(m)) => self.err(m),
             _ => {
-                let Expr::Member(_, m) = e else { unreachable!() };
+                let ExprKind::Member(_, m) = &e.kind else { unreachable!() };
                 self.err(format!("'.{m}' selects a member of a value without members"))
             }
         }
@@ -877,9 +883,9 @@ impl<'a> Compiler<'a> {
     /// The type an assignment to `e` gives a pattern on its right.
     pub(crate) fn target_layout(&self, e: &Expr, sid: usize) -> Option<Packed> {
         let (base, ops) = chain(e);
-        let sym = match base {
-            Expr::Ident(n) => self.lookup(n, sid)?,
-            Expr::Hier(p) => self.lookup_hier(p, sid)?,
+        let sym = match &base.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid)?,
+            ExprKind::Hier(p) => self.lookup_hier(p, sid)?,
             _ => return None,
         };
         let Sym::Sig(s) = sym else { return None };
@@ -895,23 +901,23 @@ impl<'a> Compiler<'a> {
     /// `e` with the assignment patterns at its top (or in a conditional's branches) resolved
     /// against `t` (a typed pattern against its own type); None where there are none.
     pub(crate) fn with_target(&mut self, e: &Expr, t: Option<&Packed>, sid: usize) -> R<Option<Expr>> {
-        match e {
-            Expr::Pattern(Some(pt), items) => {
+        match &e.kind {
+            ExprKind::Pattern(Some(pt), items) => {
                 let pt = self.packed(pt, sid)?;
                 Ok(Some(self.build_pattern(items, &pt, sid)?))
             }
-            Expr::Pattern(None, items) => match t {
+            ExprKind::Pattern(None, items) => match t {
                 Some(t) => Ok(Some(self.build_pattern(items, t, sid)?)),
                 None => Ok(None),
             },
-            Expr::Cond(c, a, b) => {
+            ExprKind::Cond(c, a, b) => {
                 let (ra, rb) = (self.with_target(a, t, sid)?, self.with_target(b, t, sid)?);
                 if ra.is_none() && rb.is_none() {
                     return Ok(None);
                 }
                 let a = ra.unwrap_or_else(|| (**a).clone());
                 let b = rb.unwrap_or_else(|| (**b).clone());
-                Ok(Some(Expr::Cond(c.clone(), Box::new(a), Box::new(b))))
+                Ok(Some(ExprKind::Cond(c.clone(), Box::new(a), Box::new(b)).into()))
             }
             _ => Ok(None),
         }
@@ -947,7 +953,7 @@ impl<'a> Compiler<'a> {
             }
             return Ok(match default {
                 Some(v) => cast(t.width(), v.clone()),
-                None => Expr::Concat(pos.into_iter().map(|v| cast(1, v.clone())).collect()),
+                None => ExprKind::Concat(pos.into_iter().map(|v| cast(1, v.clone())).collect()).into(),
             });
         };
         if !pos.is_empty() && pos.len() != parts.len() {
@@ -966,13 +972,13 @@ impl<'a> Compiler<'a> {
             };
             let v = self.with_target(v, Some(pt), sid)?.unwrap_or_else(|| v.clone());
             out.push(match (pt.leaf, v) {
-                (Leaf::Real, v) => Expr::SysCall("$realtobits".into(), vec![v]),
-                (Leaf::Str, v) => Expr::SysCall("$__strbits".into(), vec![v]),
-                (_, v @ Expr::Concat(_)) => v,
+                (Leaf::Real, v) => ExprKind::SysCall("$realtobits".into(), vec![v]).into(),
+                (Leaf::Str, v) => ExprKind::SysCall("$__strbits".into(), vec![v]).into(),
+                (_, v @ Expr { kind: ExprKind::Concat(_), .. }) => v,
                 (_, v) => cast(pt.width(), v),
             });
         }
-        Ok(Expr::Concat(out))
+        Ok(ExprKind::Concat(out).into())
     }
 
     /// A pattern in a place without a target type: one with its own type.

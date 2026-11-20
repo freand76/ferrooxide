@@ -47,8 +47,8 @@ const INT: Elem = Elem { w: 32, signed: true, leaf: Leaf::Bits, two_state: true,
 impl<'a> Compiler<'a> {
     /// `e` as a reduction or locator method call of a queue or dynamic array.
     pub(crate) fn arr_method<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<ArrMethod<'e>>> {
-        let (arr, m, with) = match e {
-            Expr::ArrayWith { arr, method, depth, with } => ((**arr).clone(), method.clone(), Some((&**with, *depth))),
+        let (arr, m, with) = match &e.kind {
+            ExprKind::ArrayWith { arr, method, depth, with } => ((**arr).clone(), method.clone(), Some((&**with, *depth))),
             _ => {
                 // (`a.max` without parentheses: a hierarchical name)
                 let call;
@@ -60,9 +60,9 @@ impl<'a> Compiler<'a> {
                     None => e,
                 };
                 let (base, m, nargs) = match self.dyn_method_expr(e, sid)? {
-                    Some((base, m, args)) => (base, m.to_string(), args.len() - matches!(args, [Expr::EmptyArg]) as usize),
+                    Some((base, m, args)) => (base, m.to_string(), args.len() - matches!(args, [Expr { kind: ExprKind::EmptyArg, .. }]) as usize),
                     None => match self.fixed_method_expr(e, sid)? {
-                        Some((base, m, args)) => (base, m, args.len() - matches!(args[..], [Expr::EmptyArg]) as usize),
+                        Some((base, m, args)) => (base, m, args.len() - matches!(args[..], [Expr { kind: ExprKind::EmptyArg, .. }]) as usize),
                         None => return Ok(None),
                     },
                 };
@@ -406,7 +406,7 @@ impl<'a> Compiler<'a> {
     /// `arr.sort with (e);` / `arr.rsort with (e);`: false if `e` is no ordering method
     /// with `with`.
     pub(crate) fn arr_order_with(&mut self, e: &Expr, sid: usize) -> R<bool> {
-        let Expr::ArrayWith { arr, method: m, depth, with: we } = e else { return Ok(false) };
+        let ExprKind::ArrayWith { arr, method: m, depth, with: we } = &e.kind else { return Ok(false) };
         if !ORDER.contains(&m.as_str()) {
             return Ok(false);
         }
@@ -452,7 +452,7 @@ impl<'a> Compiler<'a> {
         if !ORDER.contains(&m) {
             return Ok(false);
         }
-        if !args.is_empty() && !matches!(args, [Expr::EmptyArg]) {
+        if !args.is_empty() && !matches!(args, [Expr { kind: ExprKind::EmptyArg, .. }]) {
             return self.err(format!("'{m}' takes no arguments"));
         }
         if matches!(a.kind, DynKind::Assoc(_)) {
@@ -474,9 +474,9 @@ impl<'a> Compiler<'a> {
     /// `e` as a whole one-dimensional fixed-size array (None for anything else, also arrays
     /// of structs).
     pub(crate) fn fixed_arr(&mut self, e: &Expr, sid: usize) -> R<Option<FixedArr>> {
-        let sym = match e {
-            Expr::Ident(n) => self.lookup(n, sid),
-            Expr::Hier(p) => self.lookup_hier(p, sid),
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid),
+            ExprKind::Hier(p) => self.lookup_hier(p, sid),
             _ => return Ok(None),
         };
         let Some(Sym::Sig(s)) = sym else { return Ok(None) };
@@ -503,16 +503,16 @@ impl<'a> Compiler<'a> {
     /// `base.m` / `base.m(args)` where `base` is a fixed-size array and `m` an array
     /// manipulation method: (base, method, arguments).
     fn fixed_method_expr(&mut self, e: &Expr, sid: usize) -> R<Option<(Expr, String, Vec<Expr>)>> {
-        let path = |p: &[String]| if p.len() == 1 { Expr::Ident(p[0].clone()) } else { Expr::Hier(p.to_vec()) };
-        let (base, m, args) = match e {
-            Expr::Hier(p) if p.len() > 1 => (path(&p[..p.len() - 1]), p[p.len() - 1].clone(), vec![]),
-            Expr::Call(name, args) => {
+        let path = |p: &[String]| Expr::from(if p.len() == 1 { ExprKind::Ident(p[0].clone()) } else { ExprKind::Hier(p.to_vec()) });
+        let (base, m, args) = match &e.kind {
+            ExprKind::Hier(p) if p.len() > 1 => (path(&p[..p.len() - 1]), p[p.len() - 1].clone(), vec![]),
+            ExprKind::Call(name, args) => {
                 let Some((b, m)) = name.rsplit_once('.') else { return Ok(None) };
                 let parts: Vec<String> = b.split('.').map(String::from).collect();
                 (path(&parts), m.to_string(), args.clone())
             }
-            Expr::MethodCall(o, m, args) => ((**o).clone(), m.clone(), args.clone()),
-            Expr::Member(o, m) => ((**o).clone(), m.clone(), vec![]),
+            ExprKind::MethodCall(o, m, args) => ((**o).clone(), m.clone(), args.clone()),
+            ExprKind::Member(o, m) => ((**o).clone(), m.clone(), vec![]),
             _ => return Ok(None),
         };
         if ![REDUCE, LOCATE, ORDER].iter().any(|l| l.contains(&m.as_str())) || self.fixed_arr(&base, sid)?.is_none() {
@@ -674,7 +674,7 @@ impl<'a> Compiler<'a> {
             return Ok(Some(rt::FmtArg::Agg { s, w: elem.w, t, signed: elem.signed }));
         }
         if let Some((kind, elem)) = self.dyn_arr_type(e, sid)? {
-            if matches!(e, Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..)) {
+            if matches!(&e.kind, ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..)) {
                 return Ok(None);
             }
             if matches!(kind, DynKind::Assoc(_)) {

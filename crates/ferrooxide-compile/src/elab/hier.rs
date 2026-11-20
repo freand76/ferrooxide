@@ -6,7 +6,7 @@ impl<'a> Compiler<'a> {
     /// A port connected to a constant-index array element of the same width becomes an alias of
     /// the element (no copy process). Returns the alias signal.
     pub(crate) fn elem_port_alias(&mut self, conn: &Expr, ps: usize, width: u32, name: &str) -> Option<u32> {
-        let Expr::Index(a, i) = conn else { return None };
+        let ExprKind::Index(a, i) = &conn.kind else { return None };
         let arr = self.array_of(a, ps)?;
         let e = self.const_value(i, ps)? - self.sig(arr).arr_lo;
         let info = self.sig(arr).clone();
@@ -132,7 +132,7 @@ impl<'a> Compiler<'a> {
                     }
                     Conn::Wildcard => {
                         for p in &m.ports {
-                            port_conns.entry(p.clone()).or_insert_with(|| Some(Expr::Ident(p.clone())));
+                            port_conns.entry(p.clone()).or_insert_with(|| Some(ExprKind::Ident(p.clone()).into()));
                         }
                     }
                 }
@@ -162,9 +162,9 @@ impl<'a> Compiler<'a> {
                 let (pl, pr) = (self.const_int(pl, sid)?, self.const_int(pr, sid)?);
                 let actual = match (port_conns.get(pn), parent_scope) {
                     (Some(Some(e)), Some(ps)) => {
-                        let parts: Vec<String> = match e {
-                            Expr::Ident(n) => vec![n.clone()],
-                            Expr::Hier(p) => p.clone(),
+                        let parts: Vec<String> = match &e.kind {
+                            ExprKind::Ident(n) => vec![n.clone()],
+                            ExprKind::Hier(p) => p.clone(),
                             _ => vec![],
                         };
                         match parts.split_last() {
@@ -212,15 +212,15 @@ impl<'a> Compiler<'a> {
             }
             let target = match (port_conns.get(pn), parent_scope) {
                 (Some(Some(e)), Some(ps)) => {
-                    let parts: Vec<String> = match e {
-                        Expr::Ident(n) => vec![n.clone()],
-                        Expr::Hier(p) => p.clone(),
+                    let parts: Vec<String> = match &e.kind {
+                        ExprKind::Ident(n) => vec![n.clone()],
+                        ExprKind::Hier(p) => p.clone(),
                         // an element of an array of interface instances: `ifs[2]` (constant)
-                        Expr::Index(b, i) if matches!(**b, Expr::Ident(_) | Expr::Hier(_)) => {
+                        ExprKind::Index(b, i) if matches!(b.kind, ExprKind::Ident(_) | ExprKind::Hier(_)) => {
                             let k = self.const_int(i, ps)?;
-                            let mut p = match &**b {
-                                Expr::Ident(n) => vec![n.clone()],
-                                Expr::Hier(p) => p.clone(),
+                            let mut p = match &b.kind {
+                                ExprKind::Ident(n) => vec![n.clone()],
+                                ExprKind::Hier(p) => p.clone(),
                                 _ => unreachable!(),
                             };
                             let last = p.pop().unwrap();
@@ -341,8 +341,8 @@ impl<'a> Compiler<'a> {
     /// Whether an assignment target names a variable declared outside programs (programs
     /// should update those in the Reactive region, which is not modelled).
     pub(crate) fn lvalue_outside_program(&self, e: &Expr, sid: usize) -> bool {
-        match e {
-            Expr::Ident(n) => {
+        match &e.kind {
+            ExprKind::Ident(n) => {
                 let mut x = Some(sid);
                 while let Some(s) = x {
                     if self.scopes[s].syms.contains_key(n) {
@@ -352,11 +352,11 @@ impl<'a> Compiler<'a> {
                 }
                 false
             }
-            Expr::Hier(p) => self.hier_scope(&p[..p.len() - 1], sid).is_some_and(|s| !self.in_program(s)),
-            Expr::Index(b, _) | Expr::Range(b, ..) | Expr::IndexedRange(b, ..) | Expr::Member(b, _) => {
+            ExprKind::Hier(p) => self.hier_scope(&p[..p.len() - 1], sid).is_some_and(|s| !self.in_program(s)),
+            ExprKind::Index(b, _) | ExprKind::Range(b, ..) | ExprKind::IndexedRange(b, ..) | ExprKind::Member(b, _) => {
                 self.lvalue_outside_program(b, sid)
             }
-            Expr::Concat(v) => v.iter().any(|x| self.lvalue_outside_program(x, sid)),
+            ExprKind::Concat(v) => v.iter().any(|x| self.lvalue_outside_program(x, sid)),
             _ => false,
         }
     }
@@ -478,18 +478,18 @@ impl<'a> Compiler<'a> {
     /// lvalue when `e` is one.
     pub(crate) fn slice_bits(&mut self, e: &Expr, off: i64, w: i64, sid: usize) -> R<Expr> {
         let num = |v: i64| -> Expr {
-            let e = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
+            let e = ExprKind::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
             if v < 0 {
-                Expr::Unary(UnOp::Neg, Box::new(e))
+                ExprKind::Unary(UnOp::Neg, Box::new(e.into())).into()
             } else {
-                e
+                e.into()
             }
         };
         // declared index range of a plain signal
         let decl = |me: &Self, b: &Expr| -> Option<(i64, i64)> {
-            let sym = match b {
-                Expr::Ident(nm) => me.lookup(nm, sid),
-                Expr::Hier(p) => me.lookup_hier(p, sid),
+            let sym = match &b.kind {
+                ExprKind::Ident(nm) => me.lookup(nm, sid),
+                ExprKind::Hier(p) => me.lookup_hier(p, sid),
                 _ => None,
             };
             match sym {
@@ -498,16 +498,16 @@ impl<'a> Compiler<'a> {
             }
         };
         let off_of = |(msb, lsb): (i64, i64), i: i64| if msb >= lsb { i - lsb } else { lsb - i };
-        match e {
-            Expr::Range(b, m, l) if decl(self, b).is_some() => {
+        match &e.kind {
+            ExprKind::Range(b, m, l) if decl(self, b).is_some() => {
                 if let (Some(m), Some(l)) = (self.const_value(m, sid), self.const_value(l, sid)) {
                     let d = decl(self, b).unwrap();
                     let lo = off_of(d, m).min(off_of(d, l));
                     return self.slice_bits(&b.clone(), lo + off, w, sid);
                 }
             }
-            Expr::Index(b, i) if decl(self, b).is_some() && off == 0 && w == 1 => return Ok(e.clone()),
-            Expr::Concat(parts) => {
+            ExprKind::Index(b, i) if decl(self, b).is_some() && off == 0 && w == 1 => return Ok(e.clone()),
+            ExprKind::Concat(parts) => {
                 // walk from the LSB part; collect the pieces that overlap the slice
                 let mut pieces = Vec::new();
                 let mut base = 0i64;
@@ -522,16 +522,16 @@ impl<'a> Compiler<'a> {
                     base += pw;
                 }
                 pieces.reverse();
-                return Ok(if pieces.len() == 1 { pieces.pop().unwrap() } else { Expr::Concat(pieces) });
+                return Ok(if pieces.len() == 1 { pieces.pop().unwrap() } else { ExprKind::Concat(pieces).into() });
             }
             _ => {}
         }
         let d = decl(self, e).unwrap_or((self.type_of(e, sid)?.width() as i64 - 1, 0));
         let idx = |o: i64| if d.0 >= d.1 { d.1 + o } else { d.1 - o };
         Ok(if w == 1 {
-            Expr::Index(Box::new(e.clone()), Box::new(num(idx(off))))
+            ExprKind::Index(Box::new(e.clone()), Box::new(num(idx(off)))).into()
         } else {
-            Expr::Range(Box::new(e.clone()), Box::new(num(idx(off + w - 1))), Box::new(num(idx(off))))
+            ExprKind::Range(Box::new(e.clone()), Box::new(num(idx(off + w - 1))), Box::new(num(idx(off)))).into()
         })
     }
 }

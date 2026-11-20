@@ -423,7 +423,7 @@ impl Lower {
         let (unit, prec) = self.eff_timescale().unwrap_or((0, 0));
         let scale = |v: f64, k: i32| if k >= 0 { v * 10f64.powi(k) } else { v / 10f64.powi(-k) };
         let steps = scale(v, e - prec).round();
-        Expr::Real(scale(steps, prec - unit))
+        ExprKind::Real(scale(steps, prec - unit)).into()
     }
 
     fn package_module(&self, name: String, items: Vec<Item>, imports: Vec<String>) -> Module {
@@ -596,8 +596,8 @@ impl Lower {
             ports.push((pn, x, dir, e.loc.line));
         }
         for (pn, x, dir, line) in ports {
-            let one = Expr::Num(crate::ast::dec(1));
-            let msb = Expr::Binary(BinOp::Sub, Box::new(Expr::SysCall("$bits".into(), vec![x.clone()])), Box::new(one));
+            let one = ExprKind::Num(crate::ast::dec(1));
+            let msb = ExprKind::Binary(BinOp::Sub, Box::new(ExprKind::SysCall("$bits".into(), vec![x.clone()]).into()), Box::new(one.into()));
             items.push(Item::Decl(Decl {
                 dir: Some(dir),
                 kind: NetKind::Wire,
@@ -607,7 +607,7 @@ impl Lower {
                 strength: None,
                 delay: None,
                 signed: false,
-                range: Some((msb, Expr::Num(crate::ast::dec(0)))),
+                range: Some((msb.into(), ExprKind::Num(crate::ast::dec(0)).into())),
                 range_written: false,
                 packed: vec![],
                 type_param: None,
@@ -617,7 +617,7 @@ impl Lower {
                 static_: false,
                 line,
             }));
-            let p = Expr::Ident(pn);
+            let p: Expr = ExprKind::Ident(pn).into();
             let (lhs, rhs) = if dir == Dir::Input { (x, p) } else { (p, x) };
             items.push(Item::ContAssign { delay: None, lhs, rhs, strength: None, line });
         }
@@ -627,13 +627,13 @@ impl Lower {
     /// Port expression `e` of port `pn` and the direction of the signals it names.
     fn port_expr(&mut self, pn: &str, e: &t::Expr, items: &[Item]) -> Result<(Expr, Dir)> {
         fn names(e: &Expr, out: &mut Vec<String>) -> bool {
-            match e {
-                Expr::Ident(n) => {
+            match &e.kind {
+                ExprKind::Ident(n) => {
                     out.push(n.clone());
                     true
                 }
-                Expr::Index(a, _) | Expr::Range(a, _, _) | Expr::IndexedRange(a, _, _, _) => names(a, out),
-                Expr::Concat(v) => v.iter().all(|x| names(x, out)),
+                ExprKind::Index(a, _) | ExprKind::Range(a, _, _) | ExprKind::IndexedRange(a, _, _, _) => names(a, out),
+                ExprKind::Concat(v) => v.iter().all(|x| names(x, out)),
                 _ => false,
             }
         }

@@ -28,14 +28,14 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.lv_norm(e, sid) {
             return self.targets(&n, sid, out);
         }
-        match e {
-            Expr::Concat(v) => {
+        match &e.kind {
+            ExprKind::Concat(v) => {
                 for x in v {
                     self.targets(x, sid, out)?;
                 }
                 Ok(())
             }
-            Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
+            ExprKind::Ident(_) | ExprKind::Hier(_) => match self.resolve_base(e, sid)? {
                 Some(expr::Base::Sig(s)) => {
                     let s = self.redir(s);
                     let i = self.sig(s);
@@ -47,7 +47,7 @@ impl<'a> Compiler<'a> {
                 }
                 _ => self.err("assignment to a non-variable"),
             },
-            Expr::Index(a, i) => {
+            ExprKind::Index(a, i) => {
                 if let Some(arr) = self.array_of(a, sid) {
                     let info = self.sig(arr).clone();
                     if self.is_const(i, sid) {
@@ -65,7 +65,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
                 // bit of an array element: mem[i][b]
-                if let Expr::Index(arr_e, ai) = &**a {
+                if let ExprKind::Index(arr_e, ai) = &a.kind {
                     if let Some(arr) = self.array_of(arr_e, sid) {
                         let info = self.sig(arr).clone();
                         let ix = self.index_of(ai, sid, false, -info.arr_lo)?;
@@ -109,14 +109,14 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(())
             }
-            Expr::Range(a, m, l) => {
+            ExprKind::Range(a, m, l) => {
                 let (Some(mv), Some(lv)) = (self.select_bound(m, sid)?, self.select_bound(l, sid)?) else {
                     // an x/z bound: nothing is written
                     out.push((None, 1));
                     return Ok(());
                 };
                 let pw = ((mv - lv).abs() + 1) as u32;
-                if let Expr::Index(arr_e, ai) = &**a {
+                if let ExprKind::Index(arr_e, ai) = &a.kind {
                     if let Some(arr) = self.array_of(arr_e, sid) {
                         let info = self.sig(arr).clone();
                         let ix = self.index_of(ai, sid, false, -info.arr_lo)?;
@@ -151,13 +151,13 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(())
             }
-            Expr::IndexedRange(a, base, width, up) => {
+            ExprKind::IndexedRange(a, base, width, up) => {
                 if !self.is_const_expr(width, sid) {
                     return self.err("the width of an indexed part-select is not a constant expression");
                 }
                 let pw = self.const_int(width, sid)? as u32;
                 // of an array element: mem[i][b +: w]
-                if let Expr::Index(arr_e, ai) = &**a {
+                if let ExprKind::Index(arr_e, ai) = &a.kind {
                     if let Some(arr) = self.array_of(arr_e, sid) {
                         let info = self.sig(arr).clone();
                         let ix = self.index_of(ai, sid, false, -info.arr_lo)?;
@@ -174,7 +174,7 @@ impl<'a> Compiler<'a> {
                 out.push((Some(Target::DynPart { sig: s, ix, w: pw }), pw));
                 Ok(())
             }
-            Expr::Member(..) => self.member_error(e, sid),
+            ExprKind::Member(..) => self.member_error(e, sid),
             _ => self.err("invalid assignment target"),
         }
     }
@@ -210,7 +210,7 @@ impl<'a> Compiler<'a> {
     /// Store a value (slot, width) into an lvalue.
     pub(crate) fn store_value(&mut self, lhs: &Lhs, slot: u32, w: u32, mode: StoreMode) -> R<()> {
         // an element of a queue or dynamic array
-        if let Lhs::Expr(e @ Expr::Index(a, _), s) = lhs {
+        if let Lhs::Expr(e @ Expr { kind: ExprKind::Index(a, _), .. }, s) = lhs {
             if self.sigs.has_dyn {
                 if let Some((_, elem)) = self.dyn_arr_type(a, *s)? {
                     let v = if elem.leaf == crate::types::Leaf::Bits && elem.class == NONE { self.resize(slot, w, elem.w, false) } else { slot };
@@ -338,20 +338,20 @@ impl<'a> Compiler<'a> {
             let slot = c.sig(h).slot;
             c.emit(Instr::Copy { d: slot, s: v, w });
             frame.push((slot, rt::words(w)));
-            Ok(Box::new(Expr::Ident(name)))
+            Ok(Box::new(ExprKind::Ident(name).into()))
         };
-        Ok(match lhs {
-            Expr::Index(a, i) => {
+        Ok(match &lhs.kind {
+            ExprKind::Index(a, i) => {
                 let a = self.capture_indices(a, sid, frame)?;
-                Expr::Index(Box::new(a), cap(self, i, frame)?)
+                ExprKind::Index(Box::new(a), cap(self, i, frame)?).into()
             }
-            Expr::Range(a, m, l) => Expr::Range(Box::new(self.capture_indices(a, sid, frame)?), m.clone(), l.clone()),
-            Expr::IndexedRange(a, b, w, up) => {
+            ExprKind::Range(a, m, l) => ExprKind::Range(Box::new(self.capture_indices(a, sid, frame)?), m.clone(), l.clone()).into(),
+            ExprKind::IndexedRange(a, b, w, up) => {
                 let a = self.capture_indices(a, sid, frame)?;
-                Expr::IndexedRange(Box::new(a), cap(self, b, frame)?, w.clone(), *up)
+                ExprKind::IndexedRange(Box::new(a), cap(self, b, frame)?, w.clone(), *up).into()
             }
-            Expr::Concat(v) => Expr::Concat(v.iter().map(|x| self.capture_indices(x, sid, frame)).collect::<R<_>>()?),
-            e => e.clone(),
+            ExprKind::Concat(v) => ExprKind::Concat(v.iter().map(|x| self.capture_indices(x, sid, frame)).collect::<R<_>>()?).into(),
+            e => e.clone().into(),
         })
     }
 
@@ -377,8 +377,8 @@ impl<'a> Compiler<'a> {
                     if re != REdge::Any && self.type_of(e, sid)?.is_real() {
                         return self.err("an edge of a real value");
                     }
-                    match e {
-                        Expr::Ident(_) | Expr::Hier(_) => match self.resolve_base(e, sid)? {
+                    match &e.kind {
+                        ExprKind::Ident(_) | ExprKind::Hier(_) => match self.resolve_base(e, sid)? {
                             Some(expr::Base::Sig(s)) => trig.push((s, re, NONE)),
                             _ => return self.err("event expression is not a signal"),
                         },
@@ -459,6 +459,10 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn stmt(&mut self, st: &Stmt, sid: usize) -> R<()> {
+        self.at(0, |c| c.stmt_here(st, sid))
+    }
+
+    fn stmt_here(&mut self, st: &Stmt, sid: usize) -> R<()> {
         match st {
             Stmt::Null => {}
             Stmt::Block { name, decls, imports, params, stmts, fork } => {
@@ -709,7 +713,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
                 // an element of an array property (`obj.q[i] = v`)
-                if self.sigs.has_dyn && !*nonblocking && timing.is_none() && matches!(lhs, Expr::Index(..)) && self.dyn_elem_assign(lhs, rhs, sid)? {
+                if self.sigs.has_dyn && !*nonblocking && timing.is_none() && matches!(&lhs.kind, ExprKind::Index(..)) && self.dyn_elem_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
                 // a property of an object
@@ -1105,28 +1109,29 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Trigger { name, line } => {
                 self.line = *line;
-                let e = if name.contains('.') {
-                    Expr::Hier(name.split('.').map(String::from).collect())
+                let e: Expr = if name.contains('.') {
+                    ExprKind::Hier(name.split('.').map(String::from).collect())
                 } else {
-                    Expr::Ident(name.clone())
-                };
+                    ExprKind::Ident(name.clone())
+                }
+                .into();
                 let Some(expr::Base::Sig(s)) = self.resolve_base(&e, sid)? else {
                     return self.err(format!("'{name}' is not an event"));
                 };
                 // the trigger time, for `.triggered` (before the waiters wake)
                 let mut te = e.clone();
-                match &mut te {
-                    Expr::Ident(n) => *n = format!("{n}$trig"),
-                    Expr::Hier(p) => {
+                match &mut te.kind {
+                    ExprKind::Ident(n) => *n = format!("{n}$trig"),
+                    ExprKind::Hier(p) => {
                         let l = p.last_mut().unwrap();
                         *l = format!("{l}$trig");
                     }
                     _ => {}
                 }
                 // (only module-level events have one)
-                let hidden = match &te {
-                    Expr::Ident(n) => self.lookup(n, sid),
-                    Expr::Hier(p) => self.lookup_hier(p, sid),
+                let hidden = match &te.kind {
+                    ExprKind::Ident(n) => self.lookup(n, sid),
+                    ExprKind::Hier(p) => self.lookup_hier(p, sid),
                     _ => None,
                 };
                 if let Some(Sym::Sig(ht)) = hidden {
@@ -1220,20 +1225,20 @@ impl<'a> Compiler<'a> {
             }
             v.push(match a {
                 None => FmtArg::Empty,
-                Some(Expr::Str(s)) => FmtArg::Lit(s.clone()),
+                Some(Expr { kind: ExprKind::Str(s), .. }) => FmtArg::Lit(s.clone()),
                 // a parameter with a string literal value prints as text (as the reference)
-                Some(e @ Expr::Ident(n)) if self.is_str_param(n, sid) => {
+                Some(e @ Expr { kind: ExprKind::Ident(n), .. }) if self.is_str_param(n, sid) => {
                     let (s, w, _) = self.self_expr(e, sid)?;
                     FmtArg::Str { s, w }
                 }
                 Some(e) if self.type_of(e, sid)?.is_str() => FmtArg::SVar { s: self.str_expr(e, sid)? },
                 Some(e) if self.type_of(e, sid)?.is_real() => {
-                    let fixed = matches!(e, Expr::SysCall(n, a) if n == "$realtime" && a.is_empty())
+                    let fixed = matches!(&e.kind, ExprKind::SysCall(n, a) if n == "$realtime" && a.is_empty())
                         .then(|| (self.scopes[sid].tunit - self.scopes[sid].tprec).clamp(0, 18) as u8);
                     FmtArg::Real { s: self.rexpr(e, sid)?, fixed }
                 }
                 // a string value (an enum's .name())
-                Some(Expr::SysCall(n, a)) if n == "$__str" => {
+                Some(Expr { kind: ExprKind::SysCall(n, a), .. }) if n == "$__str" => {
                     let (s, w, _) = self.self_expr(&a[0], sid)?;
                     FmtArg::Str { s, w }
                 }
@@ -1253,13 +1258,13 @@ impl<'a> Compiler<'a> {
             return Ok(()); // a constant function call
         }
         let mut b = lhs;
-        while let Expr::Member(a, _) | Expr::Index(a, _) | Expr::Range(a, ..) | Expr::IndexedRange(a, ..) = b {
+        while let ExprKind::Member(a, _) | ExprKind::Index(a, _) | ExprKind::Range(a, ..) | ExprKind::IndexedRange(a, ..) = &b.kind {
             b = a;
         }
-        let sym = match b {
-            Expr::Concat(v) => return v.iter().try_for_each(|x| self.check_proc_target(x, sid)),
-            Expr::Ident(n) => self.lookup(n, sid),
-            Expr::Hier(p) => self.lookup_hier(p, sid),
+        let sym = match &b.kind {
+            ExprKind::Concat(v) => return v.iter().try_for_each(|x| self.check_proc_target(x, sid)),
+            ExprKind::Ident(n) => self.lookup(n, sid),
+            ExprKind::Hier(p) => self.lookup_hier(p, sid),
             _ => None,
         };
         if let Some(Sym::Sig(s)) = sym {
@@ -1283,20 +1288,20 @@ impl<'a> Compiler<'a> {
         if lvalue {
             // (through members and selects: `s.x[1] <= v` writes `s`)
             let mut b = e;
-            while let Expr::Member(a, _) | Expr::Index(a, _) | Expr::Range(a, ..) | Expr::IndexedRange(a, ..) = b {
-                member |= matches!(b, Expr::Member(..));
+            while let ExprKind::Member(a, _) | ExprKind::Index(a, _) | ExprKind::Range(a, ..) | ExprKind::IndexedRange(a, ..) = &b.kind {
+                member |= matches!(&b.kind, ExprKind::Member(..));
                 b = a;
             }
-            if let Expr::Concat(_) = b {
+            if let ExprKind::Concat(_) = &b.kind {
                 self.lvalue_bases(b, sid, &mut v);
             } else {
-                match b {
-                    Expr::Ident(n) => {
+                match &b.kind {
+                    ExprKind::Ident(n) => {
                         if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
                             v.push(s);
                         }
                     }
-                    Expr::Hier(p) => {
+                    ExprKind::Hier(p) => {
                         if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
                             v.push(s);
                         }
@@ -1346,7 +1351,7 @@ impl<'a> Compiler<'a> {
             }
             "$error" | "$warning" | "$info" | "$fatal" => {
                 let mut a = args;
-                if name == "$fatal" && !a.is_empty() && !matches!(a[0], Some(Expr::Str(_))) {
+                if name == "$fatal" && !a.is_empty() && !matches!(a[0], Some(Expr { kind: ExprKind::Str(_), .. })) {
                     a = &a[1..];
                 }
                 let prefix = match name {
@@ -1356,11 +1361,11 @@ impl<'a> Compiler<'a> {
                     _ => "FATAL: ",
                 };
                 // `ERROR: file:line: message` and the time and scope below it
-                let mut v = vec![Some(Expr::Str(format!("{prefix}{}: ", self.loc()).replace('%', "%%")))];
+                let mut v = vec![Some(ExprKind::Str(format!("{prefix}{}: ", self.loc()).replace('%', "%%")).into())];
                 v.extend(a.iter().cloned());
                 let pad = " ".repeat(prefix.len());
-                v.push(Some(Expr::Str(format!("\n{pad}Time: %0d  Scope: %m"))));
-                v.push(Some(Expr::SysCall("$__ticks".into(), Vec::new())));
+                v.push(Some(ExprKind::Str(format!("\n{pad}Time: %0d  Scope: %m")).into()));
+                v.push(Some(ExprKind::SysCall("$__ticks".into(), Vec::new()).into()));
                 let args = self.fmt_args(&v, sid)?;
                 let texp = self.texp(sid);
                 self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix: "", texp, radix: 'd' }));
@@ -1375,7 +1380,7 @@ impl<'a> Compiler<'a> {
                     "value is unhandled for priority or unique case statement"
                 };
                 let msg = format!("WARNING: {}: {what}\n         Time: %0d  Scope: %m", self.loc());
-                let a = [Some(Expr::Str(msg)), Some(Expr::SysCall("$__ticks".into(), Vec::new()))];
+                let a = [Some(ExprKind::Str(msg).into()), Some(ExprKind::SysCall("$__ticks".into(), Vec::new()).into())];
                 let args = self.fmt_args(&a, sid)?;
                 let texp = self.texp(sid);
                 self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix: "", texp, radix: 'd' }));
@@ -1416,10 +1421,10 @@ impl<'a> Compiler<'a> {
                     // hidden signal, so a change of other bits of its signals does not print
                     let mut trig = Vec::new();
                     for e in args.iter().flatten() {
-                        match e {
-                            Expr::Str(_) => {}
-                            Expr::SysCall(n, v) if v.is_empty() && matches!(n.as_str(), "$time" | "$stime" | "$realtime") => {}
-                            Expr::Ident(_) | Expr::Hier(_) => {
+                        match &e.kind {
+                            ExprKind::Str(_) => {}
+                            ExprKind::SysCall(n, v) if v.is_empty() && matches!(n.as_str(), "$time" | "$stime" | "$realtime") => {}
+                            ExprKind::Ident(_) | ExprKind::Hier(_) => {
                                 let mut reads = Vec::new();
                                 self.reads_expr(e, sid, &mut reads);
                                 trig.extend(reads.into_iter().map(|(s, x)| (s, REdge::Any, x)));
@@ -1481,8 +1486,8 @@ impl<'a> Compiler<'a> {
                     };
                     let units = int(self, 0, self.gprec as i64)? as i32;
                     let prec = int(self, 1, 0)?.max(0) as usize;
-                    let suffix = match args.get(2) {
-                        Some(Some(Expr::Str(s))) => s.clone(),
+                    let suffix = match args.get(2).map(|a| a.as_ref().map(|a| &a.kind)) {
+                        Some(Some(ExprKind::Str(s))) => s.clone(),
                         Some(Some(_)) => return self.err("$timeformat: the suffix must be a string literal"),
                         _ => String::new(),
                     };
@@ -1496,13 +1501,13 @@ impl<'a> Compiler<'a> {
                 // the name is printed as given (bit selects of vectors as [i:i])
                 let (target, item) = match args.first() {
                     Some(Some(e)) => {
-                        let (base, sel) = match e {
-                            Expr::Index(b, i) => (&**b, Some(&**i)),
+                        let (base, sel) = match &e.kind {
+                            ExprKind::Index(b, i) => (&**b, Some(&**i)),
                             _ => (e, None),
                         };
-                        let parts: Vec<String> = match base {
-                            Expr::Ident(n) => vec![n.clone()],
-                            Expr::Hier(p) => p.clone(),
+                        let parts: Vec<String> = match &base.kind {
+                            ExprKind::Ident(n) => vec![n.clone()],
+                            ExprKind::Hier(p) => p.clone(),
                             _ => return self.err("$printtimescale needs a scope name"),
                         };
                         // the longest prefix that names a scope
@@ -1558,12 +1563,12 @@ impl<'a> Compiler<'a> {
             }
             "$finish" | "$stop" => {
                 // $finish(0) prints nothing; otherwise "file:line: $finish called at <time> (<unit>)"
-                let quiet = matches!(args.first(), Some(Some(Expr::Num(n))) if n.digits == "0");
+                let quiet = matches!(args.first(), Some(Some(Expr { kind: ExprKind::Num(n), .. })) if n.digits == "0");
                 let loc = if quiet { String::new() } else { format!("{}", self.loc()) };
                 self.emit(sys(SysTask::Finish { loc, stop: name == "$stop", fatal: false }));
             }
             "$dumpfile" => {
-                if let Some(Some(Expr::Str(f))) = args.first() {
+                if let Some(Some(Expr { kind: ExprKind::Str(f), .. })) = args.first() {
                     self.emit(sys(SysTask::DumpFile(f.clone())));
                 }
             }
@@ -1617,7 +1622,7 @@ impl<'a> Compiler<'a> {
                         let msg = format!(
                             "WARNING: {loc}: {name}: The behaviour for reg[...] mem[N:0]; {name}(\"...\", mem); changed in the 1364-2005 standard. To avoid ambiguity, use mem[0:N] or explicit range parameters {name}(\"...\", mem, start, stop);. Defaulting to 1364-2005 behavior."
                         );
-                        let a = [Some(Expr::Str(msg.replace('%', "%%")))];
+                        let a = [Some(ExprKind::Str(msg.replace('%', "%%")).into())];
                         let args = self.fmt_args(&a, sid)?;
                         let texp = self.texp(sid);
                         self.emit(sys(SysTask::Display { nl: true, args, scope: scope.clone(), fd: None, prefix: "", texp, radix: 'd' }));
@@ -1627,7 +1632,7 @@ impl<'a> Compiler<'a> {
             }
             "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
                 // called as a task: the result is dropped
-                let a: Vec<Expr> = args.iter().map(|a| a.clone().unwrap_or(Expr::Str(String::new()))).collect();
+                let a: Vec<Expr> = args.iter().map(|a| a.clone().unwrap_or(ExprKind::Str(String::new()).into())).collect();
                 self.file_read(name, &a, sid)?;
             }
             "$fflush" => {
@@ -1702,7 +1707,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::For { init, cond, step, body, .. } => {
                 // the loop variable is written before it is read
-                if let Stmt::Assign { lhs: Expr::Ident(n), .. } = &**init {
+                if let Stmt::Assign { lhs: Expr { kind: ExprKind::Ident(n), .. }, .. } = &**init {
                     if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
                         locals.push(s);
                     }
@@ -1740,7 +1745,7 @@ impl<'a> Compiler<'a> {
             Stmt::TaskCall { name, args, .. } => {
                 // a void function called as a statement: like a call in an expression
                 if self.subr.func_reads.get() && self.lookup_func(name, sid).is_some_and(|(f, _)| !f.is_task) {
-                    self.reads_expr(&Expr::Call(name.clone(), args.clone()), sid, out);
+                    self.reads_expr(&Expr::from(ExprKind::Call(name.clone(), args.clone())), sid, out);
                     return;
                 }
                 for a in args {

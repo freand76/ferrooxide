@@ -52,7 +52,7 @@ impl Lower {
                 for e in v {
                     out.push(self.expr(e)?);
                 }
-                Ok(Expr::SysCall("$__delays".into(), out))
+                Ok(ExprKind::SysCall("$__delays".into(), out).into())
             }
         }
     }
@@ -317,14 +317,14 @@ impl Lower {
                     None => r,
                     Some(b) => {
                         let t::ExprKind::Ident(n) = &lhs.kind else { return self.unsupported(s.loc, "this generate loop step") };
-                        Expr::Binary(b, Box::new(Expr::Ident(n.clone())), Box::new(r))
+                        ExprKind::Binary(b, Box::new(ExprKind::Ident(n.clone()).into()), Box::new(r)).into()
                     }
                 })
             }
             t::StmtKind::Expr(t::Expr { kind: t::ExprKind::IncDec { inc, e, .. }, .. }) => {
                 let t::ExprKind::Ident(n) = &e.kind else { return self.unsupported(s.loc, "this generate loop step") };
                 let op = if *inc { BinOp::Add } else { BinOp::Sub };
-                (&**e, Expr::Binary(op, Box::new(Expr::Ident(n.clone())), Box::new(Expr::Num(dec(1)))))
+                (&**e, ExprKind::Binary(op, Box::new(ExprKind::Ident(n.clone()).into()), Box::new(ExprKind::Num(dec(1)).into())).into())
             }
             _ => return self.unsupported(s.loc, "this generate loop step"),
         };
@@ -387,7 +387,7 @@ impl Lower {
                             None => None,
                         },
                     ),
-                    t::PortConn::Named(n, None) => Conn::Named(n.clone(), Some(Expr::Ident(n.clone()))),
+                    t::PortConn::Named(n, None) => Conn::Named(n.clone(), Some(ExprKind::Ident(n.clone()).into())),
                     t::PortConn::Wildcard => Conn::Wildcard,
                 });
             }
@@ -465,7 +465,7 @@ impl Lower {
             if sv {
                 let t = self.data_type_req(rt)?;
                 let (k, sg, r, packed) = t.decl_parts();
-                range = if !packed.is_empty() { Some((super::types::minus_one(t.width()), Expr::Num(dec(0)))) } else { r };
+                range = if !packed.is_empty() { Some((super::types::minus_one(t.width()), ExprKind::Num(dec(0)).into())) } else { r };
                 signed = sg;
                 ret_kind = match k {
                     NetKind::Class => NetKind::Class,
@@ -478,7 +478,7 @@ impl Lower {
                 ret_type = Some(std::rc::Rc::new(t));
             } else {
                 signed = rt.signed == Some(true);
-                let width = |w: u64| Some((Expr::Num(dec(w - 1)), Expr::Num(dec(0))));
+                let width = |w: u64| Some((Expr::from(ExprKind::Num(dec(w - 1))), Expr::from(ExprKind::Num(dec(0)))));
                 match &rt.kind {
                     t::TypeKind::Void => ret_kind = NetKind::Int(0),
                     t::TypeKind::Implicit | t::TypeKind::Int(t::IntKw::Logic | t::IntKw::Reg | t::IntKw::Bit) => {}
@@ -510,7 +510,7 @@ impl Lower {
                         // several packed dimensions: the whole width, the type keeps them
                         let kind = if matches!(rt.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
                         let t = super::types::SvType::vector(kind, signed, self.dims(ds, rt.loc)?);
-                        range = Some((super::types::minus_one(t.width()), Expr::Num(dec(0))));
+                        range = Some((super::types::minus_one(t.width()), ExprKind::Num(dec(0)).into()));
                         ret_type = Some(std::rc::Rc::new(t));
                     }
                     _ => return self.err(rt.loc, "packed dimensions after a return type that has a width"),

@@ -38,9 +38,9 @@ impl<'a> Compiler<'a> {
 
     /// The string variable (or array of strings) a name refers to.
     fn string_var(&self, e: &Expr, sid: usize) -> Option<u32> {
-        let sym = match e {
-            Expr::Ident(n) => self.lookup(n, sid),
-            Expr::Hier(p) => self.lookup_hier(p, sid),
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid),
+            ExprKind::Hier(p) => self.lookup_hier(p, sid),
             _ => None,
         };
         match sym {
@@ -51,14 +51,14 @@ impl<'a> Compiler<'a> {
 
     /// A string variable that is not an array (`s[i]` is its character).
     pub(crate) fn is_string_scalar(&self, e: &Expr, sid: usize) -> bool {
-        self.string_var(e, sid).is_some_and(|s| self.sig(s).depth == 0) || matches!(e, Expr::Ident(n) if self.is_string_param(n, sid))
+        self.string_var(e, sid).is_some_and(|s| self.sig(s).depth == 0) || matches!(&e.kind, ExprKind::Ident(n) if self.is_string_param(n, sid))
     }
 
     /// `base.method` of a call name whose base is a string variable.
     pub(crate) fn str_method<'n>(&self, name: &'n str, sid: usize) -> Option<(Expr, &'n str)> {
         let (base, m) = name.rsplit_once('.')?;
         let parts: Vec<String> = base.split('.').map(String::from).collect();
-        let e = if parts.len() == 1 { Expr::Ident(parts[0].clone()) } else { Expr::Hier(parts) };
+        let e: Expr = if parts.len() == 1 { ExprKind::Ident(parts[0].clone()) } else { ExprKind::Hier(parts) }.into();
         if self.is_string_scalar(&e, sid) {
             return Some((e, m));
         }
@@ -67,7 +67,7 @@ impl<'a> Compiler<'a> {
         if arr.contains(['.', '[']) {
             return None;
         }
-        let a = Expr::Ident(arr.to_string());
+        let a: Expr = ExprKind::Ident(arr.to_string()).into();
         let strs = self.string_var(&a, sid).is_some_and(|s| self.sig(s).depth > 0)
             || self.dyn_var(&a, sid).is_some_and(|(_, el)| el.leaf == crate::types::Leaf::Str && el.class == NONE);
         if !strs {
@@ -75,23 +75,23 @@ impl<'a> Compiler<'a> {
         }
         let i = match idx.strip_prefix('@') {
             Some(n) => ferrooxide_front::lower::hier_index_expr(n.parse().ok()?)?,
-            None => Expr::Num(ferrooxide_front::ast::Number {
+            None => ExprKind::Num(ferrooxide_front::ast::Number {
                 size: None,
                 signed: true,
                 base: 10,
                 based: false,
                 digits: idx.parse::<u64>().ok()?.to_string(),
                 fill: false,
-            }),
+            }).into(),
         };
-        Some((Expr::Index(Box::new(a), Box::new(i)), m))
+        Some((ExprKind::Index(Box::new(a.into()), Box::new(i)).into(), m))
     }
 
     /// The text of a constant string operand: a literal or a `string` parameter.
     fn const_text(&self, e: &Expr, sid: usize) -> Option<Vec<u8>> {
-        let c = match e {
-            Expr::Str(t) => return Some(t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect()),
-            Expr::Ident(n) if self.is_string_param(n, sid) => match self.lookup(n, sid)? {
+        let c = match &e.kind {
+            ExprKind::Str(t) => return Some(t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect()),
+            ExprKind::Ident(n) if self.is_string_param(n, sid) => match self.lookup(n, sid)? {
                 Sym::Const(c) => c,
                 _ => return None,
             },
@@ -103,8 +103,8 @@ impl<'a> Compiler<'a> {
     /// A comparison of constant strings, at least one a `string` parameter (`P == "AB"`,
     /// `P < Q`): its 1-bit result (6.16.8: lexicographic). None for other expressions.
     pub(crate) fn const_str_cmp(&self, e: &Expr, sid: usize) -> Option<Const> {
-        let Expr::Binary(op, a, b) = e else { return None };
-        let param = |x: &Expr| matches!(x, Expr::Ident(n) if self.is_string_param(n, sid));
+        let ExprKind::Binary(op, a, b) = &e.kind else { return None };
+        let param = |x: &Expr| matches!(&x.kind, ExprKind::Ident(n) if self.is_string_param(n, sid));
         if !param(a) && !param(b) {
             return None;
         }
@@ -123,6 +123,10 @@ impl<'a> Compiler<'a> {
 
     /// Compile `e` as a string: the slot of its handle.
     pub(crate) fn str_expr(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        self.at(e.line, |c| c.str_expr_here(e, sid))
+    }
+
+    fn str_expr_here(&mut self, e: &Expr, sid: usize) -> R<u32> {
         if let Some(h) = self.str_member(e, sid)? {
             return Ok(h);
         }
@@ -144,33 +148,33 @@ impl<'a> Compiler<'a> {
                 return Ok(v);
             }
         }
-        match e {
-            Expr::Str(t) => {
+        match &e.kind {
+            ExprKind::Str(t) => {
                 // (the lexer keeps one char per byte of the literal)
                 let b: Vec<u8> = t.chars().map(|c| c as u32 as u8).filter(|&c| c != 0).collect();
                 let h = self.intern(&b);
                 return Ok(self.const_slot(&Const::from_i64(h as i64, 64, false)));
             }
             // a `string` parameter: its text
-            Expr::Ident(n) if self.is_string_param(n, sid) => {
+            ExprKind::Ident(n) if self.is_string_param(n, sid) => {
                 if let Some(b) = self.const_text(e, sid) {
                     let h = self.intern(&b);
                     return Ok(self.const_slot(&Const::from_i64(h as i64, 64, false)));
                 }
             }
-            Expr::Ident(_) | Expr::Hier(_) if self.string_var(e, sid).is_some() => {
+            ExprKind::Ident(_) | ExprKind::Hier(_) if self.string_var(e, sid).is_some() => {
                 if let Some(Base::Sig(s)) = self.resolve_base(e, sid)? {
                     return Ok(self.sig(s).slot);
                 }
             }
-            Expr::Index(a, _) if self.array_of(a, sid).is_some_and(|s| self.sig_type(s).is_str()) => {
+            ExprKind::Index(a, _) if self.array_of(a, sid).is_some_and(|s| self.sig_type(s).is_str()) => {
                 // an element of a string array: its handle
                 self.code.str_raw = true;
                 let r = self.expr(e, sid, 64, false);
                 self.code.str_raw = false;
                 return r;
             }
-            Expr::Concat(v) => {
+            ExprKind::Concat(v) => {
                 let mut acc: Option<u32> = None;
                 for x in v {
                     let h = self.str_expr(x, sid)?;
@@ -181,15 +185,15 @@ impl<'a> Compiler<'a> {
                 }
                 return Ok(match acc {
                     Some(h) => h,
-                    None => self.str_expr(&Expr::Str(String::new()), sid)?,
+                    None => self.str_expr(&Expr::from(ExprKind::Str(String::new())), sid)?,
                 });
             }
-            Expr::Repl(n, v) => {
-                let h = self.str_expr(&Expr::Concat(v.clone()), sid)?;
+            ExprKind::Repl(n, v) => {
+                let h = self.str_expr(&Expr::from(ExprKind::Concat(v.clone())), sid)?;
                 let c = self.expr(n, sid, 32, true)?;
                 return Ok(self.str_op(StrOp::Repl, h, c, NONE, 0));
             }
-            Expr::Cond(c, t, f) => {
+            ExprKind::Cond(c, t, f) => {
                 // an unknown condition gives the empty string (as in the reference)
                 let (cv, cw) = self.truth(c, sid)?;
                 let d = self.tmp(64);
@@ -215,14 +219,14 @@ impl<'a> Compiler<'a> {
                 let fv = self.str_expr(f, sid)?;
                 let eq = self.tmp(1);
                 self.emit(Instr::Str { op: StrOp::Cmp(CmpOp::Eq), d: eq, a: tv, b: fv, c: NONE, w: 1 });
-                let e0 = self.str_expr(&Expr::Str(String::new()), sid)?;
+                let e0 = self.str_expr(&Expr::from(ExprKind::Str(String::new())), sid)?;
                 self.emit(Instr::Mux { d, c: eq, cw: 1, t: tv, f: e0, w: 64 });
                 let h = self.here();
                 self.patch(j, h);
                 self.patch(j2, h);
                 return Ok(d);
             }
-            Expr::Call(name, args) => {
+            ExprKind::Call(name, args) => {
                 if let Some((base, m)) = self.str_method(name, sid) {
                     if STR_METHODS.contains(&m) {
                         return self.str_method_call(&base, m, args, sid);
@@ -237,10 +241,10 @@ impl<'a> Compiler<'a> {
                 }
             }
             // string'(e)
-            Expr::SysCall(n, args) if n == "$__tostring" && args.len() == 1 => {
+            ExprKind::SysCall(n, args) if n == "$__tostring" && args.len() == 1 => {
                 return self.str_expr(&args[0], sid);
             }
-            Expr::SysCall(n, args) if n == "$sformatf" || n == "$psprintf" => {
+            ExprKind::SysCall(n, args) if n == "$sformatf" || n == "$psprintf" => {
                 let opt: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
                 let fa = self.fmt_args(&opt, sid)?;
                 let d = self.tmp(64);
@@ -379,7 +383,7 @@ impl<'a> Compiler<'a> {
 
     /// `s[i] = c` for a string `s`: putc. Returns false if `lhs` is no such target.
     pub(crate) fn str_index_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
-        let Expr::Index(base, i) = lhs else { return Ok(false) };
+        let ExprKind::Index(base, i) = &lhs.kind else { return Ok(false) };
         if !self.is_string_scalar(base, sid) {
             return Ok(false);
         }

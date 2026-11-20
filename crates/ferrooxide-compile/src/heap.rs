@@ -178,7 +178,7 @@ impl<'a> Compiler<'a> {
         if self.classes.list.is_empty() {
             return Ok(None);
         }
-        let Expr::Member(b, m) = e else { return Ok(None) };
+        let ExprKind::Member(b, m) = &e.kind else { return Ok(None) };
         let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
         if self.class_const(c, m).is_some() {
             return Ok(None);
@@ -224,10 +224,10 @@ impl<'a> Compiler<'a> {
     /// `base.m` / `base.m(args)` where `base` is an array and `m` one of its methods:
     /// (base, method, arguments).
     pub(crate) fn dyn_method_expr<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(Expr, &'e str, &'e [Expr])>> {
-        let (o, m, args): (&Expr, &str, &[Expr]) = match e {
-            Expr::MethodCall(o, m, args) => (o, m, args),
-            Expr::Member(o, m) => (o, m, &[]),
-            Expr::Call(name, args) => match self.dyn_method(name, sid) {
+        let (o, m, args): (&Expr, &str, &[Expr]) = match &e.kind {
+            ExprKind::MethodCall(o, m, args) => (o, m, args),
+            ExprKind::Member(o, m) => (o, m, &[]),
+            ExprKind::Call(name, args) => match self.dyn_method(name, sid) {
                 Some((base, _, _, m)) => {
                     let m = &name[name.len() - m.len()..];
                     return Ok(Some((base, m, args)));
@@ -280,9 +280,9 @@ impl<'a> Compiler<'a> {
 
     /// The queue or dynamic array variable a name refers to: (signal, element type).
     pub(crate) fn dyn_var(&self, e: &Expr, sid: usize) -> Option<(u32, Elem)> {
-        let sym = match e {
-            Expr::Ident(n) => self.lookup(n, sid)?,
-            Expr::Hier(p) => self.lookup_hier(p, sid)?,
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid)?,
+            ExprKind::Hier(p) => self.lookup_hier(p, sid)?,
             _ => return None,
         };
         match sym {
@@ -302,17 +302,17 @@ impl<'a> Compiler<'a> {
             return None;
         }
         let parts: Vec<String> = base.split('.').map(String::from).collect();
-        let e = if parts.len() == 1 { Expr::Ident(parts[0].clone()) } else { Expr::Hier(parts) };
+        let e: Expr = if parts.len() == 1 { ExprKind::Ident(parts[0].clone()) } else { ExprKind::Hier(parts) }.into();
         let (s, elem) = self.dyn_var(&e, sid)?;
         Some((e, s, elem, m))
     }
 
     /// `q.size` without parentheses as a call.
     pub(crate) fn dyn_hier_call(&self, e: &Expr, sid: usize) -> Option<Expr> {
-        let Expr::Hier(p) = e else { return None };
+        let ExprKind::Hier(p) = &e.kind else { return None };
         let name = p.join(".");
         self.dyn_method(&name, sid)?;
-        Some(Expr::Call(name, vec![]))
+        Some(ExprKind::Call(name, vec![]).into())
     }
 
     /// The kind and element type of the array `e` names, without code.
@@ -327,9 +327,9 @@ impl<'a> Compiler<'a> {
 
     /// The type of an element read, a method call or a slice of a queue or dynamic array.
     pub(crate) fn dyn_type_of(&mut self, e: &Expr, sid: usize) -> R<Option<Type>> {
-        match e {
-            Expr::Index(a, _) => Ok(self.dyn_arr_type(a, sid)?.map(|(_, el)| el.ty())),
-            Expr::Range(a, ..) => Ok(self.dyn_arr_type(a, sid)?.map(|(kind, elem)| Type::Dyn { kind, elem })),
+        match &e.kind {
+            ExprKind::Index(a, _) => Ok(self.dyn_arr_type(a, sid)?.map(|(_, el)| el.ty())),
+            ExprKind::Range(a, ..) => Ok(self.dyn_arr_type(a, sid)?.map(|(kind, elem)| Type::Dyn { kind, elem })),
             _ => {
                 if let Some(am) = self.arr_method(e, sid)? {
                     return self.arr_method_type(&am, sid).map(Some);
@@ -349,19 +349,19 @@ impl<'a> Compiler<'a> {
     /// `e` with `$` replaced by the last index of the queue `q`.
     fn subst_last(e: &Expr, q: &Expr) -> Expr {
         let b = |x: &Expr| Box::new(Self::subst_last(x, q));
-        match e {
-            Expr::Last => {
-                let size = match q {
-                    Expr::Ident(n) => Expr::Call(format!("{n}.size"), vec![]),
-                    Expr::Hier(p) => Expr::Call(format!("{}.size", p.join(".")), vec![]),
-                    q => Expr::MethodCall(Box::new(q.clone()), "size".into(), vec![]),
+        match &e.kind {
+            ExprKind::Last => {
+                let size = match &q.kind {
+                    ExprKind::Ident(n) => ExprKind::Call(format!("{n}.size"), vec![]),
+                    ExprKind::Hier(p) => ExprKind::Call(format!("{}.size", p.join(".")), vec![]),
+                    q => ExprKind::MethodCall(Box::new(q.clone().into()), "size".into(), vec![]),
                 };
-                Expr::Binary(BinOp::Sub, Box::new(size), Box::new(Expr::Num(ferrooxide_front::ast::dec(1))))
+                ExprKind::Binary(BinOp::Sub, Box::new(size.into()), Box::new(ExprKind::Num(ferrooxide_front::ast::dec(1)).into())).into()
             }
-            Expr::Unary(op, a) => Expr::Unary(*op, b(a)),
-            Expr::Binary(op, x, y) => Expr::Binary(*op, b(x), b(y)),
-            Expr::Cond(c, x, y) => Expr::Cond(b(c), b(x), b(y)),
-            e => e.clone(),
+            ExprKind::Unary(op, a) => ExprKind::Unary(*op, b(a)).into(),
+            ExprKind::Binary(op, x, y) => ExprKind::Binary(*op, b(x), b(y)).into(),
+            ExprKind::Cond(c, x, y) => ExprKind::Cond(b(c), b(x), b(y)).into(),
+            e => e.clone().into(),
         }
     }
 
@@ -374,6 +374,10 @@ impl<'a> Compiler<'a> {
     /// An element read or a method call of a queue or dynamic array: the slot of the value
     /// (an element as stored: `elem.w` bits, a real's bits, a string handle) and its type.
     pub(crate) fn dyn_value(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Type)>> {
+        self.at(e.line, |c| c.dyn_value_here(e, sid))
+    }
+
+    fn dyn_value_here(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Type)>> {
         if let Some(am) = self.arr_method(e, sid)? {
             if crate::arrmeth::REDUCE.contains(&am.m.as_str()) {
                 return self.arr_reduce(&am, sid).map(Some);
@@ -381,7 +385,7 @@ impl<'a> Compiler<'a> {
             let t = self.arr_method_type(&am, sid)?;
             return Ok(Some((self.arr_locate(&am, sid)?, t)));
         }
-        if let Expr::Index(a, i) = e {
+        if let ExprKind::Index(a, i) = &e.kind {
             if self.dyn_arr_type(a, sid)?.is_none() {
                 return Ok(None);
             }
@@ -506,16 +510,16 @@ impl<'a> Compiler<'a> {
             }
             return Ok((a.slot, false));
         }
-        match e {
-            Expr::NewArray(..) | Expr::Concat(_) | Expr::Pattern(..) | Expr::Range(..) if assoc => {
+        match &e.kind {
+            ExprKind::NewArray(..) | ExprKind::Concat(_) | ExprKind::Pattern(..) | ExprKind::Range(..) if assoc => {
                 self.err("expected an associative array value")
             }
-            Expr::NewArray(n, init) => {
+            ExprKind::NewArray(n, init) => {
                 let size = self.expr(n, sid, 32, true)?;
                 // `new[n](v)` with a single real or string: every element is v (as in the
                 // reference; the standard wants an array, ICARUS_NOTES 16)
                 let (fill, src) = match init {
-                    Some(i) if !matches!(**i, Expr::Pattern(..) | Expr::Concat(_)) && !matches!(self.type_of(i, sid)?, Type::Dyn { .. }) => {
+                    Some(i) if !matches!(i.kind, ExprKind::Pattern(..) | ExprKind::Concat(_)) && !matches!(self.type_of(i, sid)?, Type::Dyn { .. }) => {
                         if elem.leaf == Leaf::Bits {
                             return self.err("`new[n](v)` with a value that is not an array is not supported for vector elements");
                         }
@@ -528,10 +532,10 @@ impl<'a> Compiler<'a> {
                 self.heap_op(HeapOp::New, d, fill, size, src, elem);
                 Ok((d, true))
             }
-            Expr::Concat(_) | Expr::Pattern(None, _) => {
-                let parts: Vec<&Expr> = match e {
-                    Expr::Concat(v) => v.iter().collect(),
-                    Expr::Pattern(_, items) => {
+            ExprKind::Concat(_) | ExprKind::Pattern(None, _) => {
+                let parts: Vec<&Expr> = match &e.kind {
+                    ExprKind::Concat(v) => v.iter().collect(),
+                    ExprKind::Pattern(_, items) => {
                         let mut v = Vec::new();
                         for it in items {
                             match it {
@@ -558,14 +562,14 @@ impl<'a> Compiler<'a> {
                 }
                 Ok((d, true))
             }
-            Expr::Range(a, lo, hi) if self.dyn_arr_type(a, sid)?.is_some() => {
+            ExprKind::Range(a, lo, hi) if self.dyn_arr_type(a, sid)?.is_some() => {
                 let (lo, hi) = (self.dyn_index(a, lo, sid)?, self.dyn_index(a, hi, sid)?);
                 let arr = self.dyn_arr(a, sid)?.unwrap();
                 let d = self.tmp(64);
                 self.heap_op(HeapOp::Slice, d, arr.slot, lo, hi, arr.elem);
                 Ok((d, true))
             }
-            Expr::Cond(c, x, y) => {
+            ExprKind::Cond(c, x, y) => {
                 // (both arrays are made; the condition picks one)
                 let k = if assoc { DynKind::Assoc(KeyKind::Str) } else { DynKind::Queue(0) };
                 let x = self.dyn_owned(x, k, elem, sid)?;
@@ -577,7 +581,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Mux { d, c: b, cw: 1, t: x, f: y, w: 64 });
                 Ok((d, true))
             }
-            Expr::Call(name, args) if self.lookup_func(name, sid).is_some() => {
+            ExprKind::Call(name, args) if self.lookup_func(name, sid).is_some() => {
                 // a function returning an array: its result variable
                 match self.call(name, args, sid, false)? {
                     (Some(slot), _, _) => Ok((slot, false)),
@@ -622,15 +626,15 @@ impl<'a> Compiler<'a> {
     /// An assignment pattern with more elements than bounded queue `name` holds: the
     /// reference's compile-time warning and the pattern cut to the first elements.
     pub(crate) fn bounded_pattern(&mut self, rhs: &Expr, lhs: &Expr, sid: usize) -> Option<Expr> {
-        let Expr::Pattern(None, items) = rhs else { return None };
+        let ExprKind::Pattern(None, items) = &rhs.kind else { return None };
         let (s, _) = self.dyn_var(lhs, sid)?;
         let Type::Dyn { kind: DynKind::Queue(b), .. } = self.sig_type(s) else { return None };
         if b == 0 || items.len() <= b as usize {
             return None;
         }
-        let name = match lhs {
-            Expr::Ident(n) => n.clone(),
-            Expr::Hier(p) => p.last().cloned().unwrap_or_default(),
+        let name = match &lhs.kind {
+            ExprKind::Ident(n) => n.clone(),
+            ExprKind::Hier(p) => p.last().cloned().unwrap_or_default(),
             _ => return None,
         };
         let w = format!(
@@ -638,7 +642,7 @@ impl<'a> Compiler<'a> {
             items.len()
         );
         self.diag.warnings.push(w);
-        Some(Expr::Pattern(None, items[..b as usize].to_vec()))
+        Some(ExprKind::Pattern(None, items[..b as usize].to_vec()).into())
     }
 
     /// Free the array of the queue variable assigned by `lhs` (before a blocking assignment
@@ -652,7 +656,7 @@ impl<'a> Compiler<'a> {
 
     /// `q[i] = v` of a queue or dynamic array: returns false if `lhs` is no such element.
     pub(crate) fn dyn_elem_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
-        let Expr::Index(a, _) = lhs else { return Ok(false) };
+        let ExprKind::Index(a, _) = &lhs.kind else { return Ok(false) };
         let Some((_, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
         let v = self.elem_value(rhs, elem, sid)?;
         self.dyn_elem_store(lhs, v, sid)
@@ -671,12 +675,12 @@ impl<'a> Compiler<'a> {
     /// the part stored there and the element written back (at once, also for `<=`). False
     /// if `lhs` is no such target.
     pub(crate) fn dyn_part_store(&mut self, lhs: &Expr, slot: u32, w: u32, sid: usize) -> R<bool> {
-        if !matches!(lhs, Expr::Member(..) | Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..)) {
+        if !matches!(&lhs.kind, ExprKind::Member(..) | ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..)) {
             return Ok(false);
         }
         let n = self.lv_norm(lhs, sid).unwrap_or_else(|| lhs.clone());
-        let (Expr::Index(el, _) | Expr::Range(el, ..) | Expr::IndexedRange(el, ..)) = &n else { return Ok(false) };
-        let Expr::Index(a, i) = &**el else { return Ok(false) };
+        let (ExprKind::Index(el, _) | ExprKind::Range(el, ..) | ExprKind::IndexedRange(el, ..)) = &n.kind else { return Ok(false) };
+        let ExprKind::Index(a, i) = &el.kind else { return Ok(false) };
         let Some((kind, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
         if elem.leaf != Leaf::Bits || elem.class != NONE {
             return Ok(false);
@@ -693,12 +697,13 @@ impl<'a> Compiler<'a> {
             None => self.arr_op(&arr, HeapOp::Get, ts, ix, NONE),
         }
         let name = self.sig(tmp).name.clone();
-        let part = match n {
-            Expr::Index(_, b) => Expr::Index(Box::new(Expr::Ident(name)), b),
-            Expr::Range(_, m, l) => Expr::Range(Box::new(Expr::Ident(name)), m, l),
-            Expr::IndexedRange(_, b, pw, up) => Expr::IndexedRange(Box::new(Expr::Ident(name)), b, pw, up),
+        let part: Expr = match n.kind {
+            ExprKind::Index(_, b) => ExprKind::Index(Box::new(ExprKind::Ident(name).into()), b),
+            ExprKind::Range(_, m, l) => ExprKind::Range(Box::new(ExprKind::Ident(name).into()), m, l),
+            ExprKind::IndexedRange(_, b, pw, up) => ExprKind::IndexedRange(Box::new(ExprKind::Ident(name).into()), b, pw, up),
             _ => unreachable!(),
-        };
+        }
+        .into();
         self.store_value(&Lhs::Expr(&part, sid), slot, w, StoreMode::Blocking)?;
         match Self::assoc_key(&arr) {
             Some(key) => self.assoc_op(AssocOp::Set, NONE, arr.slot, ix, ts, elem, key),
@@ -727,7 +732,7 @@ impl<'a> Compiler<'a> {
     /// Store the element value in slot `v` to `q[i]` of a queue or dynamic array: returns
     /// false if `lhs` is no such element.
     pub(crate) fn dyn_elem_store(&mut self, lhs: &Expr, v: u32, sid: usize) -> R<bool> {
-        let Expr::Index(a, i) = lhs else { return Ok(false) };
+        let ExprKind::Index(a, i) = &lhs.kind else { return Ok(false) };
         let Some((kind, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
         let ix = match kind {
             DynKind::Assoc(key) => self.key_value(i, key, sid)?,
@@ -747,7 +752,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn dyn_task(&mut self, name: &str, args: &[Expr], sid: usize) -> R<bool> {
         if let Some((b, m)) = name.rsplit_once('.') {
             let parts: Vec<String> = b.split('.').map(String::from).collect();
-            let base = if parts.len() == 1 { Expr::Ident(parts[0].clone()) } else { Expr::Hier(parts) };
+            let base: Expr = if parts.len() == 1 { ExprKind::Ident(parts[0].clone()) } else { ExprKind::Hier(parts) }.into();
             if self.fixed_order(&base, m, args, sid)? {
                 return Ok(true);
             }
@@ -823,7 +828,7 @@ impl<'a> Compiler<'a> {
             }
             // a value method called for its effect (pop) or ignored (size)
             _ => {
-                self.dyn_value(&Expr::MethodCall(Box::new(base.clone()), m.to_string(), args.to_vec()), sid)?;
+                self.dyn_value(&Expr::from(ExprKind::MethodCall(Box::new(base.clone()), m.to_string(), args.to_vec())), sid)?;
                 return Ok(true);
             }
         };

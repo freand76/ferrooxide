@@ -54,10 +54,10 @@ impl<'a> Compiler<'a> {
                 self.zero_init(t);
                 self.scopes[sid].syms.insert(tname.clone(), Sym::Sig(t));
                 let body: &'a Stmt = Box::leak(Box::new(Stmt::Timed {
-                    timing: Timing::Event(EventCtl::List(vec![(Edge::Any, Expr::Ident(src.clone()))])),
+                    timing: Timing::Event(EventCtl::List(vec![(Edge::Any, ExprKind::Ident(src.clone()).into())])),
                     body: Box::new(Stmt::Assign {
-                        lhs: Expr::Ident(tname.clone()),
-                        rhs: Expr::SysCall("$time".into(), vec![]),
+                        lhs: ExprKind::Ident(tname.clone()).into(),
+                        rhs: ExprKind::SysCall("$time".into(), vec![]).into(),
                         nonblocking: false,
                         timing: None,
                         line: self.line,
@@ -83,30 +83,30 @@ impl<'a> Compiler<'a> {
             self.scopes[sid].syms.insert(pname.clone(), Sym::Sig(port));
             // (rise, fall, turn-off) of each path
             let comps = |d: &Expr| -> [Expr; 3] {
-                match d {
-                    Expr::SysCall(n, v) if n == "$__delays" => {
+                match &d.kind {
+                    ExprKind::SysCall(n, v) if n == "$__delays" => {
                         let t = v.get(2).cloned().unwrap_or_else(|| {
-                            Expr::Cond(
-                                Box::new(Expr::Binary(BinOp::Lt, Box::new(v[0].clone()), Box::new(v[1].clone()))),
+                            ExprKind::Cond(
+                                Box::new(ExprKind::Binary(BinOp::Lt, Box::new(v[0].clone()), Box::new(v[1].clone())).into()),
                                 Box::new(v[0].clone()),
                                 Box::new(v[1].clone()),
-                            )
+                            ).into()
                         });
                         [v[0].clone(), v[1].clone(), t]
                     }
-                    d => [d.clone(), d.clone(), d.clone()],
+                    d => [d.clone().into(), d.clone().into(), d.clone().into()],
                 }
             };
-            let tvar = |s: &str| Expr::Ident(times[s].clone());
+            let tvar = |s: &str| Expr::from(ExprKind::Ident(times[s].clone()));
             let mut sel: [Expr; 3] = comps(&paths[0].1);
             let mut tmax = tvar(&paths[0].0);
             for (src, d) in &paths[1..] {
-                let newer = Box::new(Expr::Binary(BinOp::Gt, Box::new(tvar(src)), Box::new(tmax.clone())));
+                let newer = Box::new(Expr::from(ExprKind::Binary(BinOp::Gt, Box::new(tvar(src)), Box::new(tmax.clone()))));
                 let c = comps(d);
                 for k in 0..3 {
-                    sel[k] = Expr::Cond(newer.clone(), Box::new(c[k].clone()), Box::new(sel[k].clone()));
+                    sel[k] = ExprKind::Cond(newer.clone(), Box::new(c[k].clone()), Box::new(sel[k].clone())).into();
                 }
-                tmax = Expr::Cond(newer, Box::new(tvar(src)), Box::new(tmax));
+                tmax = ExprKind::Cond(newer, Box::new(tvar(src)), Box::new(tmax)).into();
             }
             // a multi-bit output: the LSB's transition picks the delay for all bits (as Icarus)
             let multi = info.width > 1;
@@ -116,11 +116,11 @@ impl<'a> Compiler<'a> {
                     self.diag.warnings.push(w);
                 }
             }
-            let delay = Expr::SysCall(if multi { "$__pathdelays" } else { "$__delays" }.into(), sel.to_vec());
+            let delay = ExprKind::SysCall(if multi { "$__pathdelays" } else { "$__delays" }.into(), sel.to_vec());
             self.push_job(Job::Assign {
-                lhs: Expr::Ident(pname),
-                rhs: Expr::Ident(dst.clone()),
-                delay: Some(delay),
+                lhs: ExprKind::Ident(pname).into(),
+                rhs: ExprKind::Ident(dst.clone()).into(),
+                delay: Some(delay.into()),
                 scope: sid,
                 line: self.line,
             });

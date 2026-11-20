@@ -430,8 +430,8 @@ impl Lower {
 impl Lower {
     /// The variable of static property `m` of the class of `e` (a class variable or `C`).
     pub(crate) fn static_prop(&self, e: &Expr, m: &str) -> Option<String> {
-        let class = match e {
-            Expr::Ident(v) => self.vars.get(v).and_then(|t| t.0.class.clone()).or_else(|| self.classes.contains_key(v).then(|| v.clone()))?,
+        let class = match &e.kind {
+            ExprKind::Ident(v) => self.vars.get(v).and_then(|t| t.0.class.clone()).or_else(|| self.classes.contains_key(v).then(|| v.clone()))?,
             _ => return None,
         };
         self.classes.get(&class)?.statics.get(m).cloned()
@@ -449,63 +449,63 @@ fn this_name(n: &str, c: &ClassNames, locals: &[String]) -> bool {
 }
 
 fn this() -> Box<Expr> {
-    Box::new(Expr::Ident("this".into()))
+    Box::new(ExprKind::Ident("this".into()).into())
 }
 
 /// `this.` before the class's names in an expression.
 fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
-    match e {
-        Expr::Ident(n) if static_name(n, c, locals).is_some() => *e = Expr::Ident(static_name(n, c, locals).unwrap().clone()),
-        Expr::Hier(p) if static_name(&p[0], c, locals).is_some() => p[0] = static_name(&p[0], c, locals).unwrap().clone(),
-        Expr::Member(o, n) if matches!(&**o, Expr::Ident(t) if t == "this") && c.statics.contains_key(n.as_str()) => {
-            *e = Expr::Ident(c.statics[n.as_str()].clone())
+    match &mut e.kind {
+        ExprKind::Ident(n) if static_name(n, c, locals).is_some() => *e = ExprKind::Ident(static_name(n, c, locals).unwrap().clone()).into(),
+        ExprKind::Hier(p) if static_name(&p[0], c, locals).is_some() => p[0] = static_name(&p[0], c, locals).unwrap().clone(),
+        ExprKind::Member(o, n) if matches!(&o.kind, ExprKind::Ident(t) if t == "this") && c.statics.contains_key(n.as_str()) => {
+            *e = ExprKind::Ident(c.statics[n.as_str()].clone()).into()
         }
-        Expr::Ident(n) if this_name(n, c, locals) => *e = Expr::Member(this(), n.clone()),
-        Expr::Hier(p) if this_name(&p[0], c, locals) => {
-            let mut x = Expr::Member(this(), p[0].clone());
+        ExprKind::Ident(n) if this_name(n, c, locals) => *e = ExprKind::Member(this(), n.clone()).into(),
+        ExprKind::Hier(p) if this_name(&p[0], c, locals) => {
+            let mut x = ExprKind::Member(this(), p[0].clone());
             for m in &p[1..] {
-                x = Expr::Member(Box::new(x), m.clone());
+                x = ExprKind::Member(Box::new(x.into()), m.clone());
             }
-            *e = x;
+            *e = x.into();
         }
-        Expr::Call(n, args) => {
+        ExprKind::Call(n, args) => {
             args.iter_mut().for_each(|a| this_expr(a, c, locals));
             if static_call(n, c, locals) {
-                *e = Expr::StaticCall(c.name.clone(), n.clone(), std::mem::take(args));
+                *e = ExprKind::StaticCall(c.name.clone(), n.clone(), std::mem::take(args)).into();
             } else if let Some(x) = this_call(n, c, locals) {
-                *e = Expr::MethodCall(Box::new(x.0), x.1, std::mem::take(args));
+                *e = ExprKind::MethodCall(Box::new(x.0), x.1, std::mem::take(args)).into();
             }
         }
-        Expr::Index(a, b) => {
+        ExprKind::Index(a, b) => {
             this_expr(a, c, locals);
             this_expr(b, c, locals);
         }
-        Expr::Range(a, b, d) | Expr::IndexedRange(a, b, d, _) | Expr::Cond(a, b, d) => {
+        ExprKind::Range(a, b, d) | ExprKind::IndexedRange(a, b, d, _) | ExprKind::Cond(a, b, d) => {
             this_expr(a, c, locals);
             this_expr(b, c, locals);
             this_expr(d, c, locals);
         }
-        Expr::Unary(_, a) | Expr::Member(a, _) | Expr::NewCopy(a) | Expr::IncDec { e: a, .. } => this_expr(a, c, locals),
-        Expr::Binary(_, a, b) => {
+        ExprKind::Unary(_, a) | ExprKind::Member(a, _) | ExprKind::NewCopy(a) | ExprKind::IncDec { e: a, .. } => this_expr(a, c, locals),
+        ExprKind::Binary(_, a, b) => {
             this_expr(a, c, locals);
             this_expr(b, c, locals);
         }
-        Expr::Concat(v) | Expr::SysCall(_, v) | Expr::New(v) | Expr::NewTyped(_, v) | Expr::StaticCall(_, _, v) => {
+        ExprKind::Concat(v) | ExprKind::SysCall(_, v) | ExprKind::New(v) | ExprKind::NewTyped(_, v) | ExprKind::StaticCall(_, _, v) => {
             v.iter_mut().for_each(|a| this_expr(a, c, locals))
         }
-        Expr::Repl(n, v) => {
+        ExprKind::Repl(n, v) => {
             this_expr(n, c, locals);
             v.iter_mut().for_each(|a| this_expr(a, c, locals));
         }
-        Expr::MethodCall(o, _, args) => {
+        ExprKind::MethodCall(o, _, args) => {
             this_expr(o, c, locals);
             args.iter_mut().for_each(|a| this_expr(a, c, locals));
         }
-        Expr::ArrayWith { arr, with, .. } => {
+        ExprKind::ArrayWith { arr, with, .. } => {
             this_expr(arr, c, locals);
             this_expr(with, c, locals);
         }
-        Expr::Randomize { obj, vars, with, .. } => {
+        ExprKind::Randomize { obj, vars, with, .. } => {
             if let Some(o) = obj {
                 this_expr(o, c, locals);
             }
@@ -515,13 +515,13 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
                 this_citem(it, c, &mut l);
             }
         }
-        Expr::NewArray(n, init) => {
+        ExprKind::NewArray(n, init) => {
             this_expr(n, c, locals);
             if let Some(i) = init {
                 this_expr(i, c, locals);
             }
         }
-        Expr::Pattern(_, items) => {
+        ExprKind::Pattern(_, items) => {
             for it in items {
                 match it {
                     PatItem::Pos(x) | PatItem::Key(_, x) | PatItem::Default(x) => this_expr(x, c, locals),
@@ -544,17 +544,17 @@ fn static_call(n: &str, c: &ClassNames, locals: &[String]) -> bool {
 /// A call `m(...)` / `p.m(...)` of a method through `this`: (object, method).
 fn this_call(n: &str, c: &ClassNames, locals: &[String]) -> Option<(Expr, String)> {
     match n.rsplit_once('.') {
-        None if c.methods.contains(n) && !locals.iter().any(|l| l == n) => Some((Expr::Ident("this".into()), n.to_string())),
+        None if c.methods.contains(n) && !locals.iter().any(|l| l == n) => Some((ExprKind::Ident("this".into()).into(), n.to_string())),
         Some((obj, m)) => {
             let parts: Vec<&str> = obj.split('.').collect();
             if !this_name(parts[0], c, locals) {
                 return None;
             }
-            let mut x = Expr::Member(this(), parts[0].to_string());
+            let mut x = ExprKind::Member(this(), parts[0].to_string());
             for p in &parts[1..] {
-                x = Expr::Member(Box::new(x), p.to_string());
+                x = ExprKind::Member(Box::new(x.into()), p.to_string());
             }
-            Some((x, m.to_string()))
+            Some((x.into(), m.to_string()))
         }
         None => None,
     }

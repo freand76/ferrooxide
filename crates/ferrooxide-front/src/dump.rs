@@ -128,43 +128,43 @@ fn citem(it: &CItem) -> String {
 }
 
 pub fn expr(e: &Expr) -> String {
-    match e {
-        Expr::Num(n) => number(n),
-        Expr::Real(r) => format!("{r:?}"),
-        Expr::Str(s) => format!("{s:?}"),
-        Expr::Ident(n) => n.clone(),
-        Expr::Hier(p) => p.join("."),
-        Expr::Index(a, i) => format!("{}[{}]", expr(a), expr(i)),
-        Expr::Range(a, m, l) => format!("{}[{}:{}]", expr(a), expr(m), expr(l)),
-        Expr::IndexedRange(a, b, w, up) => {
+    match &e.kind {
+        ExprKind::Num(n) => number(n),
+        ExprKind::Real(r) => format!("{r:?}"),
+        ExprKind::Str(s) => format!("{s:?}"),
+        ExprKind::Ident(n) => n.clone(),
+        ExprKind::Hier(p) => p.join("."),
+        ExprKind::Index(a, i) => format!("{}[{}]", expr(a), expr(i)),
+        ExprKind::Range(a, m, l) => format!("{}[{}:{}]", expr(a), expr(m), expr(l)),
+        ExprKind::IndexedRange(a, b, w, up) => {
             format!("{}[{} {}: {}]", expr(a), expr(b), if *up { "+" } else { "-" }, expr(w))
         }
-        Expr::Unary(op, a) => format!("({}{})", unop(*op), expr(a)),
-        Expr::Binary(op, a, b) => format!("({} {} {})", expr(a), binop(*op), expr(b)),
-        Expr::Cond(c, a, b) => format!("({} ? {} : {})", expr(c), expr(a), expr(b)),
-        Expr::Concat(es) => format!("{{{}}}", list(es)),
-        Expr::Repl(n, es) => format!("{{{}{{{}}}}}", expr(n), list(es)),
-        Expr::Call(n, args) => format!("{n}({})", list(args)),
-        Expr::SysCall(n, args) => format!("{n}({})", list(args)),
-        Expr::Type(t) => format!("type({})", sv_type(t)),
-        Expr::Member(a, m) => format!("{}.{m}", expr(a)),
-        Expr::NewArray(n, init) => match init {
+        ExprKind::Unary(op, a) => format!("({}{})", unop(*op), expr(a)),
+        ExprKind::Binary(op, a, b) => format!("({} {} {})", expr(a), binop(*op), expr(b)),
+        ExprKind::Cond(c, a, b) => format!("({} ? {} : {})", expr(c), expr(a), expr(b)),
+        ExprKind::Concat(es) => format!("{{{}}}", list(es)),
+        ExprKind::Repl(n, es) => format!("{{{}{{{}}}}}", expr(n), list(es)),
+        ExprKind::Call(n, args) => format!("{n}({})", list(args)),
+        ExprKind::SysCall(n, args) => format!("{n}({})", list(args)),
+        ExprKind::Type(t) => format!("type({})", sv_type(t)),
+        ExprKind::Member(a, m) => format!("{}.{m}", expr(a)),
+        ExprKind::NewArray(n, init) => match init {
             Some(i) => format!("new[{}]({})", expr(n), expr(i)),
             None => format!("new[{}]", expr(n)),
         },
-        Expr::Last => "$".into(),
-        Expr::IncDec { prefix, inc, e } => {
+        ExprKind::Last => "$".into(),
+        ExprKind::IncDec { prefix, inc, e } => {
             let op = if *inc { "++" } else { "--" };
             if *prefix { format!("({op}{})", expr(e)) } else { format!("({}{op})", expr(e)) }
         }
-        Expr::Null => "null".into(),
-        Expr::EmptyArg => String::new(),
-        Expr::NamedArg(n, e) => format!(".{n}({})", expr(e)),
-        Expr::New(args) => format!("new({})", list(args)),
-        Expr::NewTyped(c, args) => format!("{c}::new({})", list(args)),
-        Expr::NewCopy(x) => format!("new {}", expr(x)),
-        Expr::MethodCall(o, m, args) => format!("{}.{m}({})", expr(o), list(args)),
-        Expr::Randomize { obj, vars, with, std } => {
+        ExprKind::Null => "null".into(),
+        ExprKind::EmptyArg => String::new(),
+        ExprKind::NamedArg(n, e) => format!(".{n}({})", expr(e)),
+        ExprKind::New(args) => format!("new({})", list(args)),
+        ExprKind::NewTyped(c, args) => format!("{c}::new({})", list(args)),
+        ExprKind::NewCopy(x) => format!("new {}", expr(x)),
+        ExprKind::MethodCall(o, m, args) => format!("{}.{m}({})", expr(o), list(args)),
+        ExprKind::Randomize { obj, vars, with, std } => {
             let f = match (obj, std) {
                 (Some(o), _) => format!("{}.randomize", expr(o)),
                 (None, true) => "std::randomize".to_string(),
@@ -173,9 +173,9 @@ pub fn expr(e: &Expr) -> String {
             let w = with.as_ref().map(|v| format!(" with {{ {}}}", citems(v))).unwrap_or_default();
             format!("{f}({}){w}", list(vars))
         }
-        Expr::ArrayWith { arr, method, depth, with } => format!("{}.{method}($it{depth}) with ({})", expr(arr), expr(with)),
-        Expr::StaticCall(c, m, args) => format!("{c}::{m}({})", list(args)),
-        Expr::Pattern(t, items) => {
+        ExprKind::ArrayWith { arr, method, depth, with } => format!("{}.{method}($it{depth}) with ({})", expr(arr), expr(with)),
+        ExprKind::StaticCall(c, m, args) => format!("{c}::{m}({})", list(args)),
+        ExprKind::Pattern(t, items) => {
             let items: Vec<String> = items
                 .iter()
                 .map(|it| match it {
@@ -743,7 +743,7 @@ impl Printer {
             },
             Stmt::Break { .. } => self.line("break;"),
             Stmt::Continue { .. } => self.line("continue;"),
-            Stmt::Discard { e: e @ Expr::ArrayWith { .. }, .. } => self.line(format!("{};", expr(e))),
+            Stmt::Discard { e: e @ Expr { kind: ExprKind::ArrayWith { .. }, .. }, .. } => self.line(format!("{};", expr(e))),
             Stmt::Discard { e, .. } => self.line(format!("void'({});", expr(e))),
             Stmt::WaitFork { .. } => self.line("wait fork;"),
         }
