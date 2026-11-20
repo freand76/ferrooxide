@@ -361,6 +361,8 @@ pub(crate) struct Packed {
     pub(crate) fields: Option<Rc<Fields>>,
     /// a real or string member of an unpacked struct (64 bits: f64 bits / a string handle)
     pub(crate) leaf: Leaf,
+    /// an enum (or a packed array of them): its constants
+    pub(crate) enum_names: Option<Rc<Vec<String>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -411,7 +413,7 @@ pub(crate) fn packed_of(t: &SvType) -> Packed {
         NetKind::String => Leaf::Str,
         _ => Leaf::Bits,
     };
-    Packed { dims, signed: t.signed, int_kind: t.int_kind, fields, leaf }
+    Packed { dims, signed: t.signed, int_kind: t.int_kind, fields, leaf, enum_names: t.enum_names.clone() }
 }
 
 /// The bit offsets of the real and string members in a value of type `t` at `off`.
@@ -555,6 +557,10 @@ impl<'a> Compiler<'a> {
     /// Give signal `s` (declared as `name` in scope `sid`) the layout of its declared type.
     pub(crate) fn set_layout(&mut self, s: u32, name: &str, p: Option<Packed>, sid: usize) -> R<()> {
         let Some(p) = p else { return Ok(()) };
+        let id = self.packed_enum(&p, sid);
+        if id != NONE {
+            self.enums.sigs.insert(s, id);
+        }
         if p.fields.is_some() {
             // member chains name the flat storage
             self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(s));

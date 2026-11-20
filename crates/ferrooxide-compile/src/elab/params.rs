@@ -221,6 +221,7 @@ impl<'a> Compiler<'a> {
     /// packed dimensions also gets its type (`$type:p`, for member and element selects) and
     /// its flat name.
     pub(crate) fn insert_param(&mut self, p: &ParamDecl, v: Sym, sid: usize) -> R<()> {
+        self.enum_const(p, sid);
         if let Some(t) = p.ty.as_ref().filter(|t| t.has_struct() || t.dims.len() > 1) {
             let t = self.resolve_type(t, sid)?;
             self.scopes[sid].syms.insert(format!("$type:{}", p.name), Sym::Type(Rc::new(t)));

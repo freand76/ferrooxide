@@ -33,6 +33,8 @@ pub(crate) struct Prop {
     /// a fixed-size array: (lowest index, number of elements) per dimension, stored flat
     /// (row-major)
     pub dims: Vec<(i64, u32)>,
+    /// the enum of the property (of an element; NONE: not an enum)
+    pub enum_id: u32,
 }
 
 impl Prop {
@@ -95,6 +97,10 @@ impl<'a> Compiler<'a> {
         for d in &c.props {
             self.line = d.line;
             let base_ty = self.prop_type(d, scope)?;
+            let enum_id = match d.ty.as_ref().and_then(|t| t.enum_names.clone().filter(|_| t.dims.len() <= 1)) {
+                Some(n) => self.enum_id(&n, scope),
+                None => NONE,
+            };
             let four = !matches!(d.kind, NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class);
             for n in &d.names {
                 // a queue, dynamic or associative array: a handle (0: empty)
@@ -111,7 +117,7 @@ impl<'a> Compiler<'a> {
                     let (a, b) = (self.const_int(a, scope)?, self.const_int(b, scope)?);
                     dims.push((a.min(b), ((a - b).abs() + 1) as u32));
                 }
-                let p = Prop { name: n.name.clone(), off: width, ty, dims };
+                let p = Prop { name: n.name.clone(), off: width, ty, dims, enum_id };
                 if four && n.heap.is_none() {
                     xs.push((width, p.size()));
                 }
@@ -255,7 +261,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Property `name` of class `c`, which is not an array.
-    fn scalar_prop(&self, c: u32, name: &str) -> R<Prop> {
+    pub(crate) fn scalar_prop(&self, c: u32, name: &str) -> R<Prop> {
         let p = self.prop(c, name)?;
         if !p.dims.is_empty() {
             return self.err(format!("the whole array property '{name}' is not supported here (only its elements)"));
@@ -265,7 +271,7 @@ impl<'a> Compiler<'a> {
 
     /// An element of a fixed-size array property (`obj.a[i][j]`): (the handle expression,
     /// the property, an index per dimension); None if `e` is no such element.
-    fn prop_elem<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(&'e Expr, Prop, Vec<&'e Expr>)>> {
+    pub(crate) fn prop_elem<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(&'e Expr, Prop, Vec<&'e Expr>)>> {
         let mut idx = Vec::new();
         let mut cur = e;
         while let Expr::Index(a, i) = cur {

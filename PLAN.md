@@ -395,8 +395,12 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    calls (also for recursion from a fork branch [recursive_task]), dynamic waiters for
    run-time targets. VPI (A4) on the same base.
 3. **sv-tests, invalid code** (`SV_TESTS.md`: 412 tests that must fail are accepted). The
-   checks that reject what the standard forbids, largest families first: conflicting
-   non-ANSI port declarations (37), enum base type and compatibility rules (21),
+   checks that reject what the standard forbids, largest families first. Done 2026-11-20:
+   conflicting non-ANSI port declarations (modules and subroutines: one port and one data
+   declaration, a typed port declaration is complete, equal ranges), enum base types and
+   enum assignment compatibility (`enums.rs`: an enum is its constant list plus the scope
+   declaring the constants; checked in assignments, initializers, returns and arguments;
+   any explicit cast passes, since `$__cast` keeps no target type). Next:
    `automatic` misuse (13), constant-expression checks (11), invalid lvalue selects, real
    as an index or in a concatenation, several continuous drivers of a variable, procedural
    assignment to a net, `local`/`protected` access, macro argument counts and `` `line ``

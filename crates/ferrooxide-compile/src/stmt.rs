@@ -660,6 +660,7 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
+                self.check_enum_assign(lhs, rhs, sid)?;
                 if self.in_program(sid) && self.lvalue_outside_program(lhs, sid) {
                     let (kind, region) = if *nonblocking { ("non-blocking", "Reactive-NBA") } else { ("blocking", "Reactive") };
                     self.warn(format!("Program {kind} assignments are not currently scheduled in the {region} region."));
@@ -1088,6 +1089,9 @@ impl<'a> Compiler<'a> {
                     return self.err("return outside of a function or task");
                 };
                 if let (Some(v), Some(r)) = (value, ret) {
+                    if let Some(&id) = self.enums.sigs.get(&r) {
+                        self.check_enum(id, v, sid)?;
+                    }
                     let w = self.sig(r).width;
                     let real = self.sig_type(r);
                     let l = self.layout(r);

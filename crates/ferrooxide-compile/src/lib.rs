@@ -6,6 +6,7 @@
 mod class;
 mod codegen;
 mod elab;
+mod enums;
 mod expr;
 mod heap;
 mod konst;
@@ -160,6 +161,7 @@ pub struct Compiler<'a> {
     pub(crate) nets: Nets,
     pub(crate) sigs: Sigs,
     pub(crate) classes: class::Classes<'a>,
+    pub(crate) enums: enums::Enums,
 }
 
 /// The module hierarchy: modules, instance scopes, packages, defparams.
@@ -520,6 +522,7 @@ impl<'a> Compiler<'a> {
             },
             subr: Subr::default(),
             classes: Default::default(),
+            enums: Default::default(),
             nets: Nets::default(),
             sigs: Sigs {
                 mem_limit_words: std::env::var("FX_MAX_MEM_MB")

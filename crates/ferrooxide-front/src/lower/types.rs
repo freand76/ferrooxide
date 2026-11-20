@@ -369,6 +369,27 @@ impl Lower {
                         None => return self.unsupported(b.loc, "this enum base type"),
                     },
                 };
+                // an integer atom type, or an integer vector type with at most one packed
+                // dimension (IEEE 1800-2017 6.19)
+                if let Some(b) = &et.base {
+                    let integral = matches!(base.kind, NetKind::Reg | NetKind::Wire | NetKind::Bit | NetKind::Integer | NetKind::Int(_) | NetKind::Time);
+                    let why = if !integral || base.class.is_some() {
+                        Some("is not an integer type")
+                    } else if base.fields.is_some() {
+                        Some("is a struct or union")
+                    } else if base.enum_names.is_some() {
+                        Some("is an enum")
+                    } else if !base.unpacked.is_empty() || base.heap.is_some() {
+                        Some("is an array")
+                    } else if base.dims.len() > 1 || (base.int_kind && !b.packed.is_empty()) {
+                        Some("has more than one packed dimension")
+                    } else {
+                        None
+                    };
+                    if let Some(why) = why {
+                        return self.err(b.loc, format!("the base type of an enum {why}"));
+                    }
+                }
                 let mut prev: Option<String> = None;
                 let mut names = Vec::new();
                 let (_, signed, range, _) = base.decl_parts();
@@ -408,13 +429,21 @@ impl Lower {
                                 None => num(0),
                             },
                         };
-                        self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value: Some(value), line: it.loc.line }));
+                        self.pending.push(Item::Param(ParamDecl { local: true, signed, range: range.clone(), integer: false, real: false, ty: None, name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
                         names.push(name.clone());
                         prev = Some(name);
                     }
                 }
                 let mut t = base;
-                t.enum_names = Some(Rc::new(names));
+                let names = Rc::new(names);
+                for it in self.pending.iter_mut() {
+                    if let Item::Param(p) = it {
+                        if p.enum_type.is_none() && p.local && names.contains(&p.name) {
+                            p.enum_type = Some(names.clone());
+                        }
+                    }
+                }
+                t.enum_names = Some(names);
                 // dimensions after the enum are outer to its base type's
                 let mut outer = self.dims(&ty.packed, ty.loc)?;
                 if !outer.is_empty() {
@@ -660,7 +689,7 @@ impl Lower {
         self.decl_type = pt.sv.clone().map(Rc::new);
         self.declare_var(&name, &[]);
         let ty = self.decl_type.clone();
-        Ok(ParamDecl { local, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, ty, name, value, line: d.loc.line })
+        Ok(ParamDecl { local, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, ty, name, value, enum_type: None, line: d.loc.line })
     }
 
     /// A declaration head: direction, net type, `var`, data type, strength and delay.

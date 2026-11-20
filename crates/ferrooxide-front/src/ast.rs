@@ -165,6 +165,9 @@ pub struct ParamDecl {
     pub name: String,
     /// None: a parameter port without a default, which every instance must override
     pub value: Option<Expr>,
+    /// an enum constant: the constants of its enum (shared by the enum's type, `SvType::
+    /// enum_names`, which makes them the enum's identity)
+    pub enum_type: Option<std::rc::Rc<Vec<String>>>,
     pub line: Line,
 }
 

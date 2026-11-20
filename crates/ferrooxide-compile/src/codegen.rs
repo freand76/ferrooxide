@@ -694,6 +694,7 @@ impl<'a> Compiler<'a> {
                 Job::Assign { lhs, rhs, delay, scope, line } => {
                     self.line = *line;
                     self.file = self.scopes[*scope].file.clone();
+                    self.check_enum_assign(lhs, rhs, *scope)?;
                     if delay.is_none() {
                         self.const_assign_init(lhs, rhs, *scope)?;
                     }

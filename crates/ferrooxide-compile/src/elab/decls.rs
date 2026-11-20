@@ -65,6 +65,9 @@ impl<'a> Compiler<'a> {
         name: &str,
         sid: usize,
     ) -> R<()> {
+        if let (0, Some(&id)) = (depth, self.enums.sigs.get(&s)) {
+            self.check_enum(id, init, sid)?;
+        }
         if kind == SigKind::Wire {
             self.nets.cur_strength = strength;
             self.push_job(Job::Assign {

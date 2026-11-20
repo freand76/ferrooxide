@@ -1582,6 +1582,7 @@ impl<'a> Compiler<'a> {
                 continue;
             }
             if dir == Dir::Input || dir == Dir::Inout {
+                self.check_enum_arg(ps, a, sid, true)?;
                 let pw = self.sig(ps).width;
                 let real = self.sig_type(ps);
                 let pl = self.layout(ps);
@@ -1633,6 +1634,7 @@ impl<'a> Compiler<'a> {
                     self.array_arg(ps, fscope, a, sid, false)?;
                     continue;
                 }
+                self.check_enum_arg(ps, a, sid, false)?;
                 let info = self.sig(ps).clone();
                 self.store_value(&stmt::Lhs::Expr(a, sid), info.slot, info.width, rt::StoreMode::Blocking)?;
             }
@@ -1721,6 +1723,7 @@ impl<'a> Compiler<'a> {
                 return self.err(format!("an array argument of recursive '{}' is not supported", f.name));
             }
             if dir == Dir::Input || dir == Dir::Inout {
+                self.check_enum_arg(ps, a, sid, true)?;
                 let pw = self.sig(ps).width;
                 let real = self.sig_type(ps);
                 let pl = self.layout(ps);
@@ -1768,6 +1771,7 @@ impl<'a> Compiler<'a> {
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
             if dir == Dir::Output || dir == Dir::Inout {
+                self.check_enum_arg(ps, a, sid, false)?;
                 let w = self.sig(ps).width;
                 self.store_value(&stmt::Lhs::Expr(a, sid), dsts[k], w, rt::StoreMode::Blocking)?;
                 k += 1;
