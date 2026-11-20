@@ -502,6 +502,8 @@ impl<'a> Compiler<'a> {
                         // a `static` variable of a subroutine's block: one for all calls (not in
                         // a constant function call, which starts afresh)
                         let shared = d.static_ && self.subr.inline_stack.last().is_some_and(|f| !f.2 .1.ends_with("$const"));
+                        // (in an automatic subroutine, block variables are automatic too)
+                        let in_auto = !d.static_ && self.subr.inline_stack.last().is_some_and(|f| f.2 .1.contains('#'));
                         for dl in &d.names {
                             let key = dl as *const Declarator;
                             if shared {
@@ -517,6 +519,9 @@ impl<'a> Compiler<'a> {
                                 // a queue or dynamic array
                                 let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), b)?;
                                 let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
+                                if d.automatic || in_auto {
+                                    self.sigs.automatic.insert(s);
+                                }
                                 if let Some(init) = &dl.init {
                                     let ty = self.sig_type(s);
                                     let v = self.value_for(init, b, 64, ty, None)?;
@@ -535,6 +540,9 @@ impl<'a> Compiler<'a> {
                             };
                             let s =
                                 self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, kind);
+                            if (d.automatic || in_auto) && !shared {
+                                self.sigs.automatic.insert(s);
+                            }
                             if desc {
                                 self.sigs.desc_arrays.insert(s);
                             }
@@ -661,6 +669,18 @@ impl<'a> Compiler<'a> {
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
                 self.check_enum_assign(lhs, rhs, sid)?;
+                if *nonblocking && !self.sigs.automatic.is_empty() {
+                    if let Some(n) = self.automatic_in(lhs, sid, true) {
+                        return self.err(format!("nonblocking assignment to automatic variable '{n}'"));
+                    }
+                    if let Some(Timing::Event(EventCtl::List(l)) | Timing::Repeat(_, EventCtl::List(l))) = timing {
+                        for (_, e) in l {
+                            if let Some(n) = self.automatic_in(e, sid, false) {
+                                return self.err(format!("automatic variable '{n}' in the event control of a nonblocking assignment"));
+                            }
+                        }
+                    }
+                }
                 if self.in_program(sid) && self.lvalue_outside_program(lhs, sid) {
                     let (kind, region) = if *nonblocking { ("non-blocking", "Reactive-NBA") } else { ("blocking", "Reactive") };
                     self.warn(format!("Program {kind} assignments are not currently scheduled in the {region} region."));
@@ -967,6 +987,13 @@ impl<'a> Compiler<'a> {
                 // the expression (re-applied whenever the expression or the target changes)
                 // until release / deassign stops it
                 self.line = *line;
+                let auto = match self.automatic_in(lhs, sid, true) {
+                    Some(n) => Some(n),
+                    None => rhs.as_ref().and_then(|r| self.automatic_in(r, sid, false)),
+                };
+                if let Some(n) = auto {
+                    return self.err(format!("automatic variable '{n}' in a procedural continuous assignment (assign, deassign, force, release)"));
+                }
                 let mut bases = Vec::new();
                 self.lvalue_bases(lhs, sid, &mut bases);
                 let key = format!("$force:{:?}:{:?}", bases, lhs);
@@ -1176,8 +1203,57 @@ impl<'a> Compiler<'a> {
         Ok(v)
     }
 
+    /// The name of an automatic variable `e` writes (`lvalue`) or reads, if any.
+    fn automatic_in(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<String> {
+        if self.sigs.automatic.is_empty() {
+            return None;
+        }
+        let mut member = false;
+        let mut v = Vec::new();
+        if lvalue {
+            // (through members and selects: `s.x[1] <= v` writes `s`)
+            let mut b = e;
+            while let Expr::Member(a, _) | Expr::Index(a, _) | Expr::Range(a, ..) | Expr::IndexedRange(a, ..) = b {
+                member |= matches!(b, Expr::Member(..));
+                b = a;
+            }
+            if let Expr::Concat(_) = b {
+                self.lvalue_bases(b, sid, &mut v);
+            } else {
+                match b {
+                    Expr::Ident(n) => {
+                        if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
+                            v.push(s);
+                        }
+                    }
+                    Expr::Hier(p) => {
+                        if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
+                            v.push(s);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            let mut r = Vec::new();
+            self.reads_expr(e, sid, &mut r);
+            v = r.into_iter().map(|x| x.0).collect();
+        }
+        // (a property through an automatic handle is in the object, not in the variable)
+        let s = v.into_iter().find(|&s| self.sigs.automatic.contains(&s) && !(member && matches!(self.sig_type(s), Type::Class(_))))?;
+        Some(self.sig(s).name.rsplit('.').next().unwrap_or_default().to_string())
+    }
+
     fn sys_task(&mut self, name: &str, args: &[Option<Expr>], sid: usize) -> R<()> {
         let scope = self.scopes[sid].name.clone();
+        // (these read their arguments later, when the variables may be gone)
+        if matches!(name, "$monitor" | "$strobe" | "$fstrobe" | "$fmonitor") || name.strip_suffix(['b', 'h', 'o']).is_some_and(|b| matches!(b, "$monitor" | "$strobe" | "$fstrobe" | "$fmonitor")) {
+            for a in args.iter().flatten() {
+                if let Some(n) = self.automatic_in(a, sid, false) {
+                    return self.err(format!("automatic variable '{n}' as an argument of {name}"));
+                }
+            }
+        }
         let sys = |t: SysTask| Instr::Sys(Box::new(t));
         // $fdisplayb, $strobeh, $monitoro, ...: the default radix of unformatted arguments
         let (name, radix) = match name.strip_suffix(['b', 'h', 'o']) {

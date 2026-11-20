@@ -289,6 +289,8 @@ pub(crate) struct Nets {
 pub(crate) struct Sigs {
     /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
     pub(crate) two_state: HashSet<u32>,
+    /// automatic variables (of automatic subroutines and automatic blocks)
+    pub(crate) automatic: HashSet<u32>,
     /// memory limit (words) and the error raised when a declaration exceeds it
     pub(crate) mem_limit_words: u64,
     pub(crate) mem_error: Option<Error>,

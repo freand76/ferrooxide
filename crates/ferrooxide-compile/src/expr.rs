@@ -1307,6 +1307,7 @@ impl<'a> Compiler<'a> {
             return Ok(());
         }
         let mem_lo = self.prog.mem.len() as u32;
+        let sig_lo = self.prog.signals.len() as u32;
         let path = format!("{}.{}", self.scopes[def_scope].name, f.name);
         let file = self.file.clone();
         let fs = self.new_scope(path.clone(), Some(def_scope), file);
@@ -1443,6 +1444,7 @@ impl<'a> Compiler<'a> {
         // an automatic subroutine's variables (per call site) are private to the process
         if f.automatic {
             self.note_frame(mem.0, mem.1);
+            self.sigs.automatic.extend(sig_lo..self.prog.signals.len() as u32);
         }
         self.subr.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem, this });
         Ok(())
