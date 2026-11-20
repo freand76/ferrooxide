@@ -645,6 +645,22 @@ pub enum HeapOp {
     Eq,
     /// keep at most `bound` elements of the array at a (an array assigned to a bounded queue)
     Truncate,
+    /// reorder the elements of a in place (`sort`, `rsort`, `reverse`, `shuffle`)
+    Order(OrderOp),
+    /// d (1 bit) = array a has an element equal to c (all bits, x and z too)
+    Contains,
+}
+
+/// The ordering methods of `HeapOp::Order` (IEEE 1800-2017 7.12.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderOp {
+    /// ascending (`desc`: descending) by value; `signed` vector elements
+    Sort { desc: bool, signed: bool },
+    /// `sort with (e)` / `rsort with (e)`: by the keys in array b (`kw`-bit elements of
+    /// kind `key`, one per element of a)
+    SortBy { desc: bool, signed: bool, key: ElemKind, kw: u32 },
+    Reverse,
+    Shuffle,
 }
 
 /// Operations on strings (handles, `Program::strings`) in `Instr::Str`.

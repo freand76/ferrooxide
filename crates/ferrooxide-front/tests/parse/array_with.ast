@@ -1,0 +1,14 @@
+module m ();
+  // imports $unit
+  int(32) signed d[$], q[$], r[$];
+  string s[];
+  initial begin
+    q = d.find($it0) with (($it0 > 2));
+    q = d.find_index($it0) with (($it0 == $ix0));
+    $display(d.sum($it0) with ($__cast(32, 1, $ix0)));
+    q = d.find($it0) with ((r.sum($it1) with (($it1 * $it0)) > 0));
+    d.sort($it0) with ((-$it0));
+    s.rsort($it0) with ($it0.len());
+    d.reverse();
+  end
+endmodule

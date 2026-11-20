@@ -3607,6 +3607,65 @@ impl Sim {
                 let eq = self.harr(a) == self.harr(b);
                 self.put_int(d, 1, eq as i64);
             }
+            HeapOp::Contains => {
+                let v = elem(&self.mem, c);
+                let found = self.harr(a).chunks(n).any(|e| e == &v[..]);
+                self.put_int(d, 1, found as i64);
+            }
+            HeapOp::Order(o) => {
+                let arr = self.harr(a).to_vec();
+                if arr.len() <= n {
+                    return;
+                }
+                let mut items: Vec<&[u64]> = arr.chunks(n).collect();
+                match o {
+                    OrderOp::Reverse => items.reverse(),
+                    OrderOp::Shuffle => {
+                        for i in (1..items.len()).rev() {
+                            let j = urandom(&mut self.useed, 0, i as u32) as usize;
+                            items.swap(i, j);
+                        }
+                    }
+                    OrderOp::Sort { desc, signed } | OrderOp::SortBy { desc, signed, .. } => {
+                        let keys: Vec<SortKey> = match o {
+                            OrderOp::SortBy { key, kw, .. } => {
+                                let kn = 2 * nw(kw);
+                                self.harr(b).chunks(kn).map(|e| self.sort_key(e, kw, key, signed)).collect()
+                            }
+                            _ => items.iter().map(|e| self.sort_key(e, w, t.elem, signed)).collect(),
+                        };
+                        if keys.len() != items.len() {
+                            return;
+                        }
+                        let mut ix: Vec<usize> = (0..items.len()).collect();
+                        ix.sort_by(|&p, &q| {
+                            let o = keys[p].partial_cmp(&keys[q]).unwrap_or(std::cmp::Ordering::Equal);
+                            if desc { o.reverse() } else { o }
+                        });
+                        items = ix.into_iter().map(|k| items[k]).collect();
+                    }
+                }
+                let out = items.concat();
+                *self.hmut(a) = out;
+            }
+        }
+    }
+
+    /// The value an element (its words `e`) is sorted by.
+    fn sort_key(&self, e: &[u64], w: u32, ek: ElemKind, signed: bool) -> SortKey {
+        match ek {
+            ElemKind::Real => SortKey::Real(f64::from_bits(e[0])),
+            ElemKind::Str => SortKey::Str(self.strs.get(e[0] as usize).cloned().unwrap_or_else(|| Rc::from(&b""[..]))),
+            ElemKind::Vec => {
+                // most significant word first; a signed value's sign bit inverted
+                let k = nw(w);
+                let mut v: Vec<u64> = e[..k].iter().rev().copied().collect();
+                if signed {
+                    let top = (w - 1) % 64;
+                    v[0] ^= 1 << top;
+                }
+                SortKey::Vec(v)
+            }
         }
     }
 
@@ -4074,6 +4133,14 @@ fn rtl_dist_uniform(seed: &mut i32, start: i32, end: i32) -> i32 {
         let r = r * 4294967296.0 - 2147483648.0;
         floor(r) as i32
     }
+}
+
+/// The value an array element is sorted by (`HeapOp::Order`).
+#[derive(PartialEq, PartialOrd)]
+enum SortKey {
+    Vec(Vec<u64>),
+    Real(f64),
+    Str(Rc<[u8]>),
 }
 
 /// $urandom / $urandom_range as Icarus computes them: uniform over [start, end + 1).

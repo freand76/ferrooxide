@@ -148,7 +148,48 @@ impl Lower {
                 let (b, ops) = flatten(e);
                 self.chain(b, &ops, false)?
             }
-            t::ExprKind::Call { .. } => return self.unsupported(loc, "a call with `with`"),
+            t::ExprKind::Call { with_: None, parens: false, .. } => return self.unsupported(loc, "this call without parentheses"),
+            t::ExprKind::Call { func, args, with_: Some(w), .. } => {
+                let (t::With::Expr(we), t::ExprKind::Member(base, m)) = (&**w, &func.kind) else {
+                    return self.unsupported(loc, "a call with `with` that is not an array method");
+                };
+                // (the optional argument names the iterator, IEEE 1800-2017 7.12)
+                let iter = match args.as_slice() {
+                    [] => "item".to_string(),
+                    [t::Arg::Pos(Some(t::Expr { kind: t::ExprKind::Ident(n), .. }))] => n.clone(),
+                    _ => return self.err(loc, format!("the argument of '{m}' with `with` is the name of its iterator")),
+                };
+                let arr = self.expr(base)?;
+                let depth = self.iters.len();
+                // the iterator's type, for its members and methods: the element type of an
+                // array variable (otherwise none: members are resolved in elaboration)
+                let it = format!("$it{depth}");
+                let elem = match &arr {
+                    Expr::Ident(n) => match self.vars.get(n) {
+                        // a queue or dynamic array (`heap`), a fixed-size array (one dimension)
+                        Some((t, u)) if t.heap.is_some() && u.is_empty() => {
+                            let mut t = (**t).clone();
+                            t.heap = None;
+                            Some((Rc::new(t), vec![]))
+                        }
+                        Some((t, u)) if t.heap.is_none() && u.len() == 1 => Some((t.clone(), vec![])),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let saved = match elem {
+                    Some(t) => self.vars.insert(it.clone(), t),
+                    None => self.vars.remove(&it),
+                };
+                self.iters.push(iter);
+                let with = self.expr(we);
+                self.iters.pop();
+                match saved {
+                    Some(v) => self.vars.insert(it, v),
+                    None => self.vars.remove(&it),
+                };
+                Expr::ArrayWith { arr: Box::new(arr), method: m.clone(), depth, with: Box::new(with?) }
+            }
             t::ExprKind::SysCall { name, args, .. } => self.sys_call(name, args, loc)?,
             t::ExprKind::Unary(op, a) => Expr::Unary(unop(*op), Box::new(self.expr(a)?)),
             t::ExprKind::Binary(op, a, b) => {
@@ -532,6 +573,21 @@ impl Lower {
     }
 
     fn chain(&mut self, b: Base, ops: &[Op], lvalue: bool) -> Result<Expr> {
+        // the iterator of an array method's `with` expression: `item`, `item.index`
+        // (the element is a variable `$it<k>` of the element's type, see `ArrayWith`)
+        let mut iter = None;
+        if let Base::Name(n, _) = b {
+            if let Some(k) = self.iters.iter().rposition(|x| x == n) {
+                if let Some(Op::Member("index", _)) = ops.first() {
+                    let rest = match &ops[1..] {
+                        [Op::Call(a, _), rest @ ..] if a.is_empty() => rest,
+                        rest => rest,
+                    };
+                    return self.selects(Expr::Ident(format!("$ix{k}")), rest);
+                }
+                iter = Some(format!("$it{k}"));
+            }
+        }
         let (name, loc) = match b {
             Base::Other(e) => {
                 let t::ExprKind::Scoped(n) = &e.kind else {
@@ -633,6 +689,7 @@ impl Lower {
                     (format!("{p}::{}", n.name), e.loc)
                 }
             }
+            Base::Name(_, loc) if iter.is_some() => (iter.unwrap(), loc),
             Base::Name(n @ ("this" | "super"), loc) => (n.to_string(), loc),
             Base::Name(n, loc) => {
                 // (a call may name a subroutine declared later in the module)

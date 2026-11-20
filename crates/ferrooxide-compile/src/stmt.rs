@@ -1147,6 +1147,9 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Discard { e, line } => {
                 self.line = *line;
+                if self.sigs.has_dyn && self.arr_order_with(e, sid)? {
+                    return Ok(());
+                }
                 self.self_expr(e, sid)?;
             }
             Stmt::WaitFork { line } => {

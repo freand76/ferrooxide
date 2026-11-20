@@ -126,6 +126,7 @@ pub fn expr(e: &Expr) -> String {
         Expr::NewTyped(c, args) => format!("{c}::new({})", list(args)),
         Expr::NewCopy(x) => format!("new {}", expr(x)),
         Expr::MethodCall(o, m, args) => format!("{}.{m}({})", expr(o), list(args)),
+        Expr::ArrayWith { arr, method, depth, with } => format!("{}.{method}($it{depth}) with ({})", expr(arr), expr(with)),
         Expr::StaticCall(c, m, args) => format!("{c}::{m}({})", list(args)),
         Expr::Pattern(t, items) => {
             let items: Vec<String> = items
@@ -679,6 +680,7 @@ impl Printer {
             },
             Stmt::Break { .. } => self.line("break;"),
             Stmt::Continue { .. } => self.line("continue;"),
+            Stmt::Discard { e: e @ Expr::ArrayWith { .. }, .. } => self.line(format!("{};", expr(e))),
             Stmt::Discard { e, .. } => self.line(format!("void'({});", expr(e))),
             Stmt::WaitFork { .. } => self.line("wait fork;"),
         }

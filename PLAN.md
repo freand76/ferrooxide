@@ -452,9 +452,14 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    variables in subroutine blocks, class members through hierarchical names, functions
    returning handles, `extends P::B`, `this.super` done 2026-11-19): class handle ports, parameterized classes, struct members through
    hierarchical names (`inst.v.f`); `static` variables at the top level of an automatic
-   subroutine; array methods (`sort`, `find`, ... `with`) and `%p`; deferred assertions [sv_deferred_*].
-   From sv-tests (`SV_TESTS.md` priorities 7-11, by tests won): array methods with `with`,
-   locator, ordering and reduction methods (25); concurrent assertions, `sequence`,
+   subroutine; `%p`; deferred assertions [sv_deferred_*]. Array manipulation methods
+   of queues and dynamic arrays done 2026-11-20 (`compile/arrmeth.rs`: reductions and
+   locators as loops in the process's code, the `with` iterator a variable of the element
+   type in a scope of its own; `sort`/`rsort` (also `with`), `reverse`, `shuffle` as
+   `HeapOp::Order`): 4610 of 5112 sv-tests. Left: methods of fixed-size and associative
+   arrays (with assignments between fixed-size and dynamic arrays), members of struct
+   elements of queues (also `item.f`).
+   From sv-tests (`SV_TESTS.md` priorities 7-11, by tests won): concurrent assertions, `sequence`,
    `property`, `expect` and clocking blocks (58, used by ariane); parameterized classes,
    `typedef C#(...) T`, `mailbox #(T)` (~171, the first error of every UVM test, though
    UVM needs much more after it); constraints, `randomize`, `randsequence`, `randcase`,
@@ -642,8 +647,9 @@ standard that we match are in `ICARUS_NOTES.md`):
 Kept up to date as features stop short; regression-suite test names in brackets.
 
 SystemVerilog data types and testbench features:
-- queues of structs, arrays of queues, queue ports, `%p`, array methods (`sort`, `find`, ...
-  `with`), queue element writes with `<=` (done at once), keyed patterns for associative
+- queues of structs (members of their elements), arrays of queues, queue ports, `%p`,
+  array methods of fixed-size and associative arrays, assignments between fixed-size and
+  dynamic arrays, queue element writes with `<=` (done at once), keyed patterns for associative
   arrays, class or wider keys (see R4 slice 4).
 - classes (first part done 2026-11-18: properties, constructors, methods inlined with
   `this`, `extends`/`super`, virtual dispatch, file-scope and package classes, static

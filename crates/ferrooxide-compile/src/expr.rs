@@ -35,7 +35,10 @@ impl<'a> Compiler<'a> {
             },
             Expr::Hier(p) => match self.lookup_hier(p, sid) {
                 Some(s) => s,
-                None => return self.err(format!("cannot resolve hierarchical name '{}'", p.join("."))),
+                None => {
+                    self.fixed_arr_method(p, sid)?;
+                    return self.err(format!("cannot resolve hierarchical name '{}'", p.join(".")));
+                }
             },
             _ => return Ok(None),
         };
@@ -369,6 +372,7 @@ impl<'a> Compiler<'a> {
         match e {
             Expr::Type(_) | Expr::Pattern(..) | Expr::NewArray(..) | Expr::Last | Expr::IncDec { .. } => false,
             Expr::Null | Expr::New(_) | Expr::NewTyped(..) | Expr::NewCopy(_) | Expr::MethodCall(..) | Expr::StaticCall(..) | Expr::EmptyArg | Expr::NamedArg(..) => false,
+            Expr::ArrayWith { .. } => false,
             // a member of a struct parameter
             Expr::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             Expr::Num(_) | Expr::Str(_) | Expr::Real(_) => true,
@@ -599,6 +603,7 @@ impl<'a> Compiler<'a> {
         }
         match e {
             Expr::Type(_) => self.err("a data type is not a value"),
+            Expr::ArrayWith { method, .. } => self.err(format!("array method '{method}' with `with` is supported only for queues and dynamic arrays")),
             Expr::Member(..) => self.member_error(e, sid),
             Expr::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
@@ -1546,6 +1551,8 @@ impl<'a> Compiler<'a> {
             if let Some((obj, m)) = self.hier_handle(name, sid) {
                 return self.method_call(&obj, &m, args, sid);
             }
+            let p: Vec<String> = name.split('.').map(String::from).collect();
+            self.fixed_arr_method(&p, sid)?;
             return self.err(format!("unknown {} '{name}'", if as_task { "task" } else { "function" }));
         };
         self.call_resolved(f, fs_def, name, None, args, sid)
@@ -1967,6 +1974,7 @@ impl<'a> Compiler<'a> {
             Expr::IncDec { e, .. } | Expr::NamedArg(_, e) => self.reads_expr(e, sid, out),
             Expr::New(v) | Expr::NewTyped(_, v) | Expr::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             Expr::NewCopy(x) => self.reads_expr(x, sid, out),
+            Expr::ArrayWith { arr, .. } => self.reads_expr(arr, sid, out),
             Expr::MethodCall(o, _, args) => {
                 self.reads_expr(o, sid, out);
                 args.iter().for_each(|x| self.reads_expr(x, sid, out));

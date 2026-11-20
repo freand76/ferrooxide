@@ -470,6 +470,8 @@ impl Lower {
                 Expr::StaticCall(class, name, args) => Ok(Stmt::StaticCall { class, name, args, line }),
                 _ => self.unsupported(loc, "this expression as a statement"),
             },
+            // `q.sort with (e);`: an array method with `with` called for its effect
+            t::ExprKind::Call { with_: Some(_), .. } => Ok(Stmt::Discard { e: self.expr(e)?, line }),
             t::ExprKind::Call { func, args, with_: None, .. } => {
                 let name = self.task_name(func, loc)?;
                 let args = self.call_args(args)?;

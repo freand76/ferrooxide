@@ -351,7 +351,8 @@ pub enum Stmt {
     Return { value: Option<Expr>, line: Line },
     Break { line: Line },
     Continue { line: Line },
-    /// `void'(f(...))`: a function call whose value is not used
+    /// `void'(f(...))`: a function call whose value is not used; also an array method with
+    /// `with` called as a statement (`q.sort with (e);`)
     Discard { e: Expr, line: Line },
     /// `wait fork`: until the fork branches the process started have ended
     WaitFork { line: Line },
@@ -446,6 +447,10 @@ pub enum Expr {
     MethodCall(Box<Expr>, String, Vec<Expr>),
     /// `C::m(args)`: a call of static method m of class C (also `m(args)` in C's methods)
     StaticCall(String, String, Vec<Expr>),
+    /// `arr.m with (e)` (IEEE 1800-2017 7.12): array method `m` with `e` evaluated for each
+    /// element; in `e` the element is `$it<depth>` and its index `$ix<depth>` (`depth`:
+    /// of `with` expressions nested in one another, from 0)
+    ArrayWith { arr: Box<Expr>, method: String, depth: usize, with: Box<Expr> },
     /// `$` in an index of a queue: its last index
     Last,
     /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value

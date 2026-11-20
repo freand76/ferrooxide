@@ -83,6 +83,8 @@ pub(crate) struct Lower {
     genvars: (HashSet<String>, Vec<String>),
     /// in a generate region or block (no generate region may start there)
     in_generate: usize,
+    /// the iterator names of the array method `with` expressions being lowered
+    iters: Vec<String>,
 }
 
 /// IEEE 1800-2017 26.3: a name a module uses through a wildcard import must come from one
@@ -185,6 +187,7 @@ impl Lower {
             wild: WildCheck::default(),
             genvars: Default::default(),
             in_generate: 0,
+            iters: Vec::new(),
         }
     }
 

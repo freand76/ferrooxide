@@ -8,6 +8,7 @@ mod codegen;
 mod elab;
 mod enums;
 mod expr;
+mod arrmeth;
 mod heap;
 mod konst;
 mod lint;
@@ -226,6 +227,9 @@ pub(crate) struct Code<'a> {
     /// (enclosing scope, block statement) -> the scope of a block with declarations or
     /// imports, for the sensitivity of `@*`/`always_comb` (also unnamed blocks)
     pub(crate) block_scopes: HashMap<(usize, *const Stmt), usize>,
+    /// (array method `with` expression, scope) -> the scope declaring its iterator and the
+    /// iterator's element and index variables (`arrmeth.rs`)
+    pub(crate) iter_scopes: HashMap<(*const Expr, usize), (usize, u32, u32)>,
     /// disable targets to resolve after code generation: (target, candidate paths, file, line)
     pub(crate) pending_disables: Vec<(u32, Vec<String>, String, u32)>,
     /// signals given an initial value before time 0 (declaration initializers, constant

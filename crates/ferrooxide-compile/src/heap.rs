@@ -13,7 +13,9 @@ use ferrooxide_rt::{AssocOp, HeapOp, KeyKind, StrOp};
 /// Methods of queues, dynamic and associative arrays.
 const METHODS: &[&str] = &[
     "size", "push_back", "push_front", "pop_back", "pop_front", "insert", "delete", "num", "exists", "first", "last", "next",
-    "prev",
+    "prev", // the array manipulation methods (arrmeth.rs)
+    "sum", "product", "and", "or", "xor", "find", "find_index", "find_first", "find_first_index", "find_last",
+    "find_last_index", "min", "max", "unique", "unique_index", "sort", "rsort", "reverse", "shuffle",
 ];
 
 /// Methods of associative arrays that step through the keys.
@@ -186,7 +188,7 @@ impl<'a> Compiler<'a> {
 
     /// After array `a` changed: wake the variable's waiters, or write the property's handle
     /// back (an empty array gets an object when it changes).
-    fn dyn_done(&mut self, a: &DynArr) {
+    pub(crate) fn dyn_done(&mut self, a: &DynArr) {
         match a.home {
             DynHome::Sig(s) => {
                 self.emit(Instr::Touch { sig: s });
@@ -199,7 +201,7 @@ impl<'a> Compiler<'a> {
 
     /// `base.m` / `base.m(args)` where `base` is an array and `m` one of its methods:
     /// (base, method, arguments).
-    fn dyn_method_expr<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(Expr, &'e str, &'e [Expr])>> {
+    pub(crate) fn dyn_method_expr<'e>(&mut self, e: &'e Expr, sid: usize) -> R<Option<(Expr, &'e str, &'e [Expr])>> {
         let (o, m, args): (&Expr, &str, &[Expr]) = match e {
             Expr::MethodCall(o, m, args) => (o, m, args),
             Expr::Member(o, m) => (o, m, &[]),
@@ -307,6 +309,9 @@ impl<'a> Compiler<'a> {
             Expr::Index(a, _) => Ok(self.dyn_arr_type(a, sid)?.map(|(_, el)| el.ty())),
             Expr::Range(a, ..) => Ok(self.dyn_arr_type(a, sid)?.map(|(kind, elem)| Type::Dyn { kind, elem })),
             _ => {
+                if let Some(am) = self.arr_method(e, sid)? {
+                    return self.arr_method_type(&am, sid).map(Some);
+                }
                 let Some((base, m, _)) = self.dyn_method_expr(e, sid)? else { return Ok(None) };
                 let Some((_, elem)) = self.dyn_arr_type(&base, sid)? else { return Ok(None) };
                 Ok(Some(match m {
@@ -347,6 +352,13 @@ impl<'a> Compiler<'a> {
     /// An element read or a method call of a queue or dynamic array: the slot of the value
     /// (an element as stored: `elem.w` bits, a real's bits, a string handle) and its type.
     pub(crate) fn dyn_value(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Type)>> {
+        if let Some(am) = self.arr_method(e, sid)? {
+            if crate::arrmeth::REDUCE.contains(&am.m.as_str()) {
+                return self.arr_reduce(&am, sid).map(Some);
+            }
+            let t = self.arr_method_type(&am, sid)?;
+            return Ok(Some((self.arr_locate(&am, sid)?, t)));
+        }
         if let Expr::Index(a, i) = e {
             if self.dyn_arr_type(a, sid)?.is_none() {
                 return Ok(None);
@@ -447,6 +459,15 @@ impl<'a> Compiler<'a> {
 
     /// `dyn_rhs` for a target that is an associative array (`assoc`) or not.
     fn dyn_rhs_k(&mut self, e: &Expr, elem: Elem, assoc: bool, sid: usize) -> R<(u32, bool)> {
+        if let Some(am) = self.arr_method(e, sid)? {
+            if crate::arrmeth::LOCATE.contains(&am.m.as_str()) && !assoc {
+                let Type::Dyn { elem: el, .. } = self.arr_method_type(&am, sid)? else { unreachable!() };
+                if el.w != elem.w || el.leaf != elem.leaf {
+                    return self.err("the arrays have different element types");
+                }
+                return Ok((self.arr_locate(&am, sid)?, true));
+            }
+        }
         if let Some(a) = self.dyn_arr(e, sid)? {
             let el = a.elem;
             if el != elem && (el.w != elem.w || el.leaf != elem.leaf) {
@@ -659,6 +680,12 @@ impl<'a> Compiler<'a> {
                 let arr = self.dyn_arr(base, sid)?.unwrap();
                 self.assoc_value(&arr, m, args, key, sid)?;
             }
+            return Ok(true);
+        }
+        if crate::arrmeth::ORDER.contains(&m) {
+            let arr = self.dyn_arr(base, sid)?.unwrap();
+            self.arr_order(&arr, m, args)?;
+            self.dyn_done(&arr);
             return Ok(true);
         }
         let nargs = |c: &Self, n: usize| -> R<()> {
