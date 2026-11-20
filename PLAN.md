@@ -434,7 +434,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    and edges of reals, indexed part-selects of width 0: 4577 of 5112.
    Static class methods, UDP instances with three or more delays, events as subroutine
    arguments, a named generate or statement block whose name is taken in its scope: 4583
-   of 5112.
+   of 5112. Packed dimensions after integer atom and real types, and `` `resetall `` in a
+   design element, rejected by the parser (the sv-tests of these only parse): 4587 of 5112.
    Left among the accepted invalid tests: `var` in a for
    initialization (legal in 1800-2017, kept). Left: errors in
    class methods that are never called, the rest of the ACCEPT list

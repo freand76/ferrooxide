@@ -73,8 +73,6 @@ impl Lower {
         }
         match it {
             t::Item::Empty(_) => {}
-            // (IEEE 1800-2017 22.3)
-            t::Item::Directive(t::Directive::ResetAll, loc) => return self.err(*loc, "`resetall is not allowed inside a design element"),
             t::Item::Directive(d, _) => self.directive(d),
             t::Item::Timeunits { unit, precision, loc } => {
                 let (u, p) = self.timeunits(*unit, *precision, *loc)?;

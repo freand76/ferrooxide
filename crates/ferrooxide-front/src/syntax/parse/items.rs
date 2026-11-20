@@ -125,6 +125,10 @@ impl Parser {
             }
             T::Directive(_) => {
                 let d = self.directive()?;
+                // (IEEE 1800-2017 22.3: outside design elements only)
+                if matches!(d, Directive::ResetAll) {
+                    return self.err("`resetall is not allowed inside a design element");
+                }
                 out.push(Item::Directive(d, loc));
             }
             T::SysIdent(name) => {

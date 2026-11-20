@@ -195,6 +195,11 @@ impl Parser {
             _ => return Ok(None),
         };
         let signed = self.signing();
+        // (integer atom types and real types take no packed dimensions)
+        let atom = matches!(kind, TypeKind::Int(k) if !matches!(k, IntKw::Bit | IntKw::Logic | IntKw::Reg)) || matches!(kind, TypeKind::Real(_));
+        if atom && self.is_p("[") {
+            return self.err("packed dimensions after an integer atom type or a real type");
+        }
         let packed = self.packed_dims()?;
         Ok(Some(DataType { kind, signed, packed, loc }))
     }
