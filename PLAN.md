@@ -513,8 +513,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    methods (12), tagged unions (10), assignment in an expression (8), the `process` class,
    `$cast`/`$typename`, pure methods, replication in assignment patterns.
 5. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
-   positional assignment patterns for packed array parameters
-   [sv_ap_parray2].
+   positional assignment patterns for packed array parameters [sv_ap_parray2] and
+   index keys in patterns of packed arrays done 2026-11-20.
 6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
    list: 14 compile errors, 105 wrong outputs): the Verilog items under "Unsupported
    (known)", e.g. `$countdrivers` (5 tests),

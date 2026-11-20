@@ -208,9 +208,14 @@ impl<'a> Compiler<'a> {
         let v = match ov {
             Some(v) => v,
             None => {
-                let layout = match &p.ty {
-                    Some(t) => Some(self.packed(t, sid)?),
-                    None => None,
+                let layout = match (&p.ty, &p.range) {
+                    (Some(t), _) => Some(self.packed(t, sid)?),
+                    // a pattern for a vector parameter: one item per bit (IEEE 1800-2017
+                    // 10.9.1)
+                    (None, Some(r)) if matches!(value.kind, ExprKind::Pattern(None, _)) => {
+                        Some(self.packed(&SvType::vector(NetKind::Reg, p.signed, vec![r.clone()]), sid)?)
+                    }
+                    (None, _) => None,
                 };
                 let r = self.with_target(value, layout.as_ref(), sid)?;
                 let value = r.as_ref().unwrap_or(value);

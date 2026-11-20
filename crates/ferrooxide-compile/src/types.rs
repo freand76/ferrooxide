@@ -929,15 +929,21 @@ impl<'a> Compiler<'a> {
         let mut pos = Vec::new();
         let mut named = Vec::new();
         let mut default = None;
+        // index keys of an array: (element position, value)
+        let mut indexed: Vec<(usize, &Expr)> = Vec::new();
+        let array = !t.dims.is_empty() && !t.int_kind;
         for it in items {
             match it {
                 PatItem::Pos(v) => pos.push(v),
+                // (a name as the key of an array: a parameter giving the index)
+                PatItem::Key(k, v) if array => indexed.push((self.pattern_index(&ExprKind::Ident(k.clone()).into(), t.dims[0], sid)?, v)),
                 PatItem::Key(k, v) => named.push((k, v)),
                 PatItem::Default(v) => default = Some(v),
-                PatItem::Index(..) => return self.err("an index key in an assignment pattern of a packed type is not supported"),
+                PatItem::Index(i, v) if array => indexed.push((self.pattern_index(i, t.dims[0], sid)?, v)),
+                PatItem::Index(..) => return self.err("an index key in an assignment pattern of a struct"),
             }
         }
-        let parts: Vec<(Option<&str>, Packed)> = if !t.dims.is_empty() && !t.int_kind {
+        let parts: Vec<(Option<&str>, Packed)> = if array {
             let mut el = t.clone();
             el.dims.remove(0);
             (0..dim_size(t.dims[0])).map(|_| (None, el.clone())).collect()
@@ -963,12 +969,17 @@ impl<'a> Compiler<'a> {
         for (k, (name, pt)) in parts.iter().enumerate() {
             let v = if let Some(v) = pos.get(k) {
                 *v
+            } else if let Some((_, v)) = indexed.iter().rev().find(|(i, _)| *i == k) {
+                *v
             } else if let Some((_, v)) = named.iter().find(|(n, _)| Some(n.as_str()) == *name) {
                 *v
             } else if let Some(v) = default {
                 v
             } else {
-                return self.err(format!("assignment pattern has no value for member {}", name.unwrap_or_default()));
+                return self.err(match name {
+                    Some(n) => format!("assignment pattern has no value for member {n}"),
+                    None => format!("assignment pattern has no value for element {k} (from the left)"),
+                });
             };
             let v = self.with_target(v, Some(pt), sid)?.unwrap_or_else(|| v.clone());
             out.push(match (pt.leaf, v) {
@@ -979,6 +990,16 @@ impl<'a> Compiler<'a> {
             });
         }
         Ok(ExprKind::Concat(out).into())
+    }
+
+    /// The position (from the left) of the element that index key `i` names in a packed
+    /// dimension `d` (msb, lsb).
+    fn pattern_index(&mut self, i: &Expr, d: (i64, i64), sid: usize) -> R<usize> {
+        let v = self.const_int(i, sid)?;
+        if v < d.0.min(d.1) || v > d.0.max(d.1) {
+            return self.err(format!("index {v} of an assignment pattern is outside [{}:{}]", d.0, d.1));
+        }
+        Ok((v - d.0).unsigned_abs() as usize)
     }
 
     /// A pattern in a place without a target type: one with its own type.
