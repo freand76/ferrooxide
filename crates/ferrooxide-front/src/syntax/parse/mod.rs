@@ -32,6 +32,8 @@ pub struct Parser {
     in_constraint: bool,
     /// nesting depth of generate regions and blocks (no specify block or specparam there)
     in_generate: u32,
+    /// the label `l` of `l: begin`/`l: fork` (for the block's end label)
+    block_label: Option<String>,
 }
 
 /// What a parser carries from one file to the next of the same compilation unit.
@@ -53,7 +55,7 @@ impl Parser {
             unit.insert(t.to_string());
             classes.entry(t.to_string()).or_default();
         }
-        Parser { toks, pos: 0, file, scopes: vec![unit], packages, classes, in_constraint: false, in_generate: 0 }
+        Parser { toks, pos: 0, file, scopes: vec![unit], packages, classes, in_constraint: false, in_generate: 0, block_label: None }
     }
 
     pub fn into_state(mut self) -> UnitState {
@@ -193,6 +195,19 @@ impl Parser {
             return Ok(Some(self.ident()?));
         }
         Ok(None)
+    }
+
+    /// An optional end label `: name`, which must repeat the construct's name `name` (an
+    /// unnamed construct takes none; IEEE 1800-2017 9.3.4).
+    pub(crate) fn close_label(&mut self, name: Option<&str>) -> Result<()> {
+        if let Some(l) = self.end_label()? {
+            match name {
+                Some(n) if n == l => {}
+                Some(n) => return self.err(format!("end label '{l}' does not match the name '{n}'")),
+                None => return self.err(format!("end label '{l}' on a construct without a name")),
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- type names

@@ -50,7 +50,7 @@ impl Parser {
             }
             self.class_item(&mut items)?;
         }
-        self.end_label()?;
+        self.close_label(Some(&name))?;
         let types = self.pop_scope();
         self.classes.insert(name.clone(), types);
         Ok(ClassDecl { virtual_, interface, lifetime, name, params, extends, implements, items, loc })
@@ -257,7 +257,7 @@ impl Parser {
             }
             items.push(self.cover_item()?);
         }
-        self.end_label()?;
+        self.close_label(Some(&name))?;
         Ok(Covergroup { name, ports, event, items, extends, loc })
     }
 

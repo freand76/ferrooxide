@@ -55,6 +55,9 @@ impl Parser {
         if self.is_ident() && self.is_p_at(1, ":") && !self.soft_name_here_kwlike() {
             let label = self.ident()?;
             self.bump();
+            if self.is_kw(Kw::Begin) || self.is_kw(Kw::Fork) {
+                self.block_label = Some(label.clone());
+            }
             let mut s = self.stmt()?;
             s.label = Some(label);
             return Ok(s);
@@ -404,6 +407,7 @@ impl Parser {
     /// `begin`/`fork` block (the cursor at the keyword).
     fn block(&mut self) -> Result<StmtKind> {
         let fork = self.is_kw(Kw::Fork);
+        let label = self.block_label.take();
         self.bump();
         let name = self.end_label()?;
         self.push_scope();
@@ -434,7 +438,7 @@ impl Parser {
             }
         };
         self.pop_scope();
-        self.end_label()?;
+        self.close_label(name.as_deref().or(label.as_deref()))?;
         Ok(StmtKind::Block { fork: if fork { join } else { None }, name, decls, stmts })
     }
 

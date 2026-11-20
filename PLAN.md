@@ -409,7 +409,10 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    arguments, macro argument counts, unterminated strings in macro text, directive names as
    macros); `local`/`protected` class members (`ClassDecl::hidden`); procedural
    assignments to nets, a variable driven whole by a continuous assignment and by anything
-   else (bits driven by separate assignments stay legal): 4511 of 5112. Left: errors in
+   else (bits driven by separate assignments stay legal): 4511 of 5112. Specparams in
+   parameter values and generate conditions, specparams and specify blocks in generate
+   blocks, element types of queues/dynamic arrays assigned to each other (2-/4-state,
+   signedness, enum), end labels that do not match the name: 4529 of 5112. Left: errors in
    subroutines that are never called (compile each one once), the rest of the ACCEPT list
    in `target/svtests-baseline.res`. Interleave with the other steps.
 4. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile

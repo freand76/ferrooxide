@@ -101,6 +101,7 @@ impl Parser {
                 return Ok(());
             }
             if self.is_kw(Kw::Begin) {
+                self.block_label = Some(label.clone());
                 let mut b = self.gen_block()?;
                 if b.name.is_none() {
                     b.name = Some(label);
@@ -894,7 +895,7 @@ impl Parser {
             }
         }
         self.pop_scope();
-        self.end_label()?;
+        self.close_label(Some(&s.name.name))?;
         s.body = Some((decls, stmts));
         Ok(s)
     }
@@ -1152,6 +1153,7 @@ impl Parser {
 
     fn gen_block_inner(&mut self) -> Result<GenBlock> {
         let loc = self.loc();
+        let label = self.block_label.take();
         if self.eat_kw(Kw::Begin) {
             let name = self.end_label()?;
             let mut items = Vec::new();
@@ -1161,13 +1163,14 @@ impl Parser {
                 }
                 self.module_item(&mut items)?;
             }
-            self.end_label()?;
+            self.close_label(name.as_deref().or(label.as_deref()))?;
             return Ok(GenBlock { name, begin: true, items, loc });
         }
         // `label : begin`
         if self.is_ident() && self.is_p_at(1, ":") && self.is_kw_at(2, Kw::Begin) {
             let label = self.ident()?;
             self.bump();
+            self.block_label = Some(label.clone());
             let mut b = self.gen_block_inner()?;
             if b.name.is_none() {
                 b.name = Some(label);
@@ -1442,7 +1445,7 @@ impl Parser {
             self.module_item(&mut v)?;
             items.extend(v.into_iter().map(ClockingItem::Item));
         }
-        self.end_label()?;
+        self.close_label(name.as_deref())?;
         Ok(ClockingDecl { kind, name, event, items, loc })
     }
 

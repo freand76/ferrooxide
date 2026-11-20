@@ -366,7 +366,7 @@ impl Parser {
         let prop = self.property_spec()?;
         self.eat_p(";");
         self.expect_kw(Kw::Endproperty)?;
-        self.end_label()?;
+        self.close_label(Some(&name))?;
         Ok(PropertyDecl { name, ports, decls, prop, loc })
     }
 
@@ -384,7 +384,7 @@ impl Parser {
         let seq = self.property_spec()?;
         self.eat_p(";");
         self.expect_kw(Kw::Endsequence)?;
-        self.end_label()?;
+        self.close_label(Some(&name))?;
         Ok(SequenceDecl { name, ports, decls, seq, loc })
     }
 }

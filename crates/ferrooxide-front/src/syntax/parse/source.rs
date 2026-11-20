@@ -68,7 +68,7 @@ impl Parser {
                 }
                 self.module_item(&mut items)?;
             }
-            self.end_label()?;
+            self.close_label(Some(&name))?;
         }
         self.pop_scope();
         Ok(ModuleDecl { kind, name, lifetime, extern_, imports, params, ports, items, loc })
@@ -218,7 +218,7 @@ impl Parser {
             }
             self.module_item(&mut items)?;
         }
-        self.end_label()?;
+        self.close_label(Some(&name))?;
         let types = self.pop_scope();
         self.packages.insert(name.clone(), types);
         Ok(PackageDecl { name, lifetime, items, loc })
@@ -305,7 +305,7 @@ impl Parser {
                 return self.err(format!("unexpected {} in primitive", self.describe()));
             }
         }
-        self.end_label()?;
+        self.close_label(Some(&name))?;
         Ok(UdpDecl { name, ports, decls, init, rows, loc })
     }
 
@@ -345,7 +345,7 @@ impl Parser {
             }
             rules.push(text);
         }
-        self.end_label()?;
+        self.close_label(Some(&name))?;
         Ok(ConfigDecl { name, design, rules, loc })
     }
 }
