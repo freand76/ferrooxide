@@ -98,6 +98,16 @@ impl Lower {
         let mut props = Vec::new();
         let mut statics = Vec::new();
         let mut consts = Vec::new();
+        let mut hidden: Vec<(String, bool)> = Vec::new();
+        let vis = |quals: &[Kw]| {
+            if quals.contains(&Kw::Local) {
+                Some(true)
+            } else if quals.contains(&Kw::Protected) {
+                Some(false)
+            } else {
+                None
+            }
+        };
         let items: Vec<&t::Item> = c.items.iter().filter_map(|i| if let t::ClassItem::Item(x) = i { Some(x) } else { None }).collect();
         for it in &c.items {
             // parameters and typedefs (enum constants are parameters) in source order with
@@ -152,6 +162,9 @@ impl Lower {
             }
             for n in &d.names {
                 names.props.insert(n.name.clone());
+                if let Some(l) = vis(quals) {
+                    hidden.push((n.name.clone(), l));
+                }
             }
             props.push(d);
         }
@@ -161,6 +174,9 @@ impl Lower {
             if let t::ClassItem::Method(m) = it {
                 let n = &m.name.name;
                 names.methods.insert(n.clone());
+                if let Some(l) = vis(&m.quals) {
+                    hidden.push((n.clone(), l));
+                }
                 // (a method of this class hides a static one of a base class)
                 names.static_methods.remove(n);
                 if m.quals.contains(&Kw::Virtual) {
@@ -229,7 +245,7 @@ impl Lower {
             }
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
-        Ok(ClassDecl { name, base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, line })
+        Ok(ClassDecl { name, base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, line })
     }
 
     /// The type of handles of class `name`.

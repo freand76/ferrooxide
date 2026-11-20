@@ -231,6 +231,43 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Member `m` of class `c` used in scope `sid`: a `local` one only inside the class
+    /// declaring it, a `protected` one only there and in classes derived from it (IEEE
+    /// 1800-2017 8.18).
+    pub(crate) fn check_access(&self, c: u32, m: &str, sid: usize) -> R<()> {
+        let mut x = Some(c);
+        while let Some(k) = x {
+            let ci = &self.classes.list[k as usize];
+            if let Some(&(_, local)) = ci.decl.hidden.iter().find(|h| h.0 == m) {
+                let from = self.class_of_scope(sid);
+                let ok = match from {
+                    Some(a) if local => a == k,
+                    Some(mut a) => loop {
+                        if a == k {
+                            break true;
+                        }
+                        match self.classes.list[a as usize].base {
+                            Some(b) => a = b,
+                            None => break false,
+                        }
+                    },
+                    None => false,
+                };
+                if !ok {
+                    let what = if local { "local" } else { "protected" };
+                    return self.err(format!("'{m}' is a {what} member of class '{}' and not visible here", ci.name));
+                }
+                return Ok(());
+            }
+            // declared here without a qualifier: public
+            if ci.decl.props.iter().any(|d| d.names.iter().any(|n| n.name == m)) || ci.decl.methods.iter().any(|f| f.name == m) {
+                return Ok(());
+            }
+            x = ci.base;
+        }
+        Ok(())
+    }
+
     /// A method of class `c` or of a base class: (method, the class declaring it).
     pub(crate) fn find_method(&self, mut c: u32, name: &str) -> Option<(&'a SubroutineDecl, u32)> {
         loop {
@@ -286,6 +323,7 @@ impl<'a> Compiler<'a> {
         if self.class_const(c, m).is_some() {
             return Ok(None);
         }
+        self.check_access(c, m, sid)?;
         let p = self.prop(c, m)?;
         if p.dims.is_empty() {
             return Ok(None);
@@ -431,6 +469,7 @@ impl<'a> Compiler<'a> {
                     Some(Sym::Real(r)) => return Ok(Some((self.const_slot(&Const::from_i64(r.to_bits() as i64, 64, false)), Type::Real))),
                     _ => {}
                 }
+                self.check_access(c, m, sid)?;
                 let p = self.scalar_prop(c, m)?;
                 let h = self.handle_value(b, sid)?;
                 let w = p.ty.width();
@@ -576,6 +615,7 @@ impl<'a> Compiler<'a> {
         let Some((f, owner)) = self.find_method(c, m) else {
             return self.err(format!("class '{}' has no method '{m}'", self.classes.list[c as usize].name));
         };
+        self.check_access(c, m, sid)?;
         if m == "new" {
             return self.err("`new` is called only through `super.new`");
         }
@@ -760,6 +800,7 @@ impl<'a> Compiler<'a> {
         }
         let Expr::Member(b, m) = lhs else { return Ok(false) };
         let Some(c) = self.handle_class(b, sid)? else { return Ok(false) };
+        self.check_access(c, m, sid)?;
         let p = self.scalar_prop(c, m)?;
         let v = match p.ty {
             Type::Class(pc) => self.handle_for(rhs, pc, sid)?,

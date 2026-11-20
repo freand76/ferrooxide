@@ -278,6 +278,8 @@ pub struct ClassDecl {
     pub statics: Vec<String>,
     /// `virtual class`: no objects of its own
     pub abstract_: bool,
+    /// properties and methods declared `local` (true) or `protected` (false)
+    pub hidden: Vec<(String, bool)>,
     pub line: Line,
 }
 
