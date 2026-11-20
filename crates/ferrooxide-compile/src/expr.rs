@@ -1394,6 +1394,7 @@ impl<'a> Compiler<'a> {
         if self.subr.func_inst.contains_key(&key) {
             return Ok(());
         }
+        let f = self.subr_resolved(f, def_scope)?;
         let mem_lo = self.prog.mem.len() as u32;
         let sig_lo = self.prog.signals.len() as u32;
         let path = format!("{}.{}", self.scopes[def_scope].name, f.name);

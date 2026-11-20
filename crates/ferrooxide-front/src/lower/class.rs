@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// The names a class's methods reach through `this` (with those of its base classes).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ClassNames {
     /// the class
     pub name: String,
@@ -31,6 +31,9 @@ pub(crate) struct ClassNames {
     pub types: HashMap<String, Rc<SvType>>,
     /// parameters and enum constants declared in the class (`C::P`, `obj.P`)
     pub consts: HashSet<String>,
+    /// a parameterized class (not a specialization of one): outside the class, `C::x`
+    /// needs parameter values (`C #(..)::x`)
+    pub parameterized: bool,
 }
 
 impl Lower {
@@ -42,14 +45,106 @@ impl Lower {
         Ok(())
     }
 
-    /// `class name [extends base]; items endclass`
+    /// `class name [#(params)] [extends base]; items endclass`
     pub(crate) fn class_decl(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
+        let saved_specs = std::mem::take(&mut self.specs);
+        let r = self.class_decl_inner(c);
+        let specs = std::mem::replace(&mut self.specs, saved_specs);
+        r.map(|mut d| {
+            d.specs = specs;
+            d
+        })
+    }
+
+    /// `n` with the parameter values of a parameterized class (`C #(..)`, `C #(..)::x`,
+    /// `P::C #(..)`) replaced by the name of a new specialization (`C#1`, see
+    /// `Item::ClassSpec`); `n` itself where it has none.
+    pub(crate) fn despec(&mut self, n: &t::Name, loc: t::Loc) -> Result<t::Name> {
+        if let Some(args) = &n.params {
+            if n.scopes.iter().any(|s| s.params.is_some()) || n.scopes.len() > 1 {
+                return self.unsupported(loc, "this parameterized class name");
+            }
+            let (full, names) = match n.scopes.first() {
+                None => match self.classes.get(&n.name) {
+                    Some(c) => (n.name.clone(), c.clone()),
+                    // a class declared later (`typedef class C;`): its names come with it
+                    None if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) => (n.name.clone(), Rc::new(ClassNames::default())),
+                    None => return self.err(loc, format!("'{}' is not a class", n.name)),
+                },
+                Some(p) => match self.packages.get(&p.name).and_then(|k| k.classes.get(&n.name)).cloned() {
+                    Some(c) => {
+                        self.use_package(&p.name);
+                        (format!("{}::{}", p.name, n.name), c)
+                    }
+                    None => return self.err(loc, format!("'{}::{}' is not a class", p.name, n.name)),
+                },
+            };
+            let spec = self.new_spec(&full, &n.name, names, args, loc)?;
+            return Ok(t::Name { scopes: vec![], name: spec, params: None, loc: n.loc });
+        }
+        if let [s] = n.scopes.as_slice() {
+            if let Some(args) = &s.params {
+                let Some(names) = self.classes.get(&s.name).cloned() else {
+                    return self.err(loc, format!("'{}' is not a class", s.name));
+                };
+                let spec = self.new_spec(&s.name, &s.name, names, args, loc)?;
+                return Ok(t::Name { scopes: vec![t::NamePart { name: spec, params: None }], name: n.name.clone(), params: None, loc: n.loc });
+            }
+        }
+        if n.scopes.iter().any(|s| s.params.is_some()) {
+            return self.unsupported(loc, "this parameterized class name");
+        }
+        Ok(n.clone())
+    }
+
+    /// A new specialization of class `full` (named `base` without its package) with
+    /// parameter values `args`: its name, known as a class with `names` from here on.
+    fn new_spec(&mut self, full: &str, base: &str, names: Rc<ClassNames>, args: &[t::ParamArg], loc: t::Loc) -> Result<String> {
+        let mut conns = Vec::new();
+        for p in args {
+            conns.push(match p {
+                t::ParamArg::Positional(e) => Conn::Positional(Some(self.expr(e)?)),
+                t::ParamArg::Empty => Conn::Positional(None),
+                t::ParamArg::Named(n, e) => Conn::Named(
+                    n.clone(),
+                    match e {
+                        Some(e) => Some(self.expr(e)?),
+                        None => None,
+                    },
+                ),
+            });
+        }
+        self.spec_count += 1;
+        let spec = format!("{base}#{}", self.spec_count);
+        let mut names = (*names).clone();
+        names.parameterized = false;
+        self.classes.insert(spec.clone(), Rc::new(names));
+        self.spec_of.push((spec.clone(), full.to_string()));
+        self.types.insert(spec.clone(), Self::class_type(&spec));
+        self.specs.push(Item::ClassSpec { name: spec.clone(), class: full.to_string(), args: conns, line: loc.line });
+        Ok(spec)
+    }
+
+    fn class_decl_inner(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
+        let saved = self.in_class.replace(c.name.clone());
+        let r = self.class_decl_body(c);
+        self.in_class = saved;
+        r
+    }
+
+    /// `C::x` of a parameterized class C needs parameter values outside C (IEEE 1800-2017
+    /// 8.25.1).
+    pub(crate) fn check_unspecialized(&self, class: &str, loc: t::Loc) -> Result<()> {
+        if self.classes.get(class).is_some_and(|c| c.parameterized) && self.in_class.as_deref() != Some(class) {
+            return self.err(loc, format!("'{class}' is a parameterized class: '{class}::' needs parameter values here ('{class} #(...)::')"));
+        }
+        Ok(())
+    }
+
+    fn class_decl_body(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
         let line = c.loc.line;
         if c.interface {
             return self.unsupported(c.loc, "an interface class");
-        }
-        if c.params.is_some() {
-            return self.unsupported(c.loc, "a parameterized class");
         }
         if !c.implements.is_empty() {
             return self.unsupported(c.loc, "implements");
@@ -59,7 +154,9 @@ impl Lower {
         let (base, base_args) = match &c.extends {
             None => (None, None),
             Some((n, args)) => {
-                if n.params.is_some() || n.scopes.len() > 1 || n.scopes.first().is_some_and(|s| s.params.is_some()) {
+                // `extends B #(..)`: a specialization (in the class's scope)
+                let n = &self.despec(n, c.loc)?;
+                if n.scopes.len() > 1 {
                     return self.unsupported(c.loc, "this base class");
                 }
                 // `extends P::B`: a class of package P (named `P::B` for the compiler)
@@ -101,14 +198,30 @@ impl Lower {
         for (k, v) in &names.types {
             self.types.insert(k.clone(), v.clone());
         }
+        // the parameter ports: constants of the class (`C::P`), type parameters
+        let mut params = Vec::new();
+        let mut own: HashSet<String> = HashSet::new();
+        names.parameterized = c.params.is_some();
+        if let Some(ps) = &c.params {
+            self.param_ports(ps, &mut params)?;
+            for p in &params {
+                match p {
+                    Item::Param(p) => {
+                        self.own_name(&mut own, &p.name, p.line, &name)?;
+                        names.consts.insert(p.name.clone());
+                    }
+                    Item::TypeParam { name: n, line, .. } => self.own_name(&mut own, n, *line, &name)?,
+                    _ => {}
+                }
+            }
+        }
         // properties are names in the methods (their types for member chains)
         let saved_vars = self.vars.clone();
         let mut props = Vec::new();
         let mut statics = Vec::new();
         let mut consts = Vec::new();
         let mut hidden: Vec<(String, bool)> = Vec::new();
-        // the names the class itself declares (one item each, IEEE 1800-2017 8.3)
-        let mut own: HashSet<String> = HashSet::new();
+        // (the names the class itself declares, one item each, IEEE 1800-2017 8.3: `own`)
         let vis = |quals: &[Kw]| {
             if quals.contains(&Kw::Local) {
                 Some(true)
@@ -174,6 +287,9 @@ impl Lower {
                 self.own_name(&mut own, &n.name, n.line, &name)?;
             }
             if is_static {
+                if c.params.is_some() {
+                    return self.unsupported(v.loc, "a static property of a parameterized class");
+                }
                 for n in &mut d.names {
                     let var = format!("{name}${}", n.name);
                     names.statics.insert(n.name.clone(), var.clone());
@@ -218,6 +334,13 @@ impl Lower {
         // (the class's names are known before its methods, which may call each other)
         let names = Rc::new(names);
         self.classes.insert(name.clone(), names.clone());
+        // specializations made before (of a forward declaration) know its names now
+        let mut sn = (*names).clone();
+        sn.parameterized = false;
+        let sn = Rc::new(sn);
+        for (s, _) in self.spec_of.iter().filter(|(_, g)| *g == name) {
+            self.classes.insert(s.clone(), sn.clone());
+        }
         for d in props.iter_mut().chain(statics.iter_mut()) {
             for n in &mut d.names {
                 if let Some(e) = &mut n.init {
@@ -269,7 +392,7 @@ impl Lower {
             }
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
-        Ok(ClassDecl { name, base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, line })
+        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, line })
     }
 
     /// The type of handles of class `name`.

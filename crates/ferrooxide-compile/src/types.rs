@@ -334,6 +334,11 @@ impl<'a> Compiler<'a> {
 
     /// The type a function returns.
     pub(crate) fn func_ret_type(&mut self, f: &SubroutineDecl, fs: usize) -> R<Type> {
+        // a type parameter
+        if let Some(t) = f.ret_ty.as_ref().filter(|t| t.param.is_some()) {
+            let r = self.resolve_type(t, fs)?;
+            return self.resolved_type(&r, fs);
+        }
         if let Some(t) = f.ret_ty.as_ref().filter(|t| t.heap.is_some()) {
             let w = self.const_int(&t.width(), fs)? as u32;
             let elem = self.elem_for(t.kind, w, t.signed, Some(t), fs)?;
@@ -353,6 +358,70 @@ impl<'a> Compiler<'a> {
                 Type::vec(((m - l).abs() + 1) as u32, f.signed)
             }
         })
+    }
+}
+
+impl<'a> Compiler<'a> {
+    /// The `Type` of a value of resolved type `r` (no type parameters left) in scope `sid`.
+    pub(crate) fn resolved_type(&mut self, r: &SvType, sid: usize) -> R<Type> {
+        if !r.unpacked.is_empty() || r.heap.is_some() || r.param.is_some() {
+            return self.err("an array or queue type given by a type parameter is not supported here");
+        }
+        Ok(match r.kind {
+            NetKind::Real => Type::Real,
+            NetKind::String => Type::Str,
+            NetKind::Event => return self.err("an event type given by a type parameter is not supported here"),
+            NetKind::Class => match r.class.as_deref().and_then(|n| self.find_class(n, sid)) {
+                Some(c) => Type::Class(c),
+                None => return self.err("unknown class of a type parameter"),
+            },
+            _ => Type::vec(packed_of(r).width() as u32, r.signed),
+        })
+    }
+
+    /// `f` with the types its arguments and result take from type parameters resolved in
+    /// scope `sid` (kind, sign and ranges of the type, as declarations of a module); `f`
+    /// itself where it uses none.
+    pub(crate) fn subr_resolved(&mut self, f: &'a SubroutineDecl, sid: usize) -> R<&'a SubroutineDecl> {
+        let ret_param = f.ret_ty.as_ref().is_some_and(|t| t.param.is_some());
+        if !ret_param && !f.decls.iter().any(|d| d.type_param.is_some()) {
+            return Ok(f);
+        }
+        let mut g = f.clone();
+        if ret_param {
+            let r = self.resolve_type(f.ret_ty.as_ref().unwrap(), sid)?;
+            if r.has_struct() {
+                return self.err("a function returning a struct type given by a type parameter is not supported");
+            }
+            // (as the lowering gives a return type: a vector with its range, or a real, string
+            // or class handle)
+            (g.ret_kind, g.range) = match r.kind {
+                k @ (NetKind::Real | NetKind::String | NetKind::Class) => (k, None),
+                NetKind::Event => return self.err("a function returning an event is not supported"),
+                _ => {
+                    let w = packed_of(&r).width();
+                    (NetKind::Reg, Some((Expr::Num(ferrooxide_front::ast::dec(w as u64 - 1)), Expr::Num(ferrooxide_front::ast::dec(0)))))
+                }
+            };
+            g.signed = r.signed;
+            g.ret_ty = Some(Rc::new(r));
+        }
+        for d in &mut g.decls {
+            let Some(tp) = d.type_param.take() else { continue };
+            let Some(Sym::Type(t)) = self.lookup(&tp, sid) else {
+                return self.err(format!("'{tp}' is not a type"));
+            };
+            if t.has_struct() {
+                return self.err("an argument of a struct type given by a type parameter is not supported");
+            }
+            let (k, s, range, packed) = t.decl_parts();
+            d.kind = k;
+            d.signed = s;
+            d.range = range;
+            d.packed = packed;
+            d.ty = Some(t.clone());
+        }
+        Ok(Box::leak(Box::new(g)))
     }
 }
 

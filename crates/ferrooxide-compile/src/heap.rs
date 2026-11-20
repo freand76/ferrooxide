@@ -80,7 +80,7 @@ impl<'a> Compiler<'a> {
             return Ok(Self::elem_of(kind, w, signed));
         }
         let name = ty.and_then(|t| t.class.clone()).unwrap_or_default();
-        let c = self.find_class(&name, sid).ok_or_else(|| self.mkerr(format!("unknown class '{name}'")))?;
+        let c = self.class_named(&name, sid)?;
         Ok(Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: c })
     }
 

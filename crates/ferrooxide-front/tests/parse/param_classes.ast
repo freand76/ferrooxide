@@ -1,0 +1,31 @@
+module m ();
+  // imports $unit
+  class ext_cls#2 inst;
+  class ext_cls d;
+  initial begin
+    inst = ext_cls#3::new();
+    $display(base_cls#4::b, (base_cls#5::b + 1));
+  end
+  // specialization ext_cls#2 = ext_cls #(15, type(int(32) signed))
+  // specialization ext_cls#3 = ext_cls #(.e(3))
+  // specialization base_cls#4 = base_cls #()
+  // specialization base_cls#5 = base_cls #(4)
+endmodule
+package $unit ();
+  class base_cls;
+    // parameter port
+    parameter integer signed b = 20;
+    int(32) signed a;
+  endclass
+  class ext_cls extends base_cls#1;
+    // parameter port
+    parameter integer signed e = 25;
+    // parameter port
+    parameter type T = int(8) signed;
+    // specialization base_cls#1 = base_cls #((e + 1))
+    reg type T v;
+    function automatic reg get;
+      return this.v;
+    endfunction
+  endclass
+endpackage

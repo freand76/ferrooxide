@@ -35,6 +35,14 @@ pub(crate) struct Lower {
     decl_type: Option<Rc<SvType>>,
     /// items produced while lowering a declaration (enum constants)
     pending: Vec<Item>,
+    /// the specializations of parameterized classes used in the module, package or class
+    /// being lowered (`Item::ClassSpec`), and how many were made
+    pub(crate) specs: Vec<Item>,
+    pub(crate) spec_count: usize,
+    /// the class being lowered
+    pub(crate) in_class: Option<String>,
+    /// the specializations made: (specialization, class)
+    pub(crate) spec_of: Vec<(String, String)>,
     /// typedefs lowered ahead of their place for a forward declaration (node addresses)
     early: HashSet<usize>,
     /// items at file scope ($unit): added to every module that follows
@@ -161,6 +169,10 @@ impl Lower {
             vars: HashMap::new(),
             decl_type: None,
             pending: Vec::new(),
+            specs: Vec::new(),
+            spec_count: 0,
+            in_class: None,
+            spec_of: Vec::new(),
             early: HashSet::new(),
             unit_items: Vec::new(),
             unit_vars: Vec::new(),
@@ -350,6 +362,7 @@ impl Lower {
 
     /// After the last file: the `$unit` module holding the file-scope variables, if any.
     fn unit_module(&mut self) -> Option<Module> {
+        self.unit_vars.append(&mut self.specs);
         if self.unit_vars.is_empty() && !self.unit_items.iter().any(|i| matches!(i, Item::Param(_))) {
             return None;
         }
@@ -420,9 +433,15 @@ impl Lower {
     /// (types, variables, imports, time unit) it sees.
     fn module(&mut self, m: &t::ModuleDecl, nested: bool) -> Result<Module> {
         let saved_auto = std::mem::replace(&mut self.default_automatic, m.lifetime == Some(t::Lifetime::Automatic));
+        let saved_specs = std::mem::take(&mut self.specs);
         let r = self.module_inner(m, nested);
         self.default_automatic = saved_auto;
-        r
+        // (the specializations it uses are its items)
+        let specs = std::mem::replace(&mut self.specs, saved_specs);
+        r.map(|mut md| {
+            md.items.extend(specs);
+            md
+        })
     }
 
     fn module_inner(&mut self, m: &t::ModuleDecl, nested: bool) -> Result<Module> {
@@ -653,7 +672,7 @@ impl Lower {
     }
 
     /// The `#(...)` parameter port list of a module.
-    fn param_ports(&mut self, params: &[t::ParamDecl], items: &mut Vec<Item>) -> Result<()> {
+    pub(crate) fn param_ports(&mut self, params: &[t::ParamDecl], items: &mut Vec<Item>) -> Result<()> {
         use crate::syntax::kw::Kw;
         let mut local = false;
         for p in params {
@@ -853,6 +872,7 @@ impl Lower {
         let saved_scope = self.type_scope.replace(Default::default());
         let saved_ctx = self.pkg_ctx.replace(PkgCtx::default());
         let saved_classes = self.classes.clone();
+        let saved_specs = std::mem::take(&mut self.specs);
         let mut own = Vec::new();
         let refs: Vec<&t::Item> = p.items.iter().collect();
         for (k, it) in refs.iter().enumerate() {
@@ -863,6 +883,8 @@ impl Lower {
                 names.extend(new_params.into_iter().map(|p| (p, name.clone())));
             }
         }
+        own.append(&mut self.specs);
+        self.specs = saved_specs;
         self.type_scope = saved_scope;
         let ctx = std::mem::replace(&mut self.pkg_ctx, saved_ctx).unwrap_or_default();
         // the package's typedefs: those added while lowering it

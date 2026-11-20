@@ -450,7 +450,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
    `typedef class`, static methods, array arguments, string parameters and static
    variables in subroutine blocks, class members through hierarchical names, functions
-   returning handles, `extends P::B`, `this.super` done 2026-11-19): class handle ports, parameterized classes, struct members through
+   returning handles, `extends P::B`, `this.super` done 2026-11-19): class handle ports, struct members through
    hierarchical names (`inst.v.f`); `static` variables at the top level of an automatic
    subroutine; `%p`; deferred assertions [sv_deferred_*]. Array manipulation methods
    of queues and dynamic arrays done 2026-11-20 (`compile/arrmeth.rs`: reductions and
@@ -462,10 +462,21 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    arrays (`q[i].f`, `item.f`; `sigs.elem_layout`) and writes to a part of an element
    (read, changed in a scratch variable, written back). Left: methods of associative,
    multi-dimensional and struct arrays; queues of structs as class properties.
+   Parameterized classes done 2026-11-20: value and type parameter ports (`ClassDecl::
+   params`), each use with values a specialization item (`Item::ClassSpec`, named `C#<n>`
+   by the lowering, in the module, package or class using it) that the compiler evaluates
+   where it is used and declares as a class of its own (equal values: one class); type
+   parameters as for modules (also for subroutine arguments and results, which were wrong
+   before in modules too); `C #(..)::x`, `C #(..)::new`, `extends B #(..)`, typedefs of
+   specializations, forward-declared ones, a class's own name inside it meaning the
+   current specialization: 4623 of 5112 sv-tests. Left: static properties of
+   parameterized classes, body `parameter type` items, `C #(..)::f()` as a statement (the
+   parser takes it for a declaration), `mailbox`/`semaphore`, a class's own
+   specialization inside it naming a class other than itself (`this_type`), arguments
+   that use names of a generate block or subroutine (evaluated in the module). UVM now
+   stops at `TYPE::name` through a type parameter in a macro.
    From sv-tests (`SV_TESTS.md` priorities 7-11, by tests won): concurrent assertions, `sequence`,
-   `property`, `expect` and clocking blocks (58, used by ariane); parameterized classes,
-   `typedef C#(...) T`, `mailbox #(T)` (~171, the first error of every UVM test, though
-   UVM needs much more after it); constraints, `randomize`, `randsequence`, `randcase`,
+   `property`, `expect` and clocking blocks (58, used by ariane); `mailbox #(T)`; constraints, `randomize`, `randsequence`, `randcase`,
    `$dist_*` (51); then interface classes (21), streaming concatenation (14), extern
    methods (12), tagged unions (10), assignment in an expression (8), the `process` class,
    `$cast`/`$typename`, pure methods, replication in assignment patterns.
@@ -670,7 +681,8 @@ SystemVerilog data types and testbench features:
   package's scope), `this.super` (2026-11-19). Left: members of a call to a function
   declared after the use or in a package (`P::f().p`), a class in a package that refers to
   file-scope names [sv_ps_type_class1], enum methods on an enum
-  property from outside the class, parameterized classes, a base class declared after the
+  property from outside the class, the rest of parameterized classes (Next steps 4), a
+  base class declared after the
   class (forward typedef), whole array properties (assignments, selects of an element,
   arrays of queues), `foreach` and array queries of properties through a handle (`foreach
   (obj.a[i])`), class handle ports, string methods on properties, NBAs to properties,

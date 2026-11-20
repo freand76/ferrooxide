@@ -56,40 +56,72 @@ pub(crate) struct Classes<'a> {
     pub by_name: HashMap<(usize, String), u32>,
     /// a class's method scope -> the class
     pub of_scope: HashMap<usize, u32>,
+    /// specializations of parameterized classes: (class, parameter values) -> class, by
+    /// the values as written and as evaluated in the class
+    pub specs: HashMap<String, u32>,
+    pub spec_count: u32,
+    /// the scope declaring each class
+    pub decl_scope: HashMap<u32, usize>,
 }
 
+/// The scope of a class that is reserved but not yet declared (`ClassInfo::scope`).
+const UNDECLARED: usize = usize::MAX;
+
 impl<'a> Compiler<'a> {
-    /// Declare a class in scope `sid`: its properties' layout and start values.
-    pub(crate) fn declare_class(&mut self, c: &'a ClassDecl, sid: usize) -> R<()> {
+    /// The id of a class to be declared (`declare_class`): a placeholder until then.
+    pub(crate) fn reserve_class(&mut self, c: &'a ClassDecl, name: &str, sid: usize) -> u32 {
+        let id = self.classes.list.len() as u32;
+        self.classes.decl_scope.insert(id, sid);
+        self.classes.list.push(ClassInfo { name: name.to_string(), decl: c, base: None, scope: UNDECLARED, props: vec![], init_scope: 0, init_this: 0 });
+        self.prog.classes.push(rt::ClassDef { name: name.to_string(), width: 0, init: vec![] });
+        id
+    }
+
+    /// Declare class `c` as `name` in scope `sid` into the reserved class `id`: its
+    /// parameters (with `overrides` for a specialization), its properties' layout and start
+    /// values.
+    pub(crate) fn declare_class(&mut self, c: &'a ClassDecl, sid: usize, name: &str, overrides: &[(Option<String>, PVal)], id: u32) -> R<()> {
+        self.line = c.line;
+        let path = format!("{}.{name}", self.scopes[sid].name);
+        let file = self.file.clone();
+        let scope = self.new_scope(path.clone(), Some(sid), file.clone());
+        // the parameter ports, then the specializations the class uses (their values may
+        // use the parameters)
+        self.eval_param_items(&c.params, overrides, scope)?;
+        for s in &c.specs {
+            if let Item::ClassSpec { name, class, args, line } = s {
+                self.line = *line;
+                self.class_spec(name, class, args, scope)?;
+            }
+        }
         self.line = c.line;
         let base = match &c.base {
-            Some(b) => match self.find_class(b, sid) {
+            Some(b) => match self.find_class(b, scope) {
                 None => return self.err(format!("unknown base class '{b}'")),
-                Some(x) if x as usize >= self.classes.list.len() => {
+                Some(x) if self.classes.list[x as usize].scope == UNDECLARED => {
                     return self.err(format!("base class '{b}' declared after class '{}' is not supported", c.name))
                 }
                 x => x,
             },
             None => None,
         };
-        let id = self.classes.list.len() as u32;
-        let path = format!("{}.{}", self.scopes[sid].name, c.name);
-        let file = self.file.clone();
-        let scope = self.new_scope(path.clone(), Some(sid), file.clone());
-        // parameters and enum constants: the base class's, then its own (in its scope, where
-        // the methods find them first); `C::P` reaches them like a package's
+        // parameters and enum constants: the base class's (unless the class has its own of
+        // that name), then its own (in its scope, where the methods find them first); `C::P`
+        // reaches them like a package's
         if let Some(b) = base {
             let bs = self.classes.list[b as usize].scope;
             let inherited: Vec<(String, Sym)> =
                 self.scopes[bs].syms.iter().filter(|(_, s)| matches!(s, Sym::Const(_) | Sym::Real(_))).map(|(k, s)| (k.clone(), s.clone())).collect();
-            self.scopes[scope].syms.extend(inherited);
+            for (k, s) in inherited {
+                self.scopes[scope].syms.entry(k).or_insert(s);
+            }
         }
         for p in &c.consts {
             self.line = p.line;
             let v = self.param_value(p, None, scope)?;
             self.insert_param(p, v, scope)?;
         }
-        self.hier.pkg_scopes.entry(c.name.clone()).or_insert(scope);
+        self.hier.pkg_scopes.entry(name.to_string()).or_insert(scope);
         let mut props = base.map(|b| self.classes.list[b as usize].props.clone()).unwrap_or_default();
         let mut width = props.last().map(|p| p.off + p.size()).unwrap_or(0);
         // (4-state properties start as x)
@@ -145,20 +177,110 @@ impl<'a> Compiler<'a> {
                 init[n + (b / 64) as usize] |= 1 << (b % 64);
             }
         }
-        self.prog.classes.push(rt::ClassDef { name: c.name.clone(), width, init });
+        self.prog.classes[id as usize] = rt::ClassDef { name: name.to_string(), width, init };
         let init_scope = self.new_scope(format!("{path}.$init"), Some(scope), file);
         let init_this = self.new_signal(format!("{path}.$init.this"), 64, false, 0, 63, 0, 0, SigKind::Reg);
         self.prog.names.pop();
         self.sigs.types[init_this as usize] = Type::Class(id);
         self.scopes[init_scope].syms.insert("this".into(), Sym::Sig(init_this));
-        self.classes.list.push(ClassInfo { name: c.name.clone(), decl: c, base, scope, props, init_scope, init_this });
-        self.classes.by_name.insert((sid, c.name.clone()), id);
+        self.classes.list[id as usize] = ClassInfo { name: name.to_string(), decl: c, base, scope, props, init_scope, init_this };
+        self.classes.by_name.insert((sid, name.to_string()), id);
         self.classes.of_scope.insert(scope, id);
         Ok(())
     }
 
+    /// `C #(args)` used in scope `sid` as class `name` (`Item::ClassSpec`): the class with
+    /// these parameter values, declared where C is (once for equal values).
+    pub(crate) fn class_spec(&mut self, name: &str, class: &str, args: &'a [Conn], sid: usize) -> R<()> {
+        let Some(g) = self.find_class(class, sid) else { return self.err(format!("unknown class '{class}'")) };
+        let (decl, dscope) = (self.classes.list[g as usize].decl, self.classes.decl_scope[&g]);
+        if decl.params.is_empty() {
+            return self.err(format!("class '{class}' has no parameters"));
+        }
+        let mut ovs = Vec::new();
+        for a in args {
+            ovs.push(match a {
+                Conn::Positional(Some(e)) => (None, self.pval(e, sid)?),
+                Conn::Positional(None) => (None, PVal::Default),
+                Conn::Named(n, Some(e)) => (Some(n.clone()), self.pval(e, sid)?),
+                Conn::Named(_, None) => continue,
+                Conn::Wildcard => return self.err("`.*` in class parameters"),
+            });
+        }
+        let written = format!("{g}#{:?}", ovs.iter().map(|(n, v)| (n.clone(), Self::pval_key(v))).collect::<Vec<_>>());
+        let id = match self.classes.specs.get(&written) {
+            Some(&id) => id,
+            None => {
+                self.classes.spec_count += 1;
+                let own = format!("{}#{}", decl.name, self.classes.spec_count);
+                let id = self.reserve_class(decl, &own, dscope);
+                // (the class may use this specialization itself: `typedef C #(T) this_type;`)
+                self.classes.specs.insert(written.clone(), id);
+                let saved = self.line;
+                self.declare_class(decl, dscope, &own, &ovs, id)?;
+                self.line = saved;
+                // the same parameter values as the class itself or another specialization:
+                // that class (the new one goes unused)
+                let key = self.spec_key(g, id);
+                let generic = self.classes.list[g as usize].scope != UNDECLARED;
+                let id = match self.classes.specs.get(&key) {
+                    Some(&other) => other,
+                    None if generic && key == self.spec_key(g, g) => g,
+                    None => id,
+                };
+                self.classes.specs.insert(key, id);
+                self.classes.specs.insert(written, id);
+                id
+            }
+        };
+        self.classes.by_name.insert((sid, name.to_string()), id);
+        let cs = self.classes.list[id as usize].scope;
+        self.hier.pkg_scopes.insert(name.to_string(), cs);
+        Ok(())
+    }
+
+    /// A parameter value as text, for the key of a specialization.
+    fn pval_key(v: &PVal) -> String {
+        match v {
+            PVal::Int(c) | PVal::Str(c) => format!("{c:?}"),
+            PVal::Default => "default".into(),
+            PVal::Real(r) => format!("{}", r.to_bits()),
+            PVal::Type(t) => format!("{t:?}"),
+        }
+    }
+
+    /// The key of class `id` (a specialization of `g`, or `g` itself) by the values its
+    /// parameter ports have.
+    fn spec_key(&self, g: u32, id: u32) -> String {
+        let c = &self.classes.list[id as usize];
+        let mut k = format!("{g}=");
+        for p in &c.decl.params {
+            let n = match p {
+                Item::Param(p) => &p.name,
+                Item::TypeParam { name, .. } => name,
+                _ => continue,
+            };
+            let v = match self.scopes[c.scope].syms.get(n) {
+                Some(Sym::Const(c)) => format!("{c:?}"),
+                Some(Sym::Real(r)) => format!("{}", r.to_bits()),
+                Some(Sym::Type(t)) => format!("{t:?}"),
+                _ => "?".into(),
+            };
+            k.push_str(&format!("{n}={v};"));
+        }
+        k
+    }
+
     /// The type of a class property.
     fn prop_type(&mut self, d: &Decl, sid: usize) -> R<Type> {
+        // a type parameter (of a parameterized class)
+        if let Some(t) = d.ty.as_ref().filter(|t| t.param.is_some() && !t.has_struct()) {
+            let r = self.resolve_type(t, sid)?;
+            if r.has_struct() {
+                return self.err("a class property of a struct type given by a type parameter is not supported");
+            }
+            return self.resolved_type(&r, sid);
+        }
         if d.ty.as_ref().is_some_and(|t| t.has_struct() || t.param.is_some()) {
             return self.err("a class property of a struct type or a type parameter is not supported");
         }
@@ -199,7 +321,24 @@ impl<'a> Compiler<'a> {
     /// The class a declaration of a class type names.
     pub(crate) fn class_of_decl(&self, d: &Decl, sid: usize) -> R<u32> {
         let name = d.ty.as_ref().and_then(|t| t.class.clone()).unwrap_or_default();
-        self.find_class(&name, sid).ok_or_else(|| self.mkerr(format!("unknown class '{name}'")))
+        self.class_named(&name, sid)
+    }
+
+    /// The class `name` names in scope `sid` as the type of a handle: an error for none, and
+    /// for a parameterized class with a parameter without a default (only its
+    /// specializations exist).
+    pub(crate) fn class_named(&self, name: &str, sid: usize) -> R<u32> {
+        let c = self.find_class(name, sid).ok_or_else(|| self.mkerr(format!("unknown class '{name}'")))?;
+        let ci = &self.classes.list[c as usize];
+        if Self::needs_params(ci.decl) && ci.name == ci.decl.name {
+            return self.err(format!("class '{name}' has parameters without a default: it needs parameter values ('{name} #(...)')"));
+        }
+        Ok(c)
+    }
+
+    /// Class `c` has a parameter without a default value: only its specializations exist.
+    pub(crate) fn needs_params(c: &ClassDecl) -> bool {
+        c.params.iter().any(|p| matches!(p, Item::Param(ParamDecl { value: None, .. }) | Item::TypeParam { default: None, .. }))
     }
 
     /// The class named `name` visible from scope `sid`.

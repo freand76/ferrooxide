@@ -313,7 +313,9 @@ impl Lower {
             t::ExprKind::New { size: None, args: None, copy: Some(x) } => Expr::NewCopy(Box::new(self.expr(x)?)),
             t::ExprKind::New { .. } => return self.unsupported(loc, "new"),
             t::ExprKind::TypedNew { class, args } => {
-                if !class.scopes.is_empty() || class.params.is_some() {
+                // `C #(..)::new`: of a specialization
+                let class = &self.despec(class, loc)?;
+                if !class.scopes.is_empty() {
                     return self.unsupported(loc, "a constructor call of this class type");
                 }
                 let c = if self.classes.contains_key(&class.name) {
@@ -436,6 +438,19 @@ impl Lower {
     /// there (`$display(bit)` with a variable `bit`, Verilog-2005), except for `$bits`.
     pub(crate) fn arg(&mut self, e: &t::Expr) -> Result<Expr> {
         if let t::ExprKind::Type(dt) = &e.kind {
+            // `C #(..)::P` (parsed as a type): a constant of a specialization, unless the class
+            // declares a type of that name
+            if let t::TypeKind::Named(n) = &dt.kind {
+                if n.scopes.len() == 1 && n.scopes[0].params.is_some() && dt.signed.is_none() && dt.packed.is_empty() {
+                    let n2 = self.despec(n, e.loc)?;
+                    let is_type = self.classes.get(&n2.scopes[0].name).is_some_and(|c| c.types.contains_key(&n2.name));
+                    if !is_type {
+                        return self.expr(&t::Expr::new(t::ExprKind::Scoped(Box::new(n2)), e.loc));
+                    }
+                    let dt2 = t::DataType { kind: t::TypeKind::Named(Box::new(n2)), ..(**dt).clone() };
+                    return self.expr(&t::Expr::new(t::ExprKind::Type(Box::new(dt2)), e.loc));
+                }
+            }
             if dt.signed.is_none() && dt.packed.is_empty() {
                 // (a keyword only where such a variable exists)
                 let var = |l: &Self, n: &str| l.vars.contains_key(n).then(|| n.to_string());
@@ -596,6 +611,14 @@ impl Lower {
                     }
                     return self.unsupported(e.loc, "a select of this expression");
                 };
+                // `C #(..)::x`: of a specialization
+                let despecced;
+                let n = if n.params.is_some() || n.scopes.iter().any(|s| s.params.is_some()) {
+                    despecced = self.despec(n, e.loc)?;
+                    &despecced
+                } else {
+                    n
+                };
                 if n.scopes.len() != 1 || n.params.is_some() || n.scopes[0].params.is_some() || n.scopes[0].name == "$unit" {
                     return self.unsupported(e.loc, "this scoped name");
                 }
@@ -620,6 +643,7 @@ impl Lower {
                     let base = Expr::Hier(vec![p, n.name.clone()]);
                     return if has_struct { self.members(base, ops) } else { self.selects(base, ops) };
                 }
+                self.check_unspecialized(&p, e.loc)?;
                 // `C::p`: a static property of class C
                 if let Some(v) = self.static_prop(&Expr::Ident(p.clone()), &n.name) {
                     return self.selects(Expr::Ident(v), ops);

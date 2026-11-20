@@ -103,7 +103,7 @@ impl<'a> Compiler<'a> {
     /// The scope that declares constant `name` as seen from `sid`, and its name there.
     fn const_scope(&self, name: &str, mut sid: usize) -> Option<(usize, String)> {
         if let Some((p, n)) = name.split_once("::") {
-            return Some((*self.hier.pkg_scopes.get(p)?, n.to_string()));
+            return Some((self.prefix_scope(p, sid)?, n.to_string()));
         }
         loop {
             if self.scopes[sid].syms.contains_key(name) {

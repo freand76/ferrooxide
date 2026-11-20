@@ -241,6 +241,10 @@ pub enum Item {
     Instances { module: String, params: Vec<Conn>, insts: Vec<Instance>, line: Line },
     Subroutine(SubroutineDecl),
     Class(std::rc::Rc<ClassDecl>),
+    /// `C #(args)` (IEEE 1800-2017 8.25): the specialization of parameterized class `class`
+    /// with these parameter values (evaluated where it is used), named `name` (`C#<n>`) in
+    /// the code that uses it
+    ClassSpec { name: String, class: String, args: Vec<Conn>, line: Line },
     GenFor { init_var: String, init: Expr, cond: Expr, step_var: String, step: Expr, name: Option<String>, items: Vec<Item>, line: Line },
     /// `direct`: the whole block of an enclosing conditional (written without begin-end):
     /// its blocks are in the enclosing conditional's scope (IEEE 1800 27.5)
@@ -266,6 +270,12 @@ pub enum Item {
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
     pub name: String,
+    /// the parameter ports `#(...)` of a parameterized class (`Item::Param` and
+    /// `Item::TypeParam`): each specialization has its own values
+    pub params: Vec<Item>,
+    /// the specializations of parameterized classes the class uses (`Item::ClassSpec`,
+    /// evaluated in its scope, so their arguments may use its parameters)
+    pub specs: Vec<Item>,
     /// `extends B` and the arguments of `extends B(args)` (for B's constructor)
     pub base: Option<String>,
     pub base_args: Option<Vec<Expr>>,

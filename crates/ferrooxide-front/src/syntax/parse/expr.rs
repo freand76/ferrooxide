@@ -65,6 +65,11 @@ impl Parser {
         match self.peek() {
             T::Kw(Kw::Type) => false,
             T::Kw(k) if is_type_kw(*k) || *k == Kw::Virtual => self.type_kw_ends_arg(),
+            // `C #(..)::x` followed by more of an expression: a scoped name
+            T::Ident(n) if self.is_type_name(n) && self.is_p_at(1, "#") && self.is_p_at(2, "(") => match self.after_parens(2) {
+                Some(k) if self.is_p_at(k, "::") => matches!(self.peek_at(k + 2), T::Punct(")" | "," | "}")),
+                _ => true,
+            },
             T::Ident(n) if self.is_type_name(n) => matches!(self.peek_at(1), T::Punct(")" | "," | "[" | "#" | "}")) || self.is_kw_at(1, Kw::Signed) || self.is_kw_at(1, Kw::Unsigned),
             T::Ident(n) if self.is_p_at(1, "::") => {
                 // `p::T` followed by the end of the argument
@@ -72,6 +77,25 @@ impl Parser {
                     && matches!(self.peek_at(3), T::Punct(")" | "," | "["))
             }
             _ => false,
+        }
+    }
+
+    /// The position after the parentheses that open at `k` (None: they do not close).
+    fn after_parens(&self, mut k: usize) -> Option<usize> {
+        let mut depth = 0;
+        loop {
+            match self.peek_at(k) {
+                T::Punct("(") => depth += 1,
+                T::Punct(")") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(k + 1);
+                    }
+                }
+                T::Eof => return None,
+                _ => {}
+            }
+            k += 1;
         }
     }
 

@@ -510,8 +510,10 @@ impl Lower {
                 Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
             t::TypeKind::Named(n) => {
-                if n.params.is_some() || n.scopes.iter().any(|s| s.params.is_some()) || n.scopes.len() > 1 {
-                    return self.unsupported(ty.loc, "a parameterized class type");
+                // `C #(..)`: a specialization of a parameterized class
+                let n = &self.despec(n, ty.loc)?;
+                if n.scopes.len() > 1 {
+                    return self.unsupported(ty.loc, "a type name with more than one scope");
                 }
                 if let Some(s) = n.scopes.first() {
                     // `C::T`: a typedef of class C
@@ -555,6 +557,7 @@ impl Lower {
             Some(t) => Ok(t),
             None => match &ty.kind {
                 t::TypeKind::Named(n) => self.err(ty.loc, format!("unknown type '{}'", n.name)),
+                t::TypeKind::String if ty.packed.is_empty() => Ok(SvType { int_kind: true, ..SvType::vector(NetKind::String, false, vec![(num(63), num(0))]) }),
                 _ => self.unsupported(ty.loc, "this data type"),
             },
         }

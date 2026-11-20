@@ -756,10 +756,22 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The scope `p::` names from scope `sid`: a package or class; inside a class (or a
+    /// specialization of it) its own name is that class (IEEE 1800-2017 8.25.1).
+    pub(crate) fn prefix_scope(&self, p: &str, sid: usize) -> Option<usize> {
+        if let Some(c) = self.class_of_scope(sid) {
+            let ci = &self.classes.list[c as usize];
+            if ci.decl.name == p {
+                return Some(ci.scope);
+            }
+        }
+        self.hier.pkg_scopes.get(p).copied()
+    }
+
     /// Declared range of a parameter named `name` visible from `sid`.
     pub(crate) fn param_range(&self, name: &str, mut sid: usize) -> Option<(i64, i64)> {
         if let Some((p, n)) = name.split_once("::") {
-            return self.scopes[*self.hier.pkg_scopes.get(p)?].param_ranges.get(n).copied();
+            return self.scopes[self.prefix_scope(p, sid)?].param_ranges.get(n).copied();
         }
         loop {
             if self.scopes[sid].syms.contains_key(name) {
@@ -782,9 +794,9 @@ impl<'a> Compiler<'a> {
             // `pkg::name`: in the package's scope only; `$flat:pkg::name` and the like name
             // `$flat:name` there
             if let Some((pre, p)) = p.strip_prefix('$').and_then(|r| r.split_once(':')) {
-                return self.scopes[*self.hier.pkg_scopes.get(p)?].syms.get(&format!("${pre}:{n}")).cloned();
+                return self.scopes[self.prefix_scope(p, sid)?].syms.get(&format!("${pre}:{n}")).cloned();
             }
-            return self.scopes[*self.hier.pkg_scopes.get(p)?].syms.get(n).cloned();
+            return self.scopes[self.prefix_scope(p, sid)?].syms.get(n).cloned();
         }
         loop {
             if let Some(s) = self.scopes[sid].syms.get(name) {

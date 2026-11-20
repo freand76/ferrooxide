@@ -17,6 +17,8 @@ impl Parser {
         let lifetime = self.lifetime();
         let name = self.ident()?;
         self.add_type(&name);
+        // (a class inside itself: `typedef C #(T) this_type;`)
+        self.classes.entry(name.clone()).or_default();
         self.push_scope();
         let params = if self.is_p("#") { Some(self.param_port_list()?) } else { None };
         let mut implements = Vec::new();

@@ -429,6 +429,9 @@ impl Printer {
                 }
             }
             Item::Subroutine(f) => self.subroutine(f),
+            Item::ClassSpec { name, class, args, .. } => {
+                self.line(format!("// specialization {name} = {class} #({})", args.iter().map(conn).collect::<Vec<_>>().join(", ")))
+            }
             Item::Class(c) => {
                 let mut head = format!("{}class {}", if c.abstract_ { "virtual " } else { "" }, c.name);
                 if let Some(b) = &c.base {
@@ -439,6 +442,13 @@ impl Printer {
                 }
                 self.line(format!("{head};"));
                 self.ind += 1;
+                for p in &c.params {
+                    self.line("// parameter port");
+                    self.item(p);
+                }
+                for s in &c.specs {
+                    self.item(s);
+                }
                 for p in &c.consts {
                     self.line(Self::param_text(p));
                 }

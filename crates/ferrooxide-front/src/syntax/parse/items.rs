@@ -706,6 +706,10 @@ impl Parser {
             let name = self.ident()?;
             self.expect_p(";")?;
             self.add_type(&name);
+            // (a class, also a type declared without its kind: `C #(..) x` may follow)
+            if matches!(kind, None | Some(Kw::Class)) {
+                self.classes.entry(name.clone()).or_default();
+            }
             return Ok(Item::Typedef(Typedef::Forward { kind, interface_class, name, loc }));
         }
         // `typedef bus.data_t t;`: a type from an interface port

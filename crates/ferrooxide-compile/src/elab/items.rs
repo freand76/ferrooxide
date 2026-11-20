@@ -108,16 +108,29 @@ impl<'a> Compiler<'a> {
         self.register_defparams(items, sid)?;
         // (after the parameters, which property types may use; the ids first, so that a
         // property can be a handle of a class declared after it)
-        let mut id = self.classes.list.len() as u32;
+        let mut ids = Vec::new();
         for it in items {
             if let Item::Class(c) = it {
+                let id = self.reserve_class(c, &c.name, sid);
                 self.classes.by_name.insert((sid, c.name.clone()), id);
-                id += 1;
+                ids.push(id);
             }
         }
+        let mut k = 0;
         for it in items {
             if let Item::Class(c) = it {
-                self.declare_class(c, sid)?;
+                // (a class with a parameter without a default exists only as specializations)
+                if !Self::needs_params(c) {
+                    self.declare_class(c, sid, &c.name, &[], ids[k])?;
+                }
+                k += 1;
+            }
+        }
+        // the specializations of parameterized classes this scope uses
+        for it in items {
+            if let Item::ClassSpec { name, class, args, line } = it {
+                self.line = *line;
+                self.class_spec(name, class, args, sid)?;
             }
         }
         // 2. declarations (merged by name: `output [3:0] q; reg [3:0] q;`)
@@ -363,7 +376,7 @@ impl<'a> Compiler<'a> {
                     return self.err(format!("'{name}': a class handle port is not supported"));
                 }
                 let c = match mg.ty.and_then(|t| t.class.clone()) {
-                    Some(n) => self.find_class(&n, sid).ok_or_else(|| self.mkerr(format!("unknown class '{n}'")))?,
+                    Some(n) => self.class_named(&n, sid)?,
                     None => return self.err(format!("'{name}': a class handle without its class")),
                 };
                 if depth > 0 {
@@ -626,6 +639,7 @@ impl<'a> Compiler<'a> {
                 | Item::TypeParam { .. }
                 | Item::Subroutine(_)
                 | Item::Class(_)
+                | Item::ClassSpec { .. }
                 | Item::Defparam { .. }
                 | Item::SpecPath { .. } => {}
                 Item::ContAssign { delay, lhs, rhs, strength, line } => {

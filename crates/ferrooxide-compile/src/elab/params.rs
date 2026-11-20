@@ -5,11 +5,16 @@ use crate::*;
 impl<'a> Compiler<'a> {
     /// Evaluate the parameters of module `m` (with overrides) into scope `sid`, in order.
     pub(crate) fn eval_params(&mut self, m: &'a Module, overrides: &[(Option<String>, PVal)], sid: usize) -> R<()> {
+        self.eval_param_items(&m.items, overrides, sid)
+    }
+
+    /// `eval_params` of the parameters among `items` (a module's, a class's parameter ports).
+    pub(crate) fn eval_param_items(&mut self, items: &'a [Item], overrides: &[(Option<String>, PVal)], sid: usize) -> R<()> {
         // a named override needs a parameter of that name that is not local
         let inst_line = self.line;
         for (n, _) in overrides {
             let Some(n) = n else { continue };
-            let local = m.items.iter().find_map(|it| match it {
+            let local = items.iter().find_map(|it| match it {
                 Item::Param(p) if &p.name == n => Some(p.local),
                 Item::TypeParam { local, name, .. } if name == n => Some(*local),
                 _ => None,
@@ -27,7 +32,7 @@ impl<'a> Compiler<'a> {
         }
         self.line = inst_line;
         let mut pos = 0usize;
-        for it in &m.items {
+        for it in items {
             if let Item::TypeParam { local, name, default, line } = it {
                 self.line = *line;
                 let mut ov = None;
