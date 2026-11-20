@@ -867,6 +867,10 @@ impl<'a> Compiler<'a> {
             }
             s.fields.iter().map(|(n, ft)| (Some(n.as_str()), ft.clone())).collect()
         } else {
+            // (IEEE 1800-2017 10.9: for arrays and structs)
+            if t.dims.is_empty() && !t.int_kind {
+                return self.err("an assignment pattern for a scalar type");
+            }
             return Ok(match default {
                 Some(v) => cast(t.width(), v.clone()),
                 None => Expr::Concat(pos.into_iter().map(|v| cast(1, v.clone())).collect()),

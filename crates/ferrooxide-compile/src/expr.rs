@@ -433,6 +433,23 @@ impl<'a> Compiler<'a> {
             }
             Some(Base::Real(_)) => self.err("bit select of a real value"),
             None => {
+                // a select of one bit of a vector: nothing more to select from
+                if let Expr::Index(a, _) = e {
+                    // (the vector: a signal, or an element of a one-dimensional array)
+                    let vec = match &**a {
+                        Expr::Index(m, _) => self.array_of(m, sid).filter(|arr| !self.sigs.md_dims.contains_key(arr)),
+                        _ => match self.resolve_base(a, sid)? {
+                            Some(Base::Sig(s)) if self.sig(s).depth == 0 => Some(s),
+                            _ => None,
+                        },
+                    };
+                    if let Some(s) = vec {
+                        let one_dim = !self.sigs.packed_dims.contains_key(&s) && self.sigs.layout.get(&s).is_none_or(|l| l.dims.len() <= 1 && l.fields.is_none());
+                        if one_dim && !self.sig(s).real && matches!(self.sigs.types[s as usize], types::Type::Vec { .. }) {
+                            return self.err(format!("a select of a bit select of '{}': more indices than dimensions", self.sig(s).name));
+                        }
+                    }
+                }
                 let (s, w, _) = self.self_expr(e, sid)?;
                 Ok((s, w, w as i64 - 1, 0))
             }
@@ -1180,6 +1197,10 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(d, 32, w, s))
             }
             "$signed" | "$unsigned" => {
+                // (IEEE 1800-2017 11.7: an integral argument)
+                if self.type_of(&args[0], sid)?.is_real() {
+                    return self.err(format!("the argument of {name} is real; it must be integral"));
+                }
                 let (v, vw, _) = self.self_expr(&args[0], sid)?;
                 Ok(self.resize(v, vw, w, s))
             }
