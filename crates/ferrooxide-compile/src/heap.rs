@@ -538,6 +538,18 @@ impl<'a> Compiler<'a> {
 
     /// A queue or dynamic array value as a new array (a variable's array copied).
     pub(crate) fn dyn_owned(&mut self, e: &Expr, kind: DynKind, elem: Elem, sid: usize) -> R<u32> {
+        // another array: equivalent element types (IEEE 1800-2017 6.22.2: same signedness,
+        // both 2-state or both 4-state)
+        if let Some((_, el)) = self.dyn_arr_type(e, sid)? {
+            if el.leaf == Leaf::Bits && elem.leaf == Leaf::Bits && el.class == NONE && elem.class == NONE {
+                if el.two_state != elem.two_state {
+                    return self.err("arrays assigned to each other need equivalent element types (one is 2-state, the other 4-state)");
+                }
+                if el.signed != elem.signed {
+                    return self.err("arrays assigned to each other need equivalent element types (their signedness differs)");
+                }
+            }
+        }
         let (h, fresh) = self.dyn_rhs_k(e, elem, matches!(kind, DynKind::Assoc(_)), sid)?;
         let h = if fresh {
             h

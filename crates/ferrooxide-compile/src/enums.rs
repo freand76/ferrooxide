@@ -23,6 +23,8 @@ pub(crate) struct Enums {
     consts: HashMap<(usize, String), u32>,
     /// signals (of arrays: their elements) of an enum type -> id
     pub(crate) sigs: HashMap<u32, u32>,
+    /// queues and dynamic arrays of an enum type -> the id of their elements' enum
+    pub(crate) dyn_sigs: HashMap<u32, u32>,
 }
 
 /// The enum type of an expression.
@@ -219,11 +221,28 @@ impl<'a> Compiler<'a> {
         if self.enums.ids.is_empty() {
             return Ok(());
         }
+        // one queue or dynamic array assigned to another: the same element enum (or none)
+        if let (Some((l, _)), Some((r, _))) = (self.dyn_var(lhs, sid), self.dyn_var(rhs, sid)) {
+            let (a, b) = (self.enums.dyn_sigs.get(&l), self.enums.dyn_sigs.get(&r));
+            if a != b {
+                return self.err("arrays assigned to each other need equivalent element types (the enum types differ)");
+            }
+        }
         let want = match self.enum_of(lhs, sid)? {
             EnumOf::Id(id) => id,
             _ => return Ok(()),
         };
         self.check_enum(want, rhs, sid)
+    }
+
+    /// Queue or dynamic array `s` declared with data type `t` in scope `sid`: the enum of its
+    /// elements, if any.
+    pub(crate) fn dyn_enum(&mut self, s: u32, t: Option<&ferrooxide_front::lower::SvType>, sid: usize) {
+        let Some(names) = t.and_then(|t| t.enum_names.clone().filter(|_| t.dims.len() <= 1)) else { return };
+        let id = self.enum_id(&names, sid);
+        if id != NONE {
+            self.enums.dyn_sigs.insert(s, id);
+        }
     }
 
     /// Argument `a` of port `ps`: an enum input takes a value of its type (`into`); an output
