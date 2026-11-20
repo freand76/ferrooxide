@@ -463,6 +463,11 @@ impl<'a> Compiler<'a> {
                         Some(n) => format!("{}.{}", self.scopes[sid].name, n),
                         None => self.scopes[sid].name.clone(),
                     };
+                    // (a block compiled again, e.g. in another call of its function, has
+                    // its name already)
+                    if let Some(n) = name.as_ref().filter(|_| !self.code.block_scopes.contains_key(&(sid, st as *const Stmt))) {
+                        self.scope_name_free(n, n, sid)?;
+                    }
                     let file = self.file.clone();
                     let b = self.new_scope(path.clone(), Some(sid), file);
                     if let Some(n) = name {

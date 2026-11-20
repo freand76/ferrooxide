@@ -641,6 +641,10 @@ impl<'a> Compiler<'a> {
                     };
                     if m.udp.is_some() {
                         // a user-defined primitive: positional terminals, an optional delay
+                        // (rise and fall at most: its output is never z)
+                        if params.len() > 2 {
+                            return self.err(format!("primitive '{module}' takes at most two delays, not {}", params.len()));
+                        }
                         let delay = match params.first() {
                             Some(Conn::Positional(Some(e))) => Some(e.clone()),
                             _ => None,
@@ -740,6 +744,9 @@ impl<'a> Compiler<'a> {
                         self.no_specparam(e, sid)?;
                     }
                     let mut v = self.const_int(init, sid)?;
+                    if name.is_some() {
+                        self.scope_name_free(&bname, &format!("{bname}[{v}]"), sid)?;
+                    }
                     let mut iters = 0;
                     loop {
                         let it_name = format!("{bname}[{v}]");
@@ -839,6 +846,15 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// A named block `name` (its child scope `key`) may be declared in scope `sid`: no
+    /// signal, parameter or other block there has the name (IEEE 1800-2017 23.9).
+    pub(crate) fn scope_name_free(&mut self, name: &str, key: &str, sid: usize) -> R<()> {
+        if self.scopes[sid].syms.contains_key(name) || self.scopes[sid].children.contains_key(key) {
+            return self.err(format!("'{name}' is already declared in this scope"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn gen_scope(&mut self, items: &'a [Item], name: &Option<String>, n: usize, sid: usize) -> R<()> {
         if items.is_empty() {
             return Ok(());
@@ -848,6 +864,9 @@ impl<'a> Compiler<'a> {
             return self.elab_items(items, sid, false, &HashMap::new(), None);
         }
         let bname = name.clone().unwrap_or_else(|| format!("genblk{n}"));
+        if name.is_some() {
+            self.scope_name_free(&bname, &bname, sid)?;
+        }
         let path = format!("{}.{}", self.scopes[sid].name, bname);
         let file = self.file.clone();
         let child = self.new_scope(path, Some(sid), file);

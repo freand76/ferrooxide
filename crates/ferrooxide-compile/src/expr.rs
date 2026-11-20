@@ -1600,6 +1600,17 @@ impl<'a> Compiler<'a> {
                 args
             }
         };
+        // (an event is no value: it cannot be passed to a subroutine)
+        for a in args {
+            if let Expr::Ident(n) = a {
+                if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
+                    if self.sig(s).event {
+                        let what = if f.is_task { "task" } else { "function" };
+                        return self.err(format!("event '{n}' cannot be an argument of {what} '{name}'"));
+                    }
+                }
+            }
+        }
         // a call of a function that is being inlined: recursion, through a subroutine
         if let Some(k) = self.subr.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
             return self.recursive_call(f, k, this, args, sid);

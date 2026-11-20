@@ -233,11 +233,12 @@ impl Lower {
                     if let Some(q) = m.quals.iter().find(|q| !matches!(q, Kw::Virtual | Kw::Local | Kw::Protected | Kw::Static)) {
                         return self.unsupported(m.loc, &format!("a {} method", q.as_str()));
                     }
-                    let mut f = self.subroutine_in(m, true)?;
-                    // methods are automatic (IEEE 1800-2017 8.6)
-                    if m.lifetime != Some(t::Lifetime::Static) {
-                        f.automatic = true;
+                    // (IEEE 1800-2017 8.6: methods have automatic lifetime)
+                    if m.lifetime == Some(t::Lifetime::Static) {
+                        return self.err(m.loc, format!("method '{}' cannot have a static lifetime", m.name.name));
                     }
+                    let mut f = self.subroutine_in(m, true)?;
+                    f.automatic = true;
                     let mut locals: Vec<String> = vec![f.name.clone()];
                     for d in &f.decls {
                         locals.extend(d.names.iter().map(|n| n.name.clone()));
