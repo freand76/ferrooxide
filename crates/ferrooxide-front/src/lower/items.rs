@@ -593,9 +593,6 @@ impl Lower {
                         Some(t::Lifetime::Static) if automatic => {
                             return self.unsupported(v.loc, "a static variable in an automatic subroutine")
                         }
-                        Some(t::Lifetime::Automatic) if !automatic => {
-                            return self.unsupported(v.loc, "an automatic variable in a static subroutine")
-                        }
                         _ => {}
                     }
                     (None, None, v.var, &v.ty, &v.decls, v.loc)
@@ -611,6 +608,8 @@ impl Lower {
                 d.kind = NetKind::Reg;
             }
             d.names = self.declarators(dl)?;
+            // (`automatic` in a static subroutine: initialized at each call)
+            d.automatic = !automatic && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
             decls.push(d);
         }
         let mut stmts = Vec::new();

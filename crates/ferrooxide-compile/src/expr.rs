@@ -1806,11 +1806,10 @@ impl<'a> Compiler<'a> {
 
     /// The initializers of an automatic subroutine's variables (`fresh`: also of a static
     /// one called in a constant expression), applied on each call.
+    /// The initializers of a call's automatic variables (`fresh`: all, the subroutine is
+    /// automatic; else those declared `automatic` in a static one).
     fn auto_inits(&mut self, f: &'a SubroutineDecl, fscope: usize, fresh: bool) -> R<()> {
-        if !fresh {
-            return Ok(());
-        }
-        for d in f.decls.iter().filter(|d| d.dir.is_none()) {
+        for d in f.decls.iter().filter(|d| d.dir.is_none() && (fresh || d.automatic)) {
             for n in &d.names {
                 if let Some(init) = &n.init {
                     let st = Stmt::Assign { lhs: ExprKind::Ident(n.name.clone()).into(), rhs: init.clone(), nonblocking: false, timing: None, line: n.line };
