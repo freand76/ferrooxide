@@ -2,6 +2,7 @@
 //! primitives and specify paths.
 
 mod decls;
+mod gen;
 mod hier;
 mod items;
 mod nets;

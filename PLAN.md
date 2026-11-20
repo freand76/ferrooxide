@@ -357,7 +357,11 @@ the rest of R4 in slices (step 5 below). *Spans done 2026-11-20*: `ast::Expr` is
 expressions in places); the lowering gives each expression its tree `Loc` (`fill_line`
 for the parts made for it); the compiler's `at(line, f)` runs `expr`/`rexpr`/`str_expr`/
 `type_of`/`dyn_value`/`stmt` at their line and returns to the location before, so an
-inlined call no longer moves it. `self.line` stays as the current location.
+inlined call no longer moves it. `self.line` stays as the current location. *`elab_items`
+split 2026-11-20*: it runs the phases (`scope_defs`, `declarations`, implicit nets, path
+delays, static subroutines, `elab_item` per item); declarations (`Merged`, `decl_shape`,
+`declare`, `declare_port`) in `elab/decls.rs`, instances in `elab/items.rs`, generate
+constructs in `elab/gen.rs`.
 
 Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in elaboration
 (A1 = R4 slices 1-4), heap objects (A2: queues, dynamic and associative arrays), classes
@@ -509,8 +513,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    methods (12), tagged unions (10), assignment in an expression (8), the `process` class,
    `$cast`/`$typename`, pure methods, replication in assignment patterns.
 5. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
-   spans on `Expr`/`Stmt` (R6); `elab_items` (`elab/items.rs`) is still one function, to be
-   split per item kind; positional assignment patterns for packed array parameters
+   positional assignment patterns for packed array parameters
    [sv_ap_parray2].
 6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
    list: 14 compile errors, 105 wrong outputs): the Verilog items under "Unsupported
