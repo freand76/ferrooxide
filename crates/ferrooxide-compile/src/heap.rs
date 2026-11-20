@@ -38,6 +38,26 @@ enum DynHome {
     Sig(u32),
     /// the property at bit `off` of the object whose handle is in slot `h`
     Prop { h: u32, off: u32 },
+    /// a temporary copy of a fixed-size array (`arrmeth.rs`) whose leftmost element has
+    /// index `left`, the indexes descending to the right (`desc`)
+    Temp { left: i64, desc: bool },
+}
+
+impl DynArr {
+    /// A temporary queue of `elem` in `slot`, a copy of a fixed-size array (see
+    /// `DynHome::Temp`).
+    pub(crate) fn temp(slot: u32, elem: Elem, left: i64, desc: bool) -> DynArr {
+        DynArr { slot, kind: DynKind::Queue(0), elem, home: DynHome::Temp { left, desc } }
+    }
+
+    /// The index of the copied array's leftmost element and whether indexes descend (None:
+    /// the array's own indexes, from 0).
+    pub(crate) fn index_map(&self) -> Option<(i64, bool)> {
+        match self.home {
+            DynHome::Temp { left, desc } => Some((left, desc)),
+            _ => None,
+        }
+    }
 }
 
 impl<'a> Compiler<'a> {
@@ -196,6 +216,7 @@ impl<'a> Compiler<'a> {
             DynHome::Prop { h, off } => {
                 self.emit(Instr::Obj { op: rt::ObjOp::Set, d: NONE, a: h, b: a.slot, off, w: 64 });
             }
+            DynHome::Temp { .. } => {}
         }
     }
 
@@ -221,7 +242,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// The current source location for run-time warnings (`Program::locs`).
-    fn loc_id(&mut self) -> u32 {
+    pub(crate) fn loc_id(&mut self) -> u32 {
         let l = format!("{}", self.loc());
         if self.prog.locs.last() != Some(&l) {
             self.prog.locs.push(l);
@@ -458,7 +479,16 @@ impl<'a> Compiler<'a> {
     }
 
     /// `dyn_rhs` for a target that is an associative array (`assoc`) or not.
-    fn dyn_rhs_k(&mut self, e: &Expr, elem: Elem, assoc: bool, sid: usize) -> R<(u32, bool)> {
+    pub(crate) fn dyn_rhs_k(&mut self, e: &Expr, elem: Elem, assoc: bool, sid: usize) -> R<(u32, bool)> {
+        // a fixed-size array: its elements in a new array
+        if !assoc {
+            if let Some(f) = self.fixed_arr(e, sid)? {
+                if f.elem.w != elem.w || f.elem.leaf != elem.leaf {
+                    return self.err("the arrays have different element types");
+                }
+                return Ok((self.fixed_to_queue(&f), true));
+            }
+        }
         if let Some(am) = self.arr_method(e, sid)? {
             if crate::arrmeth::LOCATE.contains(&am.m.as_str()) && !assoc {
                 let Type::Dyn { elem: el, .. } = self.arr_method_type(&am, sid)? else { unreachable!() };
@@ -648,6 +678,13 @@ impl<'a> Compiler<'a> {
     /// `q.method(args);` of a queue or dynamic array: returns false if `name` is no such
     /// method.
     pub(crate) fn dyn_task(&mut self, name: &str, args: &[Expr], sid: usize) -> R<bool> {
+        if let Some((b, m)) = name.rsplit_once('.') {
+            let parts: Vec<String> = b.split('.').map(String::from).collect();
+            let base = if parts.len() == 1 { Expr::Ident(parts[0].clone()) } else { Expr::Hier(parts) };
+            if self.fixed_order(&base, m, args, sid)? {
+                return Ok(true);
+            }
+        }
         let Some((base, _, _, m)) = self.dyn_method(name, sid) else { return Ok(false) };
         let m = &name[name.len() - m.len()..];
         self.dyn_method_stmt(&base, m, args, sid)
@@ -656,6 +693,9 @@ impl<'a> Compiler<'a> {
     /// `q.method(args);` as a method call (`obj.q`: an array property, `q`: an array of
     /// class handles): false if `obj` is no array.
     pub(crate) fn dyn_method_task(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<bool> {
+        if self.fixed_order(obj, m, args, sid)? {
+            return Ok(true);
+        }
         if !METHODS.contains(&m) || self.dyn_arr_type(obj, sid)?.is_none() {
             return Ok(false);
         }

@@ -3607,6 +3607,21 @@ impl Sim {
                 let eq = self.harr(a) == self.harr(b);
                 self.put_int(d, 1, eq as i64);
             }
+            HeapOp::SizeIs => {
+                let have = self.harr(a).len() / n;
+                let want = int(&self.mem, c).unwrap_or(-1);
+                let ok = have as i64 == want;
+                if !ok {
+                    let msg = format!("an array of {have} elements assigned to a fixed-size array of {want} elements (the target is unchanged)");
+                    if self.fileline {
+                        let loc = self.prog.locs.get(at as usize).cloned().unwrap_or_default();
+                        let _ = writeln!(self.out, "{loc}: ERROR: {msg}");
+                    } else {
+                        let _ = writeln!(self.out, "ERROR: {msg}");
+                    }
+                }
+                self.put_int(d, 1, ok as i64);
+            }
             HeapOp::Contains => {
                 let v = elem(&self.mem, c);
                 let found = self.harr(a).chunks(n).any(|e| e == &v[..]);
@@ -3655,7 +3670,13 @@ impl Sim {
     fn sort_key(&self, e: &[u64], w: u32, ek: ElemKind, signed: bool) -> SortKey {
         match ek {
             ElemKind::Real => SortKey::Real(f64::from_bits(e[0])),
-            ElemKind::Str => SortKey::Str(self.strs.get(e[0] as usize).cloned().unwrap_or_else(|| Rc::from(&b""[..]))),
+            // (the run-time table starts with the program's strings once a string operation
+            // ran)
+            ElemKind::Str => SortKey::Str(match self.strs.get(e[0] as usize) {
+                Some(s) => s.clone(),
+                None if self.strs.is_empty() => Rc::from(self.prog.strings.get(e[0] as usize).map_or(&[][..], |s| &s[..])),
+                None => Rc::from(&b""[..]),
+            }),
             ElemKind::Vec => {
                 // most significant word first; a signed value's sign bit inverted
                 let k = nw(w);

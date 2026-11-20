@@ -719,6 +719,10 @@ impl<'a> Compiler<'a> {
                 if self.sigs.has_dyn && timing.is_none() && self.dyn_elem_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
+                // a fixed-size array from a queue or dynamic array
+                if self.sigs.has_dyn && timing.is_none() && self.fixed_from_dyn(lhs, rhs, *nonblocking, sid)? {
+                    return Ok(());
+                }
                 // a whole unpacked array: element by element
                 if let Some(pairs) = self.array_pairs(lhs, rhs, sid)? {
                     if timing.is_some() {

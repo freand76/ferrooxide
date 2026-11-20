@@ -649,6 +649,9 @@ pub enum HeapOp {
     Order(OrderOp),
     /// d (1 bit) = array a has an element equal to c (all bits, x and z too)
     Contains,
+    /// d (1 bit) = array a has as many elements as the 32-bit value in c (else an error
+    /// message: a fixed-size array of that many elements cannot take it)
+    SizeIs,
 }
 
 /// The ordering methods of `HeapOp::Order` (IEEE 1800-2017 7.12.2).

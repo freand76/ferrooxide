@@ -503,6 +503,10 @@ impl<'a> Compiler<'a> {
                 }
             }
             let s = self.new_signal(full, width, signed, depth, msb, lsb, arr_lo, kind);
+            if depth > 0 {
+                // (its array methods and assignments with queues take the paths of those)
+                self.sigs.has_dyn = true;
+            }
             if desc {
                 self.sigs.desc_arrays.insert(s);
             }

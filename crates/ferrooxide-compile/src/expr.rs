@@ -603,7 +603,7 @@ impl<'a> Compiler<'a> {
         }
         match e {
             Expr::Type(_) => self.err("a data type is not a value"),
-            Expr::ArrayWith { method, .. } => self.err(format!("array method '{method}' with `with` is supported only for queues and dynamic arrays")),
+            Expr::ArrayWith { method, .. } => self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
             Expr::Member(..) => self.member_error(e, sid),
             Expr::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
