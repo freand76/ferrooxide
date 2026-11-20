@@ -407,9 +407,11 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    bounds (`is_const_expr`), constant selects in continuous assignment and force targets,
    no real index or real concatenation operand; preprocessor checks (`line and `pragma
    arguments, macro argument counts, unterminated strings in macro text, directive names as
-   macros); `local`/`protected` class members (`ClassDecl::hidden`): 4507 of 5112. Next:
-   several continuous drivers of a variable, procedural assignment to a net. Interleave
-   with the other steps.
+   macros); `local`/`protected` class members (`ClassDecl::hidden`); procedural
+   assignments to nets, a variable driven whole by a continuous assignment and by anything
+   else (bits driven by separate assignments stay legal): 4511 of 5112. Left: errors in
+   subroutines that are never called (compile each one once), the rest of the ACCEPT list
+   in `target/svtests-baseline.res`. Interleave with the other steps.
 4. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
    `typedef class`, static methods, array arguments, string parameters and static

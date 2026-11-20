@@ -446,6 +446,31 @@ impl<'a> Compiler<'a> {
                 *count.entry(s).or_default() += 1;
             }
         }
+        // variables a continuous assignment drives whole: no other driver (6.5)
+        let mut whole: Vec<(u32, usize, u32)> = Vec::new();
+        for job in &jobs {
+            if let Job::Assign { lhs, scope, line, .. } | Job::PortOut { lhs, scope, line, .. } = job {
+                let sym = match lhs {
+                    Expr::Ident(n) => self.lookup(n, *scope),
+                    Expr::Hier(p) => self.lookup_hier(p, *scope),
+                    _ => None,
+                };
+                if let Some(Sym::Sig(s)) = sym {
+                    let i = self.sig(s);
+                    if i.kind != SigKind::Wire && i.depth == 0 {
+                        whole.push((self.canon(s), *scope, *line));
+                    }
+                }
+            }
+        }
+        for &(s, scope, line) in &whole {
+            if count.get(&s).is_some_and(|&n| n > 1) {
+                self.line = line;
+                self.file = self.scopes[scope].file.clone();
+                let n = self.sig(s).name.clone();
+                return self.err(format!("variable '{n}' is driven by more than one continuous assignment"));
+            }
+        }
         let multi: HashSet<u32> = count
             .into_iter()
             .filter(|&(s, n)| {
@@ -513,6 +538,14 @@ impl<'a> Compiler<'a> {
             self.codegen_job(job)?;
         }
         self.nets.redirect.clear();
+        for &(s, scope, line) in &whole {
+            if self.code.proc_writes.contains(&s) {
+                self.line = line;
+                self.file = self.scopes[scope].file.clone();
+                let n = self.sig(s).name.clone();
+                return self.err(format!("variable '{n}' is written by both a continuous and a procedural assignment"));
+            }
+        }
         let island = self.link_islands()?;
         // resolver processes: net = resolve(driver 0, driver 1, ...)
         let mut nets: Vec<(u32, Vec<u32>)> =

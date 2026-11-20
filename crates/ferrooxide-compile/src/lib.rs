@@ -201,6 +201,8 @@ pub(crate) struct Diag {
 #[derive(Default)]
 pub(crate) struct Code<'a> {
     pub(crate) jobs: Vec<Job<'a>>,
+    /// variables procedural assignments write (for the check against continuous ones)
+    pub(crate) proc_writes: HashSet<u32>,
     pub(crate) consts: HashMap<Const, u32>,
     pub(crate) pb: Vec<PState>,
     pub(crate) scratch_top: u32,

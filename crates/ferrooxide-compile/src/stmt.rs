@@ -672,6 +672,7 @@ impl<'a> Compiler<'a> {
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
                 self.check_enum_assign(lhs, rhs, sid)?;
+                self.check_proc_target(lhs, sid)?;
                 if *nonblocking && !self.sigs.automatic.is_empty() {
                     if let Some(n) = self.automatic_in(lhs, sid, true) {
                         return self.err(format!("nonblocking assignment to automatic variable '{n}'"));
@@ -1205,6 +1206,33 @@ impl<'a> Compiler<'a> {
             });
         }
         Ok(v)
+    }
+
+    /// The target of a procedural assignment is a variable (IEEE 1800-2017 10.4, table
+    /// 10-1), never a net; it is noted for the check against continuous assignments.
+    fn check_proc_target(&mut self, lhs: &Expr, sid: usize) -> R<()> {
+        if self.code.pb.last().is_none_or(|p| p.proc == NONE) {
+            return Ok(()); // a constant function call
+        }
+        let mut b = lhs;
+        while let Expr::Member(a, _) | Expr::Index(a, _) | Expr::Range(a, ..) | Expr::IndexedRange(a, ..) = b {
+            b = a;
+        }
+        let sym = match b {
+            Expr::Concat(v) => return v.iter().try_for_each(|x| self.check_proc_target(x, sid)),
+            Expr::Ident(n) => self.lookup(n, sid),
+            Expr::Hier(p) => self.lookup_hier(p, sid),
+            _ => None,
+        };
+        if let Some(Sym::Sig(s)) = sym {
+            if self.sig(s).kind == SigKind::Wire {
+                let n = self.sig(s).name.rsplit('.').next().unwrap_or_default().to_string();
+                return self.err(format!("procedural assignment to net '{n}' (only variables take procedural assignments)"));
+            }
+            let c = self.canon(s);
+            self.code.proc_writes.insert(c);
+        }
+        Ok(())
     }
 
     /// The name of an automatic variable `e` writes (`lvalue`) or reads, if any.
