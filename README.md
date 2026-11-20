@@ -15,16 +15,15 @@ target/release/ferrooxide tb.v dut.v
 
 CPU cycles (`perf stat`) on the same machine, Icarus Verilog 14 (`iverilog` + `vvp`) vs ferrooxide:
 
-| benchmark | Icarus | ferrooxide | speed-up |
-|-----------|-------:|-----------:|---------:|
-| [`bench/cpuish.v`](bench/cpuish.v): 32 lanes of LFSR + ALU + accumulator, 200k clock cycles | 33.6 G | 2.60 G | **13x** |
-| [`bench/mixed.v`](bench/mixed.v): combinational chain, 128-bit datapath, memory, FSM, 300k cycles | 13.2 G | 0.68 G | **19x** |
+| benchmark | Icarus | ferrooxide `release` | ferrooxide `speed` (LTO) | speed-up (`release` / `speed`) |
+|-----------|-------:|---------------------:|-------------------------:|-------------------------------:|
+| [`bench/cpuish.v`](bench/cpuish.v): 32 lanes of LFSR + ALU + accumulator, 200k clock cycles | 33.6 G | 2.68 G | 2.60 G | 12.5x / **13x** |
+| [`bench/mixed.v`](bench/mixed.v): combinational chain, 128-bit datapath, memory, FSM, 300k cycles | 13.2 G | 0.72 G | 0.68 G | 18x / **19x** |
 
-Both produce output identical to Icarus. (Measured 2026-11-20, median of three runs, with the
-`speed` build.)
+Both produce output identical to Icarus. (Measured 2026-11-20, median of three runs.)
 
-The numbers are for the `speed` profile, a release build with link-time optimisation (slower
-to build, a few percent faster):
+`release` is the usual `cargo build --release`; `speed` is a release build with link-time
+optimisation (slower to build, a few percent faster), for measurements:
 
 ```sh
 cargo build --profile speed
