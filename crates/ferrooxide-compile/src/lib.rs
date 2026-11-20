@@ -251,6 +251,8 @@ pub(crate) struct Subr<'a> {
     pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
     /// `static` variables of blocks in subroutines, by declaration: shared by all calls
     pub(crate) static_vars: HashMap<*const Declarator, u32>,
+    /// subroutines whose body was compiled (a call inlines it): (declaring scope, name)
+    pub(crate) compiled: HashSet<(usize, String)>,
     /// recursive functions compiled as subroutines (of the process at `level`)
     pub(crate) subs: Vec<SubReq<'a>>,
     /// counter for per-call storage of automatic functions and tasks
@@ -463,6 +465,7 @@ pub fn compile_dialect(
     c.resolve_disables();
     c.resolve_views();
     c.start_order();
+    c.check_uncalled_subs()?;
     // package variables are not dumped (as in the reference)
     if !c.hier.pkg_scopes.is_empty() {
         let pre: Vec<String> = c.hier.pkg_scopes.keys().map(|n| format!("{n}.")).collect();

@@ -402,8 +402,7 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    declaring the constants; checked in assignments, initializers, returns and arguments;
    any explicit cast passes, since `$__cast` keeps no target type); automatic variables
    (no nonblocking writes, procedural continuous assignments or `$monitor`/`$strobe`
-   arguments; checked where a subroutine is compiled, so not in one that is never called:
-   compiling uncalled subroutines once would catch all their errors); constant part-select
+   arguments; checked where a subroutine is compiled); constant part-select
    bounds (`is_const_expr`), constant selects in continuous assignment and force targets,
    no real index or real concatenation operand; preprocessor checks (`line and `pragma
    arguments, macro argument counts, unterminated strings in macro text, directive names as
@@ -417,11 +416,14 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    concatenations, `==?`/`!=?` with real or string operands, `return v` in a task or void
    function, `timeunit` in a generate block, inout ports that are variables, enum values
    (duplicates, x/z in a 2-state enum, sized values of another width): 4549 of 5112.
+   Subroutines that are never called are compiled once at the end (in a throwaway
+   process, its code and signals dropped), so their errors are reported; class methods
+   are not yet. With it, a constant array index with x bits reads x (was an error): 4552 of 5112.
    Left among the accepted invalid tests: wildcard import conflicts (a name from two
    packages, a local declaration after an imported name was used), name collisions in a
    class, continuous assignment of arrays with non-equivalent elements, `var` in a for
    initialization (legal in 1800-2017, kept). Left: errors in
-   subroutines that are never called (compile each one once), the rest of the ACCEPT list
+   class methods that are never called, the rest of the ACCEPT list
    in `target/svtests-baseline.res`. Interleave with the other steps.
 4. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
    errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward

@@ -80,6 +80,65 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Compile each module or package subroutine that is never called once, for its errors
+    /// (a call inlines a subroutine, so an uncalled one would never be checked). The code
+    /// and everything made for it are dropped again. Class methods are left out.
+    pub(crate) fn check_uncalled_subs(&mut self) -> R<()> {
+        let mut todo: Vec<(usize, &'a SubroutineDecl)> = Vec::new();
+        for sid in 0..self.scopes.len() {
+            if self.classes.of_scope.contains_key(&sid) {
+                continue;
+            }
+            for (name, &f) in &self.scopes[sid].funcs {
+                let called = self.subr.compiled.contains(&(sid, name.clone()));
+                if !called {
+                    todo.push((sid, f));
+                }
+            }
+        }
+        if todo.is_empty() {
+            return Ok(());
+        }
+        todo.sort_by_key(|(s, f)| (self.scopes[*s].file.clone(), f.line, *s));
+        let p = &self.prog;
+        let lens = (p.mem.len(), p.signals.len(), p.procs.len(), p.ctls.len(), p.names.len(), p.strings.len(), p.locs.len(), p.classes.len());
+        let mem_error = self.sigs.mem_error.take();
+        let mut r = Ok(());
+        for (sid, f) in todo {
+            self.file = self.scopes[sid].file.clone();
+            self.line = f.line;
+            self.begin_proc(String::new(), ProcClass::Normal);
+            let key = format!("{}$check", f.name);
+            r = self.func_instance(f, sid, &key).and_then(|_| {
+                let (fscope, ret) = {
+                    let fi = &self.subr.func_inst[&(sid, key.clone())];
+                    (fi.scope, fi.ret)
+                };
+                self.subr.inline_stack.push((sid, f.name.clone(), (sid, key.clone())));
+                self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
+                let r = self.stmt(&f.body, fscope);
+                self.code.pb.last_mut().unwrap().rets.pop();
+                self.subr.inline_stack.pop();
+                r
+            });
+            self.end_proc();
+            if r.is_err() {
+                break;
+            }
+        }
+        let p = &mut self.prog;
+        p.mem.truncate(lens.0);
+        p.signals.truncate(lens.1);
+        p.procs.truncate(lens.2);
+        p.ctls.truncate(lens.3);
+        p.names.truncate(lens.4);
+        p.strings.truncate(lens.5);
+        p.locs.truncate(lens.6);
+        p.classes.truncate(lens.7);
+        self.sigs.mem_error = mem_error;
+        r
+    }
+
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
         self.code.proc_scope.push(self.code.job_scope);

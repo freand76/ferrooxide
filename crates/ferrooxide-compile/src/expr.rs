@@ -623,7 +623,8 @@ impl<'a> Compiler<'a> {
                 if let Some(arr) = self.array_of(a, sid) {
                     let info = self.sig(arr).clone();
                     if self.is_const(i, sid) {
-                        let e = self.const_int(i, sid)? - info.arr_lo;
+                        // (an index with x/z bits reads x)
+                        let e = self.const_index(i, sid)?.map_or(-1, |v| v - info.arr_lo);
                         if e < 0 || e >= info.depth as i64 {
                             let c = self.const_slot(&Const::fill('x', info.width));
                             return Ok(self.resize(c, info.width, w, s));
@@ -1530,6 +1531,7 @@ impl<'a> Compiler<'a> {
         args: &[Expr],
         sid: usize,
     ) -> R<(Option<u32>, u32, bool)> {
+        self.subr.compiled.insert((fs_def, f.name.clone()));
         // named arguments (IEEE 1800 13.5.4): in the order of the ports, after the
         // positional ones
         let ordered: Vec<Expr>;
@@ -2112,7 +2114,7 @@ impl<'a> Compiler<'a> {
                 let arr = self.array_of(a, sid).unwrap();
                 let info = self.sig(arr).clone();
                 if self.is_const(i, sid) {
-                    let e = self.const_int(i, sid)? - info.arr_lo;
+                    let e = self.const_index(i, sid)?.map_or(-1, |v| v - info.arr_lo);
                     if e >= 0 && e < info.depth as i64 {
                         return Ok(info.slot + e as u32 * rt::words(64));
                     }
