@@ -383,6 +383,22 @@ impl<'a> Compiler<'a> {
         format!("{dims} of {w} bits")
     }
 
+    /// Unpacked array `rs` assigned to `ls`: their element types must be equivalent (IEEE
+    /// 1800-2017 6.22.2, 7.6).
+    pub(crate) fn check_array_equiv(&self, ls: u32, rs: u32) -> R<()> {
+        let (lc, rc) = (self.canon(ls), self.canon(rs));
+        let why = if self.sigs.two_state.contains(&lc) != self.sigs.two_state.contains(&rc) {
+            "one is 2-state, the other 4-state"
+        } else if self.sig(ls).signed != self.sig(rs).signed {
+            "their signedness differs"
+        } else if self.enums.sigs.get(&ls) != self.enums.sigs.get(&rs) {
+            "the enum types differ"
+        } else {
+            return Ok(());
+        };
+        self.err(format!("array '{}' assigned from '{}': the element types are not equivalent ({why})", self.sig(ls).name, self.sig(rs).name))
+    }
+
     /// `lhs = rhs` of two unpacked arrays (or subarrays) as one assignment per element pair
     /// (None if `lhs` is not an array).
     pub(crate) fn array_pairs(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<Option<Vec<(Expr, Expr)>>> {
@@ -406,6 +422,7 @@ impl<'a> Compiler<'a> {
                 Self::shape_str(&rshape, rw)
             ));
         }
+        self.check_array_equiv(ls, rs)?;
         Ok(Some(li.into_iter().zip(ri).collect()))
     }
 

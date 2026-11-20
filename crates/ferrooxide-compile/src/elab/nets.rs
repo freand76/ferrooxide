@@ -293,8 +293,13 @@ impl<'a> Compiler<'a> {
         let mut changed = false;
         for (k, job) in jobs.into_iter().enumerate() {
             if !old_strength.contains_key(&k) {
-                if let Job::Assign { lhs, rhs, delay, scope, .. } = &job {
+                if let Job::Assign { lhs, rhs, delay, scope, line } = &job {
                     if let Some((z, a)) = self.alias_pair(lhs, rhs, delay.as_ref(), *scope) {
+                        if self.sig(z).depth > 0 && self.sig(a).depth > 0 {
+                            self.line = *line;
+                            self.file = self.scopes[*scope].file.clone();
+                            self.check_array_equiv(z, a)?;
+                        }
                         let i = self.sig(z);
                         let ok = count.get(&z) == Some(&1)
                             && i.kind != SigKind::Integer
