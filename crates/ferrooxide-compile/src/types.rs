@@ -603,8 +603,8 @@ impl<'a> Compiler<'a> {
     }
 
     /// A member chain of a signal with a struct type (`v[i].f.g[3:0]`) as one part select of
-    /// its flat storage (`$flat:v[i][off +: w]`; offsets are expressions, so run-time
-    /// indexes work); a whole signed member read is `$signed` unless `lvalue`. None where `e`
+    /// its flat storage (`$flat:v[i][off +: w]`, of a queue or dynamic array element
+    /// `q[i][off +: w]`; offsets are expressions, so run-time indexes work); a whole signed member read is `$signed` unless `lvalue`. None where `e`
     /// is no such chain, an error message where it is a wrong one.
     pub(crate) fn struct_walk(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<Result<Walk, String>> {
         let (base, ops) = chain(e);
@@ -625,7 +625,10 @@ impl<'a> Compiler<'a> {
             _ => return None,
         };
         let is_param = matches!(sym, Sym::Const(_));
+        // (a queue or dynamic array of structs: `q[i]` is the struct)
+        let dyn_elem = matches!(sym, Sym::Sig(s) if self.sigs.elem_layout.contains_key(&s));
         let (layout, nun) = match sym {
+            Sym::Sig(s) if dyn_elem => ((*self.sigs.elem_layout[&s]).clone(), 1),
             Sym::Sig(s) => {
                 let info = self.sig(s);
                 // (an array: the unpacked dimensions come first)
@@ -648,7 +651,7 @@ impl<'a> Compiler<'a> {
         if layout.fields.is_none() && !(is_param && layout.dims.len() > 1) {
             return None;
         }
-        let flat_base = renamed("$flat:");
+        let flat_base = if dyn_elem { base.clone() } else { renamed("$flat:") };
         let mut k = 0;
         let mut elem = base.clone();
         while k < nun {

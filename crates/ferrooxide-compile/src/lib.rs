@@ -319,6 +319,11 @@ pub(crate) struct Sigs {
     pub(crate) types: Vec<types::Type>,
     /// the layout of signals declared with a data type (struct members, assignment patterns)
     pub(crate) layout: HashMap<u32, Rc<types::Packed>>,
+    /// the struct layout of the elements of queues and dynamic arrays of structs (member
+    /// chains of their elements, `heap.rs`)
+    pub(crate) elem_layout: HashMap<u32, Rc<types::Packed>>,
+    /// a scratch variable per width for stores into a part of a queue element (`heap.rs`)
+    pub(crate) elem_scratch: HashMap<u32, u32>,
     /// some signal has a struct type (member chains need the rewrite in `md_norm`)
     pub(crate) has_structs: bool,
     /// some struct has real or string members

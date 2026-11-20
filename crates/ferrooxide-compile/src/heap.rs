@@ -6,9 +6,10 @@
 //! the variable. A class property can hold an array too: its handle is read into a temporary,
 //! changed there and written back to the object (`DynArr`).
 
-use crate::types::{DynKind, Elem, Leaf, Type};
+use crate::stmt::Lhs;
+use crate::types::{DynKind, Elem, Leaf, Packed, Type};
 use crate::*;
-use ferrooxide_rt::{AssocOp, HeapOp, KeyKind, StrOp};
+use ferrooxide_rt::{AssocOp, HeapOp, KeyKind, StoreMode, StrOp};
 
 /// Methods of queues, dynamic and associative arrays.
 const METHODS: &[&str] = &[
@@ -655,6 +656,72 @@ impl<'a> Compiler<'a> {
         let Some((_, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
         let v = self.elem_value(rhs, elem, sid)?;
         self.dyn_elem_store(lhs, v, sid)
+    }
+
+    /// Note the struct layout of the elements of queue or dynamic array `s` (declared with
+    /// element layout `p`).
+    pub(crate) fn dyn_layout(&mut self, s: u32, p: Option<&Packed>) {
+        if let Some(p) = p.filter(|p| p.fields.is_some()) {
+            self.sigs.elem_layout.insert(s, Rc::new(p.clone()));
+        }
+    }
+
+    /// A store of the `w`-bit value in `slot` into a part of an element of a queue or
+    /// dynamic array (`q[i][7:0]`, `q[i].f`): the element is read into a scratch variable,
+    /// the part stored there and the element written back (at once, also for `<=`). False
+    /// if `lhs` is no such target.
+    pub(crate) fn dyn_part_store(&mut self, lhs: &Expr, slot: u32, w: u32, sid: usize) -> R<bool> {
+        if !matches!(lhs, Expr::Member(..) | Expr::Index(..) | Expr::Range(..) | Expr::IndexedRange(..)) {
+            return Ok(false);
+        }
+        let n = self.lv_norm(lhs, sid).unwrap_or_else(|| lhs.clone());
+        let (Expr::Index(el, _) | Expr::Range(el, ..) | Expr::IndexedRange(el, ..)) = &n else { return Ok(false) };
+        let Expr::Index(a, i) = &**el else { return Ok(false) };
+        let Some((kind, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
+        if elem.leaf != Leaf::Bits || elem.class != NONE {
+            return Ok(false);
+        }
+        let ix = match kind {
+            DynKind::Assoc(key) => self.key_value(i, key, sid)?,
+            _ => self.dyn_index(a, i, sid)?,
+        };
+        let arr = self.dyn_arr(a, sid)?.unwrap();
+        let tmp = self.elem_scratch(elem.w, sid);
+        let ts = self.sig(tmp).slot;
+        match Self::assoc_key(&arr) {
+            Some(key) => self.assoc_op(AssocOp::Get, ts, arr.slot, ix, NONE, elem, key),
+            None => self.arr_op(&arr, HeapOp::Get, ts, ix, NONE),
+        }
+        let name = self.sig(tmp).name.clone();
+        let part = match n {
+            Expr::Index(_, b) => Expr::Index(Box::new(Expr::Ident(name)), b),
+            Expr::Range(_, m, l) => Expr::Range(Box::new(Expr::Ident(name)), m, l),
+            Expr::IndexedRange(_, b, pw, up) => Expr::IndexedRange(Box::new(Expr::Ident(name)), b, pw, up),
+            _ => unreachable!(),
+        };
+        self.store_value(&Lhs::Expr(&part, sid), slot, w, StoreMode::Blocking)?;
+        match Self::assoc_key(&arr) {
+            Some(key) => self.assoc_op(AssocOp::Set, NONE, arr.slot, ix, ts, elem, key),
+            None => self.arr_op(&arr, HeapOp::Set, NONE, ix, ts),
+        }
+        self.dyn_done(&arr);
+        Ok(true)
+    }
+
+    /// The scratch variable of `dyn_part_store` for `w`-bit elements, visible in scope `sid`.
+    fn elem_scratch(&mut self, w: u32, sid: usize) -> u32 {
+        let name = format!("$elem{w}");
+        let s = match self.sigs.elem_scratch.get(&w) {
+            Some(&s) => s,
+            None => {
+                let s = self.new_signal(name.clone(), w, false, 0, w as i64 - 1, 0, 0, SigKind::Reg);
+                self.prog.names.pop();
+                self.sigs.elem_scratch.insert(w, s);
+                s
+            }
+        };
+        self.scopes[sid].syms.insert(name, Sym::Sig(s));
+        s
     }
 
     /// Store the element value in slot `v` to `q[i]` of a queue or dynamic array: returns

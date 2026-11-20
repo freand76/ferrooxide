@@ -220,6 +220,12 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        // a part of an element (a member of a struct element: `q[i].f`)
+        if let Lhs::Expr(e, s) = lhs {
+            if self.sigs.has_dyn && self.dyn_part_store(e, slot, w, *s)? {
+                return Ok(());
+            }
+        }
         let ts = self.lhs_targets(lhs)?;
         let total: u32 = ts.iter().map(|t| t.1).sum();
         let v = self.resize(slot, w, total, false);
@@ -531,6 +537,7 @@ impl<'a> Compiler<'a> {
                                 // a queue or dynamic array
                                 let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), b)?;
                                 let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
+                                self.dyn_layout(s, layout.as_ref());
                                 if d.automatic || in_auto {
                                     self.sigs.automatic.insert(s);
                                 }

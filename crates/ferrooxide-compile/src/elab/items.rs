@@ -348,6 +348,7 @@ impl<'a> Compiler<'a> {
                 let elem = self.elem_for(mg.kind, width, signed, mg.ty.map(|t| &**t), sid)?;
                 let s = self.new_dyn(full, &name, elem, h, sid)?;
                 self.dyn_enum(s, mg.ty.map(|t| &**t), sid);
+                self.dyn_layout(s, layout.as_ref());
                 if let Some(init) = mg.init {
                     let line = self.line;
                     self.code.jobs.push(Job::Init { lhs: Expr::Ident(name.clone()), rhs: init.clone(), scope: sid, line });

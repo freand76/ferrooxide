@@ -104,12 +104,12 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// The scope of the iterator of `with` expression `w` (in scope `sid`), and its element
-    /// and index variables, made once.
-    fn iter_scope(&mut self, w: &Expr, depth: usize, elem: Elem, sid: usize) -> (usize, u32, u32) {
+    /// The scope of the iterator of `with` expression `w` (in scope `sid`) over the elements
+    /// of `arr`, and its element and index variables, made once.
+    fn iter_scope(&mut self, w: &Expr, depth: usize, elem: Elem, arr: &Expr, sid: usize) -> R<(usize, u32, u32)> {
         let key = (w as *const Expr, sid);
         if let Some(&s) = self.code.iter_scopes.get(&key) {
-            return s;
+            return Ok(s);
         }
         let path = self.scopes[sid].name.clone();
         let file = self.file.clone();
@@ -127,14 +127,18 @@ impl<'a> Compiler<'a> {
         self.scopes[isid].syms.insert(format!("$it{depth}"), Sym::Sig(it));
         self.scopes[isid].syms.insert(format!("$ix{depth}"), Sym::Sig(ix));
         let r = (isid, it, ix);
+        // the elements of a queue of structs: the iterator has their members
+        if let Some(l) = self.dyn_var(arr, sid).and_then(|(s, _)| self.sigs.elem_layout.get(&s).cloned()) {
+            self.set_layout(it, &format!("$it{depth}"), Some((*l).clone()), isid)?;
+        }
         self.code.iter_scopes.insert(key, r);
-        r
+        Ok(r)
     }
 
     /// The type of the `with` expression of `am` (None: no `with`).
     fn with_type(&mut self, am: &ArrMethod, elem: Elem, sid: usize) -> R<Option<Type>> {
         let Some((w, depth)) = am.with else { return Ok(None) };
-        let (isid, _, _) = self.iter_scope(w, depth, elem, sid);
+        let (isid, _, _) = self.iter_scope(w, depth, elem, &am.arr, sid)?;
         self.type_of(w, isid).map(Some)
     }
 
@@ -228,7 +232,7 @@ impl<'a> Compiler<'a> {
             return self.err(format!("'{}' needs integral values", am.m));
         };
         let (a, fixed) = self.method_arr(&am.arr, sid)?;
-        let iter = am.with.map(|(we, depth)| self.iter_scope(we, depth, a.elem, sid));
+        let iter = am.with.map(|(we, depth)| self.iter_scope(we, depth, a.elem, &am.arr, sid)).transpose()?;
         let init = match am.m.as_str() {
             "product" => Const::from_i64(1, w, false),
             "and" => Const::from_i64(-1, w, false),
@@ -262,7 +266,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn arr_locate(&mut self, am: &ArrMethod, sid: usize) -> R<u32> {
         let (a, fixed) = self.method_arr(&am.arr, sid)?;
         let elem = a.elem;
-        let iter = am.with.map(|(we, depth)| self.iter_scope(we, depth, elem, sid));
+        let iter = am.with.map(|(we, depth)| self.iter_scope(we, depth, elem, &am.arr, sid)).transpose()?;
         let with = am.with.map(|x| x.0);
         let m = am.m.clone();
         let index = m.ends_with("_index");
@@ -416,7 +420,7 @@ impl<'a> Compiler<'a> {
         if matches!(a.kind, DynKind::Assoc(_)) {
             return self.err(format!("'{m}' is not a method of an associative array"));
         }
-        let (isid, it, ix) = self.iter_scope(we, *depth, a.elem, sid);
+        let (isid, it, ix) = self.iter_scope(we, *depth, a.elem, arr, sid)?;
         let kt = self.type_of(we, isid)?;
         let key = match kt {
             Type::Vec { w, signed } => Elem { w, signed, leaf: Leaf::Bits, two_state: false, class: NONE },
