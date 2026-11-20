@@ -178,6 +178,8 @@ pub(crate) struct Hier<'a> {
     pub(crate) tops: HashMap<String, usize>,
     /// defparam overrides by full parameter path
     pub(crate) defparams: HashMap<String, PVal>,
+    /// where each defparam is (file, line), for one whose target is not a parameter
+    pub(crate) defparam_at: HashMap<String, (String, Line)>,
     /// parameters already evaluated (full paths), a defparam for one of them came too late,
     /// and whether this is the second elaboration
     pub(crate) params_done: HashSet<String>,
@@ -456,6 +458,7 @@ pub fn compile_dialect(
         return Err(e);
     }
     c.codegen_jobs()?;
+    c.check_defparams()?;
     c.init_events();
     c.resolve_disables();
     c.resolve_views();

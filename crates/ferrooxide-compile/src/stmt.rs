@@ -1120,6 +1120,9 @@ impl<'a> Compiler<'a> {
                 let Some((ret, _)) = self.code.pb.last().unwrap().rets.last().cloned() else {
                     return self.err("return outside of a function or task");
                 };
+                if value.is_some() && ret.is_none() {
+                    return self.err("a task or void function cannot return a value");
+                }
                 if let (Some(v), Some(r)) = (value, ret) {
                     if let Some(&id) = self.enums.sigs.get(&r) {
                         self.check_enum(id, v, sid)?;
@@ -1745,7 +1748,12 @@ impl<'a> Compiler<'a> {
         for p in params {
             // (a `defparam` of it: registered during elaboration, before any code)
             let ov = match p.local {
-                false => self.hier.defparams.get(&format!("{}.{}", self.scopes[b].name, p.name)).cloned(),
+                false => {
+                    let key = format!("{}.{}", self.scopes[b].name, p.name);
+                    let ov = self.hier.defparams.get(&key).cloned();
+                    self.hier.params_done.insert(key);
+                    ov
+                }
                 true => None,
             };
             let v = self.param_value(p, ov, b)?;

@@ -656,7 +656,7 @@ impl Lower {
                 Some(_) => return self.unsupported(p.loc, "a ref port"),
             };
             match (&p.header, dir) {
-                (t::PortHeader::Data { net, var, ty }, Some(_)) => cur = Some(self.decl_head(dir, *net, *var, ty, None, None, p.loc)?),
+                (t::PortHeader::Data { net, var, ty }, Some(_)) => cur = Some(self.module_port_head(dir, *net, *var, ty, p.loc)?),
                 (_, Some(_)) => {
                     let ty = t::DataType { kind: t::TypeKind::Implicit, signed: None, packed: vec![], loc: p.loc };
                     cur = Some(self.decl_head(dir, None, false, &ty, None, None, p.loc)?);
@@ -665,7 +665,7 @@ impl Lower {
                 (t::PortHeader::Data { net, var, ty }, None) => {
                     // a new type without a direction: inherits the direction
                     let dir = cur.as_ref().unwrap().dir;
-                    cur = Some(self.decl_head(dir, *net, *var, ty, None, None, p.loc)?);
+                    cur = Some(self.module_port_head(dir, *net, *var, ty, p.loc)?);
                 }
                 _ => {}
             }

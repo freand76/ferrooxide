@@ -216,7 +216,7 @@ impl Lower {
             }
             t::Item::Port(p) => {
                 let dir = self.dir(p.dir, p.loc)?;
-                let mut d = self.decl_head(Some(dir), p.net, p.var, &p.ty, None, None, p.loc)?;
+                let mut d = self.module_port_head(Some(dir), p.net, p.var, &p.ty, p.loc)?;
                 d.names = self.declarators(&p.decls)?;
                 items.append(&mut self.pending);
                 items.push(Item::Decl(d));

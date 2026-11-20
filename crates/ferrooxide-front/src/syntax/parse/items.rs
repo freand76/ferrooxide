@@ -143,6 +143,9 @@ impl Parser {
     fn kw_item(&mut self, k: Kw, out: &mut Vec<Item>) -> Result<()> {
         let loc = self.loc();
         match k {
+            Kw::Timeunit | Kw::Timeprecision if self.in_generate > 0 => {
+                return self.err(format!("{} is not allowed in a generate block", k.as_str()))
+            }
             Kw::Timeunit | Kw::Timeprecision => out.push(self.timeunits()?),
             Kw::Specparam if self.in_generate > 0 => return self.err("a specparam is not allowed in a generate block"),
             Kw::Parameter | Kw::Localparam | Kw::Specparam => {

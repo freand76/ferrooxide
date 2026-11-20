@@ -412,7 +412,15 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    else (bits driven by separate assignments stay legal): 4511 of 5112. Specparams in
    parameter values and generate conditions, specparams and specify blocks in generate
    blocks, element types of queues/dynamic arrays assigned to each other (2-/4-state,
-   signedness, enum), end labels that do not match the name: 4529 of 5112. Left: errors in
+   signedness, enum), end labels that do not match the name: 4529 of 5112. Defparams of
+   missing or local parameters, zero replications outside a concatenation and zero-width
+   concatenations, `==?`/`!=?` with real or string operands, `return v` in a task or void
+   function, `timeunit` in a generate block, inout ports that are variables, enum values
+   (duplicates, x/z in a 2-state enum, sized values of another width): 4549 of 5112.
+   Left among the accepted invalid tests: wildcard import conflicts (a name from two
+   packages, a local declaration after an imported name was used), name collisions in a
+   class, continuous assignment of arrays with non-equivalent elements, `var` in a for
+   initialization (legal in 1800-2017, kept). Left: errors in
    subroutines that are never called (compile each one once), the rest of the ACCEPT list
    in `target/svtests-baseline.res`. Interleave with the other steps.
 4. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile

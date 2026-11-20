@@ -25,6 +25,8 @@ pub(crate) struct Enums {
     pub(crate) sigs: HashMap<u32, u32>,
     /// queues and dynamic arrays of an enum type -> the id of their elements' enum
     pub(crate) dyn_sigs: HashMap<u32, u32>,
+    /// the values of each enum's constants so far, with their names
+    values: HashMap<u32, Vec<(Const, String)>>,
 }
 
 /// The enum type of an expression.
@@ -49,6 +51,26 @@ impl<'a> Compiler<'a> {
             owners.push(sid);
         }
         self.enums.consts.insert((sid, p.name.clone()), id);
+    }
+
+    /// Enum constant `p` (of scope `sid`) has value `v`: no other constant of its enum may
+    /// have the same value (IEEE 1800-2017 6.19).
+    pub(crate) fn enum_value(&mut self, p: &ParamDecl, v: &Sym, sid: usize) -> R<()> {
+        let (Some(&id), Sym::Const(c)) = (self.enums.consts.get(&(sid, p.name.clone())), v) else { return Ok(()) };
+        if p.enum_type.is_none() {
+            return Ok(());
+        }
+        let vals = self.enums.values.entry(id).or_default();
+        // (declared again: a subroutine compiled once more)
+        if vals.iter().any(|(_, n)| *n == p.name) {
+            return Ok(());
+        }
+        if let Some((_, other)) = vals.iter().find(|(x, _)| x == c) {
+            let other = other.clone();
+            return self.err(format!("enum constant '{}' has the same value as '{other}'", p.name));
+        }
+        vals.push((c.clone(), p.name.clone()));
+        Ok(())
     }
 
     /// The id of the enum with constants `names` used in scope `sid`: the one whose

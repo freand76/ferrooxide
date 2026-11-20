@@ -141,9 +141,26 @@ impl<'a> Compiler<'a> {
             if !self.hier.restarted && self.hier.params_done.contains(&key) && !self.hier.defparams.contains_key(&key) {
                 self.hier.late_defparam = true;
             }
+            self.hier.defparam_at.insert(key.clone(), (self.file.clone(), self.line));
             self.hier.defparams.insert(key, v);
         }
         Ok(())
+    }
+
+    /// Every defparam must have set a parameter that may be overridden: one that exists and
+    /// is not local (IEEE 1800-2017 23.10.1).
+    pub(crate) fn check_defparams(&self) -> R<()> {
+        let mut left: Vec<(&String, &(String, Line))> =
+            self.hier.defparam_at.iter().filter(|(k, _)| !self.hier.params_done.contains(*k)).collect();
+        left.sort_by_key(|(k, at)| (at.0.clone(), at.1, (*k).clone()));
+        match left.first() {
+            Some((k, (file, line))) => Err(Error {
+                msg: format!("defparam: '{k}' is not a parameter that can be overridden (it does not exist or is local)"),
+                file: file.clone(),
+                line: *line,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// The value of a parameter (from its override if any): integer or real.
@@ -225,6 +242,7 @@ impl<'a> Compiler<'a> {
     /// its flat name.
     pub(crate) fn insert_param(&mut self, p: &ParamDecl, v: Sym, sid: usize) -> R<()> {
         self.enum_const(p, sid);
+        self.enum_value(p, &v, sid)?;
         if p.spec {
             self.scopes[sid].specparams.insert(p.name.clone());
         }

@@ -767,6 +767,9 @@ impl<'a> Compiler<'a> {
                     if self.type_of(x, sid)?.is_real() {
                         return self.err("a real value in a concatenation");
                     }
+                    if self.zero_repl(x, sid)? {
+                        continue;
+                    }
                     let (xs, xw, _) = self.self_expr(x, sid)?;
                     if xw == 0 {
                         continue;
@@ -774,16 +777,30 @@ impl<'a> Compiler<'a> {
                     parts.push((xs, xw));
                     tw += xw;
                 }
+                if tw == 0 {
+                    return self.err("a concatenation of zero width (its only operands are replications with a zero count)");
+                }
                 let d = self.tmp(tw);
                 self.emit_concat(d, tw, &parts);
                 Ok(self.resize(d, tw, w, false))
             }
             Expr::Repl(n, v) => {
                 let n = self.const_int(n, sid)?;
+                // (a zero count is allowed only for an operand of a concatenation, which skips
+                // it: IEEE 1800-2017 11.4.12.1)
+                if n == 0 {
+                    return self.err("a replication with a zero count is allowed only in a concatenation with other operands");
+                }
                 let mut one = Vec::new();
                 for x in v {
+                    if self.zero_repl(x, sid)? {
+                        continue;
+                    }
                     let (xs, xw, _) = self.self_expr(x, sid)?;
                     one.push((xs, xw));
+                }
+                if one.iter().all(|p| p.1 == 0) {
+                    return self.err("a replication of zero width (its only operands are replications with a zero count)");
                 }
                 let mut parts = Vec::new();
                 for _ in 0..n.max(0) {
@@ -809,6 +826,22 @@ impl<'a> Compiler<'a> {
             }
             Expr::SysCall(name, args) => self.sys_func(name, args, sid, w, s),
         }
+    }
+
+    /// `e` is a replication with a zero count: an operand of a concatenation that adds
+    /// nothing. Its operands are evaluated all the same (function calls run, as in the
+    /// reference).
+    fn zero_repl(&mut self, e: &Expr, sid: usize) -> R<bool> {
+        let Expr::Repl(n, v) = e else { return Ok(false) };
+        if self.const_int(n, sid)? != 0 {
+            return Ok(false);
+        }
+        for x in v {
+            if !self.zero_repl(x, sid)? {
+                self.self_expr(x, sid)?;
+            }
+        }
+        Ok(true)
     }
 
     /// Concatenation (parts msb-first). Two ≤64-bit parts use one Concat; otherwise the value is
@@ -946,6 +979,9 @@ impl<'a> Compiler<'a> {
                     }
                     let d = self.dyn_compare(matches!(op, B::Ne | B::CaseNe), a, b, elem, sid)?;
                     return Ok(self.resize(d, 1, w, false));
+                }
+                if matches!(op, B::WildEq | B::WildNe) && (ta.is_str() || tb.is_str() || ta.is_real() || tb.is_real()) {
+                    return self.err("the operands of ==? and !=? must be integral, not real or string");
                 }
                 if ta.is_str() || tb.is_str() {
                     let cop = match op {

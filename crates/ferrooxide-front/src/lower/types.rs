@@ -394,6 +394,16 @@ impl Lower {
                 let mut names = Vec::new();
                 let (_, signed, range, _) = base.decl_parts();
                 let range = range.or_else(|| base.int_kind.then(|| base.dims[0].clone()));
+                // the base type's width when its range is literal (a sized value must match
+                // it), and whether it is 2-state (no x or z values; IEEE 1800-2017 6.19)
+                let base_w = match &range {
+                    None => Some(1),
+                    Some((a, b)) => match (super::expr::lit_index(a), super::expr::lit_index(b)) {
+                        (Some(a), Some(b)) => Some((a - b).unsigned_abs() + 1),
+                        _ => None,
+                    },
+                };
+                let two_state = matches!(base.kind, NetKind::Bit | NetKind::Int(_));
                 for it in &et.items {
                     // `name[N]`: name0 .. name(N-1); `name[N:M]`: nameN .. nameM (6.19)
                     let base_name = self.name(&it.name, it.loc);
@@ -423,7 +433,20 @@ impl Lower {
                     };
                     for (k, name) in item_names.into_iter().enumerate() {
                         let value = match (&it.value, k) {
-                            (Some(e), 0) => self.expr(e)?,
+                            (Some(e), 0) => {
+                                let v = self.expr(e)?;
+                                if let Expr::Num(n) = &v {
+                                    if two_state && n.digits.contains(['x', 'z']) {
+                                        return self.err(it.loc, format!("enum constant '{name}': a 2-state enum cannot have an x or z value"));
+                                    }
+                                    if let (Some(s), Some(w)) = (n.size, base_w) {
+                                        if s as u64 != w {
+                                            return self.err(it.loc, format!("enum constant '{name}': a sized value of {s} bits for an enum of {w} bits"));
+                                        }
+                                    }
+                                }
+                                v
+                            }
                             _ => match &prev {
                                 Some(p) => add(Expr::Ident(p.clone()), num(1)),
                                 None => num(0),
@@ -690,6 +713,15 @@ impl Lower {
         self.declare_var(&name, &[]);
         let ty = self.decl_type.clone();
         Ok(ParamDecl { local, spec: false, signed: pt.signed, range: pt.range.clone(), integer: pt.integer, real: pt.real, ty, name, value, enum_type: None, line: d.loc.line })
+    }
+
+    /// A module port declaration `dir [net] [var] ty`: an inout port is a net (IEEE 1800-2017
+    /// 23.2.2.3), not `var` or `reg`.
+    pub(crate) fn module_port_head(&mut self, dir: Option<Dir>, net: Option<t::NetTypeKw>, var: bool, ty: &t::DataType, loc: t::Loc) -> Result<Decl> {
+        if dir == Some(Dir::Inout) && net.is_none() && (var || matches!(ty.kind, t::TypeKind::Int(t::IntKw::Reg))) {
+            return self.err(loc, "an inout port cannot be a variable");
+        }
+        self.decl_head(dir, net, var, ty, None, None, loc)
     }
 
     /// A declaration head: direction, net type, `var`, data type, strength and delay.

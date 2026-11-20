@@ -65,3 +65,8 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    over the elements instead (`int d[]; d = new[4](7);` gives `'{0, 0, 0, 7}`); ferrooxide
    reports that form as unsupported. ivtest `sv_darray_args3`, `sv_darray_args4`. Test:
    `tests/verilog/darray_new_fill.v`.
+17. **The operands of a zero replication are evaluated.** In `{{0{f(x)}}, y}` the
+   reference calls `f` (and `$random`) although the replication contributes no bits;
+   1800-2017 11.4.12.1 says such a replication is ignored. ivtest `concat3`, `concat4`.
+   Test: `tests/suite/expr/zero_repl.v` covers the width; the calls are covered by the
+   regression suite.
