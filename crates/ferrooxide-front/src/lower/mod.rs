@@ -77,6 +77,8 @@ pub(crate) struct Lower {
     class_statics: Vec<Item>,
     /// the wildcard imports of the module being lowered and the names used through them
     wild: WildCheck,
+    /// the genvars declared in the module, and those of the generate loops being lowered
+    genvars: (HashSet<String>, Vec<String>),
 }
 
 /// IEEE 1800-2017 26.3: a name a module uses through a wildcard import must come from one
@@ -176,6 +178,7 @@ impl Lower {
             classes: HashMap::new(),
             class_statics: Vec::new(),
             wild: WildCheck::default(),
+            genvars: Default::default(),
         }
     }
 
@@ -455,6 +458,7 @@ impl Lower {
         let refs: Vec<&t::Item> = m.items.iter().filter(|i| !matches!(i, t::Item::Module(_))).collect();
         // (the names of a nested module are checked with the enclosing one's)
         let saved_wild = (!nested).then(|| std::mem::take(&mut self.wild));
+        let saved_genvars = std::mem::take(&mut self.genvars);
         if !nested {
             self.wild.on = true;
             let wild: Vec<t::Import> = m.imports.iter().filter(|i| i.name.is_none()).cloned().collect();
@@ -473,6 +477,7 @@ impl Lower {
         if let Some(w) = saved_wild {
             self.wild = w;
         }
+        self.genvars = saved_genvars;
         r?;
         if !port_exprs.is_empty() {
             self.port_exprs(port_exprs, &mut items)?;

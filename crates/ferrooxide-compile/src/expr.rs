@@ -792,6 +792,9 @@ impl<'a> Compiler<'a> {
                 if n == 0 {
                     return self.err("a replication with a zero count is allowed only in a concatenation with other operands");
                 }
+                if n < 0 {
+                    return self.err(format!("a replication with a negative count ({n})"));
+                }
                 let mut one = Vec::new();
                 for x in v {
                     if self.zero_repl(x, sid)? {

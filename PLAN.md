@@ -423,7 +423,10 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    Wildcard imports in a module (`WildCheck` in the lowering): a name used through two of
    them is an error, as is a module declaration of a name after a use imported it (calls
    and generate blocks are not checked): 4556 of 5112.
-   Two declarations of one name in a class: 4557 of 5112.
+   Two declarations of one name in a class: 4557 of 5112. Nets of class, dynamic array
+   or queue type, negative replication counts, port connections mixing order and name,
+   generate loops over a non-genvar or the genvar of an enclosing loop, real types with
+   packed dimensions, a packed `[0]`, enum values that do not fit the base type: 4570 of 5112.
    Left among the accepted invalid tests: `var` in a for
    initialization (legal in 1800-2017, kept). Left: errors in
    class methods that are never called, the rest of the ACCEPT list

@@ -154,13 +154,21 @@ impl Lower {
             }
             t::Item::GenFor(g) => {
                 let init_var = self.name(&g.var, g.loc);
-                let init = self.expr(&g.init)?;
-                let cond = self.expr(&g.cond)?;
-                let (step_var, step) = self.gen_step(&g.step)?;
-                let (name, sub) = self.gen_items(&g.body)?;
-                items.push(Item::GenFor { init_var, init, cond, step_var, step, name, items: sub, line: g.loc.line });
+                // (IEEE 1800-2017 27.4: the loop variable is a genvar, which an enclosing
+                // loop does not use already)
+                if !g.genvar && !self.genvars.0.contains(&init_var) {
+                    return self.err(g.loc, format!("'{init_var}' is not a genvar"));
+                }
+                if self.genvars.1.contains(&init_var) {
+                    return self.err(g.loc, format!("genvar '{init_var}' is already the variable of an enclosing generate loop"));
+                }
+                self.genvars.1.push(init_var.clone());
+                let r = self.gen_for(g, init_var);
+                self.genvars.1.pop();
+                items.push(r?);
             }
             t::Item::GenIf(g) => {
+
                 let cond = self.expr(&g.cond)?;
                 let (then_name, then_items) = self.gen_items(&g.then_)?;
                 let (else_name, else_items) = match &g.else_ {
@@ -202,6 +210,11 @@ impl Lower {
                 }
                 let mut d = self.decl_head(None, n.net, false, &n.ty, n.strength.as_ref(), n.delay.as_ref(), n.loc)?;
                 d.names = self.declarators(&n.decls)?;
+                // (IEEE 1800-2017 6.7.1: a net holds a 4-state integral or real value, or an
+                // unpacked array or struct of them)
+                if d.ty.as_ref().is_some_and(|t| t.class.is_some() || t.heap.is_some()) || d.names.iter().any(|x| x.heap.is_some()) {
+                    return self.err(n.loc, "a net cannot be of a class, dynamic array, queue or associative array type");
+                }
                 items.append(&mut self.pending);
                 items.push(Item::Decl(d));
             }
@@ -233,6 +246,7 @@ impl Lower {
                 let mut names = Vec::new();
                 for (n, loc) in v {
                     let n = self.name(n, *loc);
+                    self.genvars.0.insert(n.clone());
                     self.declare_var(&n, &[]);
                     names.push(Declarator { name: n, dims: vec![], heap: None, init: None, line: loc.line });
                 }
@@ -309,6 +323,14 @@ impl Lower {
         Ok((self.name(n, lhs.loc), rhs))
     }
 
+    fn gen_for(&mut self, g: &t::GenFor, init_var: String) -> Result<Item> {
+        let init = self.expr(&g.init)?;
+        let cond = self.expr(&g.cond)?;
+        let (step_var, step) = self.gen_step(&g.step)?;
+        let (name, items) = self.gen_items(&g.body)?;
+        Ok(Item::GenFor { init_var, init, cond, step_var, step, name, items, line: g.loc.line })
+    }
+
     fn instances(&mut self, i: &t::Instances) -> Result<Item> {
         let module = i.module.clone();
         let mut params = Vec::new();
@@ -337,6 +359,11 @@ impl Lower {
                 }
             };
             let dims = self.dims(&x.dims, x.loc)?;
+            // (IEEE 1800-2017 23.3.2: by order or by name, not both)
+            let by_order = x.conns.iter().any(|c| matches!(c, t::PortConn::Positional(_)));
+            if by_order && x.conns.iter().any(|c| !matches!(c, t::PortConn::Positional(_))) {
+                return self.err(x.loc, "port connections by order and by name are mixed");
+            }
             let mut conns = Vec::new();
             for c in &x.conns {
                 conns.push(match c {

@@ -189,6 +189,9 @@ impl<'a> Compiler<'a> {
             self.scopes[sid].str_params.insert(p.name.clone());
             return Ok(Sym::Const(c.with_sign(false)));
         }
+        if p.enum_type.is_some() && ov.is_none() && p.range.is_some() {
+            self.enum_in_range(p, value, sid)?;
+        }
         let untyped = !p.integer && p.range.is_none() && !p.signed;
         // a number given for a ranged parameter: widened like in an expression (`'bx` fills)
         if let (None, Expr::Num(n), Some(_), false) = (&ov, value, &p.range, p.real) {
@@ -235,6 +238,30 @@ impl<'a> Compiler<'a> {
             PVal::Type(_) | PVal::Default => unreachable!(),
         };
         Ok(Sym::Const(self.param_type(p, c, sid)?))
+    }
+
+    /// The value of enum constant `p` fits its base type (IEEE 1800-2017 6.19): a wider
+    /// value loses no bits and is not negative for an unsigned base.
+    fn enum_in_range(&mut self, p: &ParamDecl, value: &Expr, sid: usize) -> R<()> {
+        let (a, b) = self.range_vals(&p.range, sid)?;
+        let w = ((a - b).abs() + 1) as u32;
+        if w >= 63 {
+            return Ok(());
+        }
+        let c = self.const_eval(value, sid)?;
+        // (a value of the enum's width or less is a bit pattern of it: `-4'sd1` for 4 bits)
+        let Some(v) = c.to_i64().filter(|_| c.w > w) else { return Ok(()) };
+        let fits = if v < 0 {
+            p.signed && v >= -(1i64 << (w - 1))
+        } else if p.signed {
+            v < 1i64 << (w - 1)
+        } else {
+            v < 1i64 << w
+        };
+        if !fits {
+            return self.err(format!("enum constant '{}': the value {v} does not fit the enum's {w}-bit {} base type", p.name, if p.signed { "signed" } else { "unsigned" }));
+        }
+        Ok(())
     }
 
     /// Declare parameter `p` with value `v` in scope `sid`; one with a struct type or several

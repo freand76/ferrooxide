@@ -70,3 +70,11 @@ ferrooxide copies Icarus's output, including where Icarus seems to depart from I
    1800-2017 11.4.12.1 says such a replication is ignored. ivtest `concat3`, `concat4`.
    Test: `tests/suite/expr/zero_repl.v` covers the width; the calls are covered by the
    regression suite.
+
+18. **A packed dimension `[n]`.** 1800-2017 7.4.1 allows only ranges as packed
+   dimensions; the reference takes `T [2] x` as `T [0:1] x` and rejects only `[0]`.
+   ivtest `display_bug` (accepted), `br_ml20181012a` (rejected). Test:
+   `tests/suite/sv/packed_size_dim_fail.v`.
+19. **`reg real x`.** Two data types in one declaration are not in the grammar; the
+   reference takes the second (ivtest `real8`) but rejects packed dimensions on `real`
+   (`pr3112073a`). Test: `tests/suite/sv/real_packed_fail.v`.

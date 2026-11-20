@@ -307,6 +307,20 @@ impl Lower {
         Ok(out)
     }
 
+    /// Packed dimensions. `[n]` is an unpacked dimension only (IEEE 1800-2017 7.4.1); the
+    /// reference takes it as `[0:n-1]` here too, and rejects `[0]`.
+    pub(crate) fn packed_dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<Vec<Range>> {
+        let out = self.dims(v, loc)?;
+        for (d, r) in v.iter().zip(&out) {
+            if let (t::Dim::Size(_), Expr::Binary(BinOp::Sub, n, _)) = (d, &r.1) {
+                if let Some(n) = lit(n).filter(|n| *n <= 0) {
+                    return self.err(loc, format!("a packed dimension of size {n}"));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The type is resolved through the type tables (struct, enum, a type name).
     fn is_sv_type(&self, ty: &t::DataType) -> bool {
         match &ty.kind {
@@ -355,7 +369,7 @@ impl Lower {
                         fields.push((n, ft.clone()));
                     }
                 }
-                let dims = self.dims(&ty.packed, ty.loc)?;
+                let dims = self.packed_dims(&ty.packed, ty.loc)?;
                 let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
                 Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
@@ -468,7 +482,7 @@ impl Lower {
                 }
                 t.enum_names = Some(names);
                 // dimensions after the enum are outer to its base type's
-                let mut outer = self.dims(&ty.packed, ty.loc)?;
+                let mut outer = self.packed_dims(&ty.packed, ty.loc)?;
                 if !outer.is_empty() {
                     t.int_kind = false;
                     outer.extend(t.dims);
@@ -483,13 +497,16 @@ impl Lower {
                 if let Some(w) = iw {
                     dims.push((num(w as i64 - 1), num(0)));
                 }
-                dims.extend(self.dims(&ty.packed, ty.loc)?);
+                dims.extend(self.packed_dims(&ty.packed, ty.loc)?);
                 Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: iw.is_some(), enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
             t::TypeKind::Real(_) => {
+                if !ty.packed.is_empty() {
+                    return self.err(ty.loc, "a real type cannot have packed dimensions");
+                }
                 let (kind, signed, iw) = builtin("real").unwrap();
                 let mut dims = vec![(num(iw.unwrap() as i64 - 1), num(0))];
-                dims.extend(self.dims(&ty.packed, ty.loc)?);
+                dims.extend(self.packed_dims(&ty.packed, ty.loc)?);
                 Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }))
             }
             t::TypeKind::Named(n) => {
@@ -520,7 +537,7 @@ impl Lower {
                 let mut t = (*t).clone();
                 t.signed = ty.signed.unwrap_or(t.signed);
                 // dimensions after a type name are outer to the type's own
-                let mut outer = self.dims(&ty.packed, ty.loc)?;
+                let mut outer = self.packed_dims(&ty.packed, ty.loc)?;
                 if !outer.is_empty() {
                     t.int_kind = false;
                     outer.extend(t.dims);
@@ -687,7 +704,7 @@ impl Lower {
                 return self.err(ty.loc, "packed dimensions after a type that has a width");
             }
             let kind = if matches!(ty.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
-            let t = SvType::vector(kind, signed, self.dims(&ty.packed, ty.loc)?);
+            let t = SvType::vector(kind, signed, self.packed_dims(&ty.packed, ty.loc)?);
             let range = Some((minus_one(t.width()), Expr::Num(dec(0))));
             return Ok(PType { signed, integer: false, real: false, range, sv: Some(t) });
         }
@@ -821,7 +838,10 @@ impl Lower {
         if let Some(s) = ty.signed {
             signed = s;
         }
-        let mut pd = self.dims(&ty.packed, ty.loc)?.into_iter();
+        if kind == NetKind::Real && !ty.packed.is_empty() {
+            return self.err(ty.loc, "a real type cannot have packed dimensions");
+        }
+        let mut pd = self.packed_dims(&ty.packed, ty.loc)?.into_iter();
         let range = pd.next();
         let packed: Vec<Range> = pd.collect();
         // the type (assignment patterns, $left & co.)
