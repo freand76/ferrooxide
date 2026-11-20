@@ -938,8 +938,49 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Whether `e` is a constant expression (IEEE 1800-2017 11.2.1): literals, parameters,
+    /// constant system and user function calls of constant arguments; no variables or nets.
+    /// (Names not found are left to the error at their use.)
+    pub(crate) fn is_const_expr(&self, e: &Expr, sid: usize) -> bool {
+        let all = |c: &Self, v: &[Expr]| v.iter().all(|x| c.is_const_expr(x, sid));
+        match e {
+            Expr::Ident(n) => !matches!(self.lookup(n, sid), Some(Sym::Sig(_))),
+            Expr::Hier(p) => !matches!(self.lookup_hier(p, sid), Some(Sym::Sig(_))),
+            Expr::Unary(_, a) | Expr::Member(a, _) => self.is_const_expr(a, sid),
+            Expr::Binary(_, a, b) | Expr::Index(a, b) => self.is_const_expr(a, sid) && self.is_const_expr(b, sid),
+            Expr::Cond(a, b, c) | Expr::Range(a, b, c) | Expr::IndexedRange(a, b, c, _) => {
+                self.is_const_expr(a, sid) && self.is_const_expr(b, sid) && self.is_const_expr(c, sid)
+            }
+            Expr::Concat(v) => all(self, v),
+            Expr::Repl(n, v) => self.is_const_expr(n, sid) && all(self, v),
+            Expr::Call(_, args) => all(self, args),
+            // queries of a declaration are constant whatever they name
+            Expr::SysCall(n, _)
+                if matches!(
+                    n.as_str(),
+                    "$bits" | "$size" | "$left" | "$right" | "$low" | "$high" | "$increment" | "$dimensions" | "$unpacked_dimensions" | "$typename" | "$isunbounded"
+                ) =>
+            {
+                true
+            }
+            Expr::SysCall(n, _) if matches!(n.as_str(), "$time" | "$stime" | "$realtime" | "$random" | "$urandom" | "$urandom_range") => false,
+            Expr::SysCall(_, args) => all(self, args),
+            _ => true,
+        }
+    }
+
+    /// A part-select bound or width (`[m:l]`, `[b +: w]`), which must be constant: None when
+    /// it has x/z bits.
+    pub(crate) fn select_bound(&mut self, e: &Expr, sid: usize) -> R<Option<i64>> {
+        if !self.is_const_expr(e, sid) {
+            return self.err("a part-select bound is not a constant expression (use an indexed part-select, [b +: w])");
+        }
+        self.const_index(e, sid)
+    }
+
     /// A constant index: None when it has x/z bits (such a select reads x, writes nothing).
     pub(crate) fn const_index(&mut self, e: &Expr, sid: usize) -> R<Option<i64>> {
+        self.no_real_index(e, sid)?;
         Ok(self.const_eval(e, sid)?.to_i64())
     }
 

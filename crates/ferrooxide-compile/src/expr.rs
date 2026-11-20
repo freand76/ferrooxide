@@ -437,8 +437,17 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn index_of(&mut self, e: &Expr, sid: usize, neg: bool, k: i64) -> R<Index> {
+        self.no_real_index(e, sid)?;
         let (slot, w, signed) = self.self_expr(e, sid)?;
         Ok(Index { slot, w, signed, neg, k })
+    }
+
+    /// An index or select bound may not be real (IEEE 1800-2017 11.5.1).
+    pub(crate) fn no_real_index(&mut self, e: &Expr, sid: usize) -> R<()> {
+        if self.type_of(e, sid)?.is_real() {
+            return self.err("a real value as an index or part-select bound");
+        }
+        Ok(())
     }
 
     pub(crate) fn mkerr(&self, msg: String) -> ferrooxide_front::Error {
@@ -654,7 +663,7 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(d, 1, w, false))
             }
             Expr::Range(a, m, l) => {
-                let (Some(mv), Some(lv)) = (self.const_index(m, sid)?, self.const_index(l, sid)?) else {
+                let (Some(mv), Some(lv)) = (self.select_bound(m, sid)?, self.select_bound(l, sid)?) else {
                     // an x/z bound: all x (also in a wider context, like Icarus)
                     let n = rt::nw(w);
                     let mut a = vec![u64::MAX; n];
@@ -680,6 +689,9 @@ impl<'a> Compiler<'a> {
                 Ok(self.resize(d, pw, w, false))
             }
             Expr::IndexedRange(a, base, width, up) => {
+                if !self.is_const_expr(width, sid) {
+                    return self.err("the width of an indexed part-select is not a constant expression");
+                }
                 let pw = self.const_int(width, sid)? as u32;
                 let (bs, bw, msb, lsb) = self.vec_base(a, sid)?;
                 let (neg, k) = Self::index_part_map(msb, lsb, pw, *up);
@@ -752,6 +764,9 @@ impl<'a> Compiler<'a> {
                 let mut parts = Vec::new();
                 let mut tw = 0;
                 for x in v {
+                    if self.type_of(x, sid)?.is_real() {
+                        return self.err("a real value in a concatenation");
+                    }
                     let (xs, xw, _) = self.self_expr(x, sid)?;
                     if xw == 0 {
                         continue;

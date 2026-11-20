@@ -695,6 +695,7 @@ impl<'a> Compiler<'a> {
                     self.line = *line;
                     self.file = self.scopes[*scope].file.clone();
                     self.check_enum_assign(lhs, rhs, *scope)?;
+                    self.check_const_selects(lhs, *scope)?;
                     if delay.is_none() {
                         self.const_assign_init(lhs, rhs, *scope)?;
                     }
@@ -745,4 +746,23 @@ fn index_expr(e: &Expr, v: i64) -> Expr {
     let num = Expr::Num(ferrooxide_front::ast::dec(v.unsigned_abs()));
     let num = if v < 0 { Expr::Unary(ferrooxide_front::ast::UnOp::Neg, Box::new(num)) } else { num };
     Expr::Index(Box::new(e.clone()), Box::new(num))
+}
+
+impl<'a> Compiler<'a> {
+    /// The selects in the target of a continuous assignment (or of a force or procedural
+    /// assign) are constant (IEEE 1800-2017 10.3.1, 10.6: a net, a constant bit- or
+    /// part-select of it, an element at a constant index).
+    pub(crate) fn check_const_selects(&mut self, lhs: &Expr, sid: usize) -> R<()> {
+        match lhs {
+            Expr::Index(a, i) | Expr::IndexedRange(a, i, _, _) => {
+                if !self.is_const_expr(i, sid) {
+                    return self.err("a select in the target of a continuous assignment or force is not a constant expression");
+                }
+                self.check_const_selects(a, sid)
+            }
+            Expr::Range(a, ..) | Expr::Member(a, _) => self.check_const_selects(a, sid),
+            Expr::Concat(v) => v.iter().try_for_each(|x| self.check_const_selects(x, sid)),
+            _ => Ok(()),
+        }
+    }
 }

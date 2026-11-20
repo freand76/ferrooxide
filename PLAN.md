@@ -400,9 +400,13 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    declaration, a typed port declaration is complete, equal ranges), enum base types and
    enum assignment compatibility (`enums.rs`: an enum is its constant list plus the scope
    declaring the constants; checked in assignments, initializers, returns and arguments;
-   any explicit cast passes, since `$__cast` keeps no target type). Next:
-   `automatic` misuse (13), constant-expression checks (11), invalid lvalue selects, real
-   as an index or in a concatenation, several continuous drivers of a variable, procedural
+   any explicit cast passes, since `$__cast` keeps no target type); automatic variables
+   (no nonblocking writes, procedural continuous assignments or `$monitor`/`$strobe`
+   arguments; checked where a subroutine is compiled, so not in one that is never called:
+   compiling uncalled subroutines once would catch all their errors); constant part-select
+   bounds (`is_const_expr`), constant selects in continuous assignment and force targets,
+   no real index or real concatenation operand: 4489 of 5112. Next: several continuous
+   drivers of a variable, procedural
    assignment to a net, `local`/`protected` access, macro argument counts and `` `line ``
    arguments. Interleave with the other steps.
 4. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile

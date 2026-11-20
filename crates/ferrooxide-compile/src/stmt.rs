@@ -110,7 +110,7 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
             Expr::Range(a, m, l) => {
-                let (Some(mv), Some(lv)) = (self.const_index(m, sid)?, self.const_index(l, sid)?) else {
+                let (Some(mv), Some(lv)) = (self.select_bound(m, sid)?, self.select_bound(l, sid)?) else {
                     // an x/z bound: nothing is written
                     out.push((None, 1));
                     return Ok(());
@@ -152,6 +152,9 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
             Expr::IndexedRange(a, base, width, up) => {
+                if !self.is_const_expr(width, sid) {
+                    return self.err("the width of an indexed part-select is not a constant expression");
+                }
                 let pw = self.const_int(width, sid)? as u32;
                 // of an array element: mem[i][b +: w]
                 if let Expr::Index(arr_e, ai) = &**a {
@@ -994,6 +997,7 @@ impl<'a> Compiler<'a> {
                 if let Some(n) = auto {
                     return self.err(format!("automatic variable '{n}' in a procedural continuous assignment (assign, deassign, force, release)"));
                 }
+                self.check_const_selects(lhs, sid)?;
                 let mut bases = Vec::new();
                 self.lvalue_bases(lhs, sid, &mut bases);
                 let key = format!("$force:{:?}:{:?}", bases, lhs);
