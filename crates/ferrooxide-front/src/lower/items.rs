@@ -22,7 +22,9 @@ impl Lower {
         let mut items = Vec::new();
         let refs: Vec<&t::Item> = b.items.iter().collect();
         self.wild.skip += 1;
+        self.in_generate += 1;
         let r = self.item_list(&refs, &mut items);
+        self.in_generate -= 1;
         self.wild.skip -= 1;
         r?;
         // a conditional that is the whole block, without begin-end: no scope of its own
@@ -148,9 +150,16 @@ impl Lower {
                 let s = self.subroutine_in(s, false)?;
                 items.push(Item::Subroutine(s));
             }
-            t::Item::Generate(v, _) => {
+            t::Item::Generate(v, loc) => {
+                // (IEEE 1800-2017 27.3: a generate region is a module item only)
+                if self.in_generate > 0 {
+                    return self.err(*loc, "a generate region inside a generate region or block");
+                }
                 let refs: Vec<&t::Item> = v.iter().collect();
-                self.item_list(&refs, items)?;
+                self.in_generate += 1;
+                let r = self.item_list(&refs, items);
+                self.in_generate -= 1;
+                r?;
             }
             t::Item::GenFor(g) => {
                 let init_var = self.name(&g.var, g.loc);
@@ -418,7 +427,9 @@ impl Lower {
                         t::Delay::List(v) if v.len() > 3 => self.delay(&t::Delay::List(v[..3].to_vec()))?,
                         d => self.delay(d)?,
                     };
-                    items.push(Item::SpecPath { srcs, dsts, delay, line: p.loc.line });
+                    let whole = |v: &[t::Expr]| matches!(v, [t::Expr { kind: t::ExprKind::Ident(_), .. }]);
+                    let parallel = !p.full && p.data.is_none() && whole(&p.srcs) && whole(&p.dsts);
+                    items.push(Item::SpecPath { srcs, dsts, delay, parallel, line: p.loc.line });
                 }
                 t::SpecifyItem::TimingCheck { .. } | t::SpecifyItem::Pulse { .. } => {}
             }

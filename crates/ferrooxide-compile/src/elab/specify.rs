@@ -10,8 +10,16 @@ impl<'a> Compiler<'a> {
         // destination -> (source, delay) pairs
         let mut by_dst: Vec<(String, Vec<(String, Expr)>)> = Vec::new();
         for it in items {
-            let Item::SpecPath { srcs, dsts, delay, line } = it else { continue };
+            let Item::SpecPath { srcs, dsts, delay, parallel, line } = it else { continue };
             self.line = *line;
+            if let (true, [s], [d]) = (*parallel, &srcs[..], &dsts[..]) {
+                if let (Some(Sym::Sig(a)), Some(Sym::Sig(b))) = (self.lookup(s, sid), self.lookup(d, sid)) {
+                    let (wa, wb) = (self.sig(a).width, self.sig(b).width);
+                    if wa != wb {
+                        return self.err(format!("a parallel path (`=>`) between '{s}' ({wa} bits) and '{d}' ({wb} bits) of different widths"));
+                    }
+                }
+            }
             for d in dsts {
                 if dirs.get(d) != Some(&Dir::Output) {
                     continue; // only output ports (inout paths are not modelled)

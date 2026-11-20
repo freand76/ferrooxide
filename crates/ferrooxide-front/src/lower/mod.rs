@@ -79,6 +79,8 @@ pub(crate) struct Lower {
     wild: WildCheck,
     /// the genvars declared in the module, and those of the generate loops being lowered
     genvars: (HashSet<String>, Vec<String>),
+    /// in a generate region or block (no generate region may start there)
+    in_generate: usize,
 }
 
 /// IEEE 1800-2017 26.3: a name a module uses through a wildcard import must come from one
@@ -179,6 +181,7 @@ impl Lower {
             class_statics: Vec::new(),
             wild: WildCheck::default(),
             genvars: Default::default(),
+            in_generate: 0,
         }
     }
 
@@ -479,6 +482,17 @@ impl Lower {
         }
         self.genvars = saved_genvars;
         r?;
+        // a port of a non-ANSI list is declared with a direction in the module
+        if let t::Ports::NonAnsi(v) = &m.ports {
+            for p in v {
+                if let Some(t::Expr { kind: t::ExprKind::Ident(n), loc }) = &p.expr {
+                    let declared = items.iter().any(|i| matches!(i, Item::Decl(d) if d.dir.is_some() && d.names.iter().any(|x| &x.name == n)));
+                    if !declared && !iface_ports.iter().any(|ip| &ip.0 == n) {
+                        return self.err(*loc, format!("port '{n}' has no direction declaration"));
+                    }
+                }
+            }
+        }
         if !port_exprs.is_empty() {
             self.port_exprs(port_exprs, &mut items)?;
         }
@@ -716,6 +730,10 @@ impl Lower {
                 _ => {}
             }
             let pname = self.name(&p.name, p.loc);
+            // (IEEE 1800-2017 23.2.2.4: not for an inout port)
+            if p.default.is_some() && cur.as_ref().is_some_and(|d| d.dir == Some(Dir::Inout)) {
+                return self.err(p.loc, format!("inout port '{pname}' cannot have a default value"));
+            }
             let (dims, heap) = self.declarator_dims(&p.dims, p.loc)?;
             let init = match &p.default {
                 Some(e) => Some(self.expr(e)?),

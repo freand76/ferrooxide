@@ -427,6 +427,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    or queue type, negative replication counts, port connections mixing order and name,
    generate loops over a non-genvar or the genvar of an enclosing loop, real types with
    packed dimensions, a packed `[0]`, enum values that do not fit the base type: 4570 of 5112.
+   Non-ANSI ports without a direction declaration, default values of inout ports, nested
+   generate regions, parallel paths between terminals of different widths: 4573 of 5112.
    Left among the accepted invalid tests: `var` in a for
    initialization (legal in 1800-2017, kept). Left: errors in
    class methods that are never called, the rest of the ACCEPT list

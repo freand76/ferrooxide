@@ -231,7 +231,8 @@ pub enum Item {
     /// `parameter type T = logic [7:0];` (`default` None: no default type)
     TypeParam { local: bool, name: String, default: Option<std::rc::Rc<crate::lower::SvType>>, line: Line },
     /// a `specify` path delay: `(a, b *> q) = (rise, fall);` (conditions and edges ignored)
-    SpecPath { srcs: Vec<String>, dsts: Vec<String>, delay: Expr, line: Line },
+    /// `parallel`: a `=>` path between two whole terminals (the same width, 30.4.5)
+    SpecPath { srcs: Vec<String>, dsts: Vec<String>, delay: Expr, parallel: bool, line: Line },
     /// `defparam a.b.P = value;` (the target path includes the parameter name)
     Defparam { target: Vec<String>, value: Expr, line: Line },
     /// `strength`: drive strength (strength0, strength1), levels 0 (highz) .. 7 (supply)
