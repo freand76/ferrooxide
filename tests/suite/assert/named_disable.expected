@@ -1,0 +1,5 @@
+15 a_past fail x=0
+15 stable
+25 a_past fail x=1
+85 a_ok fail
+named_disable.v:33: $finish called at 110 (1s)

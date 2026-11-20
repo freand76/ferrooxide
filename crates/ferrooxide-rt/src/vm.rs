@@ -216,6 +216,10 @@ pub struct Sim {
     /// sequence number of the first pending combinational wake, u64::MAX if none is pending
     comb_seq: u64,
     inactive: Vec<(u32, u32)>,
+    /// processes waiting for the Reactive region (assertion action blocks): (process, gen)
+    reactive: Vec<(u32, u32)>,
+    /// the running attempts of each concurrent assertion
+    asserts: Vec<assert::AssertState>,
     /// always_comb / always_latch processes still to be woken for their time-0 run
     kicks: Vec<u32>,
     nba: Vec<Nba>,
@@ -459,7 +463,7 @@ impl Sim {
             ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals, &elem_sig)).collect(),
             orig: prog.procs.iter().map(|p| p.code.clone()).collect(),
         });
-        Sim {
+        let mut sim = Sim {
             code,
             comb_bits: vec![0; comb_words],
             comb_order,
@@ -530,6 +534,8 @@ impl Sim {
             seq: 0,
             comb_seq: u64::MAX,
             inactive: Vec::new(),
+            reactive: Vec::new(),
+            asserts: vec![assert::AssertState::default(); prog.asserts.len()],
             kicks: Vec::new(),
             nba: Vec::new(),
             nba_vals: Vec::new(),
@@ -572,7 +578,10 @@ impl Sim {
             #[cfg(feature = "jit")]
             entries: Vec::new(),
             prog,
-        }
+        };
+        // the sampled values at time 0: the values before it
+        sim.sample();
+        sim
     }
 
     /// Run until no events remain, $finish, or `max_time` is passed.
@@ -946,7 +955,20 @@ impl Sim {
                 self.apply_nba();
                 continue;
             }
+            // (IEEE 1800-2017 4.4.2.7: the Observed region has nothing here; the Reactive
+            // region runs assertion action blocks, then the active regions again)
+            if !self.reactive.is_empty() {
+                for (p, g) in std::mem::take(&mut self.reactive) {
+                    if self.procs[p as usize].gen == g {
+                        self.push_active(p);
+                    }
+                }
+                continue;
+            }
             break;
+        }
+        if !self.prog.samples.is_empty() {
+            self.sample();
         }
         if !self.postponed.is_empty() {
             let pp = std::mem::take(&mut self.postponed);
@@ -2432,6 +2454,9 @@ impl Sim {
             self.exec_obj(*op, *d, *a, *b, *off, *w);
             return false;
         }
+        if let Instr::Assert(op) = ins {
+            return self.exec_assert(p, *op, *pc);
+        }
         {
             let m = &mut self.mem;
             match ins {
@@ -2734,7 +2759,7 @@ impl Sim {
                 | Instr::RToTicks { .. } => {
                     ops::exec_real(ins, m);
                 }
-                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } => unreachable!("handled before"),
+                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } | Instr::Assert(_) => unreachable!("handled before"),
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -3233,6 +3258,44 @@ impl Sim {
             let word = if k == 0 { v as u64 } else if v < 0 { !0 } else { 0 };
             self.mem[d + k] = if k == n - 1 { word & ops::mask(w - 64 * k as u32) } else { word };
             self.mem[d + n + k] = 0;
+        }
+    }
+
+    /// A concurrent assertion operation (`Instr::Assert`); true if the process suspends.
+    fn exec_assert(&mut self, p: u32, op: AssertOp, pc: usize) -> bool {
+        match op {
+            AssertOp::Tick { id, leaves, n, pass, fail } => {
+                let m = &self.mem;
+                let words = nw(n);
+                let bit = |l: u32| {
+                    let (w, b) = ((l / 64) as usize, l % 64);
+                    (m[leaves as usize + w] >> b) & 1 == 1 && (m[leaves as usize + words + w] >> b) & 1 == 0
+                };
+                let (np, nf) = self.asserts[id as usize].tick(&self.prog.asserts[id as usize], &bit);
+                for (s, v) in [(pass, np), (fail, nf)] {
+                    self.mem[s as usize] = v as u64;
+                    self.mem[s as usize + 1] = 0;
+                }
+                false
+            }
+            AssertOp::Disable { id } => {
+                self.asserts[id as usize].disable();
+                false
+            }
+            AssertOp::Reactive => {
+                let g = self.procs[p as usize].gen;
+                self.reactive.push((p, g));
+                self.procs[p as usize].pc = pc as u32;
+                true
+            }
+        }
+    }
+
+    /// Sampled values for the next time step (`Program::samples`).
+    fn sample(&mut self) {
+        for &(from, to, n) in &self.prog.samples {
+            let (from, to, n) = (from as usize, to as usize, n as usize);
+            self.mem.copy_within(from..from + n, to);
         }
     }
 

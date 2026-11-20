@@ -1,0 +1,18 @@
+5 c1 fell
+5 p1 pass
+15 p1 pass
+25 c1 fell
+25 p2 fail
+25 p1 pass
+35 p1 pass
+45 p1 fail t.p1
+55 p1 pass
+55 p2 fail
+55 p4 fail q=7
+55 c1 fell
+65 p1 pass
+75 p1 pass
+75 p3 fail
+85 p1 pass
+95 p1 pass
+implication.v:30: $finish called at 100 (1s)

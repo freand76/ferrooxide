@@ -1,0 +1,28 @@
+module m (clk, rst, a, b, x);
+  // imports $unit
+  input wire(implicit) clk;
+  input wire(implicit) rst;
+  input wire(implicit) a;
+  input wire(implicit) b;
+  input wire(implicit) [3:0] x;
+  a1: assert property (@(posedge clk) disable iff (rst) (a |=> (a ##[1:2] b)))
+    ;
+    else
+    $error("q");
+  a2: assert property (@(negedge clk) ((a[*2] ##1 b[->1:2]) or (a intersect b)))
+    ;
+    else
+    $error();
+  a3: assume property (@(posedge clk) (not (a throughout b[=2]) and ((x == 0) |-> ($past(x, 2) != 1))))
+    ;
+    else
+    $error();
+  c1: cover property (@(posedge clk) (if (a) b else $rose(a)))
+    $display("covered");
+    else
+    ;
+  cover sequence (@(posedge clk) ((a ##1 b) within b[*3]))
+    ;
+    else
+    ;
+endmodule

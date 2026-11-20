@@ -79,12 +79,16 @@ Verilog-2005 plus common SystemVerilog:
   (also bounded), dynamic and associative arrays, unpacked structs, classes (properties,
   also arrays and queues, constructors, methods, `extends`/`super`, virtual methods,
   static properties and methods, forward `typedef class`), arrays and queues of class
-  handles, `string` parameters, `fork`
+  handles, parameterized classes, constraints and `randomize()`, mailboxes and semaphores,
+  array methods (`sort`, `find`, `sum`, ...), `string` parameters, `fork`
   in loops with `automatic` variables, `wait fork`, immediate assertions, `inside`,
   `foreach`, `unique`/`priority`
+- concurrent assertions: `assert`/`assume`/`cover property`, `cover sequence`, sequence
+  and property operators, named sequences and properties with arguments, default clocking,
+  `disable iff`, `$past`/`$rose`/`$fell`/`$stable`/`$changed`/`$sampled`
 
-Not yet: the rest of classes (parameterized classes, randomization),
-concurrent assertions, array methods (`sort`, `find`, ...), `%v` strength display, SDF, VPI.
+Not yet: clocking blocks with clocking signals, deferred assertions, assertions inside
+procedures, `%v` strength display, SDF, VPI.
 The full list is "Unsupported (known)" in [PLAN.md](PLAN.md). Icarus's regression suite
 (ivtest) passes at about 91% (its SystemVerilog list at 92%); places where Icarus seems to
 deviate from the standard (ferrooxide matches Icarus) are listed in

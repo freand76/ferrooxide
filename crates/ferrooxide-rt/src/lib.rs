@@ -4,6 +4,7 @@
 //! `nw` words of aval followed by `nw` words of bval (VPI encoding: 00=0, 10=1, 01=Z, 11=X).
 //! Bits above `w` in the top word are always zero in both planes.
 
+pub mod assert;
 pub mod fast;
 pub mod fmt;
 pub mod fuse;
@@ -157,6 +158,11 @@ pub struct Program {
     /// a signal every write of an object property touches (for `wait` on conditions that
     /// read objects), if some code waits on it
     pub obj_sig: Option<u32>,
+    /// concurrent assertions (`Instr::Assert`)
+    pub asserts: Vec<assert::AssertDef>,
+    /// sampled values (IEEE 1800-2017 16.5.1): (from, to, words) copied before each time
+    /// step, so that `to` holds the values of `from` from before the step (Preponed region)
+    pub samples: Vec<(u32, u32, u32)>,
 }
 
 /// A class: an object holds its properties flat, `nw(width)` value words then as many
@@ -294,6 +300,8 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             [*d, *a, *b, *c].into_iter().filter(|&x| x != NONE).collect()
         }
         Instr::Obj { d, a, b, .. } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
+        Instr::Assert(AssertOp::Tick { leaves, pass, fail, .. }) => vec![*leaves, *pass, *fail],
+        Instr::Assert(_) => vec![],
         Instr::Unforce { t } => match t {
             Target::DynPart { ix, .. } | Target::Elem { ix, .. } | Target::ElemPart { ix, .. } => vec![ix.slot],
             Target::ElemDynPart { ix, bix, .. } => vec![ix.slot, bix.slot],
@@ -809,6 +817,20 @@ pub enum Instr {
     Assoc { op: AssocOp, d: u32, a: u32, b: u32, c: u32, w: u32, key: KeyKind, x: bool },
     /// an operation on class objects; unused operands are NONE
     Obj { op: ObjOp, d: u32, a: u32, b: u32, off: u32, w: u32 },
+    /// concurrent assertions
+    Assert(AssertOp),
+}
+
+/// Operations of concurrent assertions (`Instr::Assert`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssertOp {
+    /// a tick of assertion `id` (`Program::asserts`): its leaves are the bits of the `n`-bit
+    /// value at `leaves`; the numbers of passes and failures go to the 32-bit `pass`, `fail`
+    Tick { id: u32, leaves: u32, n: u32, pass: u32, fail: u32 },
+    /// `disable iff`: the running attempts of assertion `id` end
+    Disable { id: u32 },
+    /// the process waits for the Reactive region of this time step (action blocks)
+    Reactive,
 }
 
 /// Operations on class objects in `Instr::Obj`. An object is on the simulator's heap; a

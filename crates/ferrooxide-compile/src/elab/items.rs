@@ -222,6 +222,7 @@ impl<'a> Compiler<'a> {
                 self.code.jobs.push(Job::Proc { kind: *kind, body, scope: sid, line: *line });
             }
             Item::Instances { module, params, insts, line } => self.instances(module, params, insts, *line, sid)?,
+            Item::Assert(a) => self.code.jobs.push(Job::Assert { a, scope: sid }),
             Item::GenFor { .. } => self.gen_for(it, sid, genblk)?,
             Item::GenIf { .. } => self.gen_if(it, sid, genblk)?,
             Item::GenCase { .. } => self.gen_case(it, sid, genblk)?,

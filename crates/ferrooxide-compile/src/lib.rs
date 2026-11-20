@@ -9,6 +9,7 @@ mod elab;
 mod enums;
 mod expr;
 mod arrmeth;
+mod assert;
 mod heap;
 mod konst;
 mod lint;
@@ -101,6 +102,8 @@ pub(crate) struct Scope<'a> {
 enum Job<'a> {
     Proc { kind: ProcKind, body: &'a Stmt, scope: usize, line: u32 },
     Assign { lhs: Expr, rhs: Expr, delay: Option<Expr>, scope: usize, line: u32 },
+    /// a concurrent assertion
+    Assert { a: &'a ConcAssert, scope: usize },
     /// a variable initializer that is not a constant (a queue's): assigned once at time 0
     Init { lhs: Expr, rhs: Expr, scope: usize, line: u32 },
     /// child input port driven by a parent expression
@@ -300,6 +303,8 @@ pub(crate) struct Nets {
 /// Facts about signals beyond `SignalInfo`, and the memory limit.
 #[derive(Default)]
 pub(crate) struct Sigs {
+    /// the sampled copies of signals read by concurrent assertions
+    pub(crate) sampled: HashMap<u32, u32>,
     /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
     pub(crate) two_state: HashSet<u32>,
     /// automatic variables (of automatic subroutines and automatic blocks)

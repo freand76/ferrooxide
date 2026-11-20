@@ -303,6 +303,14 @@ impl Lower {
                 }
             }
             t::Item::Instances(i) => items.push(self.instances(i)?),
+            t::Item::Assertion(a) => {
+                if let Some(a) = self.conc_assert(a)? {
+                    items.push(Item::Assert(Box::new(a)));
+                }
+            }
+            t::Item::Property(_) | t::Item::Sequence(_) | t::Item::Clocking(_) | t::Item::ClockingRef { .. } | t::Item::DefaultDisable(..) => {
+                self.sva_item(it)?;
+            }
             other => return self.unsupported(item_loc(other), item_what(other)),
         }
         Ok(())

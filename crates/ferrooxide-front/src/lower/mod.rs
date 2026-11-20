@@ -6,6 +6,7 @@
 //! unnamed instances. What has nothing behind it fails with "... is not supported" at its
 //! line.
 
+mod assert;
 mod class;
 mod constraint;
 mod expr;
@@ -97,6 +98,8 @@ pub(crate) struct Lower {
     in_generate: usize,
     /// the iterator names of the array method `with` expressions being lowered
     iters: Vec<String>,
+    /// the assertion context of the module (named sequences and properties, clocking)
+    sva: assert::Sva,
 }
 
 /// IEEE 1800-2017 26.3: a name a module uses through a wildcard import must come from one
@@ -222,6 +225,7 @@ impl Lower {
             genvars: Default::default(),
             in_generate: 0,
             iters: Vec::new(),
+            sva: assert::Sva::default(),
         }
     }
 
@@ -522,7 +526,10 @@ impl Lower {
             self.wild.declared.extend(ports.iter().cloned());
             self.wild.declared.extend(iface_ports.iter().map(|p| p.0.clone()));
         }
-        let r = self.wild_declared(&t::Item::Empty(m.loc), &items).and_then(|_| {
+        // (named sequences and properties and the default clocking are known in the whole
+        // module)
+        let saved_sva = std::mem::take(&mut self.sva);
+        let r = self.wild_declared(&t::Item::Empty(m.loc), &items).and_then(|_| self.sva_prescan(&refs)).and_then(|_| {
             for (k, it) in refs.iter().enumerate() {
                 let n = items.len();
                 self.module_item(it, &refs[k + 1..], &mut items)?;
@@ -530,6 +537,7 @@ impl Lower {
             }
             Ok(())
         });
+        self.sva = saved_sva;
         if let Some(w) = saved_wild {
             self.wild = w;
         }

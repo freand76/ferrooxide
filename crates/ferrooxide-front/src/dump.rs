@@ -271,6 +271,56 @@ fn event_ctl(ec: &EventCtl) -> String {
     }
 }
 
+fn cycles(c: &Cycles) -> String {
+    match (&c.hi, c.unbounded) {
+        (_, true) => format!("[{}:$]", expr(&c.lo)),
+        (Some(h), false) => format!("[{}:{}]", expr(&c.lo), expr(h)),
+        (None, false) => expr(&c.lo),
+    }
+}
+
+fn sequence(s: &Sequence) -> String {
+    let rep = |c: &Cycles| match (&c.hi, c.unbounded) {
+        (None, false) => format!("[{}]", expr(&c.lo)),
+        _ => cycles(c),
+    };
+    match s {
+        Sequence::Bool(e) => expr(e),
+        Sequence::Delay(a, c, b) => {
+            let d = match (&c.hi, c.unbounded) {
+                (None, false) => format!("##{}", expr(&c.lo)),
+                _ => format!("##{}", cycles(c)),
+            };
+            match a {
+                Some(a) => format!("({} {d} {})", sequence(a), sequence(b)),
+                None => format!("({d} {})", sequence(b)),
+            }
+        }
+        Sequence::Repeat(a, c) => format!("{}[*{}]", sequence(a), rep(c).trim_start_matches('[').trim_end_matches(']')),
+        Sequence::Goto(e, c) => format!("{}[->{}]", expr(e), rep(c).trim_start_matches('[').trim_end_matches(']')),
+        Sequence::NonCons(e, c) => format!("{}[={}]", expr(e), rep(c).trim_start_matches('[').trim_end_matches(']')),
+        Sequence::Or(a, b) => format!("({} or {})", sequence(a), sequence(b)),
+        Sequence::And(a, b) => format!("({} and {})", sequence(a), sequence(b)),
+        Sequence::Intersect(a, b) => format!("({} intersect {})", sequence(a), sequence(b)),
+        Sequence::Throughout(e, b) => format!("({} throughout {})", expr(e), sequence(b)),
+        Sequence::Within(a, b) => format!("({} within {})", sequence(a), sequence(b)),
+    }
+}
+
+fn property(p: &Property) -> String {
+    match p {
+        Property::Seq(s) => sequence(s),
+        Property::Not(a) => format!("not {}", property(a)),
+        Property::And(a, b) => format!("({} and {})", property(a), property(b)),
+        Property::Or(a, b) => format!("({} or {})", property(a), property(b)),
+        Property::Implies { ante, next, cons } => format!("({} {} {})", sequence(ante), if *next { "|=>" } else { "|->" }, property(cons)),
+        Property::If(c, a, b) => match b {
+            Some(b) => format!("(if ({}) {} else {})", expr(c), property(a), property(b)),
+            None => format!("(if ({}) {})", expr(c), property(a)),
+        },
+    }
+}
+
 fn timing(t: &Timing) -> String {
     match t {
         Timing::Delay(d) => format!("#({})", expr(d)),
@@ -476,6 +526,22 @@ impl Printer {
                 }
             }
             Item::Subroutine(f) => self.subroutine(f),
+            Item::Assert(a) => {
+                let kind = match a.kind {
+                    AssertKind::Assert => "assert property",
+                    AssertKind::Assume => "assume property",
+                    AssertKind::Cover => "cover property",
+                    AssertKind::CoverSeq => "cover sequence",
+                };
+                let label = a.label.as_ref().map(|l| format!("{l}: ")).unwrap_or_default();
+                let dis = a.disable.as_ref().map(|d| format!("disable iff ({}) ", expr(d))).unwrap_or_default();
+                self.line(format!("{label}{kind} ({} {dis}{})", event_ctl(&a.clock), property(&a.prop)));
+                self.ind += 1;
+                self.stmt(&a.pass);
+                self.line("else");
+                self.stmt(&a.fail);
+                self.ind -= 1;
+            }
             Item::ClassSpec { name, class, args, .. } => {
                 self.line(format!("// specialization {name} = {class} #({})", args.iter().map(conn).collect::<Vec<_>>().join(", ")))
             }

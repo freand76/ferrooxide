@@ -617,7 +617,7 @@ impl Lower {
         })
     }
 
-    fn event_ctl(&mut self, ec: &t::EventCtl, loc: t::Loc) -> Result<EventCtl> {
+    pub(crate) fn event_ctl(&mut self, ec: &t::EventCtl, loc: t::Loc) -> Result<EventCtl> {
         let (ec, guard) = self.event_ctl_iff(ec, loc)?;
         if guard.is_some() {
             return self.err(loc, "`iff` is only supported in an event control before a statement");

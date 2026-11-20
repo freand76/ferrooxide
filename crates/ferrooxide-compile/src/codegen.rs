@@ -471,7 +471,7 @@ impl<'a> Compiler<'a> {
             Job::Assign { lhs, scope, .. } | Job::PortOut { lhs, scope, .. } => self.lvalue_bases(lhs, *scope, &mut v),
             Job::PortIn { child_sig, .. } => v.push(*child_sig),
             Job::Udp { terms, scope, .. } => self.lvalue_bases(&terms[0], *scope, &mut v),
-            Job::Proc { .. } | Job::Init { .. } => {}
+            Job::Proc { .. } | Job::Init { .. } | Job::Assert { .. } => {}
         }
         v.sort_unstable();
         v.dedup();
@@ -728,7 +728,7 @@ impl<'a> Compiler<'a> {
         // (only initial / always blocks start in scope order; continuous assignments and
         // port connections keep theirs)
         self.code.job_scope = match job {
-            Job::Proc { scope, .. } => *scope,
+            Job::Proc { scope, .. } | Job::Assert { scope, .. } => *scope,
             _ => usize::MAX - 1,
         };
         {
@@ -789,6 +789,10 @@ impl<'a> Compiler<'a> {
                         }
                     }
                     self.end_proc();
+                }
+                Job::Assert { a, scope } => {
+                    self.file = self.scopes[*scope].file.clone();
+                    self.assertion(a, *scope)?;
                 }
                 Job::Init { lhs, rhs, scope, line } => {
                     self.line = *line;

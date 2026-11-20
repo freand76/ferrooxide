@@ -330,7 +330,7 @@ deterministic, long runs cancellable, a memory budget for history.
   starting `FAILED`) or compared with a checked-in `<name>.expected` (`// expected`; `--bless`
   writes it: review it). Expected behaviour comes from IEEE 1364/1800 (cite the section);
   where the reference agrees, that checks the test itself. Order IEEE leaves open (wakes of
-  one change, races) belongs in `tests/verilog`. Areas: `sched`, `sv`, `expr`, `nets`,
+  one change, races) belongs in `tests/verilog`. Areas: `sched`, `sv`, `assert`, `expr`, `nets`,
   `systasks`, `hier`, `subr`, `real`, `vcd` (reads its own dump back), `prims`, `arrays`,
   `directives`, `events`. Next areas: `$sformatf` corner cases, `` `timescale `` inheritance
   across files, `disable` corner cases; ideas from the regression suite's coverage, tests
@@ -366,6 +366,24 @@ constructs in `elab/gen.rs`.
 Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in elaboration
 (A1 = R4 slices 1-4), heap objects (A2: queues, dynamic and associative arrays), classes
 (first part), programs, package exports, port expressions, process instances (A3 first part).
+
+**Concurrent assertions, first part done 2026-11-20** (`front/lower/assert.rs`,
+`compile/assert.rs`, `rt/assert.rs`): `assert`/`assume`/`cover property` and `cover
+sequence` at module level (`Item::Assert`; `restrict` is ignored), sequences (`##n`,
+`##[m:n]`, `##[m:$]`, `[*]`, `[->]`, `[=]`, `and`, `or`, `intersect`, `throughout`, `within`)
+and properties (`|->`, `|=>`, `not`, `and`, `or`, `if`, `implies`, `iff`), named sequences
+and properties expanded with their arguments (formals resolved to the actual expressions
+in the lowering), the default clocking and `default disable iff`. A sequence becomes an
+automaton without empty transitions over the clock's ticks (`rt::assert::Nfa`, pruned so
+that attempts end when they cannot match), a property a tree of them; each tick starts an
+attempt and steps the running ones (`Instr::Assert`, generic path, no JIT work). Leaves are
+evaluated on sampled values: copies of the signals they read made at the end of each time
+step (`Program::samples`); `$past` is a register chain shifted at every tick. Action blocks
+run in a Reactive region (`Sim::reactive`, after the NBAs), once per pass or failure;
+`disable iff` ends attempts between ticks through a second process. 27 more sv-tests pass;
+ariane now stops at elaboration system tasks. Left: see "Unsupported (known)"; next by
+value: assertions inside procedures, clocking blocks with signals (chapter 14), deferred
+assertions, global clocking.
 
 1. **sv-tests, first part** (chipsalliance/sv-tests; results, error tables and the reasons
    in `SV_TESTS.md`). 3798 of 5110 tests pass at a3fa6b3 with the ferrooxide runner
@@ -746,8 +764,13 @@ SystemVerilog data types and testbench features:
   event control before a statement (not in intra-assignment controls).
 - nets of 2-state types (`wire bit`, `wire int`; a reference extension, 6.7.1 allows only
   4-state types) [implicit_cast4-13, br_gh337].
-- deferred (`assert #0`, `assert final`) and concurrent assertions, properties, sequences
-  [sv_deferred_assert*]; `edge` event controls [edge]; casts to a real type (`real'(x)`)
+- deferred assertions (`assert #0`, `assert final`) [sv_deferred_assert*]; of concurrent
+  assertions (see Next steps): assertions inside procedures (clock inferred from the
+  procedure), local variables of sequences and properties, match items, `first_match`,
+  `nexttime`/`always`/`eventually`/`until`/`accept_on` & co., `#-#`/`#=#`, `case`
+  properties, strong sequences, several clocks, `.triggered`/`.matched` of sequences,
+  `expect`, global clocking and the `_gclk` functions, clocking blocks with clocking
+  signals; `edge` event controls [edge]; casts to a real type (`real'(x)`)
   [cast_real]; a compound assignment or increment whose target index has an
   increment (`x[i++] += 2`) [pr3390385, pr3390385c, pr3462145].
 - unsized constants inside concatenations (`{a - 1}`) are accepted; the standard forbids

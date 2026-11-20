@@ -287,6 +287,82 @@ pub enum Item {
         delay: Option<Expr>,
         line: Line,
     },
+    /// a concurrent assertion
+    Assert(Box<ConcAssert>),
+}
+
+/// A concurrent assertion (IEEE 1800-2017 16.14): `assert property`, `assume property`,
+/// `cover property` or `cover sequence`. Its expressions are evaluated on sampled values
+/// (16.5.1) at the ticks of `clock`.
+#[derive(Debug, Clone)]
+pub struct ConcAssert {
+    pub kind: AssertKind,
+    /// the assertion's label: a scope for its action blocks
+    pub label: Option<String>,
+    /// the clocking event: the property's own, else that of the default clocking
+    pub clock: EventCtl,
+    /// `disable iff (e)` (or `default disable iff`): evaluated on current values
+    pub disable: Option<Expr>,
+    pub prop: Property,
+    pub pass: Stmt,
+    /// the fail action; the default reports an error
+    pub fail: Stmt,
+    pub line: Line,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertKind {
+    Assert,
+    Assume,
+    /// `cover property`: non-vacuous successes run the pass action
+    Cover,
+    /// `cover sequence`: every match runs the pass action
+    CoverSeq,
+}
+
+/// A property (IEEE 1800-2017 16.12).
+#[derive(Debug, Clone)]
+pub enum Property {
+    /// holds when the sequence matches (weak: an attempt still running at the end passes)
+    Seq(Sequence),
+    Not(Box<Property>),
+    And(Box<Property>, Box<Property>),
+    Or(Box<Property>, Box<Property>),
+    /// `ante |-> cons`, `ante |=> cons` (`next`)
+    Implies { ante: Sequence, next: bool, cons: Box<Property> },
+    /// `if (e) p [else q]`
+    If(Expr, Box<Property>, Option<Box<Property>>),
+}
+
+/// A number of clock ticks `[lo:hi]` (`##`, repetitions): `hi` None is `lo` alone; `$` is
+/// `unbounded`. The bounds are constant expressions.
+#[derive(Debug, Clone)]
+pub struct Cycles {
+    pub lo: Expr,
+    pub hi: Option<Expr>,
+    pub unbounded: bool,
+}
+
+/// A sequence (IEEE 1800-2017 16.7-16.9) over the ticks of the assertion's clock.
+#[derive(Debug, Clone)]
+pub enum Sequence {
+    /// a boolean expression for one tick (true: known nonzero)
+    Bool(Expr),
+    /// `a ##n b`; without `a` (`##n b`) the attempt's first tick is `1'b1`
+    Delay(Option<Box<Sequence>>, Cycles, Box<Sequence>),
+    /// `s[*n]`
+    Repeat(Box<Sequence>, Cycles),
+    /// `b[->n]`
+    Goto(Expr, Cycles),
+    /// `b[=n]`
+    NonCons(Expr, Cycles),
+    Or(Box<Sequence>, Box<Sequence>),
+    And(Box<Sequence>, Box<Sequence>),
+    Intersect(Box<Sequence>, Box<Sequence>),
+    /// `b throughout s`
+    Throughout(Expr, Box<Sequence>),
+    /// `s within t`
+    Within(Box<Sequence>, Box<Sequence>),
 }
 
 /// A class declaration. Inside its methods, the class's properties and methods (also

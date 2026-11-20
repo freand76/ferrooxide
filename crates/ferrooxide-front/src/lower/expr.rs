@@ -618,6 +618,14 @@ impl Lower {
                 return self.class_chain(o, &v, lvalue);
             }
         }
+        // a formal argument of a named sequence or property: the actual one, lowered where
+        // the instance is
+        if let Base::Name(n, _) = b {
+            if let Some(a) = self.sva_actual(n) {
+                let base = self.sva_caller(|l| l.expr(&a))?;
+                return if ops.iter().any(|o| matches!(o, Op::Member(..))) { self.members(base, ops) } else { self.selects(base, ops) };
+            }
+        }
         // `local::x` there: the caller's x
         if let Base::Other(t::Expr { kind: t::ExprKind::Scoped(n), loc: sloc }) = b {
             if n.scopes.len() == 1 && n.scopes[0].name == "local" && n.scopes[0].params.is_none() && n.params.is_none() {
