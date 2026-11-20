@@ -66,7 +66,9 @@ impl<'a> Compiler<'a> {
             // the internal copy the module's logic drives
             let info = self.sig(port).clone();
             let full = format!("{}.{dst}$int", self.scopes[sid].name);
-            let int = self.new_signal(full, info.width, info.signed, 0, info.msb, info.lsb, 0, SigKind::Wire);
+            // (a variable for a variable port: the module may assign it procedurally)
+            let kind = if info.kind == SigKind::Wire { SigKind::Wire } else { SigKind::Reg };
+            let int = self.new_signal(full, info.width, info.signed, 0, info.msb, info.lsb, 0, kind);
             self.prog.names.pop();
             let pname = format!("$fxport_{dst}");
             self.scopes[sid].syms.insert(dst.clone(), Sym::Sig(int));
