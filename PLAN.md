@@ -349,6 +349,11 @@ deterministic, long runs cancellable, a memory budget for history.
 
 ## Next steps (in priority order)
 
+**Next: R6** (decided 2026-11-20), before concurrent assertions and the other large
+features: spans on `Expr`/`Stmt` instead of `self.line` (an inlined call moving
+`self.line` gave `randomize()` warnings the wrong line), then splitting `elab_items`, then
+the rest of R4 in slices (step 5 below).
+
 Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in elaboration
 (A1 = R4 slices 1-4), heap objects (A2: queues, dynamic and associative arrays), classes
 (first part), programs, package exports, port expressions, process instances (A3 first part).
