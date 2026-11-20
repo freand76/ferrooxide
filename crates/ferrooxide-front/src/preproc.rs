@@ -282,6 +282,12 @@ impl Preprocessor {
                                 })
                                 .collect()
                         });
+                        if DIRECTIVES.contains(&id.as_str()) {
+                            return Err(err(format!("`{id} is a compiler directive and cannot be a macro name"), line));
+                        }
+                        if open_string(&body) {
+                            return Err(err(format!("the text of macro `{id} has a string literal that does not end"), line));
+                        }
                         self.macros.insert(id, Macro { params, defaults, body: body.trim().to_string() });
                     }
                     // IEEE 1800 22.5.3: every text macro is gone
@@ -405,18 +411,28 @@ impl Preprocessor {
                             i += 1;
                         }
                         let rest: String = s[st..i].iter().collect();
+                        let rest = rest.split("//").next().unwrap_or_default();
+                        // `line number "filename" level (IEEE 1800-2017 22.12)
                         let mut parts = rest.trim().splitn(2, char::is_whitespace);
-                        let n: Option<i64> = parts.next().and_then(|n| n.parse().ok());
-                        let f = parts.next().map(str::trim).and_then(|r| r.strip_prefix('"')).and_then(|r| r.split_once('"')).map(|x| x.0.to_string());
-                        // (a malformed one is ignored)
-                        if let (Some(n), Some(f), true) = (n, f, active(&conds)) {
+                        let n: Option<i64> = parts.next().and_then(|n| n.parse().ok()).filter(|&n| n >= 0);
+                        let fl = parts.next().map(str::trim).and_then(|r| r.strip_prefix('"')).and_then(|r| r.split_once('"'));
+                        let level = fl.map(|x| x.1.trim());
+                        let (Some(n), Some((f, _)), Some("0" | "1" | "2")) = (n, fl, level) else {
+                            return Err(err("`line needs a line number, a quoted file name and a level (0, 1 or 2)".into(), line));
+                        };
+                        if active(&conds) {
                             line_off = n - (line as i64 + 1);
-                            cur_file = f;
+                            cur_file = f.to_string();
                         }
                     }
                     "pragma" => {
+                        let st = i;
                         while i < s.len() && s[i] != '\n' {
                             i += 1;
+                        }
+                        let rest: String = s[st..i].iter().collect();
+                        if rest.split("//").next().unwrap_or_default().trim().is_empty() {
+                            return Err(err("`pragma needs a pragma name".into(), line));
                         }
                     }
                     "__LINE__" => out.push_str(&self.macro_line.unwrap_or((line as i64 + line_off) as u32).to_string()),
@@ -479,6 +495,17 @@ impl Preprocessor {
                                 }
                                 cur.push(ch);
                                 i += 1;
+                            }
+                            // `M()` of a macro without parameters: no arguments
+                            if params.is_empty() && args.len() == 1 && args[0].is_empty() {
+                                args.clear();
+                            }
+                            if args.len() > params.len() {
+                                return Err(err(format!("macro `{name} takes {} arguments, given {}", params.len(), args.len()), line));
+                            }
+                            // (IEEE 1800-2017 22.5.1: a missing argument needs a default)
+                            if let Some(k) = (args.len()..params.len()).find(|&k| m.defaults.get(k).is_none_or(|d| d.is_none())) {
+                                return Err(err(format!("macro `{name}: no argument for '{}', which has no default", params[k]), line));
                             }
                             // missing or empty arguments take their defaults
                             for (k, d) in m.defaults.iter().enumerate() {
@@ -633,4 +660,30 @@ fn parse_timescale(spec: &str) -> Option<(i32, i32)> {
     let u = one(parts.next()?)?;
     let p = one(parts.next()?)?;
     Some((u, p.min(u)))
+}
+
+/// The compiler directives (IEEE 1800-2017 22), which cannot be redefined as macros.
+const DIRECTIVES: &[&str] = &[
+    "begin_keywords", "celldefine", "default_nettype", "define", "else", "elsif", "end_keywords", "endcelldefine", "endif",
+    "ifdef", "ifndef", "include", "line", "nounconnected_drive", "pragma", "resetall", "timescale", "unconnected_drive",
+    "undef", "undefineall", "__FILE__", "__LINE__",
+];
+
+/// Whether macro text `t` has a string literal that does not end in it (outside strings,
+/// the `" of a stringified argument and an escaped `\`" do not count).
+fn open_string(t: &str) -> bool {
+    let b = t.as_bytes();
+    let (mut open, mut k) = (false, 0);
+    while k < b.len() {
+        match b[k] {
+            // (in a string literal a backtick is a plain character)
+            b'`' if !open && b.get(k + 1) == Some(&b'"') => k += 1,
+            b'`' if !open && b.get(k + 1) == Some(&b'\\') && b.get(k + 2) == Some(&b'`') => k += 3,
+            b'\\' if open => k += 1,
+            b'"' => open = !open,
+            _ => {}
+        }
+        k += 1;
+    }
+    open
 }

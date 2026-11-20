@@ -405,7 +405,9 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    arguments; checked where a subroutine is compiled, so not in one that is never called:
    compiling uncalled subroutines once would catch all their errors); constant part-select
    bounds (`is_const_expr`), constant selects in continuous assignment and force targets,
-   no real index or real concatenation operand: 4489 of 5112. Next: several continuous
+   no real index or real concatenation operand; preprocessor checks (`line and `pragma
+   arguments, macro argument counts, unterminated strings in macro text, directive names as
+   macros): 4502 of 5112. Next: `local`/`protected` access, several continuous
    drivers of a variable, procedural
    assignment to a net, `local`/`protected` access, macro argument counts and `` `line ``
    arguments. Interleave with the other steps.
