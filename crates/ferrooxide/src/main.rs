@@ -42,13 +42,9 @@ options:
   -i, --interactive commands on stdin: run, step, print, list, set, force, release (help)
   --mcp             serve the simulator as MCP tools (JSON-RPC on stdio) for AI agents; files
                     on the command line are loaded at start, else with the load_design tool
-  --cdsp [host:]port  serve the simulation over the CXXRTL debug server protocol (waveform
-                    viewers attach live: surfer cxxrtl+tcp://127.0.0.1:port); starts paused
-  --surfer          start the Surfer waveform viewer on a debug server and show the --trace
-                    signals (else the top modules' signals; --trace-all: all, at most 2000);
-                    the simulation runs at once (pausing after
-                    2 s if it has not ended); exits with Surfer (FX_SURFER: the Surfer
-                    executable); with -i the console runs next to the viewer and controls it
+  --cdsp [host:]port  serve the simulation over the CXXRTL debug server protocol (debug
+                    clients such as waveform viewers attach live at cxxrtl+tcp://host:port);
+                    starts paused; with -i the console runs next to the server
   --lint            check the design (incomplete sensitivity lists, SystemVerilog keywords
                     as names) and exit; status 1 on findings
   -pfileline=1      run-time warnings (queue operations) start with the source location
@@ -97,7 +93,6 @@ fn main() -> ExitCode {
     let mut interactive = false;
     let mut mcp_mode = false;
     let mut cdsp_addr: Option<String> = None;
-    let mut surfer = false;
     let mut vcd: Option<String> = None;
     let mut traces: Vec<String> = Vec::new();
     let mut dialect = ferrooxide_compile::Dialect::default();
@@ -157,7 +152,6 @@ fn main() -> ExitCode {
             "--lint" => lint = true,
             "-i" | "--interactive" => interactive = true,
             "--mcp" => mcp_mode = true,
-            "--surfer" => surfer = true,
             "--cdsp" => match val("--cdsp") {
                 Some(v) => cdsp_addr = Some(v),
                 None => return ExitCode::from(2),
@@ -291,7 +285,7 @@ fn main() -> ExitCode {
     }
     // (VCD traces started here: `restart` starts them again)
     let mut started_traces: Vec<(String, Vec<String>)> = Vec::new();
-    if vcd.is_some() || (!traces.is_empty() && !surfer) {
+    if vcd.is_some() || !traces.is_empty() {
         let path = vcd.clone().unwrap_or_else(|| "dump.vcd".into());
         let set = match regex::RegexSet::new(&traces) {
             Ok(s) => s,
@@ -332,13 +326,8 @@ fn main() -> ExitCode {
         jit,
         fuse,
     };
-    if cdsp_addr.is_some() || surfer {
-        let addr = cdsp_addr.clone().unwrap_or_else(|| "0".into());
-        let viewer = surfer.then(|| cdsp::Viewer {
-            bin: std::env::var("FX_SURFER").unwrap_or_else(|_| "surfer".into()),
-            traces: traces.clone(),
-        });
-        let r = cdsp::serve(sim, &addr, viewer.as_ref(), interactive, Some(&reload), &started_traces);
+    if let Some(addr) = &cdsp_addr {
+        let r = cdsp::serve(sim, addr, interactive, Some(&reload), &started_traces);
         console::restore_terminal();
         if let Err(e) = r {
             eprintln!("ferrooxide: {e}");

@@ -54,7 +54,7 @@ impl Console {
     }
 }
 
-/// With a server (`--cdsp`/`--surfer`) the console is read on its own thread: the next prompt
+/// With a server (`--cdsp`) the console is read on its own thread: the next prompt
 /// waits until the previous command's report is printed (`ready`).
 static READY: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
 

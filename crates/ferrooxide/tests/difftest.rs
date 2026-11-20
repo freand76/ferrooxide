@@ -227,84 +227,57 @@ fn cdsp_session() {
     child.wait().unwrap();
 }
 
-/// --surfer: a stand-in viewer (tests/cdsp/fake_surfer.py) connects over WCP and CDSP; the
-/// initial signals are added after a "no waveform" retry, $finish gets a marker, and
-/// ferrooxide exits with the viewer.
+/// `-i --cdsp`: console commands move the simulation and the client gets simulation_paused
+/// (breakpoint stop, run to a time); quit ends the session.
 #[test]
-fn surfer_pairing() {
-    if std::process::Command::new("python3").arg("-V").output().is_err() {
-        eprintln!("python3 not found, skipping");
-        return;
-    }
+fn cdsp_console() {
+    use std::io::{BufRead, Read, Write};
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
     assert!(st.success());
-    let log = std::env::temp_dir().join(format!("fx_fake_surfer_{}.log", std::process::id()));
-    let out = std::process::Command::new(root.join("target/release/ferrooxide"))
-        .args(["-q", "--surfer", "--trace", r"u\.q$", "--trace", "x$", "tests/cdsp/counter.v"])
-        .env("FX_SURFER", "tests/cdsp/fake_surfer.py")
-        .env("FAKE_SURFER_LOG", &log)
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let got = std::fs::read_to_string(&log).unwrap();
-    let _ = std::fs::remove_file(&log);
-    assert_eq!(
-        got,
-        "wcp add_items ['tb.u.q', 'tb.x'] (no waveform yet)\n\
-         wcp add_items ['tb.u.q', 'tb.x']\n\
-         cdsp simulation_finished\n\
-         wcp add_markers [{'move_focus': False, 'name': '$finish', 'time': 1022000000}]\n"
-    );
-}
-
-/// `-i --surfer`: console commands move the simulation; the viewer gets simulation_paused and
-/// the cursor follows (breakpoint stop, run to a time); quit ends the session.
-#[test]
-fn surfer_console() {
-    use std::io::Write;
-    if std::process::Command::new("python3").arg("-V").output().is_err() {
-        eprintln!("python3 not found, skipping");
-        return;
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let st = std::process::Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&root).status().unwrap();
-    assert!(st.success());
-    let log = std::env::temp_dir().join(format!("fx_fake_surfer_console_{}.log", std::process::id()));
-    let _ = std::fs::remove_file(&log);
     let mut child = std::process::Command::new(root.join("target/release/ferrooxide"))
-        .args(["-q", "-i", "--surfer", "tests/cdsp/counter.v"])
-        .env("FX_SURFER", "tests/cdsp/fake_surfer.py")
-        .env("FAKE_SURFER_MODE", "watch")
-        .env("FAKE_SURFER_LOG", &log)
+        .args(["-q", "-i", "--cdsp", "0", "tests/cdsp/counter.v"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let read = || std::fs::read_to_string(&log).unwrap_or_default();
-    let wait = |what: &str| {
-        for _ in 0..100 {
-            if read().contains(what) {
-                return;
+    let mut err = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let addr = line.split_whitespace().find(|w| w.starts_with("127.0.0.1:")).unwrap().to_string();
+    let mut s = std::net::TcpStream::connect(&addr).unwrap();
+    let mut buf = Vec::new();
+    // the next `n` messages from the server
+    let mut next = |s: &mut std::net::TcpStream, n: usize| -> String {
+        let mut got = Vec::new();
+        while got.len() < n {
+            if let Some(i) = buf.iter().position(|&c| c == 0) {
+                got.push(String::from_utf8(buf[..i].to_vec()).unwrap());
+                buf.drain(..=i);
+                continue;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            let mut chunk = [0u8; 4096];
+            let k = s.read(&mut chunk).unwrap();
+            assert!(k > 0, "connection closed");
+            buf.extend_from_slice(&chunk[..k]);
         }
-        panic!("no '{what}' from the viewer: {}", read());
+        got.join("\n")
     };
-    wait("ready");
-    child.stdin.take().unwrap().write_all(b"break x 4'd9\nrun\nprint x d\nrun 100ns\nquit\n").unwrap();
+    s.write_all(b"{\"type\":\"greeting\",\"version\":0}\0").unwrap();
+    assert!(next(&mut s, 1).contains(r#""type":"greeting""#));
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"break x 4'd9\nrun\n").unwrap();
+    let ev = next(&mut s, 1);
+    assert!(ev.contains(r#""event":"simulation_paused""#) && ev.contains(r#""time":"0.000000022000000""#), "{ev}");
+    stdin.write_all(b"print x d\nrun 100ns\n").unwrap();
+    let ev = next(&mut s, 1);
+    assert!(ev.contains(r#""event":"simulation_paused""#) && ev.contains(r#""time":"0.000000100000000""#), "{ev}");
+    stdin.write_all(b"quit\n").unwrap();
+    drop(stdin);
     let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
     assert!(out.contains("break: tb.x = 9 at time 22000") && out.contains("stopped at time 100000"), "{out}");
-    wait("closed");
-    let got = read();
-    let _ = std::fs::remove_file(&log);
-    // (the two connections are read in no fixed order: compare each on its own)
-    let only = |p: &str| got.lines().filter(|l| l.starts_with(p)).collect::<Vec<_>>().join("\n");
-    assert_eq!(only("cdsp"), "cdsp simulation_paused 0.000000022000000\ncdsp simulation_paused 0.000000100000000", "{got}");
-    assert_eq!(only("wcp"), "wcp set_cursor 22000000\nwcp set_cursor 100000000", "{got}");
-    assert!(got.starts_with("ready\n") && got.ends_with("closed\n"), "{got}");
 }
 
 /// Our own suite (tests/suite.sh): self-checking tests and tests with expected outputs, in

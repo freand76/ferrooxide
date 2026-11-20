@@ -65,7 +65,7 @@ Verilog-2005 plus common SystemVerilog:
 - gate, net and continuous-assignment delays (rise/fall/turn-off, inertial), `specify` path
   delays with `-gspecify`
 - VCD output: `$dumpfile`, `$dumpvars`, `$dumpon`, `$dumpoff`; live waveforms over the CXXRTL
-  debug server protocol (`--cdsp`, `--surfer`)
+  debug server protocol (`--cdsp`)
 - preprocessor: `` `define `` (with arguments), `` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``, `` `include ``
 - SystemVerilog testbench features: interfaces and modports, `program`, `string`, queues
   (also bounded), dynamic and associative arrays, unpacked structs, classes (properties,
@@ -107,7 +107,6 @@ ferrooxide [options] <files...>
   -i, --interactive interactive mode, see below
   --mcp             MCP server for AI agents (JSON-RPC on stdio), see below
   --cdsp [host:]port  live waveforms in a viewer (CXXRTL debug server protocol), see below
-  --surfer          start Surfer on the debug server and show the --trace signals, see below
   --lint            check the design and exit (status 1 on findings), see below
   +<arg>            plusarg for $test$plusargs / $value$plusargs
 ```
@@ -173,15 +172,10 @@ ferrooxide --cdsp 6618 tb.v &
 surfer cxxrtl+tcp://127.0.0.1:6618
 ```
 
-`ferrooxide --surfer [--trace REGEX...] <files>` does both: it starts Surfer
-(`FX_SURFER` selects the executable) and, over Surfer's control protocol (WCP), adds the
-signals matching `--trace` (or, without it, the top modules' signals) to the view and puts a
-marker at `$finish`. ferrooxide exits when Surfer is closed.
-
-Add `-i` to get the interactive console next to the viewer: `run`, `step`, breakpoints,
-`force` and `print` work as in the interactive mode, and after each `run` or `step` the viewer
-refreshes and Surfer's cursor moves to where the simulation stopped (e.g. a breakpoint hit).
-`quit` ends the session.
+Add `-i` to get the interactive console next to the server: `run`, `step`, breakpoints,
+`force` and `print` work as in the interactive mode, and after each `run` or `step` the client
+is told where the simulation stopped (e.g. a breakpoint hit) and refreshes. `quit` ends the
+session.
 
 The simulation starts paused after time 0. The value history of every signal is kept in
 memory (`FX_HISTORY_MB`, default 512; changes after that are not recorded). The protocol's

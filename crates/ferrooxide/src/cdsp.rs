@@ -1,67 +1,30 @@
-//! CXXRTL Debug Server Protocol server (`--cdsp [HOST:]PORT`): waveform viewers such as Surfer
-//! (`surfer cxxrtl+tcp://HOST:PORT`) attach to the running simulation, run and pause it and query
-//! the value history of any signal. Spec: https://cxxrtl.org/protocol.html (protocol version 0).
-//!
-//! With `--surfer`, ferrooxide also starts Surfer and drives it over Surfer's Waveform Control
-//! Protocol (WCP, same framing): Surfer connects back (`--wcp-initiate`), and the initial
-//! signals (`--trace` patterns, else the top modules') are added to its view; without a console the
-//! simulation runs at once (pausing after a while if it does not end); `$finish`
-//! gets a marker. Surfer reports no `waveforms_loaded` for a CXXRTL source, so `add_items` is
-//! retried while Surfer answers that no waveform is loaded.
+//! CXXRTL Debug Server Protocol server (`--cdsp [HOST:]PORT`): debug clients (waveform
+//! viewers) attach to the running simulation, run and pause it and query the value history of
+//! any signal. Spec: https://cxxrtl.org/protocol.html (protocol version 0).
 //!
 //! With `-i`, the interactive console runs next to the server (stdin): its run/step commands
-//! (and breakpoints) move the simulation; the viewer then gets `simulation_paused` and, with
-//! `--surfer`, the cursor moves to the new time.
+//! (and breakpoints) move the simulation; the client then gets `simulation_paused`.
 //!
 //! Messages are JSON objects terminated by NUL. One client at a time (a new connection replaces
 //! the old one); the simulation keeps its state across connections. Values are sent as
 //! `base64(u32)`, which is two-state: x is sent as 1, z as 0. Reals are 64-bit items holding the
-//! IEEE double. Arrays are not listed yet (Surfer designates every item as a plain node).
+//! IEEE double. Arrays are not listed yet (every item is a plain node).
 
 use crate::session::Session;
 use ferrooxide_rt::{RunState, Sim};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{mpsc, Arc, Mutex, Once};
+use std::sync::{mpsc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 enum In {
     Connected(u32, TcpStream),
     Msg(u32, String),
     Closed(u32),
-    WcpConnected(TcpStream),
-    WcpMsg(String),
-    WcpClosed,
-    ViewerExited,
     Console(String),
     ConsoleEof,
-}
-
-/// Start a viewer (Surfer) that attaches to the server and is driven over WCP.
-pub struct Viewer {
-    /// the Surfer executable
-    pub bin: String,
-    /// regular expressions selecting the signals shown first (empty: the top modules' signals)
-    pub traces: Vec<String>,
-}
-
-/// The WCP side: the connection to the viewer and what is still to be sent.
-#[derive(Default)]
-struct Wcp {
-    out: Option<TcpStream>,
-    /// the viewer's greeting arrived
-    ready: bool,
-    /// signals (dotted names) to add once a waveform is loaded in the viewer
-    pending: Option<Vec<String>>,
-    /// the view was zoomed to fit the first values
-    zoomed: bool,
-    /// when to try `add_items` again
-    retry_at: Option<Instant>,
-    /// commands sent and not answered yet (WCP answers in order)
-    inflight: VecDeque<&'static str>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -90,12 +53,6 @@ struct Server {
     refs: HashMap<String, Vec<String>>,
     out: Option<(u32, TcpStream)>,
     warned_full: bool,
-    wcp: Wcp,
-    /// running on its own (`--surfer` without a console): pause at this wall time, so a
-    /// simulation without an end still shows its waves
-    auto_pause: Option<Instant>,
-    /// run on its own once the viewer has referenced its signals
-    auto_run: bool,
     /// time steps per `advance_steps` call while running
     chunk: u64,
 }
@@ -160,8 +117,6 @@ impl Server {
         let traces = std::mem::take(&mut self.ses.traces);
         let mut fresh = Server::prepare(sim);
         fresh.out = self.out.take();
-        fresh.wcp = std::mem::take(&mut self.wcp);
-        fresh.wcp.zoomed = false;
         // references to items that still exist
         for (name, ids) in std::mem::take(&mut self.refs) {
             let ids: Vec<String> = ids.into_iter().filter(|i| fresh.items.contains_key(i)).collect();
@@ -176,9 +131,6 @@ impl Server {
         }
         let t = self.time_str(0);
         self.send(json!({"type": "event", "event": "simulation_paused", "time": t, "cause": "until_time"}));
-        if self.wcp.ready {
-            self.wcp_send("set_cursor", json!({"type": "command", "command": "set_cursor", "timestamp": 0}));
-        }
     }
 
     fn new(ses: Session) -> Server {
@@ -200,7 +152,7 @@ impl Server {
             }
             items.insert(id, Item { sig: *sig, width: info.width, lsb: info.lsb.min(info.msb) });
         }
-        Server { ses, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, wcp: Wcp::default(), chunk: 64, auto_pause: None, auto_run: false }
+        Server { ses, status: Status::Paused, fs_per_tick, scopes, items, refs: HashMap::new(), out: None, warned_full: false, chunk: 64 }
     }
 
     fn time_str(&self, ticks: u64) -> String {
@@ -305,21 +257,8 @@ impl Server {
                 }
                 self.refs.insert(name.to_string(), ids);
                 self.send(json!({"type": "response", "command": cmd}));
-                if self.auto_run && self.status == Status::Paused {
-                    self.auto_run = false;
-                    self.status = Status::Running(None);
-                    self.auto_pause = Some(Instant::now() + AUTO_RUN);
-                }
             }
-            "query_interval" => {
-                self.query_interval(m);
-                // the first values after time 0: show the whole run (later the viewer's own
-                // zoom is kept)
-                if self.wcp.ready && !self.wcp.zoomed && self.ses.time() > 0 {
-                    self.wcp.zoomed = true;
-                    self.wcp_send("zoom_to_fit", json!({"type": "command", "command": "zoom_to_fit", "viewport_idx": 0}));
-                }
-            }
+            "query_interval" => self.query_interval(m),
             "get_simulation_status" => {
                 let mut r = json!({"type": "response", "command": cmd, "latest_time": self.time_str(self.ses.sim.now())});
                 r["status"] = json!(match self.status {
@@ -349,7 +288,6 @@ impl Server {
                 self.send(json!({"type": "response", "command": cmd}));
             }
             "pause_simulation" => {
-                self.auto_pause = None;
                 if let Status::Running(_) = self.status {
                     self.status = Status::Paused;
                     self.ses.sim.flush();
@@ -450,12 +388,7 @@ impl Server {
         } else if dt > Duration::from_millis(40) {
             self.chunk = (self.chunk / 2).max(1);
         }
-        let auto = st == RunState::Paused && self.auto_pause.is_some_and(|t| Instant::now() >= t);
-        if auto {
-            self.auto_pause = None;
-            eprintln!("ferrooxide: paused at time {} after running for a while; continue from the viewer", self.ses.sim.now());
-        }
-        if auto || (st == RunState::Paused && until.is_some_and(|u| self.ses.sim.now() >= u)) {
+        if st == RunState::Paused && until.is_some_and(|u| self.ses.sim.now() >= u) {
             self.status = Status::Paused;
             self.ses.sim.flush();
             let t = self.time_str(self.ses.sim.now());
@@ -474,12 +407,11 @@ impl Server {
             self.ses.mark_finished();
             let t = self.time_str(self.ses.sim.now());
             self.send(json!({"type": "event", "event": "simulation_finished", "time": t}));
-            self.mark_finish(if st == RunState::Finished { "$finish" } else { "end" });
         }
     }
 
     /// A console command (`-i`); false for quit. A command that moved the simulation is
-    /// reported to the viewer, and the viewer's cursor follows it.
+    /// reported to the client.
     fn console(&mut self, line: &str) -> bool {
         let was_running = matches!(self.status, Status::Running(_));
         if was_running {
@@ -495,102 +427,13 @@ impl Server {
             self.status = Status::Finished;
             let t = self.time_str(self.ses.sim.now());
             self.send(json!({"type": "event", "event": "simulation_finished", "time": t}));
-            self.mark_finish("$finish");
         } else if was_running || self.ses.time() != t0 {
             let t = self.time_str(self.ses.sim.now());
             self.send(json!({"type": "event", "event": "simulation_paused", "time": t, "cause": "until_time"}));
-            if self.wcp.ready && self.ses.time() != t0 {
-                let fs = self.ses.time() as u128 * self.fs_per_tick;
-                self.wcp_send("set_cursor", json!({"type": "command", "command": "set_cursor", "timestamp": fs as u64}));
-            }
         }
         crate::repl::prompt();
         true
     }
-
-    // ------------------------------------------------------------ WCP (viewer control)
-
-    fn wcp_send(&mut self, kind: &'static str, v: Value) {
-        if let Some(s) = &mut self.wcp.out {
-            let mut b = serde_json::to_vec(&v).unwrap();
-            b.push(0);
-            if s.write_all(&b).is_err() {
-                self.wcp.out = None;
-                return;
-            }
-            if !kind.is_empty() {
-                self.wcp.inflight.push_back(kind);
-            }
-        }
-    }
-
-    /// Send `add_items` when the viewer is ready and the retry time has come.
-    fn wcp_poll(&mut self) {
-        let due = self.wcp.retry_at.is_none_or(|t| Instant::now() >= t);
-        if !self.wcp.ready || !due || self.wcp.inflight.contains(&"add_items") {
-            return;
-        }
-        if let Some(items) = self.wcp.pending.clone() {
-            self.wcp.retry_at = None;
-            self.wcp_send("add_items", json!({"type": "command", "command": "add_items", "items": items, "recursive": false}));
-        }
-    }
-
-    fn wcp_handle(&mut self, text: &str) {
-        let Ok(m) = serde_json::from_str::<Value>(text) else { return };
-        match m["type"].as_str() {
-            Some("greeting") => {
-                self.wcp.ready = true;
-                self.wcp_poll();
-            }
-            Some("response") => {
-                if self.wcp.inflight.pop_front() == Some("add_items") {
-                    self.wcp.pending = None;
-                }
-            }
-            Some("error") => {
-                if self.wcp.inflight.pop_front() == Some("add_items") {
-                    // most likely the CXXRTL source is not connected yet
-                    self.wcp.retry_at = Some(Instant::now() + Duration::from_millis(250));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// A marker at the time of $finish (or the end of the events) in the viewer.
-    fn mark_finish(&mut self, name: &str) {
-        if self.wcp.ready {
-            let fs = self.ses.sim.now() as u128 * self.fs_per_tick;
-            self.wcp_send("add_markers", json!({"type": "command", "command": "add_markers",
-                "markers": [{"time": fs as u64, "name": name, "move_focus": false}]}));
-        }
-    }
-}
-
-/// The signals shown first: those matching `traces`, else those of the top modules (not
-/// arrays; at most `MAX_SHOWN`).
-const MAX_SHOWN: usize = 2000;
-fn initial_items(sim: &Sim, traces: &[String]) -> Result<Vec<String>, String> {
-    let set = regex::RegexSet::new(traces).map_err(|e| format!("bad --trace pattern: {e}"))?;
-    let mut v: Vec<String> = sim
-        .signal_names()
-        .iter()
-        .filter(|(n, s)| {
-            let info = sim.signal_info(*s);
-            info.depth == 0
-                && !n.contains(' ')
-                && if traces.is_empty() { n.matches('.').count() == 1 } else { set.is_match(n) }
-        })
-        .map(|(n, _)| n.clone())
-        .collect();
-    v.sort();
-    v.dedup();
-    if v.len() > MAX_SHOWN {
-        eprintln!("ferrooxide: {} signals; the viewer shows the first {MAX_SHOWN} (select with --trace)", v.len());
-        v.truncate(MAX_SHOWN);
-    }
-    Ok(v)
 }
 
 fn reader(mut s: TcpStream, tx: mpsc::Sender<In>, msg: impl Fn(String) -> In, closed: In) {
@@ -613,28 +456,15 @@ fn reader(mut s: TcpStream, tx: mpsc::Sender<In>, msg: impl Fn(String) -> In, cl
     let _ = tx.send(closed);
 }
 
-const AUTO_RUN: Duration = Duration::from_secs(2);
-
 /// Console lines go to the current server (one stdin reader for all restarts).
 static CONSOLE: Mutex<Option<mpsc::Sender<In>>> = Mutex::new(None);
 static CONSOLE_READER: Once = Once::new();
 
-/// Close the connections, give the viewer a moment to exit on its own, then stop it.
-fn close_viewer(srv: &mut Server, child: Option<&Arc<Mutex<std::process::Child>>>) {
+/// Close the client's connection.
+fn close_client(srv: &mut Server) {
     if let Some((_, s)) = srv.out.take() {
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
-    if let Some(s) = srv.wcp.out.take() {
-        let _ = s.shutdown(std::net::Shutdown::Both);
-    }
-    let Some(c) = child else { return };
-    for _ in 0..10 {
-        if !matches!(c.lock().unwrap().try_wait(), Ok(None)) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = c.lock().unwrap().kill();
 }
 
 fn console_input(tx: mpsc::Sender<In>) {
@@ -660,13 +490,12 @@ fn console_input(tx: mpsc::Sender<In>) {
     });
 }
 
-/// Serve `sim` (not started yet) on `addr` until the process is stopped, the viewer started
-/// with `viewer` exits, or (with `console`: commands on stdin) the console quits. `restart` in
-/// the console loads the design again with `reload`.
+/// Serve `sim` (not started yet) on `addr` until the process is stopped or (with `console`:
+/// commands on stdin) the console quits. `restart` in the console loads the design again with
+/// `reload`.
 pub fn serve(
     sim: Sim,
     addr: &str,
-    viewer: Option<&Viewer>,
     console: bool,
     reload: Option<&crate::session::LoadOptions>,
     traces: &[(String, Vec<String>)],
@@ -675,56 +504,10 @@ pub fn serve(
     let listener = TcpListener::bind(&addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
     // (port 0: the system picks one; report the real address)
     let addr = listener.local_addr().map_or(addr, |a| a.to_string());
-    let pending = match viewer {
-        Some(v) => Some(initial_items(&sim, &v.traces)?),
-        None => None,
-    };
     let mut srv = Server::prepare(sim);
-    srv.wcp.pending = pending;
     srv.ses.traces = traces.to_vec();
-    // with a viewer and no console: run at once (the viewer shows the waves at the end, or
-    // after AUTO_RUN when the simulation goes on)
-    // (it starts when the viewer has referenced its signals: Surfer fetches values only
-    // after a status event, so the run must end after it is listening)
-    srv.auto_run = viewer.is_some() && !console && srv.status == Status::Paused;
     let (tx, rx) = mpsc::channel();
-    let mut viewer_child: Option<Arc<Mutex<std::process::Child>>> = None;
-    if let Some(v) = viewer {
-        let wl = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot listen for the viewer: {e}"))?;
-        let port = wl.local_addr().map_err(|e| e.to_string())?.port();
-        let child = std::process::Command::new(&v.bin)
-            .arg(format!("cxxrtl+tcp://{addr}"))
-            .args(["--wcp-initiate", &port.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("cannot start '{}' ({e}); FX_SURFER selects the Surfer executable", v.bin))?;
-        eprintln!("ferrooxide: debug server on {addr}, started {}", v.bin);
-        let child = Arc::new(Mutex::new(child));
-        viewer_child = Some(child.clone());
-        let t = tx.clone();
-        std::thread::spawn(move || loop {
-            // (polled: the lock must stay free for a kill at restart)
-            if !matches!(child.lock().unwrap().try_wait(), Ok(None)) {
-                let _ = t.send(In::ViewerExited);
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        });
-        let t = tx.clone();
-        std::thread::spawn(move || {
-            // one viewer connection
-            if let Some(Ok(s)) = wl.incoming().next() {
-                let _ = s.set_nodelay(true);
-                let Ok(r) = s.try_clone() else { return };
-                if t.send(In::WcpConnected(s)).is_ok() {
-                    reader(r, t, In::WcpMsg, In::WcpClosed);
-                }
-            }
-        });
-    } else {
-        eprintln!("ferrooxide: debug server on {addr}; connect with: surfer cxxrtl+tcp://{addr}");
-    }
+    eprintln!("ferrooxide: debug server on {addr} (CXXRTL debug protocol, cxxrtl+tcp://{addr})");
     if console {
         console_input(tx.clone());
         crate::repl::prompt();
@@ -742,20 +525,11 @@ pub fn serve(
         }
     });
     loop {
-        if srv.wcp.retry_at.is_some() {
-            srv.wcp_poll();
-        }
         let msg = if let Status::Running(_) = srv.status {
             match rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
-            }
-        } else if let Some(t) = srv.wcp.retry_at {
-            match rx.recv_timeout(t.saturating_duration_since(Instant::now())) {
-                Ok(m) => Some(m),
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => return Ok(()),
             }
         } else {
             match rx.recv() {
@@ -772,13 +546,7 @@ pub fn serve(
             }
             Some(In::Msg(id, text)) if srv.out.as_ref().is_some_and(|o| o.0 == id) => srv.handle(&text),
             Some(In::Closed(id)) if srv.out.as_ref().is_some_and(|o| o.0 == id) => srv.out = None,
-            Some(In::WcpConnected(s)) => {
-                srv.wcp.out = Some(s);
-                srv.wcp_send("", json!({"type": "greeting", "version": "0", "commands": []}));
-            }
-            Some(In::WcpMsg(text)) => srv.wcp_handle(&text),
-            Some(In::WcpClosed) => srv.wcp = Wcp::default(),
-            Some(In::ViewerExited) | Some(In::ConsoleEof) => {
+            Some(In::ConsoleEof) => {
                 if srv.status != Status::Finished {
                     srv.ses.finish();
                 }
@@ -801,8 +569,7 @@ pub fn serve(
                     if srv.status != Status::Finished {
                         srv.ses.finish();
                     }
-                    // quit: the viewer goes too
-                    close_viewer(&mut srv, viewer_child.as_ref());
+                    close_client(&mut srv);
                     return Ok(());
                 }
             }

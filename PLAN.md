@@ -83,7 +83,7 @@ started (IEEE 1800 9.2.2.2.2).
 Regression suite (normal tests): main list 1405 of 1526 (92 %), SystemVerilog list
 (`--list regress-sv.list`) 650 of 701 (93 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
 to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
-`--vcd`/`--trace`, the CDSP debug server with value history and the Surfer pairing work.
+`--vcd`/`--trace`, the CDSP debug server with value history work.
 Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
 
 | # | Content | Status |
@@ -99,7 +99,7 @@ Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
 | M6 | SystemVerilog | RTL subset ✅; testbench (classes, queues, ...) partial, see below |
 | M7 | FST, VPI-lite, better diagnostics | |
 | M8 | Multi-threading: same-edge / same-rank partitions writing disjoint signals, deterministic | (A5) |
-| M9 | CXXRTL Debug Server Protocol (`--cdsp`, `--surfer`) | ✅ first version |
+| M9 | CXXRTL Debug Server Protocol (`--cdsp`) | ✅ first version |
 | M10 | MCP server over stdio (`--mcp`) | ✅ first version |
 | M11 | Interactive mode (`-i`): run/step/print/list/set/force/release, `restart`, `trace` | ✅ first version |
 
@@ -289,26 +289,14 @@ latest + 100 ns` (hard-coded); `pause_simulation` expects `{time}`; no polling w
 Responses carry no ids and are paired FIFO (an error pops one too): answer strictly in order.
 Values are decoded as unsigned integers: x/z are lost.
 
-**WCP** (Surfer's Waveform Control Protocol, `surfer-wcp`, unfinished, NUL-terminated JSON):
-`add_items`, `set_cursor`, `set_viewport_to/range`, `add_markers`, `load`, `reload`, `clear`,
-`zoom_to_fit`, `set_item_color`, `get_item_list/info`, `remove_items`, `focus_item`; events
-`waveforms_loaded` and, if listed in the tool's greeting, `goto_declaration`, `add_drivers`,
-`add_loads`. `surfer --wcp-initiate PORT` connects to a listening tool (127.0.0.1). `load`
-accepts only files and URLs, and `waveforms_loaded` is only sent for file sources.
-
-**Pairing (`--surfer`).** ferrooxide opens a CDSP and a WCP listener and starts
-`surfer cxxrtl+tcp://127.0.0.1:<cdsp> --wcp-initiate <wcp>`; after the WCP greeting it sends
-`add_items` (dotted names), retried every 250 ms while Surfer answers "No waveform loaded";
-`$finish` gets a marker (WCP times are fs for a CXXRTL source); ferrooxide exits with Surfer.
-Without `-i` it runs at once and pauses after 2 s of wall time if not ended (Surfer queries
-only at status changes); without `--trace` the top modules' signals are shown (`--trace-all`:
-all, at most 2000); the first values after time 0 get one `zoom_to_fit`. Console (`-i`):
-cursor follows run/step/breakpoints, `restart` reloads the design (sources and data files as
-they are now) and starts at time 0 on the same connections (viewer gets `simulation_paused` at
-0; a running VCD trace is written anew), `quit` closes the viewer; line editing and history
-(`~/.ferrooxide_history`, rustyline). Checked with Surfer 0.7.0 (2026-11-14, logging proxy on
-both connections): greeting, scopes, items, `reference_items`, `query_interval` and
-`add_items` work.
+**Console next to the server (`-i --cdsp`).** run/step/breakpoints move the simulation and
+the client gets `simulation_paused`; `restart` reloads the design (sources and data files as
+they are now) and starts at time 0 on the same connection (the client gets
+`simulation_paused` at 0; a running VCD trace is written anew); `quit` closes the connection;
+line editing and history (`~/.ferrooxide_history`, rustyline). Checked with Surfer 0.7.0
+(2026-11-14, logging proxy): greeting, scopes, items, `reference_items` and `query_interval`
+work. (A `--surfer` mode that started Surfer and drove it over its control protocol, WCP, was
+removed on 2026-11-20: only the generic protocol is kept.)
 
 Surfer 0.7.0 (11bb2e3) shows no live waves because of two bugs in its CXXRTL path (fixed
 locally in `/projects/surfer`, to report upstream): (1) `WaveData::cached_time_range` is
@@ -443,10 +431,8 @@ Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in ela
    arrays (per-element items for small memories; memories with `depth`/`zero_at`), port
    directions (`input`/`output` are false; needs direction in `SignalInfo`), `src` from
    declaration locations, diagnostics (`$display`/`$write` → `print`, `$finish`/`$stop` →
-   `break`, assertions → `assert`; kept in the history, `until_diagnostics`); WCP pushes:
-   `--trace REGEX` signals via `add_items`, `set_cursor` at breakpoints and `$stop`,
-   `$display`/assertions as markers, `goto_declaration` from declaration locations,
-   `add_drivers`/`add_loads` from the elaborated netlist. Interactive mode: watch, conditional
+   `break`, assertions → `assert`; kept in the history, `until_diagnostics`). Interactive
+   mode: watch, conditional
    breakpoints, waveform history, scopes.
 8. **Performance** (in parallel, when speed matters again):
    - `notify` (largest item): per change it follows `parent` (array elements), checks the
