@@ -2,6 +2,9 @@
 
 A fast, 4-state, event-driven Verilog simulator written in Rust, with a Cranelift JIT.
 
+The name is made up: a play on *ferric oxide*, better known as rust, the language it is
+written in.
+
 One command, no separate compile step: `ferrooxide tb.v dut.v` parses, elaborates, compiles the
 design to native code in milliseconds and simulates it. The reference for behaviour is the
 standard (IEEE 1364-2005 and 1800-2017); the chipsalliance
