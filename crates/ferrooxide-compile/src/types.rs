@@ -132,6 +132,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn type_of_here(&mut self, e: &Expr, sid: usize) -> R<Type> {
+        if let Some((n, s)) = self.class_member(e, sid)? {
+            return self.type_of(&n, s);
+        }
         if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..)) {
             if let Some(t) = self.obj_type_of(e, sid)? {
                 return Ok(t);
@@ -151,6 +154,7 @@ impl<'a> Compiler<'a> {
         let v = Type::vec;
         Ok(match &e.kind {
             ExprKind::Type(_) => return self.err("a data type is not a value"),
+            ExprKind::ClassMember { class, name } => return self.err(format!("'{class}::{name}' is not a value here")),
             ExprKind::Randomize { .. } => Type::vec(32, true),
             ExprKind::Stream { items, .. } => {
                 let mut w = 0;

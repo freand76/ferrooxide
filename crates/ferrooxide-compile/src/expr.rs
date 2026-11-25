@@ -383,10 +383,13 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn is_const(&self, e: &Expr, sid: usize) -> bool {
+        if let Ok(Some((n, s))) = self.class_member(e, sid) {
+            return self.is_const(&n, s);
+        }
         match &e.kind {
             ExprKind::Type(_) | ExprKind::Pattern(..) | ExprKind::NewArray(..) | ExprKind::Last | ExprKind::IncDec { .. } => false,
             ExprKind::Null | ExprKind::New(_) | ExprKind::NewTyped(..) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::EmptyArg | ExprKind::NamedArg(..) => false,
-            ExprKind::ArrayWith { .. } | ExprKind::Randomize { .. } => false,
+            ExprKind::ArrayWith { .. } | ExprKind::Randomize { .. } | ExprKind::ClassMember { .. } => false,
             // a member of a struct parameter
             ExprKind::Member(..) => self.md_norm(e, sid).is_some_and(|n| self.is_const(&n, sid)),
             ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Real(_) => true,
@@ -550,6 +553,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn expr_here(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
+        if let Some((n, sc)) = self.class_member(e, sid)? {
+            return self.expr(&n, sc, w, s);
+        }
         // a property of an object, a method's result, null
         if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_)) {
             if let Some((v, t)) = self.obj_value(e, sid)? {
@@ -631,6 +637,7 @@ impl<'a> Compiler<'a> {
         }
         match &e.kind {
             ExprKind::Type(_) => self.err("a data type is not a value"),
+            ExprKind::ClassMember { class, name } => self.err(format!("'{class}::{name}' is not a value here")),
             ExprKind::Randomize { .. } => {
                 let r = self.randomize(e, sid)?;
                 Ok(self.resize(r, 32, w, true))
@@ -2094,8 +2101,11 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.reads_expr(&n, sid, out);
         }
+        if let Ok(Some((n, s))) = self.class_member(e, sid) {
+            return self.reads_expr(&n, s, out);
+        }
         match &e.kind {
-            ExprKind::Type(_) | ExprKind::Last | ExprKind::Null | ExprKind::EmptyArg => {}
+            ExprKind::Type(_) | ExprKind::Last | ExprKind::Null | ExprKind::EmptyArg | ExprKind::ClassMember { .. } => {}
             ExprKind::IncDec { e, .. } | ExprKind::NamedArg(_, e) => self.reads_expr(e, sid, out),
             ExprKind::New(v) | ExprKind::NewTyped(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             ExprKind::NewCopy(x) => self.reads_expr(x, sid, out),

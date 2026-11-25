@@ -1,0 +1,20 @@
+package $unit ();
+  class B;
+    // static
+    function automatic integer signed f;
+      return 1;
+    endfunction
+  endclass
+  int(32) signed B$k;
+  class U;
+    // parameter port
+    parameter type T = class;
+    // static
+    function automatic integer signed g;
+      begin
+        T::f();
+        return (T::k + T::f());
+      end
+    endfunction
+  endclass
+endpackage

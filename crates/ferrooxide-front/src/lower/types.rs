@@ -580,8 +580,16 @@ impl Lower {
                     if !self.pkg_ctx.as_ref().is_some_and(|c| c.name == s.name) {
                         let Some(p) = self.packages.get(&s.name).cloned() else { return Ok(None) };
                         let Some(t) = p.types.get(&n.name) else { return Ok(None) };
-                        self.types.insert(n.name.clone(), t.clone());
                         self.use_package(&s.name);
+                        // a class of the package: named `P::C` for the compiler (visible
+                        // where `P` is, e.g. as a type parameter's value in another package)
+                        if let Some(c) = t.class.as_deref().filter(|c| !c.contains("::")) {
+                            let mut q = (**t).clone();
+                            q.class = Some(format!("{}::{c}", s.name));
+                            q.signed = ty.signed.unwrap_or(q.signed);
+                            return Ok(Some(q));
+                        }
+                        self.types.insert(n.name.clone(), t.clone());
                     }
                 }
                 self.note_ref(&n.name);

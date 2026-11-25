@@ -161,6 +161,7 @@ pub fn expr(e: &Expr) -> String {
             let s = slice.as_ref().map(|s| expr(s)).unwrap_or_default();
             format!("{{{}{s}{{{}}}}}", if *left { "<<" } else { ">>" }, list(items))
         }
+        ExprKind::ClassMember { class, name } => format!("{class}::{name}"),
         ExprKind::Null => "null".into(),
         ExprKind::EmptyArg => String::new(),
         ExprKind::NamedArg(n, e) => format!(".{n}({})", expr(e)),

@@ -127,6 +127,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn str_expr_here(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        if let Some((n, s)) = self.class_member(e, sid)? {
+            return self.str_expr(&n, s);
+        }
         if let Some(h) = self.str_member(e, sid)? {
             return Ok(h);
         }

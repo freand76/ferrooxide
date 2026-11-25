@@ -408,6 +408,8 @@ impl Lower {
                     Some(v) => self.selects(ExprKind::Ident(v).into(), &ops),
                     // `P::v = ...`: a variable of a package
                     None if self.packages.contains_key(&n.scopes[0].name) => self.chain(b, &ops, true),
+                    // `P::v = ...` inside package P
+                    None if self.pkg_ctx.as_ref().is_some_and(|c| c.name == n.scopes[0].name) => self.chain(Base::Name(&n.name, *loc), &ops, true),
                     // of a class declared later (`typedef class C;`)
                     None if self.types.get(&n.scopes[0].name).is_some_and(|t| t.class.is_some()) => self.chain(b, &ops, true),
                     None => self.unsupported(*loc, "this assignment target"),
@@ -705,6 +707,23 @@ impl Lower {
                     return self.unsupported(e.loc, "this scoped name");
                 }
                 let mut p = n.scopes[0].name.clone();
+                // `P::x` inside package P: its own name x
+                if self.pkg_ctx.as_ref().is_some_and(|c| c.name == p) && !self.classes.contains_key(&p) {
+                    return self.chain(Base::Name(&n.name, e.loc), ops, lvalue);
+                }
+                // through a type parameter (a class per specialization): resolved by the
+                // compiler
+                if !self.classes.contains_key(&p) && !self.packages.contains_key(&p) && self.types.get(&p).is_some_and(|t| t.param.is_some()) {
+                    if let Some((Op::Call(a, _), rest)) = ops.split_first() {
+                        if !rest.is_empty() {
+                            return self.unsupported(e.loc, "a select of a call");
+                        }
+                        let args = self.call_args(a)?;
+                        return Ok(ExprKind::StaticCall(p, n.name.clone(), args).into());
+                    }
+                    let m: Expr = ExprKind::ClassMember { class: p, name: n.name.clone() }.into();
+                    return if ops.iter().any(|o| matches!(o, Op::Member(..))) { self.class_chain(m, ops, lvalue) } else { self.selects(m, ops) };
+                }
                 // a class declared later (`typedef class C;`, its body in the same scope, IEEE
                 // 1800-2017 8.27): `C::f(args)` a static method, `C::x` a static property
                 if !self.classes.contains_key(&p) && !self.packages.contains_key(&p) {
@@ -859,10 +878,15 @@ impl Lower {
         }
         if let Some((Op::Call(a, l), rest)) = ops.split_first() {
             let args = self.call_args(a)?;
+            let call: Expr = ExprKind::Call(name, args).into();
+            // `f().m()`, `f().p`: through the handle the function returns
+            if matches!(rest.first(), Some(Op::Member(..))) {
+                return self.class_chain(call, rest, lvalue);
+            }
             if !rest.is_empty() {
                 return self.unsupported(*l, "a select of a call");
             }
-            return Ok(ExprKind::Call(name, args).into());
+            return Ok(call);
         }
         let (parts, k) = self.hier_tail(&name, ops)?;
         if parts.len() > 1 {

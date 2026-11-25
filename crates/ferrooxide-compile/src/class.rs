@@ -366,6 +366,12 @@ impl<'a> Compiler<'a> {
 
     /// The class named `name` visible from scope `sid`.
     pub(crate) fn find_class(&self, name: &str, mut sid: usize) -> Option<u32> {
+        // a type parameter (or typedef) naming a class
+        if let Some(Sym::Type(t)) = self.lookup(name, sid) {
+            if let Some(cn) = t.class.as_deref().filter(|cn| *cn != name) {
+                return self.find_class(cn, sid);
+            }
+        }
         // `P::C`: class C of package P
         if let Some((p, n)) = name.split_once("::") {
             return self.classes.by_name.get(&(*self.hier.pkg_scopes.get(p)?, n.to_string())).copied();
@@ -458,6 +464,37 @@ impl<'a> Compiler<'a> {
         match self.scopes[s].syms.get(name) {
             Some(x @ (Sym::Const(_) | Sym::Real(_))) => Some(x.clone()),
             _ => None,
+        }
+    }
+
+    /// `T::x` through type parameter `T` (`ExprKind::ClassMember`): the name to evaluate
+    /// instead and the scope to evaluate it in, a constant of the class (in the class's
+    /// scope) or a static property (its variable `C$x`, beside the class); also of a base
+    /// class. None for any other expression.
+    pub(crate) fn class_member(&self, e: &Expr, sid: usize) -> R<Option<(Expr, usize)>> {
+        let ExprKind::ClassMember { class, name } = &e.kind else { return Ok(None) };
+        let cn = match self.lookup(class, sid) {
+            Some(Sym::Type(t)) => t.class.clone(),
+            _ => None,
+        };
+        let Some(mut c) = cn.and_then(|n| self.find_class(&n, sid)) else {
+            return self.err(format!("'{class}::{name}': '{class}' is not a class here"));
+        };
+        loop {
+            let ci = &self.classes.list[c as usize];
+            if self.class_const(c, name).is_some() {
+                return Ok(Some((ExprKind::Ident(name.clone()).into(), ci.scope)));
+            }
+            let var = format!("{}${name}", ci.decl.name);
+            if let Some(parent) = self.scopes[ci.scope].parent {
+                if self.scopes[parent].syms.contains_key(&var) {
+                    return Ok(Some((ExprKind::Ident(var).into(), parent)));
+                }
+            }
+            match ci.base {
+                Some(b) => c = b,
+                None => return self.err(format!("class '{}' has no static property or constant '{name}'", self.classes.list[c as usize].name)),
+            }
         }
     }
 

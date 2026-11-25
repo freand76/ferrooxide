@@ -603,7 +603,7 @@ impl Expr {
     pub fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
         use ExprKind as K;
         match &mut self.kind {
-            K::Num(_) | K::Real(_) | K::Str(_) | K::Ident(_) | K::Hier(_) | K::Type(_) | K::Null | K::EmptyArg | K::Last => {}
+            K::Num(_) | K::Real(_) | K::Str(_) | K::Ident(_) | K::Hier(_) | K::Type(_) | K::Null | K::EmptyArg | K::Last | K::ClassMember { .. } => {}
             K::Index(a, b) | K::Binary(_, a, b) => {
                 f(a);
                 f(b);
@@ -775,6 +775,9 @@ pub enum ExprKind {
     Last,
     /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value
     IncDec { prefix: bool, inc: bool, e: Box<Expr> },
+    /// `T::x` through a type parameter `T` (a class, known per specialization): a static
+    /// property or a constant of the class (`T::f()` is a `StaticCall` of `T`)
+    ClassMember { class: String, name: String },
     /// a streaming concatenation (IEEE 1800-2017 11.4.14): `{>> {items}}` (the items as a
     /// stream), `{<< slice {items}}` (blocks of `slice` bits, a constant or a type, from the
     /// right end in reverse order; default 1)
