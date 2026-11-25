@@ -581,12 +581,21 @@ impl<'a> Compiler<'a> {
                 })),
                 None => Ok(None),
             },
+            // (a character of a string property: a byte)
+            ExprKind::Index(a, _) if matches!(a.kind, ExprKind::Member(..)) && matches!(self.type_of(a, sid), Ok(Type::Str)) => Ok(Some(Type::vec(8, false))),
             ExprKind::Index(..) => Ok(self.prop_elem(e, sid)?.map(|(_, p, _)| p.ty)),
             ExprKind::MethodCall(o, m, _) => {
                 let Some(c) = self.handle_class(o, sid)? else {
                     // (a method of an array property: `heap.rs`)
-                    if let Type::Dyn { .. } = self.type_of(o, sid)? {
-                        return Ok(None);
+                    match self.type_of(o, sid)? {
+                        Type::Dyn { .. } => return Ok(None),
+                        // a string method with an integral result (`c.name.len()`)
+                        Type::Str => {
+                            if let Some((w, s)) = Self::str_method_width(m) {
+                                return Ok(Some(Type::vec(w, s)));
+                            }
+                        }
+                        _ => {}
                     }
                     return self.err(format!("'.{m}()' of a value that is not an object"));
                 };
@@ -784,7 +793,15 @@ impl<'a> Compiler<'a> {
             self.ctor_prologue(c, h, Some(args), sid)?;
             return Ok((None, 0, false));
         }
-        let Some(c) = self.handle_class(obj, sid)? else { return self.err(format!("'.{m}()' of a value that is not an object")) };
+        let Some(c) = self.handle_class(obj, sid)? else {
+            if let Some((w, s)) = Self::str_method_width(m) {
+                if self.type_of(obj, sid)?.is_str() {
+                    let d = self.str_method_call(obj, m, args, sid)?;
+                    return Ok((Some(d), w, s));
+                }
+            }
+            return self.err(format!("'.{m}()' of a value that is not an object"));
+        };
         let Some((f, owner)) = self.find_method(c, m) else {
             return self.err(format!("class '{}' has no method '{m}'", self.classes.list[c as usize].name));
         };

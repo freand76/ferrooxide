@@ -11,8 +11,8 @@ use crate::*;
 enum Dim {
     /// a fixed-size dimension: from `left` to `right`
     Fixed { left: i64, right: i64 },
-    /// a queue or dynamic array
-    Sized,
+    /// a queue or dynamic array (`size`), a string (`len`)
+    Sized(&'static str),
     /// an associative array with this key
     Assoc(rt::KeyKind),
 }
@@ -75,7 +75,7 @@ impl<'a> Compiler<'a> {
         let dim = self.foreach_dim(probe, sid)?;
         let first = match dim {
             Dim::Fixed { left, .. } => num(left),
-            Dim::Sized => num(0),
+            Dim::Sized(_) => num(0),
             Dim::Assoc(_) => num(0),
         };
         let Some(v) = v else {
@@ -103,8 +103,12 @@ impl<'a> Compiler<'a> {
                 };
                 (vec![int_decl(v)], lp)
             }
-            Dim::Sized => {
-                let size: Expr = ExprKind::MethodCall(Box::new(sub.clone()), "size".into(), vec![]).into();
+            Dim::Sized(m) => {
+                // (string methods of a name are calls of `name.len`)
+                let size: Expr = match &sub.kind {
+                    ExprKind::Ident(n) if m == "len" => ExprKind::Call(format!("{n}.len"), vec![]).into(),
+                    _ => ExprKind::MethodCall(Box::new(sub.clone()), m.into(), vec![]).into(),
+                };
                 let lp = Stmt::For {
                     init: Box::new(assign(v, num(0), line)),
                     cond: ExprKind::Binary(BinOp::Lt, var(), Box::new(size)).into(),
@@ -163,7 +167,8 @@ impl<'a> Compiler<'a> {
             }
         }
         match self.type_of(e, sid)? {
-            Type::Dyn { kind: DynKind::Queue(_) | DynKind::Darray, .. } => Ok(Dim::Sized),
+            Type::Dyn { kind: DynKind::Queue(_) | DynKind::Darray, .. } => Ok(Dim::Sized("size")),
+            Type::Str => Ok(Dim::Sized("len")),
             Type::Dyn { kind: DynKind::Assoc(k), .. } => Ok(Dim::Assoc(k)),
             _ => self.err("foreach over this expression (no unpacked array) is not supported"),
         }

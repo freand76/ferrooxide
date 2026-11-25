@@ -611,6 +611,7 @@ impl Lower {
             None => match &ty.kind {
                 t::TypeKind::Named(n) => self.err(ty.loc, format!("unknown type '{}'", n.name)),
                 t::TypeKind::String if ty.packed.is_empty() => Ok(SvType { int_kind: true, ..SvType::vector(NetKind::String, false, vec![(num(63), num(0))]) }),
+                t::TypeKind::Chandle if ty.packed.is_empty() => Ok(SvType { int_kind: true, ..SvType::vector(NetKind::Int(64), false, vec![(num(63), num(0))]) }),
                 _ => self.unsupported(ty.loc, "this data type"),
             },
         }
@@ -876,13 +877,16 @@ impl Lower {
                     t::TypeKind::Real(_) => Some(NetKind::Real),
                     t::TypeKind::Event => Some(NetKind::Event),
                     t::TypeKind::String => Some(NetKind::String),
+                    // (IEEE 1800-2017 6.14: an opaque pointer, here a 64-bit 2-state value,
+                    // `null` 0)
+                    t::TypeKind::Chandle => Some(NetKind::Int(64)),
                     _ => return self.unsupported(ty.loc, "this data type"),
                 };
                 if let Some(k) = k {
                     kind = k;
                     explicit_kind = true;
                     if matches!(k, NetKind::Integer | NetKind::Int(_)) {
-                        signed = true;
+                        signed = !matches!(ty.kind, t::TypeKind::Chandle);
                     }
                 }
                 NetType::Wire

@@ -536,6 +536,11 @@ impl Lower {
                     t::TypeKind::Int(t::IntKw::Time) => range = width(64),
                     t::TypeKind::Real(_) => ret_kind = NetKind::Real,
                     t::TypeKind::String => ret_kind = NetKind::String,
+                    // a chandle: a 64-bit 2-state value (see `decl_head`)
+                    t::TypeKind::Chandle => {
+                        range = width(64);
+                        ret_kind = NetKind::Bit;
+                    }
                     _ => return self.unsupported(rt.loc, "this return type"),
                 }
                 match rt.packed.as_slice() {

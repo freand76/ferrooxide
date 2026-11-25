@@ -82,6 +82,8 @@ def jobs():
         if p.get("top_module"):
             cmd += ["-s", p["top_module"]]
         cmd += ["-I" + d for d in incdirs]
+        # UVM without its DPI C code, as the runner does
+        cmd.append("-DUVM_NO_DPI")
         cmd += ["-D" + d for d in p.get("defines", "").split()]
         cmd += files
         variants = p.get("simvariants", "").split() if mode == "simulation" else []

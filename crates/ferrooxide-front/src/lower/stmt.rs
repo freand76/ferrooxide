@@ -850,7 +850,8 @@ impl Lower {
                 let name = self.name(n, array.loc);
                 return self.foreach_heap(&name, vars, body, loc);
             }
-            t::ExprKind::Ident(n) => self.var_dims(n).map(|d| (n.clone(), d)),
+            // (fewer dimensions than variables: a string, or a packed type; the compiler)
+            t::ExprKind::Ident(n) => self.var_dims(n).filter(|d| d.len() >= vars.len()).map(|d| (n.clone(), d)),
             _ => None,
         };
         let Some((name, dims)) = local else {

@@ -563,6 +563,15 @@ impl<'a> Compiler<'a> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.expr(&n, sid, w, s);
         }
+        // a character of a string property (`obj.s[i]`)
+        if let ExprKind::Index(a, i) = &e.kind {
+            if matches!(a.kind, ExprKind::Member(..)) && matches!(self.type_of(a, sid), Ok(Type::Str)) {
+                let h = self.str_expr(a, sid)?;
+                let iv = self.expr(i, sid, 32, true)?;
+                let d = self.str_op(ferrooxide_rt::StrOp::Getc, h, iv, NONE, 0);
+                return Ok(self.resize(d, 8, w, false));
+            }
+        }
         let ty = self.type_of(e, sid)?;
         if !self.code.str_ids.is_empty() || matches!(&e.kind, ExprKind::SysCall(n, _) if n == "$sformatf" || n == "$psprintf" || n == "$__tostring") {
             // a string where a vector is needed: its characters
