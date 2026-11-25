@@ -254,7 +254,7 @@ impl Lower {
                 acc.unwrap()
             }
             t::ExprKind::Pattern { ty, items } => {
-                let items = self.pattern(items, loc)?;
+                let items = self.pattern(items)?;
                 let ty = match ty {
                     Some(dt) => Some(Rc::new(self.data_type_req(dt)?)),
                     None => None,
@@ -443,7 +443,7 @@ impl Lower {
     }
 
     /// The items of `'{...}` (resolved in elaboration against the target type).
-    fn pattern(&mut self, items: &t::PatternItems, loc: t::Loc) -> Result<Vec<PatItem>> {
+    fn pattern(&mut self, items: &t::PatternItems) -> Result<Vec<PatItem>> {
         let mut out = Vec::new();
         match items {
             t::PatternItems::Positional(v) => {
@@ -457,12 +457,19 @@ impl Lower {
                     out.push(match &k.kind {
                         t::ExprKind::Ident(n) => PatItem::Key(n.clone(), x),
                         t::ExprKind::Default => PatItem::Default(x),
-                        t::ExprKind::Type(_) => return self.unsupported(k.loc, "a type key in an assignment pattern"),
+                        t::ExprKind::Type(dt) => PatItem::Type(Rc::new(self.data_type_req(dt)?), x),
                         _ => PatItem::Index(self.expr(k)?, x),
                     });
                 }
             }
-            t::PatternItems::Repl(..) => return self.unsupported(loc, "a replication in an assignment pattern"),
+            t::PatternItems::Repl(n, v) => {
+                let n = self.expr(n)?;
+                let mut items = Vec::new();
+                for x in v {
+                    items.push(self.expr(x)?);
+                }
+                out.push(PatItem::Repl(n, items));
+            }
         }
         Ok(out)
     }

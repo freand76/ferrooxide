@@ -556,10 +556,23 @@ impl<'a> Compiler<'a> {
                                 }
                                 continue;
                             }
-                            if dl.dims.len() > 1 {
-                                return self.err(format!("'{}': a multi-dimensional array in a block is not supported", dl.name));
-                            }
-                            let (depth, lo, desc) = if let Some((a, b2)) = dl.dims.first() {
+                            // (a multi-dimensional array is stored flat, row-major, as in a module)
+                            let mut md: Option<Vec<(i64, u32, bool)>> = None;
+                            let (depth, lo, desc) = if dl.dims.len() > 1 {
+                                let mut dims = Vec::new();
+                                let mut total: u64 = 1;
+                                for (x, y) in &dl.dims {
+                                    let (a, b2) = (self.const_int(x, b)?, self.const_int(y, b)?);
+                                    let n = ((a - b2).abs() + 1) as u32;
+                                    total *= n as u64;
+                                    dims.push((a.min(b2), n, a > b2));
+                                }
+                                if total > u32::MAX as u64 {
+                                    return self.err(format!("array '{}' is too large", dl.name));
+                                }
+                                md = Some(dims);
+                                (total as u32, 0, false)
+                            } else if let Some((a, b2)) = dl.dims.first() {
                                 let (a, b2) = (self.const_int(a, b)?, self.const_int(b2, b)?);
                                 (((a - b2).abs() + 1) as u32, a.min(b2), a > b2)
                             } else {
@@ -572,6 +585,10 @@ impl<'a> Compiler<'a> {
                             }
                             if desc {
                                 self.sigs.desc_arrays.insert(s);
+                            }
+                            if let Some(d) = md {
+                                self.sigs.md_dims.insert(s, d);
+                                self.scopes[b].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(s));
                             }
                             if let Some(d) = &pk {
                                 self.sigs.packed_dims.insert(s, d.clone());

@@ -188,6 +188,8 @@ pub fn expr(e: &Expr) -> String {
                     PatItem::Key(k, v) => format!("{k}: {}", expr(v)),
                     PatItem::Index(k, v) => format!("{}: {}", expr(k), expr(v)),
                     PatItem::Default(v) => format!("default: {}", expr(v)),
+                    PatItem::Type(t, v) => format!("type({}): {}", sv_type(t), expr(v)),
+                    PatItem::Repl(n, v) => format!("{}{{{}}}", expr(n), list(v)),
                 })
                 .collect();
             let t = t.as_ref().map(|t| format!("type({})", sv_type(t))).unwrap_or_default();

@@ -757,7 +757,7 @@ impl<'a> Compiler<'a> {
                 ExprKind::Index(_, i) => ExprKind::Index(Box::new(flat_base), i).into(),
                 _ => unreachable!(),
             },
-            _ => self.md_norm(&elem, sid)?,
+            _ => self.md_norm_elem(&elem, sid)?,
         };
         let mut cur: Packed = layout;
         let mut di = 0;
@@ -939,8 +939,10 @@ impl<'a> Compiler<'a> {
     /// An assignment pattern for type `t` as a concatenation of its elements or members,
     /// each cast to its width (IEEE 1800 10.9).
     fn build_pattern(&mut self, items: &[PatItem], t: &Packed, sid: usize) -> R<Expr> {
+        let items = &self.expand_pattern(items, sid)?[..];
         let mut pos = Vec::new();
         let mut named = Vec::new();
+        let mut typed: Vec<(Packed, &Expr)> = Vec::new();
         let mut default = None;
         // index keys of an array: (element position, value)
         let mut indexed: Vec<(usize, &Expr)> = Vec::new();
@@ -954,6 +956,11 @@ impl<'a> Compiler<'a> {
                 PatItem::Default(v) => default = Some(v),
                 PatItem::Index(i, v) if array => indexed.push((self.pattern_index(i, t.dims[0], sid)?, v)),
                 PatItem::Index(..) => return self.err("an index key in an assignment pattern of a struct"),
+                PatItem::Type(kt, v) => {
+                    let p = self.packed(kt, sid)?;
+                    typed.push((p, v));
+                }
+                PatItem::Repl(..) => unreachable!("expanded"),
             }
         }
         let parts: Vec<(Option<&str>, Packed)> = if array {
@@ -986,6 +993,9 @@ impl<'a> Compiler<'a> {
                 *v
             } else if let Some((_, v)) = named.iter().find(|(n, _)| Some(n.as_str()) == *name) {
                 *v
+            } else if let Some((_, v)) = typed.iter().rev().find(|(kt, _)| same_packed(kt, pt)) {
+                // (a type key: the members and elements of that type, 10.9.2)
+                *v
             } else if let Some(v) = default {
                 v
             } else {
@@ -1005,6 +1015,27 @@ impl<'a> Compiler<'a> {
         Ok(ExprKind::Concat(out).into())
     }
 
+    /// The items of a pattern with replications (`n{a, b}`, 10.10.1) written out as
+    /// positional items.
+    pub(crate) fn expand_pattern(&mut self, items: &[PatItem], sid: usize) -> R<Vec<PatItem>> {
+        let mut out = Vec::new();
+        for it in items {
+            match it {
+                PatItem::Repl(n, v) => {
+                    let k = self.const_int(n, sid)?;
+                    if k < 0 {
+                        return self.err(format!("replication count {k} in an assignment pattern is negative"));
+                    }
+                    for _ in 0..k {
+                        out.extend(v.iter().cloned().map(PatItem::Pos));
+                    }
+                }
+                x => out.push(x.clone()),
+            }
+        }
+        Ok(out)
+    }
+
     /// The position (from the left) of the element that index key `i` names in a packed
     /// dimension `d` (msb, lsb).
     fn pattern_index(&mut self, i: &Expr, d: (i64, i64), sid: usize) -> R<usize> {
@@ -1022,4 +1053,24 @@ impl<'a> Compiler<'a> {
             None => self.err("an assignment pattern needs a known target type here"),
         }
     }
+}
+
+/// Two layouts are the same type (for type keys of assignment patterns): shape, sign, kind,
+/// and the same struct or enum.
+fn same_packed(a: &Packed, b: &Packed) -> bool {
+    let ws = |p: &Packed| p.dims.iter().map(|&(l, r)| (l - r).abs()).collect::<Vec<_>>();
+    ws(a) == ws(b)
+        && a.signed == b.signed
+        && a.int_kind == b.int_kind
+        && a.leaf == b.leaf
+        && match (&a.fields, &b.fields) {
+            (None, None) => true,
+            (Some(x), Some(y)) => Rc::ptr_eq(x, y) || (x.union == y.union && x.fields.len() == y.fields.len() && x.fields.iter().zip(&y.fields).all(|(f, g)| f.0 == g.0 && same_packed(&f.1, &g.1))),
+            _ => false,
+        }
+        && match (&a.enum_names, &b.enum_names) {
+            (None, None) => true,
+            (Some(x), Some(y)) => Rc::ptr_eq(x, y),
+            _ => false,
+        }
 }

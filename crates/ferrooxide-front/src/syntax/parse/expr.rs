@@ -829,6 +829,25 @@ impl Parser {
         Ok(Expr::new(ExprKind::Concat(v), loc))
     }
 
+    /// A key of an assignment pattern or its first item: a data type before `:` is a type key
+    /// (`'{int: 0}`, IEEE 1800-2017 10.9.2), anything else an expression.
+    fn pattern_key(&mut self) -> Result<Expr> {
+        let loc = self.loc();
+        if self.is_type_start() {
+            let t = self.attempt(|p| {
+                let t = p.data_type()?;
+                match t {
+                    Some(t) if p.is_p(":") && !p.is_p("::") => Ok(t),
+                    _ => p.err("not a type key"),
+                }
+            });
+            if let Some(t) = t {
+                return Ok(Expr::new(ExprKind::Type(Box::new(t)), loc));
+            }
+        }
+        self.expr_or_type()
+    }
+
     /// `{...}` of an assignment pattern, at the `{`.
     pub(crate) fn pattern_items(&mut self) -> Result<PatternItems> {
         self.expect_p("{")?;
@@ -844,7 +863,7 @@ impl Parser {
         };
         let first = match first_key {
             Some(k) => k,
-            None => self.expr_or_type()?,
+            None => self.pattern_key()?,
         };
         if self.is_p("{") {
             // `'{n{a, b}}`
@@ -865,7 +884,7 @@ impl Parser {
             let mut items = vec![(first, v)];
             while self.eat_p(",") {
                 let loc = self.loc();
-                let k = if self.eat_kw(Kw::Default) { Expr::new(ExprKind::Default, loc) } else { self.expr_or_type()? };
+                let k = if self.eat_kw(Kw::Default) { Expr::new(ExprKind::Default, loc) } else { self.pattern_key()? };
                 self.expect_p(":")?;
                 items.push((k, self.expr()?));
             }

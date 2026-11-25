@@ -631,10 +631,14 @@ impl Expr {
             K::Pattern(_, items) => {
                 for it in items {
                     match it {
-                        PatItem::Pos(e) | PatItem::Key(_, e) | PatItem::Default(e) => f(e),
+                        PatItem::Pos(e) | PatItem::Key(_, e) | PatItem::Default(e) | PatItem::Type(_, e) => f(e),
                         PatItem::Index(a, b) => {
                             f(a);
                             f(b);
+                        }
+                        PatItem::Repl(n, v) => {
+                            f(n);
+                            v.iter_mut().for_each(&mut *f);
                         }
                     }
                 }
@@ -797,6 +801,10 @@ pub enum PatItem {
     Index(Expr, Expr),
     /// `default: value`
     Default(Expr),
+    /// `type: value`: the members of that type (IEEE 1800-2017 10.9.2)
+    Type(std::rc::Rc<crate::lower::SvType>, Expr),
+    /// `n{a, b}`: the items repeated n times, a constant (10.10.1)
+    Repl(Expr, Vec<Expr>),
 }
 
 /// An unsized decimal number.

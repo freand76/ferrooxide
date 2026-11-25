@@ -84,7 +84,7 @@ started (IEEE 1800 9.2.2.2.2).
 
 ## Status (2026-11-19)
 
-(2026-11-25: sv-tests 4740 of 5112; the regression-suite numbers below are the last ones,
+(2026-11-25: sv-tests 4758 of 5112; the regression-suite numbers below are the last ones,
 it is no longer run.) Regression suite (normal tests): main list 1405 of 1526 (92 %), SystemVerilog list
 (`--list regress-sv.list`) 650 of 701 (93 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
 to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
@@ -353,6 +353,20 @@ deterministic, long runs cancellable, a memory budget for history.
   simulators.
 
 ## Next steps (in priority order)
+
+**Resume here (2026-11-25, end of session)**: sv-tests 4758 of 5112, chapter 5 all pass.
+Next, as the user decided: the flat-field slice of R4 (step 5 below): `Decl` keeps only
+`ty` (always set) and derives `kind`/`signed`/`range`/`packed`/`type_param` from it with
+methods, as `ParamDecl` does since slice 5; the same for `SubroutineDecl`'s return
+(`ret_kind`/`range`/`signed` beside `ret_ty`). The lowering builds both forms in
+`lower/types.rs` `decl_head` (flat form from `SvType::decl_parts`, or `ty` built from the
+flat form for plain Verilog types); the compiler reads the flat fields at about 90 places
+(`grep -rnE "\.(range|packed|kind|signed|type_param)\b" crates/ferrooxide-compile/src`),
+most in `elab/decls.rs` (non-ANSI port merging, `Merged`) and `stmt.rs` (block variables).
+After it, UVM again: it stops at `uvm_coreservice.svh:379` ("this scoped name is not
+supported"). Known bug found on the way: 2-state members (`int`) of an unpacked struct
+start as x and keep x bits (the struct is one 4-state signal; `Packed` has no 2-state
+flag).
 
 **Direction (2026-11-25)**: the standard is the reference for behaviour, Icarus only for
 speed; the work is making sv-tests pass (`SV_TESTS.md` priorities, "Unsupported (known)").
@@ -749,6 +763,10 @@ SystemVerilog data types and testbench features:
   (need the scheduler to hold back a suspended process's wake-ups), `srandom`/
   `get_randstate`/`set_randstate`; enum methods of a call's result (`p.status().name()`);
   `process::self().kill();` as a statement.
+- unpacked array members of unpacked structs (2026-11-25) are laid out as packed arrays of
+  their elements: `$size` & co. and `%p` see a packed array; real, string and unpacked
+  struct elements are not supported. Type keys in patterns of unpacked arrays; a type key
+  does not tell `int` from `integer` members (`Packed` has no 2-state flag).
 - `ref` arguments are copied in and out (as `inout`); calls where that differs from a
   reference are rejected: a task with ref arguments that can wait, a ref argument whose
   variable the subroutine also names [sv-tests chapter-7/queues/persistence]. A real

@@ -1,0 +1,10 @@
+module t ();
+  // imports $unit
+  reg type(reg unpacked struct { int(32) signed a; reg [3:0] c; }) [35:0] s;
+  int(32) signed n[0:(2 - 1)][0:(4 - 1)];
+  initial begin
+    s = '{type(int(32) signed): 5, type(reg [3:0]): 4'h3};
+    s = '{a: 1, default: 0};
+    n = '{2{'{2{1, 2}}}};
+  end
+endmodule

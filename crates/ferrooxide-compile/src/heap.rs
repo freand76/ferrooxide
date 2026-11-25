@@ -533,11 +533,13 @@ impl<'a> Compiler<'a> {
                 Ok((d, true))
             }
             ExprKind::Concat(_) | ExprKind::Pattern(None, _) => {
+                let expanded;
                 let parts: Vec<&Expr> = match &e.kind {
                     ExprKind::Concat(v) => v.iter().collect(),
                     ExprKind::Pattern(_, items) => {
+                        expanded = self.expand_pattern(items, sid)?;
                         let mut v = Vec::new();
-                        for it in items {
+                        for it in &expanded {
                             match it {
                                 PatItem::Pos(x) => v.push(x),
                                 _ => return self.err("a keyed assignment pattern for a queue or dynamic array is not supported"),

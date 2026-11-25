@@ -315,6 +315,7 @@ impl<'a> Compiler<'a> {
     /// assignment per element into `out` (IEEE 1800-2017 10.9.1: positional items left to
     /// right, index keys, `default:` for the rest; nested patterns for the inner dimensions).
     fn pattern_pairs(&mut self, lhs: &Expr, dims: &[(i64, u32, bool)], items: &[PatItem], sid: usize, out: &mut Vec<(Expr, Expr)>) -> R<()> {
+        let items = &self.expand_pattern(items, sid)?[..];
         let idx: Vec<i64> = dim_indexes(dims[0]).collect();
         let mut vals: Vec<Option<&Expr>> = vec![None; idx.len()];
         let (mut npos, mut default) = (0, None);
@@ -333,6 +334,8 @@ impl<'a> Compiler<'a> {
                 }
                 PatItem::Key(k, v) => (self.const_int(&Expr::from(ExprKind::Ident(k.clone())), sid)?, v),
                 PatItem::Index(k, v) => (self.const_int(k, sid)?, v),
+                PatItem::Type(..) => return self.err("a type key in an assignment pattern of an unpacked array is not supported"),
+                PatItem::Repl(..) => unreachable!("expanded"),
             };
             let Some(p) = idx.iter().position(|&i| i == k) else {
                 return self.err(format!("assignment pattern key {k} is outside the array's range"));

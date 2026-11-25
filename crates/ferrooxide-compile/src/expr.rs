@@ -68,17 +68,23 @@ impl<'a> Compiler<'a> {
     /// An index chain on a multi-dimensional array (`m[i][j]`, also with selects after it) as
     /// one index into the flat storage: `m[(i - lo0) * n1 + (j - lo1)]`.
     pub(crate) fn md_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
-        self.norm(e, sid, false)
+        self.norm(e, sid, false, true)
     }
 
     /// `md_norm` of an assignment target (a signed struct member stays a plain select).
     pub(crate) fn lv_norm(&self, e: &Expr, sid: usize) -> Option<Expr> {
-        self.norm(e, sid, true)
+        self.norm(e, sid, true, true)
     }
 
-    /// A select chain in the form the code generation knows: struct members, several
-    /// unpacked or packed dimensions and `.triggered` resolved.
-    fn norm(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<Expr> {
+    /// `md_norm` without struct members: the element of an array of structs (for
+    /// `struct_walk`, which resolves the members).
+    pub(crate) fn md_norm_elem(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        self.norm(e, sid, false, false)
+    }
+
+    /// A select chain in the form the code generation knows: struct members (`structs`),
+    /// several unpacked or packed dimensions and `.triggered` resolved.
+    fn norm(&self, e: &Expr, sid: usize, lvalue: bool, structs: bool) -> Option<Expr> {
         // `q.size` of a queue: a call
         if self.sigs.has_dyn {
             if let Some(c) = self.dyn_hier_call(e, sid) {
@@ -89,7 +95,7 @@ impl<'a> Compiler<'a> {
         if let Some(m) = self.hier_member(e, sid) {
             return Some(m);
         }
-        if self.sigs.has_structs && matches!(&e.kind, ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..) | ExprKind::Member(..)) {
+        if structs && self.sigs.has_structs && matches!(&e.kind, ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..) | ExprKind::Member(..)) {
             if let Some(Ok(w)) = self.struct_walk(e, sid, lvalue) {
                 return Some(w.expr);
             }
@@ -2193,8 +2199,10 @@ impl<'a> Compiler<'a> {
                     if let PatItem::Index(k, _) = it {
                         self.reads_expr(k, sid, out);
                     }
-                    let (PatItem::Pos(v) | PatItem::Key(_, v) | PatItem::Default(v) | PatItem::Index(_, v)) = it;
-                    self.reads_expr(v, sid, out);
+                    match it {
+                        PatItem::Pos(v) | PatItem::Key(_, v) | PatItem::Default(v) | PatItem::Index(_, v) | PatItem::Type(_, v) => self.reads_expr(v, sid, out),
+                        PatItem::Repl(_, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
+                    }
                 }
             }
             ExprKind::Ident(n) => {

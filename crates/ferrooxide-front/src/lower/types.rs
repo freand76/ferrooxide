@@ -396,14 +396,36 @@ impl Lower {
                         return self.err(m.loc, "a member of a packed struct or union cannot be an unpacked struct");
                     }
                     for d in &m.decls {
-                        if !d.dims.is_empty() {
-                            return self.unsupported(d.loc, "an unpacked struct member array");
-                        }
                         if d.init.is_some() {
                             return self.unsupported(d.loc, "a struct member default");
                         }
                         let n = self.name(&d.name, d.loc);
-                        fields.push((n, ft.clone()));
+                        if d.dims.is_empty() {
+                            fields.push((n, ft.clone()));
+                            continue;
+                        }
+                        // an array member of an unpacked struct: laid out as a packed array of
+                        // its elements (the same element order, left index first)
+                        if st.packed {
+                            return self.err(d.loc, "a member of a packed struct or union cannot be an unpacked array");
+                        }
+                        if matches!(ft.kind, NetKind::Real | NetKind::String) || ft.fields.as_ref().is_some_and(|f| !f.packed) || ft.heap.is_some() || !ft.unpacked.is_empty() {
+                            return self.unsupported(d.loc, "an unpacked struct member array of this element type");
+                        }
+                        let (dims, heap) = self.unpacked_dims(&d.dims, d.loc)?;
+                        if heap.is_some() {
+                            return self.unsupported(d.loc, "a queue or dynamic array as a struct member");
+                        }
+                        let mut at = ft.clone();
+                        let mut outer = dims;
+                        at.int_kind = false;
+                        if at.fields.is_none() && at.dims.is_empty() {
+                            // (a scalar element: one bit)
+                            at.dims.push((num(0), num(0)));
+                        }
+                        outer.extend(at.dims);
+                        at.dims = outer;
+                        fields.push((n, at));
                     }
                 }
                 let dims = self.packed_dims(&ty.packed, ty.loc)?;

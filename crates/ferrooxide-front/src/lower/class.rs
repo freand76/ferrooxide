@@ -584,10 +584,14 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
         ExprKind::Pattern(_, items) => {
             for it in items {
                 match it {
-                    PatItem::Pos(x) | PatItem::Key(_, x) | PatItem::Default(x) => this_expr(x, c, locals),
+                    PatItem::Pos(x) | PatItem::Key(_, x) | PatItem::Default(x) | PatItem::Type(_, x) => this_expr(x, c, locals),
                     PatItem::Index(k, x) => {
                         this_expr(k, c, locals);
                         this_expr(x, c, locals);
+                    }
+                    PatItem::Repl(n, v) => {
+                        this_expr(n, c, locals);
+                        v.iter_mut().for_each(|x| this_expr(x, c, locals));
                     }
                 }
             }
