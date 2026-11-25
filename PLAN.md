@@ -1,877 +1,248 @@
-# ferrooxide — a fast 4-state, event-driven Verilog simulator in Rust
+# ferrooxide — plan
 
 ## Goals
-- IEEE 1364-2005 Verilog first, then a pragmatic synthesizable/testbench subset of
-  SystemVerilog (1800).
-- Full 4-state semantics (0/1/X/Z), IEEE stratified event scheduler (active / inactive / NBA /
-  postponed).
+- IEEE 1364-2005 Verilog and a usable SystemVerilog (1800-2017) subset: RTL and testbenches.
+- Full 4-state semantics and the IEEE stratified event scheduler.
 - **≥10x Icarus (vvp) throughput** on typical RTL + testbench workloads. Icarus is the
   baseline for speed only.
-- The standard (IEEE 1364-2005, 1800-2017) is the reference for behaviour (decided
-  2026-11-25; before, the output matched Icarus, and the regression suite was the main
-  oracle). Coverage is measured with chipsalliance *sv-tests* (`tests/svtests.py`); our own
-  suite (`tests/suite`) checks behaviour. Where ferrooxide still copies an Icarus deviation
-  (`DEVIATIONS.md`) it changes to the standard when a test needs it.
+- The standard is the reference for behaviour (since 2026-11-25; before, the output matched
+  Icarus). Coverage is measured with chipsalliance *sv-tests* (`tests/svtests.py`), behaviour
+  is checked by our own suite (`tests/suite`). Where ferrooxide still copies an Icarus
+  deviation (`DEVIATIONS.md`) it changes to the standard when a test needs it.
+- One command, no intermediate files: `ferrooxide tb.v dut.v` parses, elaborates, compiles
+  (milliseconds) and simulates.
+
+## Status (2026-11-25)
+- sv-tests: 4758 of 5112 (93.1%); all of chapter 5. Baseline in
+  `target/svtests-baseline.res`.
+- Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
+  10-13x.
+- Debug front ends: interactive mode, MCP server, `--vcd`/`--trace`, CDSP server with value
+  history.
 
 ## Architecture
 
 ```
  .v/.sv files
-     │  ferrooxide-front    preprocessor (`define/`ifdef/`include) → lexer → syntax/: IEEE 1800
-     │                      parser (syntax tree, only type names resolved) → lower/: tables,
-     ▼                      enums, packages, expansions; "X is not supported" at its line
+     │  ferrooxide-front    preprocessor → lexer → syntax/: IEEE 1800 parser (syntax tree, only
+     │                      type names resolved) → lower/: tables, enums, packages, classes,
+     ▼                      expansions; "X is not supported" at its line
    AST  (declarations keep their data type; `Expr::Member`, `Expr::Pattern`)
-     │  ferrooxide-compile  elaboration: params, hierarchy flattening, port collapsing (aliasing),
-     │                      a `Type` per signal and `type_of(expr)` (vector, real, string,
-     │                      queue/darray/assoc, class), packed layouts, width/sign inference
-     │                      (IEEE context-determined rules), codegen
-     ▼
-  Program  (flat memory image + per-process bytecode + static fanout tables + classes)
-     │  ferrooxide-rt       event scheduler + bytecode VM, lowering to fast ops, fusion, Cranelift
-     ▼                      JIT; string table and object heap (generic path)
+     │  ferrooxide-compile  elaboration: params, hierarchy flattening, port collapsing, a `Type`
+     │                      per signal and `type_of(expr)`, packed layouts, IEEE width/sign
+     ▼                      rules, codegen to bytecode (subroutines inlined)
+  Program  (flat memory image + per-process bytecode + static fan-out tables + classes)
+     │  ferrooxide-rt       event scheduler + bytecode VM, lowering to fast ops, fusion,
+     ▼                      Cranelift JIT; string table and object heap (generic path)
   simulation
 ```
 
-**Usage model.** One command, no intermediate files: `ferrooxide tb.v dut.v` parses,
-elaborates, compiles to in-memory bytecode (milliseconds) and simulates. Unlike `iverilog` +
-`vvp` there is no separate compile step.
-
-**Key design decisions.**
-1. *Flat memory*: every signal, temp and constant lives in one `Vec<u64>`. A value of width W
-   uses `n = ceil(W/64)` words of `aval` followed by `n` words of `bval` (VPI encoding: 00=0,
-   10=1, 01=Z, 11=X). Unused high bits are always zero, so equality is a word compare.
-2. *2-state fast path*: every op on ≤64-bit values checks `(b_a | b_b) == 0` once and then
-   does plain machine arithmetic. X/Z handling is the slow path.
-3. *Static everything*: temps are statically allocated per process (no allocation during
-   simulation), event controls get static ids, the signal→waiter fanout is a precomputed flat
-   table. Waking a process = one compare + push.
-4. *Port collapsing*: ports connected to whole signals (and constant-index array elements)
-   alias the parent signal (no copy process).
-5. *Processes are coroutines with a single `pc`*: suspension is free.
-6. *Rank-ordered combinational settle* (from digsim-native `levels.rs`): every combinational
-   process gets a rank above its drivers (Kahn longest path, SCCs/loops excluded); each dirty
-   one is evaluated once per settle in rank order, without events in between. Loops fall back
-   to events. This gave digsim 45–100x.
-7. *Cranelift JIT per process shape*: identical processes of different instances share one
-   native function and get their slots/signals/controls from a per-process table.
+Key design decisions:
+1. *Flat memory*: every signal, temporary and constant lives in one `Vec<u64>`; a value is
+   `n` value words + `n` unknown words (00=0, 10=1, 01=z, 11=x), bits above the width 0.
+2. *2-state fast path*: ops on ≤64-bit values check the unknown words once, then do plain
+   machine arithmetic.
+3. *Static everything*: temporaries per process, static event-control ids, a precomputed
+   signal→waiter fan-out table; waking a process is a compare and a push.
+4. *Port collapsing*: ports connected to whole signals or constant-index elements alias them.
+5. *Processes are coroutines with one `pc`*; process *instances* (a fork branch started again
+   while it runs) get their own id, JIT table and swapped-in frame.
+6. *Rank-ordered combinational settle*: each dirty combinational process runs once per settle
+   in rank order (from digsim-native); loops fall back to events.
+7. *Cranelift JIT per process shape*: identical processes of different instances share code.
 8. *Handles for dynamic data*: strings, queues, dynamic/associative arrays and class objects
-   are one 64-bit word in the flat memory (an interned text, or an object on the simulator's
-   heap; 0 = empty / `null`), so stores, change events and `==` need nothing new; operations
-   on them are generic-path instructions.
-9. *Process instances*: a fork branch started again while it runs becomes a run-time instance
-   of its `ProcDef` (its own id and JIT table, private frame swapped in when it runs); the
-   static processes keep the fast path.
+   are one 64-bit word (0 = empty / `null`); their operations are generic-path instructions.
 
-The design was built around everything being static (processes, storage, fan-out) and types
-being resolved before the compiler. The front end and the compiler's types have since been
-rebuilt for SystemVerilog (R1-R5), and handles and process instances (A2, first part of A3)
-cover queues, classes and fork in a loop; real subroutine calls, dynamic waiters and VPI are
-still ahead (see "Architecture changes ahead").
+Scheduling order where IEEE leaves it open (kept from the Icarus days): wakes FIFO between
+active processes and the settle, waiters of one change newest first, fork branches last to
+first, time-0 processes by scope, `always_comb` after all others at time 0 (9.2.2.2.2).
 
-Also adopted from digsim-native: the value encoding and its `get_bits`/`set_bits` helpers
-(`rt/ops.rs`); flip-flops update "in the next round" = our NBA region, edge-triggered processes
-grouped per clock edge; deterministic event order so engines can be diffed exactly. Not
-(yet) adopted: whole-block "sweep" evaluation when most inputs changed, profiling counters
-behind a cargo `prof` feature.
+## Done
+- Verilog-2005: modules/ports (ANSI, non-ANSI, port expressions), parameters, generate,
+  hierarchical names, `defparam`, arrays of instances, all operators with IEEE width/sign
+  rules, functions/tasks (inlined; recursion through saved frames), fork/join, events,
+  `disable`, force/release, nets with several drivers, strengths, `tran`, UDPs, gate and
+  net delays, specify paths, `timescale`, reals, file I/O, plusargs, VCD.
+- SystemVerilog data: typedefs, enums, packed and unpacked structs/unions (also array
+  members), casts, assignment patterns (positional, keys, `default:`, type keys,
+  replication), packages (import/export), `$unit`, interfaces/modports, strings, queues,
+  dynamic and associative arrays with their methods, streaming concatenations, `chandle`,
+  2-state types, unpacked array parameters.
+- Classes: properties, constructors, inheritance, virtual/pure/extern/static methods,
+  parameterized classes, forward declarations, static members through type parameters,
+  constraints and `randomize()`, `randcase`, mailbox, semaphore, `std::process`
+  (self/status/kill/await).
+- Procedural: `always_*`, `final`, `unique`/`priority`, `inside`, `foreach` (also over
+  members, strings and queues; resolved in the compiler), `ref` arguments (by copy, see
+  Unsupported), `wait fork`, programs.
+- Assertions: immediate, deferred and concurrent (`assert`/`assume`/`cover property`,
+  sequence and property operators, named sequences/properties, default clocking,
+  `disable iff`, `$past` & co.), elaboration system tasks.
+- Performance: fast ops, JIT per shape, scratch temporaries, element-level sensitivity,
+  fusion of combinational chains, edge groups, wide ops in the JIT.
+- Debug front ends: interactive mode (`-i`), MCP server (`--mcp`), CDSP debug server
+  (`--cdsp`) with value history, `--vcd`/`--trace`, `--lint`.
+- Restructuring (R0-R6): a complete IEEE 1800 parser with a syntax tree and a separate
+  lowering; the compiler split into elaboration, types and codegen; `Type`/`type_of` in the
+  compiler; spans on expressions; one declared type per parameter (R4 slice 5).
+- Process: own test suite in three modes (no other simulator needed), parser snapshots,
+  sv-tests runner with baseline, regenerated sv-tests (`make generate-tests`, Python
+  requirements in a scratch venv).
 
-**Scheduling order** mimics Icarus where IEEE leaves it open: wakes are FIFO (sequence
-numbers) between active processes and the combinational settle (`tests/suite/verilog/race.v`);
-waiters woken by one change run newest first (Icarus's LIFO waiting lists, also for edge
-groups, which alternate their member order); fork branches start last to first; time-0
-processes start by scope (instances before the instantiating module's own blocks,
-`start_order`); `always_comb`/`always_latch` run at time 0 after all other processes have
-started (IEEE 1800 9.2.2.2.2).
+## Next (in priority order)
+1. **R4, flat-field slice** (decided 2026-11-25). `Decl` keeps only `ty` (always set) and
+   derives `kind`/`signed`/`range`/`packed`/`type_param` from it, as `ParamDecl` does; the
+   same for `SubroutineDecl`'s return (`ret_kind`/`range`/`signed` beside `ret_ty`). The
+   lowering builds both forms in `lower/types.rs` `decl_head` (from `SvType::decl_parts`);
+   the compiler reads the flat fields at about 90 places
+   (`grep -rnE "\.(range|packed|kind|signed|type_param)\b" crates/ferrooxide-compile/src`),
+   mostly in `elab/decls.rs` (non-ANSI port merging) and `stmt.rs` (block variables).
+   No change in behaviour; check with the suite and sv-tests.
+2. **UVM** (about 130 sv-tests, run with `-DUVM_NO_DPI`). Stops at `uvm_coreservice.svh:379`
+   ("this scoped name is not supported"). Fix the blockers one at a time, each with a test.
+3. **sv-tests features, by tests won**: interface classes (21), `$dist_*` (16), randsequence
+   (12), global clocking and `_gclk` functions (11), tagged unions (10), assignments in
+   expressions (8), arrays assigned from arrays of another shape (6), `type()` operator (4),
+   extern/pure constraints (5), whole unpacked array equality (3), real casts (3), streams of
+   dynamic arrays and `with` (3). DPI (9) needs a C interface: last.
+4. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
+   (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
+   patterns also lack); enum methods of a call's result (`p.status().name()`).
+5. **sv-tests invalid code** (16 accepted that must fail): see the ACCEPT lines of the
+   baseline; errors in class methods that are never called.
+6. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
+   reference, `process::suspend`/`resume`, recursion from fork branches, waits on run-time
+   targets (`@(obj.ev)`, `vif.clk`), VPI callbacks and MCP conditional breakpoints.
+7. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
+   lowering goes. Large; only when feature work slows down.
+8. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
+   needs it.
+9. **Debug front ends**: report the Surfer bugs upstream; MCP over HTTP, MCP history queries,
+   CDSP arrays, port directions and diagnostics; interactive watch/conditional breakpoints.
+10. **Performance** (one instructions check after runtime changes; deeper work when speed
+    matters again): `notify` (largest item), a timing wheel for `Sim::future`, wide ops that
+    leave the JIT, inline resolution of multi-driver nets, the A3 instance checks.
+11. **Outputs and Verilog-2005 rest**: FST, VCD of arrays, `$dumpvars` arguments; VPI (A4),
+    configurations and libraries, timing checks, SDF.
+12. **Multi-threading** (A5): last; pays off only on large designs.
 
-## Status (2026-11-19)
-
-(2026-11-25: sv-tests 4758 of 5112; the regression-suite numbers below are the last ones,
-it is no longer run.) Regression suite (normal tests): main list 1405 of 1526 (92 %), SystemVerilog list
-(`--list regress-sv.list`) 650 of 701 (93 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
-to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
-`--vcd`/`--trace`, the CDSP debug server with value history work.
-
-| # | Content | Status |
-|---|---------|--------|
-| M0 | Workspace, plan, CLI, diff-test harness vs iverilog, benchmark | ✅ |
-| M1 | Core Verilog: modules/ports (ANSI + non-ANSI), params + overrides, vectors + memories, assign, initial/always, blocking/NBA (incl. `<= #d`), all procedural statements, `#`/`@`/`wait`, all operators with IEEE width & sign rules, functions/tasks, generate, gate primitives, common system tasks | ✅ |
-| M1b | VCD: `$dumpfile/$dumpvars/$dumpon/$dumpoff/$dumpall/$dumpflush`, reals, events | ✅ (dumps everything; scope/level args ignored) |
-| M2 | `timescale`, reals, plusargs, hierarchical task calls, `$sformat`, `$fopen` modes | ✅ |
-| M2b | Testbench concurrency: fork/join (+ join_any/join_none, disable fork), named events, `disable`, automatic tasks/functions, recursion, Icarus wake order | ✅ |
-| M3 | Nets: multiple drivers, tri-state, wand/wor/tri0/tri1/supply, static drive strengths, tran islands, inertial delays (rise/fall/turn-off), specify path delays (-gspecify), UDPs, switches | ✅ (strength values on nets / `%v` pending) |
-| M4 | Performance I: levelized comb evaluation, fast ops, scratch temporaries | ✅ (timing wheel pending) |
-| M5 | Performance II: Cranelift JIT backend, shared per shape | ✅ (wide ops leave the JIT in places) |
-| M6 | SystemVerilog | RTL subset ✅; testbench (classes, queues, ...) partial, see below |
-| M7 | FST, VPI-lite, better diagnostics | |
-| M8 | Multi-threading: same-edge / same-rank partitions writing disjoint signals, deterministic | (A5) |
-| M9 | CXXRTL Debug Server Protocol (`--cdsp`) | ✅ first version |
-| M10 | MCP server over stdio (`--mcp`) | ✅ first version |
-| M11 | Interactive mode (`-i`): run/step/print/list/set/force/release, `restart`, `trace` | ✅ first version |
-
-### Verilog notes
-- Fork branches are processes started by `Fork` (last branch first), joins count finished
-  branches, `disable` uses a table of named-block code ranges (+ the branches forked inside
-  them) and process generations to drop stale wake-ups; events are toggled variables;
-  automatic subroutines get storage per call site.
-- Recursion: a call of a function that is being inlined becomes a subroutine call
-  (`SaveFrame` copies the function's variables and the process's temporaries to a per-process
-  frame stack, `CallSub`/`RetSub`; such processes keep no temporaries in JIT registers; depth
-  limit 100000 frames). `?:` with calls in its branches evaluates only the selected one.
-- Done beyond M1: arrays of instances, `defparam`, `` `default_nettype ``, implicit nets,
-  multi-dimensional unpacked arrays and packed vectors (stored flat; index chains become one
-  index/select), hierarchical names with genvar indices, file input, `$random`/`$urandom`
-  (Icarus sequences), `$timeformat`/`$printtimescale`, `$writemem*`, force/release,
-  assign/deassign; static strengths per driver (the strongest wins per bit), pull gates, MOS
-  switches, `tran`/`tranif` (islands solved in one process).
-- `assign z = a;` (also `{a}`, a constant-index element, `#0`, `wire z = a;`, chains, `logic`
-  variables) makes `z` a view of `a` (`alias_assigns`), so it updates immediately as in the
-  reference, unless `z` has other drivers, is a special net type, has a strength, a link or
-  is forced.
-- `$finish` (as in the reference, where it is an event at the end of the queue): the
-  processes already scheduled in the time step still run, then its NBAs (woken processes
-  do not run) and `$monitor` / `$strobe`; `$stop` stops at once (`Sim::finish_step`).
-- Port expressions (`m(a[3:0], .p({b, c}))`, 2026-11-19): each becomes a port net of the
-  expression's width and a continuous assignment to the signals (input) or from them
-  (output); the signals keep their direction in the AST but are internal (not in the port
-  list). A port declared without a range whose net declaration has one is an error (IEEE
-  1364-2005 12.3.3), a warning with `-gno-io-range-error` (as the reference).
-
-### SystemVerilog status
-Resolved in the lowering (`front/src/lower/types.rs`): `typedef` (module and file scope, unpacked
-dimensions: the type's first, DEVIATIONS 9, forward typedefs, array typedefs), `enum`
-(constants as localparams of the base type; methods, also without parentheses), packed
-`struct`/`union` (flat vectors; member/index/select chains become one `[off +: w]` select, also
-at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`, `$bits(T)`,
-assignment patterns (positional, and beyond the reference: named and `default:`), packages
-with `import p::*` / `import p::x` (module, header, file scope, begin-end blocks), `pkg::name`, `P::x`/`P::f()`,
-`export p::x` / `p::*` / `*::*` (names resolve to the package that declares them),
-members and methods of package variables (`P::s.x`, `P::e.next(N)`, `P::c.f()`), assignments to them by scoped name (`P::v[i] = x`, `P::s.x = y`).
-Lint reports names that are SystemVerilog keywords.
-
-Also done: interfaces and modports (interface ports alias the connected instance's scope),
-arrays of interfaces and interface port arrays, array query functions, 2-state types
-(`bit`/`int`/...: start at 0, stores turn x/z into 0; `UnOp::To2`), `always_comb`/
-`always_latch` (sensitivity through called functions, time-0 run), `` `__LINE__ ``,
-`$isunknown`, `$countones`/`$onehot`/`$onehot0`, file-scope and package variables (one
-instance, shared), `timeunit`/`timeprecision` (module and file scope), time literals,
-`input var`/`input logic` port kinds, `-u` (separate compilation units), `unique`/`priority`
-case and if warnings for unmatched values, `break;`/`continue;`, prefix `++a;`/`--a;`,
-`inside` and `case ... inside`, `foreach`, several variables and steps in a `for` header,
-`iff`, `.triggered`, `wait fork`, `program` blocks (also nested in modules; no `always`, instances,
-gates or nested declarations in them), nested module declarations (23.4: without ports
-instantiated once under their own name; names not found inside are looked up in the
-enclosing instance), the checks on `final` procedures (no NBAs, delays, event or wait
-controls, task calls), immediate `assert`/`assume` (default `$error`; `cover` does nothing,
-as in the reference), `$error`/`$warning`/`$info`/`$fatal` with file, line, time and scope,
-initial values of variables in functions and tasks (static: once; automatic: per call;
-constant calls start afresh), `module automatic`, whole unpacked array assignments (continuous: an alias for the same shape, else per
-element; procedural: per element; also subarrays, constant slices and assignment patterns) and array ports (an alias of an array of the same shape),
-`void'(f())`, `->`/`<->`, enum name ranges (`N[3]`, `M[5:3]`), `$countbits`, array
-queries of parameters, expressions and queues, `wire integer`/`wire time`, `++`/`--` inside
-expressions (with short-circuit `&&`/`||`/`?:` when the
-right side has side effects).
-
-*A1, first part (types in elaboration).* Packages and `$unit` are scopes of their own,
-elaborated once (`Module::package`; `Scope::imports` for lookups after a module's own names).
-Their variables are shared, their functions and tasks run in their scope (its names and time
-unit); a module finds package and `$unit` names (parameters, enum constants, functions)
-through `Scope::imports`, and constants in types declared there refer to that scope
-(`Lower::qualify_type`). Type values in
-the compiler: `Sym::Type` / `PVal::Type` hold an `SvType` with its dimensions evaluated
-(`resolve_type`), `Expr::Type` carries a type in a parameter list. `parameter type` works for
-declarations, ports, `$bits` and casts, per instance. The rest of A1 is R4 (done in slices
-1-4: `Type` per signal, member access and patterns in elaboration, unpacked structs, heap
-types).
-
-*A2, first part (strings).* A string value is the 64-bit handle of an interned text
-(`Program::strings` from the compiler, the table in `Sim`), so equal texts have equal handles
-and stores, change events and `==` need nothing new; the rest are `Instr::Str` operations on
-the generic path (`compile/src/strings.rs`, `Sim::exec_str`). The compiler knows a string
-signal by `SignalInfo::string` and types expressions with `is_string` next to `is_real`
-(`Type::Str`). Interning never frees a text.
-
-*Heap objects and classes.* Queues, dynamic and associative arrays (R4 slice 4) and class
-objects (`compile/class.rs`: properties flat as in an unpacked struct, methods inlined with
-`this`, virtual dispatch, static properties as variables beside the class) live on the
-simulator's heap behind handles; objects are never freed. Fork branches started again run as
-process instances (Next steps 2). What is left of both is under "Unsupported (known)".
-
-### Performance
-
-CPU cycles (`perf stat`, same machine):
-
-| benchmark | Icarus | ferrooxide JIT | ferrooxide `--no-jit` | ferrooxide JIT, `release` (no LTO) | speed-up |
-|-----------|--------|----------------|-----------------------|------------------------------------|----------|
-| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 2.60 G | 4.33 G | 2.68 G | **12.9x** |
-| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.2 G | 0.68 G | 1.13 G | 0.72 G | **19.4x** |
-
-(Measured 2026-11-20 at 296d2ef with `cargo build --profile speed` (`target/speed/`) unless
-marked `release`, median of three runs; outputs identical to the reference.)
-
-With a full VCD dump (all signals; wall time, same machine, 2026-11-13):
-
-| benchmark | Icarus | Icarus + `$dumpvars` | ferrooxide | ferrooxide `--vcd` | VCD size |
-|-----------|--------|----------------------|------------|--------------------|----------|
-| `bench/cpuish.v` | 14.3 s | 19.5 s | 0.73 s | 1.95 s | 707 MB (Icarus 720 MB) |
-| `bench/mixed.v` | 3.1 s | 7.4 s | 0.15 s | 0.51 s | 175 MB (Icarus 308 MB) |
-
-Dumping everything costs ferrooxide 2.7-3.4x (mostly formatting and writing the text); the
-lead over Icarus with a dump is 10-14x. `--trace REGEX` limits the cost to the selected
-signals. Real design (TetrIC run target): about 25-32 s wall with the machine loaded; compare
-builds with `perf stat -e instructions` (231 G at 69f7fb4).
-
-What got us here (in order of impact):
-1. Lowering to single-word fast ops with the 2-state check inline (`rt/fast.rs`).
-2. JIT code shared per process shape: without sharing, 32 lane copies thrashed the
-   instruction cache (586M i-cache misses → 2M).
-3. Shared scratch region for temporaries (dead at every suspension point): L1d misses
-   161M → 42M.
-4. Rank-ordered combinational settle as a dirty bitset in rank order, with a separate
-   combinational fan-out list that needs no per-process state.
-5. Constant-index array accesses resolved at compile time; inline `Wait` and inline NBA queue
-   appends in JIT code.
-6. Element-level sensitivity for constant-index array accesses (virtual element signals,
-   element-granular rank graph): mixed.v 27.6M → 8.4M activations.
-7. Wide (≤1024-bit) ops compiled natively (unrolled word loops), concatenation as bit-field
-   inserts, scratch temporaries promoted to SSA variables unless a generic callback reads them.
-8. Ports connected to constant-index array elements alias the element.
-9. Fusion of combinational chains (`rt/fuse.rs`): a pure combinational process whose only
-   combinational consumer is B is merged into B (cpuish 26.0M → 19.6M activations, mixed
-   3.6M → 1.2M).
-10. Fast paths for variable-index memory reads/writes, part-select stores, signed compares,
-    logical not and wire resolution; edge groups (clocked processes with identical triggers
-    run as one activation).
-
-Profile (2026-11-14, `perf record -g`; cpuish 2.9-3.0 G cycles / 7.96 G instructions, mixed
-0.68 G / 1.82 G):
-
-| function | cpuish | mixed |
-|----------|--------|-------|
-| `Sim::notify` (`rt/vm.rs`) | 36 % | 25 % |
-| JIT code (all shapes) | 39 % | 25 % |
-| `Sim::advance_steps` (scheduler loop) | 12 % | 19 % |
-| `Sim::exec` (generic instructions) | 10 % | 7 % |
-| future queue: `BTreeMap` entry + malloc/free/realloc of `Vec<Fut>` | 1.5 % | 7.5 % |
-
-Measuring: cycles move by up to ±4 % between builds whose instruction counts are identical
-(code layout of `notify` / `advance_steps` after unrelated changes: cpuish 2.86 G at 7d1ee50,
-2.96 G after the SystemVerilog work, both 7.964 G instructions). Compare
-`-e instructions,cycles`, several runs each; a layout-only swing is not a regression, and
-pinning the hot functions' alignment (or PGO) may recover it.
-
-### Debug front ends (M9, M10, M11)
-
-**CDSP** (spec https://cxxrtl.org/protocol.html, v0.14.0, protocol version 0, still
-changing). NUL-terminated UTF-8 JSON over TCP or a Unix socket. Commands: `list_scopes`,
-`list_items` (direct children; ids are space-separated hierarchical names, root `""`),
-`reference_items`, `query_interval` (samples and diagnostics for an inclusive interval,
-optionally collapsed), `get_simulation_status`, `run_simulation` (`until_time`,
-`until_diagnostics`), `pause_simulation`; events `simulation_paused`, `simulation_finished`.
-Times are `"<s>.<fs>"` (ticks × 10^(15 + precision) fs); values per item are little-endian
-u32 words in base64; no value setting in the spec yet.
-
-Implementation (`cdsp.rs`): listener thread, one reader thread per connection; the simulation
-thread owns `Sim` and runs `advance_steps` chunks of 10-40 ms, checking the command channel
-between time steps, so the hot loop needs no locking. History (`rt/history.rs`): one
-sequential log (signal id + planes packed to the width, 6 bytes per 1-bit change) fed from the
-dirty list at the end of each time step (`Sim::history_start`; `track` replaces `dumping` as
-the dirty-list switch), budget `FX_HISTORY_MB`; per-signal indexes are built on demand.
-Samples are sent at the interval start and at each change of a referenced item. Reals are
-64-bit items (IEEE double bits). `base64(u32)` is two-state: x/z are sent as the value plane
-(x→1, z→0). Cost on `bench/cpuish.v` (all signals toggle): 0.64 s plain, 1.1-1.3 s with full
-history (290 MB); a query of 10 signals over the whole run (400k samples) about 0.85 s, the
-first one 0.45 s more (indexing).
-
-**Surfer as client** (its source, 2026-11-03 snapshot, `libsurfer/src/cxxrtl*`;
-`surfer cxxrtl+tcp://HOST:PORT`, TCP only in native builds). Its greeting check needs
-`commands`, `events`, `features` (contents ignored). `list_scopes {scope: null}` expects *all*
-scopes in one flat map; `list_items` (with `null` and per scope) reads only `width`; every item
-is taken as a node, so a memory item would make its whole reference fail. `reference_items
-"ALL_VARIABLES"` is re-sent whenever a signal is added; `query_interval` always asks for
-`[0, latest_time]`, `collapse: true`, no diagnostics, after every status change (no
-incremental fetch; it looks up the latest sample <= t). Play = `run_simulation until_time =
-latest + 100 ns` (hard-coded); `pause_simulation` expects `{time}`; no polling while running.
-Responses carry no ids and are paired FIFO (an error pops one too): answer strictly in order.
-Values are decoded as unsigned integers: x/z are lost.
-
-**Console next to the server (`-i --cdsp`).** run/step/breakpoints move the simulation and
-the client gets `simulation_paused`; `restart` reloads the design (sources and data files as
-they are now) and starts at time 0 on the same connection (the client gets
-`simulation_paused` at 0; a running VCD trace is written anew); `quit` closes the connection;
-line editing and history (`~/.ferrooxide_history`, rustyline). Checked with Surfer 0.7.0
-(2026-11-14, logging proxy): greeting, scopes, items, `reference_items` and `query_interval`
-work. (A `--surfer` mode that started Surfer and drove it over its control protocol, WCP, was
-removed on 2026-11-20: only the generic protocol is kept.)
-
-Surfer 0.7.0 (11bb2e3) shows no live waves because of two bugs in its CXXRTL path (fixed
-locally in `/projects/surfer`, to report upstream): (1) `WaveData::cached_time_range` is
-computed at load (latest time 0 → 1 fs) and never refreshed for a live source: refresh it on
-`Message::InvalidateDrawCommands`; (2) `variable_draw_commands` skips every variable whose
-`signal_id` fails, and `WaveContainer::signal_id` is not implemented for CXXRTL: skip the check
-for CXXRTL. With both fixes the waves show. Its value cache never forgets samples, so after a
-`restart` it can show the previous run's samples (feature request: clear the cache when the
-latest time goes backwards).
-
-**MCP** (`--mcp`, JSON-RPC 2.0 over stdio; https://modelcontextprotocol.io). Lets an agent
-load, run, inspect, force and lint a design instead of reading logs and huge VCDs. It shares
-the core with CDSP and `-i`: `Sim::start/advance/finish`, signals read, deposited, forced and
-released by name, the hierarchy model, the change-log history. Tool set of the first cut:
-`load_design {files, defines, include_dirs, top, plusargs, dialect}` (structured errors with
-file:line), `lint`, `run {until_time | for_time | until_condition, max_steps}` (stop reason,
-time, `$display` output truncated with a count), `list_scopes`/`list_signals {scope,
-pattern}`, `get_values {signals, radix}` (x/z as in `$display`), `get_history {signals, from,
-to, max_changes}`, `set_value`/`force`/`release`, `add_breakpoint {condition}`/`list`/
-`remove_breakpoint`, `dump_vcd {file, scopes, from, to}`, `reset`/`restart`, `status`.
-Resources: source files, elaborated hierarchy, simulation log. Rules: every result small and
-bounded (truncation with counts, pattern filters), structured errors with locations,
-deterministic, long runs cancellable, a memory budget for history.
+## Architecture changes ahead
+- **A3. Real calls, dynamic waiters.** Process instances are done. Left: subroutines that are
+  called instead of inlined (methods through a handle, large functions), and a per-signal list
+  of dynamic waiters next to the static fan-out (a flag keeps the static path fast).
+- **A4. VPI** (cocotb): a handle tree from the hierarchy model, get/put value through the
+  force-mask path, value-change callbacks as dynamic waiters, region hooks in the scheduler.
+- **A5. Multi-threading**: needs per-thread scratch (a base pointer in the JIT ABI),
+  per-thread NBA queues merged in a fixed order, parallel work only for processes without
+  system tasks.
+- **Heap**: nothing is freed (strings, objects); reference counts or a collector when a
+  testbench needs it.
+- **CDSP later**: checkpoints and re-simulation for history, setting values, attributes;
+  upstream proposals (4-state values, incremental `query_interval`).
+- **Watch**: elaboration and codegen run per instance; measure on a large netlist.
 
 ## Testing
-- `tests/suite/<area>/*.v` (`tests/suite.sh`, also in `cargo test`): our own suite, no other
-  simulator needed, every test in all three modes. Self-checking (print `PASSED`, never a line
-  starting `FAILED`) or compared with a checked-in `<name>.expected` (`// expected`; `--bless`
-  writes it: review it). Expected behaviour comes from IEEE 1364/1800 (cite the section);
-  where the reference agrees, that checks the test itself. Order IEEE leaves open (wakes of
-  one change, races) is checked by `.expected` files as ferrooxide orders it. Areas: `verilog`
-  (the former tests diffed against Icarus, 2026-11-25: outputs from it, may change where it
-  deviates from the standard), `sched`, `sv`, `assert`, `expr`, `nets`,
-  `systasks`, `hier`, `subr`, `real`, `vcd` (reads its own dump back), `prims`, `arrays`,
-  `directives`, `events`. Next areas: `$sformatf` corner cases, `` `timescale `` inheritance
-  across files, `disable` corner cases; ideas from the regression suite's coverage, tests
-  written fresh.
-- Pitfalls: fork branches start last to first (here and in the reference), so a trigger in one
-  branch for a waiter in another needs a `#0`. A task argument is context-determined by the
-  task's input width (`check(x, a + b)` with a 64-bit input widens `a + b`); wrap
-  self-determined expressions in `{...}` and route signed values through `integer`.
-- Parser snapshots: `front/tests/parse.rs`, `tests/parse/*.sv` → checked-in `.ast`
-  (`--dump-ast`, `front/src/dump.rs`).
-- chipsalliance *sv-tests*: `tests/svtests.py` (as its ferrooxide runner runs them, with a
-  baseline in `target/svtests-baseline.res`; `--tags` for pass rates per tag) is the measure
-  of coverage. `tests/parsecheck.py` runs the parser alone over sv-tests, the Icarus
-  regression suite (as a corpus of Verilog only) and real designs. The Icarus regression
-  scripts (`ivtest.py`, `regress.sh`, `difftest.sh`) were removed 2026-11-25.
-- `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both
-  simulators.
+- `tests/suite/<area>/*.v` (`tests/suite.sh`, in `cargo test`): every test in all three modes
+  (default, `--no-jit`, `--no-fuse`); self-checking (`PASSED`) or `// expected` with a
+  checked-in `.expected` (`--bless` writes it: review it). Behaviour from the standard. The
+  `verilog` area holds the former Icarus diff tests (outputs taken from Icarus).
+- Pitfalls: fork branches start last to first (a trigger for another branch needs `#0`);
+  `join_any` leaves the other branches running; a port without a direction inherits the
+  previous one (`ref int a, int b`: b is ref); a task argument is context-determined by the
+  port width.
+- Parser snapshots: `crates/ferrooxide-front/tests/parse/` (`--dump-ast`), bless with
+  `FX_BLESS=1`.
+- sv-tests: `tests/svtests.py [--baseline] [--tags] [--filter RE]`; no test worse than the
+  baseline after a step. `tests/parsecheck.py` runs the parser alone over sv-tests, the Icarus
+  regression suite (as a corpus) and real designs.
+- `bench/`: benchmarks; `perf stat -e instructions,cycles` with the `speed` profile.
 
-## Next steps (in priority order)
+## Performance notes
+CPU cycles (`perf stat`, `speed` profile, 2026-11-20, median of three):
 
-**Resume here (2026-11-25, end of session)**: sv-tests 4758 of 5112, chapter 5 all pass.
-Next, as the user decided: the flat-field slice of R4 (step 5 below): `Decl` keeps only
-`ty` (always set) and derives `kind`/`signed`/`range`/`packed`/`type_param` from it with
-methods, as `ParamDecl` does since slice 5; the same for `SubroutineDecl`'s return
-(`ret_kind`/`range`/`signed` beside `ret_ty`). The lowering builds both forms in
-`lower/types.rs` `decl_head` (flat form from `SvType::decl_parts`, or `ty` built from the
-flat form for plain Verilog types); the compiler reads the flat fields at about 90 places
-(`grep -rnE "\.(range|packed|kind|signed|type_param)\b" crates/ferrooxide-compile/src`),
-most in `elab/decls.rs` (non-ANSI port merging, `Merged`) and `stmt.rs` (block variables).
-After it, UVM again: it stops at `uvm_coreservice.svh:379` ("this scoped name is not
-supported"). Known bug found on the way: 2-state members (`int`) of an unpacked struct
-start as x and keep x bits (the struct is one 4-state signal; `Packed` has no 2-state
-flag).
+| benchmark | Icarus | ferrooxide JIT | `--no-jit` | speed-up |
+|-----------|-------:|---------------:|-----------:|---------:|
+| `bench/cpuish.v` (32 lanes LFSR+ALU, 200k cycles) | 33.6 G | 2.60 G | 4.33 G | 12.9x |
+| `bench/mixed.v` (comb chain, 128-bit datapath, memory, FSM, 300k cycles) | 13.2 G | 0.68 G | 1.13 G | 19.4x |
 
-**Direction (2026-11-25)**: the standard is the reference for behaviour, Icarus only for
-speed; the work is making sv-tests pass (`SV_TESTS.md` priorities, "Unsupported (known)").
-Streaming concatenations of integral items done 2026-11-25 (`ExprKind::Stream`, as values
-and as targets, a constant or type slice size; a stream wider than its target is an
-error); left: streams of dynamic arrays and queues (sizes at run time) and `with` (3
-sv-tests). Then (2026-11-25): macro argument defaults holding brackets (`RO=f()`), `p::T`
-inside package `p`, extern methods (prototype + `C::f` body after the class, merged in the
-lowering from the items that follow the class; defaults from either), pure virtual
-methods (an empty body), `T::f()` through a typedef parsed as a call, `foreach
-(a[i].m[j])` parsed: 4740 of 5112. UVM (about 150 sv-tests) now stops at `foreach` over
-a scoped or member array (`C::settings[i]`, `a[s].m[j]`): the lowering only knows plain
-array names; a `foreach` resolved in the compiler (with `type_of`) is the fix, and also
-`T::f()` through a type parameter (lowering: "this scoped task name"). Next by sv-tests
-won: that UVM chain, interface classes (21), `$dist_*` (16), randsequence (12), global
-clocking (11), tagged unions (10).
+With a full VCD dump the lead is 10-14x. Profile (2026-11-14): `Sim::notify` 25-36 %, JIT code
+25-39 %, `advance_steps` 12-19 %, generic instructions 7-10 %, the future queue up to 7.5 %.
+Cycles move by up to ±4 % between builds with identical instruction counts (code layout):
+compare instructions too.
 
-**Next: R6** (decided 2026-11-20), before concurrent assertions and the other large
-features: spans on `Expr`/`Stmt` instead of `self.line` (an inlined call moving
-`self.line` gave `randomize()` warnings the wrong line), then splitting `elab_items`, then
-the rest of R4 in slices (step 5 below). *Spans done 2026-11-20*: `ast::Expr` is
-`{ kind: ExprKind, line }` (0: made by the compiler; `{:?}` prints only the kind, it keys
-expressions in places); the lowering gives each expression its tree `Loc` (`fill_line`
-for the parts made for it); the compiler's `at(line, f)` runs `expr`/`rexpr`/`str_expr`/
-`type_of`/`dyn_value`/`stmt` at their line and returns to the location before, so an
-inlined call no longer moves it. `self.line` stays as the current location. *`elab_items`
-split 2026-11-20*: it runs the phases (`scope_defs`, `declarations`, implicit nets, path
-delays, static subroutines, `elab_item` per item); declarations (`Merged`, `decl_shape`,
-`declare`, `declare_port`) in `elab/decls.rs`, instances in `elab/items.rs`, generate
-constructs in `elab/gen.rs`.
-
-Done since the 2026-11-15 review: the restructuring (R0-R5, below), types in elaboration
-(A1 = R4 slices 1-4), heap objects (A2: queues, dynamic and associative arrays), classes
-(first part), programs, package exports, port expressions, process instances (A3 first part).
-
-**Concurrent assertions, first part done 2026-11-20** (`front/lower/assert.rs`,
-`compile/assert.rs`, `rt/assert.rs`): `assert`/`assume`/`cover property` and `cover
-sequence` at module level (`Item::Assert`; `restrict` is ignored), sequences (`##n`,
-`##[m:n]`, `##[m:$]`, `[*]`, `[->]`, `[=]`, `and`, `or`, `intersect`, `throughout`, `within`)
-and properties (`|->`, `|=>`, `not`, `and`, `or`, `if`, `implies`, `iff`), named sequences
-and properties expanded with their arguments (formals resolved to the actual expressions
-in the lowering), the default clocking and `default disable iff`. A sequence becomes an
-automaton without empty transitions over the clock's ticks (`rt::assert::Nfa`, pruned so
-that attempts end when they cannot match), a property a tree of them; each tick starts an
-attempt and steps the running ones (`Instr::Assert`, generic path, no JIT work). Leaves are
-evaluated on sampled values: copies of the signals they read made at the end of each time
-step (`Program::samples`); `$past` is a register chain shifted at every tick. Action blocks
-run in a Reactive region (`Sim::reactive`, after the NBAs), once per pass or failure;
-`disable iff` ends attempts between ticks through a second process. 27 more sv-tests pass;
-ariane now stops at elaboration system tasks. Left: see "Unsupported (known)"; next by
-value: assertions inside procedures, clocking blocks with signals (chapter 14), global
-clocking. *Then (2026-11-20)*: elaboration system tasks (`Item::ElabTask`: `$info`/
-`$warning`/`$error`/`$fatal` in a module or generate scope print the reference's
-"During elaboration" lines when the scope is elaborated, after elaboration; `$error` and
-`$fatal` make it fail) and deferred assertions (`Stmt::Deferred`: the outcome in a hidden
-bit, an action process scheduled once per time step into the Reactive or Postponed region,
-so a later evaluation replaces the report; at module level in an always_comb). Then
-`automatic` variables in static subroutines and unpacked array parameters (`ParamDecl::
-unpacked`: a read-only array signal declared like a variable, its value written at
-elaboration by a constant-context assignment, constant in constant expressions
-(`sigs.const_arrays`); an override by another array parameter passes its words,
-`PVal::Array`; a pattern as an override is not supported yet): ariane now stops at
-streaming concatenations.
-
-1. **sv-tests, first part** (chipsalliance/sv-tests; results, error tables and the reasons
-   in `SV_TESTS.md`). 3798 of 5110 tests pass at a3fa6b3 with the ferrooxide runner
-   (`tools/runners/ferrooxide.py`: parsing -> `--parse-only`, elaboration ->
-   `--elab-only`, simulation -> a full run; pass = exit status, inverted for
-   `:should_fail_because:` tests). Done 2026-11-19: `--elab-only`, and the bugs the run
-   found (`` `include `` + tab, locations through includes, directives from macro
-   expansions, non-UTF-8 sources, non-constant variable initializers, a JIT size limit,
-   `release` looping in an edge group), parameters and return types with several packed
-   dimensions, packed dimensions after an enum, parameter ports without a default (331 of
-   the 366 basejump/black-parrot tests pass now; the rest stop at elaboration system tasks
-   (17), unpacked array parameters (7), DPI (5), streaming concatenation, real casts).
-   Keywords used as names are an error in SV mode (`-g2005` stays permissive;
-   `` `begin_keywords "1364-2005" `` frees the SV keywords in its region): all 248 keyword
-   tests pass. Named arguments in calls (`f(.clear(x), .set(y))`) done; TNoC now stops at
-   a typedef of an interface port's type, RSD (after a fix for package types whose
-   dimensions use names the package imported) at a struct member through an interface
-   port (`cacheSystem.icMemAccessResult.data`, step 4). `tests/svtests.py` runs sv-tests as the runner does
-   (modes, `:assert:` checks; 3845 of 5112 at a5d09e5, matching the official run) with a
-   baseline and pass rates per tag (`--tags`): 4370 of 5112 (85.5%) at the end of this step.
-   The leftovers of the run fixed: recursive module instances (only through a generate
-   block, at most 10 deep, as the reference; were a stack overflow), `$ftell`/`$fseek`/
-   `$rewind` on files opened for writing, block variables with a descending range, and
-   subarrays of multi-dimensional arrays (`b[1][1] = a[0][2]`, were silently wrong). With
-   them: assignment patterns for unpacked arrays (positional, index keys, `default:`,
-   nested; also real and string arrays) and unpacked array slices as array values
-   (`d[5:3] = c[7:5]`, `+:`/`-:` with constant bounds): 4386 of 5112. Next: priorities 6-11
-   of `SV_TESTS.md`.
-2. **Dynamic processes, subroutine calls, dynamic waiters** (A3). *First part done
-   2026-11-19*: a fork branch started again while it still runs (fork/join_none in a loop)
-   becomes another instance of the branch: a process id from `Sim::inst_base` on, running
-   the branch's code (JIT: a copy of its table with the instance's id), woken through the
-   branch's fan-out entries (`notify_insts`). The branch's private memory
-   (`ProcDef::frame`: temporaries that live across waits, frames of automatic subroutines it
-   calls, automatic block and loop variables) is swapped between instances when another one
-   runs. Automatic variables of a fork block are part of each branch's frame and keep the
-   value the forking process gave them (`ProcDef::capture`, `Instr::Evict` before the
-   block sets them). Cost: about 3% more cycles on bench/cpuish (instance checks in
-   `exec`/`notify`). Left: the branches of one fork each get their own copy of the fork
-   block's automatic variables (the standard shares one between them), real subroutine
-   calls (also for recursion from a fork branch [recursive_task]), dynamic waiters for
-   run-time targets. VPI (A4) on the same base.
-3. **sv-tests, invalid code** (`SV_TESTS.md`: 412 tests that must fail are accepted). The
-   checks that reject what the standard forbids, largest families first. Done 2026-11-20:
-   conflicting non-ANSI port declarations (modules and subroutines: one port and one data
-   declaration, a typed port declaration is complete, equal ranges), enum base types and
-   enum assignment compatibility (`enums.rs`: an enum is its constant list plus the scope
-   declaring the constants; checked in assignments, initializers, returns and arguments;
-   any explicit cast passes, since `$__cast` keeps no target type); automatic variables
-   (no nonblocking writes, procedural continuous assignments or `$monitor`/`$strobe`
-   arguments; checked where a subroutine is compiled); constant part-select
-   bounds (`is_const_expr`), constant selects in continuous assignment and force targets,
-   no real index or real concatenation operand; preprocessor checks (`line and `pragma
-   arguments, macro argument counts, unterminated strings in macro text, directive names as
-   macros); `local`/`protected` class members (`ClassDecl::hidden`); procedural
-   assignments to nets, a variable driven whole by a continuous assignment and by anything
-   else (bits driven by separate assignments stay legal): 4511 of 5112. Specparams in
-   parameter values and generate conditions, specparams and specify blocks in generate
-   blocks, element types of queues/dynamic arrays assigned to each other (2-/4-state,
-   signedness, enum), end labels that do not match the name: 4529 of 5112. Defparams of
-   missing or local parameters, zero replications outside a concatenation and zero-width
-   concatenations, `==?`/`!=?` with real or string operands, `return v` in a task or void
-   function, `timeunit` in a generate block, inout ports that are variables, enum values
-   (duplicates, x/z in a 2-state enum, sized values of another width): 4549 of 5112.
-   Subroutines that are never called are compiled once at the end (in a throwaway
-   process, its code and signals dropped), so their errors are reported; class methods
-   are not yet. With it, a constant array index with x bits reads x (was an error): 4552 of 5112.
-   Unpacked arrays assigned to each other need equivalent element types: 4554 of 5112.
-   Wildcard imports in a module (`WildCheck` in the lowering): a name used through two of
-   them is an error, as is a module declaration of a name after a use imported it (calls
-   and generate blocks are not checked): 4556 of 5112.
-   Two declarations of one name in a class: 4557 of 5112. Nets of class, dynamic array
-   or queue type, negative replication counts, port connections mixing order and name,
-   generate loops over a non-genvar or the genvar of an enclosing loop, real types with
-   packed dimensions, a packed `[0]`, enum values that do not fit the base type: 4570 of 5112.
-   Non-ANSI ports without a direction declaration, default values of inout ports, nested
-   generate regions, parallel paths between terminals of different widths: 4573 of 5112.
-   `` `resetall `` inside a design element (now its own directive, which also resets the
-   default net type and unconnected drive), fork-join/join_any in a function, bit selects
-   and edges of reals, indexed part-selects of width 0: 4577 of 5112.
-   Static class methods, UDP instances with three or more delays, events as subroutine
-   arguments, a named generate or statement block whose name is taken in its scope: 4583
-   of 5112. Packed dimensions after integer atom and real types, and `` `resetall `` in a
-   design element, rejected by the parser (the sv-tests of these only parse): 4587 of 5112.
-   A select of a bit select, `$signed`/`$unsigned` of a real, an assignment pattern for
-   a scalar: 4590 of 5112. Left (16): reference behaviour or options the runner does not
-   pass (`[n]` packed dimensions, `-gspecify`), `input x[2:0]` (legal in SV), `var` in
-   a for initialization, and harder ones: strengths on assignments to variables, a port
-   listed twice, gate array terminal widths, an automatic variable in an intra-assignment
-   event, `$bits` of a real, typedefs that are never resolved or use undeclared names.
-   Left among the accepted invalid tests: `var` in a for
-   initialization (legal in 1800-2017, kept). Left: errors in
-   class methods that are never called, the rest of the ACCEPT list
-   in `target/svtests-baseline.res`. Interleave with the other steps.
-4. **The rest of classes and SV testbench data** (regression-suite SV list: 56 compile
-   errors, 22 wrong outputs at ba4fb93; array properties, arrays of handles, forward
-   `typedef class`, static methods, array arguments, string parameters and static
-   variables in subroutine blocks, class members through hierarchical names, functions
-   returning handles, `extends P::B`, `this.super` done 2026-11-19): class handle ports, struct members through
-   hierarchical names (`inst.v.f`); `static` variables at the top level of an automatic
-   subroutine; deferred assertions [sv_deferred_*]. Array manipulation methods
-   of queues and dynamic arrays done 2026-11-20 (`compile/arrmeth.rs`: reductions and
-   locators as loops in the process's code, the `with` iterator a variable of the element
-   type in a scope of its own; `sort`/`rsort` (also `with`), `reverse`, `shuffle` as
-   `HeapOp::Order`): 4610 of 5112 sv-tests. One-dimensional fixed-size arrays too (through
-   a temporary queue), with assignments between them and queues or dynamic arrays (a size
-   mismatch is an error at run time). Members of struct elements of queues and dynamic
-   arrays (`q[i].f`, `item.f`; `sigs.elem_layout`) and writes to a part of an element
-   (read, changed in a scratch variable, written back). Left: methods of associative,
-   multi-dimensional and struct arrays; queues of structs as class properties.
-   Parameterized classes done 2026-11-20: value and type parameter ports (`ClassDecl::
-   params`), each use with values a specialization item (`Item::ClassSpec`, named `C#<n>`
-   by the lowering, in the module, package or class using it) that the compiler evaluates
-   where it is used and declares as a class of its own (equal values: one class); type
-   parameters as for modules (also for subroutine arguments and results, which were wrong
-   before in modules too); `C #(..)::x`, `C #(..)::new`, `extends B #(..)`, typedefs of
-   specializations, forward-declared ones, a class's own name inside it meaning the
-   current specialization: 4623 of 5112 sv-tests. `mailbox #(T)` and `semaphore`
-   (2026-11-20): the package `std` in SystemVerilog (`front/src/std.sv`), parsed first
-   where the sources name them and imported into every compilation unit; `wait` on a
-   condition that reads objects wakes on every property write (`Program::obj_sig`; before,
-   it never woke): 4625. `C #(..)::f()` as a statement, a class's typedefs through a
-   specialization (`C #(3)::T`, its parameters those of the specialization), `%p`
-   (assignment patterns of queues, dynamic and fixed-size arrays; values as their
-   elements) also done. Left: static properties of
-   parameterized classes, body `parameter type` items, an untyped `mailbox`, `process`,
-   `%p` of unpacked structs, associative arrays and class handles, a class's own
-   specialization inside it naming a class other than itself (`this_type`), arguments
-   that use names of a generate block or subroutine (evaluated in the module). UVM now
-   stops at `TYPE::name` through a type parameter in a macro.
-   Constraints and `randomize()` done 2026-11-20 (`front/lower/constraint.rs`,
-   `compile/random.rs`): `rand` properties, constraint blocks (relations, `inside`, `dist`,
-   implication, if-else, `foreach` over fixed-size arrays, `unique`, soft, inheritance and
-   overriding by name), `obj.randomize()` (virtual: the object's class), `randomize(v)`,
-   `with {...}` (`local::`), `std::randomize`, pre/post_randomize, and `randcase` (an
-   expansion in the lowering). The solver works at the call: values in a dependency order
-   from simple rules, then a check of all constraints, retried; without a solution the
-   values stay, 0 and a warning. `--elab-only` elaborates sources without a top-level
-   module (their packages and file scope): 4660 of 5112. Left: `randc`, `rand_mode`,
-   `constraint_mode`, extern/pure constraints, `disable soft`, rand dynamic arrays and
-   real/string/class rand properties, `randomize(null)`, `randsequence` (12 sv-tests).
-   From sv-tests (`SV_TESTS.md` priorities 7-11, by tests won): concurrent assertions, `sequence`,
-   `property`, `expect` and clocking blocks (58, used by ariane); the rest of constraints, `randomize`, `randsequence`, `randcase`,
-   `$dist_*` (51); then interface classes (21), streaming concatenation (14), extern
-   methods (12), tagged unions (10), assignment in an expression (8), the `process` class,
-   `$cast`/`$typename`, pure methods, replication in assignment patterns.
-5. **The rest of R4**: the compiler reads the syntax tree's types and the old AST shrinks;
-   positional assignment patterns for packed array parameters [sv_ap_parray2] and
-   index keys in patterns of packed arrays done 2026-11-20. Slice 5 (2026-11-20):
-   a parameter has one declared type (`ParamDecl::ty`, None: the value's type; `range()`,
-   `integer()`, `real()` derived from it) instead of a flat form beside an optional type;
-   with it, values of 2-state parameter types lose x/z bits, `int unsigned` parameters
-   are unsigned and scalar `bit`/`logic` parameters are one bit wide (were the value's
-   type). Next candidate: `Decl`'s flat form (`kind`/`signed`/`range`/`packed` beside `ty`,
-   which the non-ANSI port merging reads).
-6. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
-   needs it. (The former step "remaining regression failures" was dropped 2026-11-25 with
-   the regression suite as a target.)
-7. **Debug front ends**: report the Surfer bugs upstream; MCP over streamable HTTP (attach to
-   a running simulation), MCP history queries on the CDSP value history, MCP resources; CDSP
-   arrays (per-element items for small memories; memories with `depth`/`zero_at`), port
-   directions (`input`/`output` are false; needs direction in `SignalInfo`), `src` from
-   declaration locations, diagnostics (`$display`/`$write` → `print`, `$finish`/`$stop` →
-   `break`, assertions → `assert`; kept in the history, `until_diagnostics`). Interactive
-   mode: watch, conditional
-   breakpoints, waveform history, scopes.
-8. **Performance** (in parallel, when speed matters again):
-   - `notify` (largest item): per change it follows `parent` (array elements), checks the
-     dirty list, sets one comb bit per combinational reader with a `comb_wake` call each, then
-     scans the event fan-out (edge check from the value's LSB) and sorts `wake_buf` when more
-     than one waiter wakes. Ideas: per-signal flags precomputed at build time (no event
-     fan-out / only combinational readers / no parent) so the common case is one bit loop;
-     set comb bits of small fan-outs directly in JIT code; skip the sort when waiters are
-     already in `wseq` order.
-   - Timing wheel for `Sim::future`, and reuse the `Vec<Fut>` of a finished time slot instead
-     of allocating one per slot (`BTreeMap::entry().or_default()`).
-   - Wide (>64-bit) ops that still leave the JIT (`FX_GENSTATS=1` counts them).
-   - Nets with several drivers resolved inline at the driver's store (as the reference does)
-     instead of by a process in the settle; saves activations.
-   - `advance_steps` per-step bookkeeping (dirty list, postponed, NBA swap): `perf annotate`
-     before changing it.
-   - Ports connected to part selects as aliases, fusing sibling processes with the same
-     inputs, signal values cached in registers within an activation, an optional 2-state
-     shadow for signals proven never to hold X.
-   - Multi-threading (M8, A5) last.
-   - The instance checks of A3 in `exec`/`notify` (about 3 % on cpuish): a per-process flag
-     or a separate entry point could remove them for processes that are never instanced.
-9. **Outputs**: FST, VCD of arrays, `$dumpvars` scope/level arguments, `$dumplimit`,
-   `$dumpports`.
-10. **Verilog-2005 rest**: VPI/PLI, configurations and libraries (`config`, `-y`/`-v`,
-    `` `uselib ``), timing checks, SDF back-annotation, see Unsupported.
-
-### Restructuring for maintainability (review 2026-11-15, done)
-
-The review found SystemVerilog slow to add because the parser did semantics (types, struct
-layouts, patterns, enum methods in `svtypes.rs`, a 24-field symbol table in `Parser`), the AST
-encoded SV as `$__` pseudo calls, keywords were strings, and `compile/lib.rs` was one
-3500-line `Compiler` that typed expressions with `ty`/`is_real`/`is_string`/`lvalue_ty`.
-Each step ended with all tests in all three modes and no regression-suite test worse.
-
-- **R0** (2026-11-15): `--dump-ast`, parser snapshot tests, per-test regression baseline.
-- **R1/R2, F1-F6** (2026-11-15): a complete IEEE 1800-2017 parser (`front/src/syntax/`: a
-  `Kw` enum with soft SV keywords, a syntax tree of what the source says, recursive descent
-  whose only state is the scoped sets of type names) and a lowering to the AST
-  (`front/src/lower/`); the old parser is gone. `--parse-only`/`--dump-syntax`;
-  `tests/parsecheck.py` over sv-tests (896 of 914 that must parse; the rest are
-  preprocessor gaps: `` `undefineall``, predefined `` `SV_COV_*``, include names from
-  macros; 92 need UVM), the regression suite, `tests/` and real designs, baseline
-  `target/parsecheck-baseline.res`. Rules in CLAUDE.md ("Front end"). Left: dialect-dependent
-  keyword sets (`begin_keywords`, `-g2005`) as their own step with a regression check.
-- **R3** (2026-11-15): modules, packages and `$unit` keep only their own items; names come
-  from the imported scopes. Left: a named import (`import p::X`) or a reference `p::Y` makes
-  all of `p` visible, not only that name.
-- **R4** (types in the compiler, = A1): slices 1-4 done 2026-11-18:
-  1. `types.rs`: a `Type` per signal (`sigs.types`, every signal through `push_signal`) and
-     one `type_of(expr)` replacing `ty`, `is_real`, `is_string`, `lvalue_ty`, `VTy`.
-  2. Declarations, parameters and function results keep their data type (`Decl::ty`,
-     `ParamDecl::ty`, `SubroutineDecl::ret_ty`); `Expr::Member`/`Expr::Pattern`; each typed
-     signal gets a `Packed` layout (`sigs.layout`), member chains become a part select of
-     the flat storage in `md_norm`, patterns are resolved against the target's layout
-     (assignments, declarations, parameters, `return`, arguments, `T'{...}`). Members of
-     type-parameter variables work.
-  3. Unpacked structs stored flat with `real`/`string` members at their offsets; a packed
-     struct with a non-integral member is an error (7.2.1).
-  4. Queues and dynamic arrays (`Type::Dyn`, `compile/heap.rs`, `Instr::Heap`; each
-     variable owns its object, copies on assignment, `Touch` for change events),
-     associative arrays (`Instr::Assoc`), bounded queues with the reference's run-time
-     warnings (`-pfileline=1`, `Program::locs`).
-  Left: see Next steps 5 and "Unsupported (known)".
-- **R5** (2026-11-15): `elab/{hier,params,decls,items,nets,udp,specify}.rs` and
-  `codegen.rs`; `lib.rs` keeps state, scopes, lookup and constant evaluation; fields grouped
-  in `hier`, `diag`, `code`, `subr`, `nets`, `sigs`.
-- **R6** (spans on `Expr`/`Stmt` instead of `self.line`): lines on AST expressions and a
-  scoped current location in the compiler done 2026-11-20 (see Next steps); the rest of R4
-  (the compiler reading the syntax tree) keeps the tree's `Loc`s.
-
-### Architecture changes ahead (review 2026-11-14)
-
-**Fits as is.** Wide JIT ops, timing wheel (`future` is a `BTreeMap` behind a few calls),
-part-select port aliases, strength values (per-bit strength data next to the value, only on
-nets with resolve processes / tran islands; the value encoding stays), FST, `$dumpvars`
-arguments, CDSP/MCP history and breakpoints between time steps, the remaining Verilog-2005
-gaps.
-
-**A1. Types in elaboration** (= R4). *Done in its main part (2026-11-18)*: `Type` in the
-compiler (vector, real, string, queue/darray/assoc, class) with `type_of(expr)`; struct
-layouts and patterns in elaboration. Left: the compiler reading the syntax tree, spans.
-
-**A2. Heap objects.** *Done (2026-11-18/19)*: strings (interned texts), queues, dynamic and
-associative arrays and class objects are handles in the flat memory (0: empty / `null`) with
-generic-path operations. Nothing is ever freed (strings, objects); reclaiming needs reference
-counts or a collector when a testbench makes that matter.
-
-**A3. Dynamic processes, calls and waiters.** (Process instances done 2026-11-19, see Next
-steps 1.) Before: a process was a fixed `ProcDef` with one `ProcRt`, fork branches were fixed
-processes that got restarted (hence fork/join_none in a loop); still: automatic storage is per
-call site, functions are inlined (recursion copies frames),
-and fan-out is a fixed range of `(proc, ctl)` entries. Classes, fork in a loop, VPI callbacks
-and MCP conditional breakpoints all need:
-- process instances created at run time from a `ProcDef` template, with their own frame for
-  automatic storage: an instance is a new JIT table (`ProcFn(sim, mem, pc, table, hot)`), no
-  recompilation (*done* for fork branches);
-- real subroutine calls (methods through a handle, virtual dispatch); also usable for large
-  functions called from many places instead of inlining them everywhere;
-- dynamic waiters: a per-signal list next to the static fan-out, for waits whose target is
-  only known at run time (`@(obj.ev)`, `vif.clk`, `cbValueChange`, breakpoint conditions).
-  The static path stays the fast path; a per-signal flag says the list is non-empty.
-
-**A4. VPI** (cocotb): handle tree from the hierarchy model (as for CDSP), get/put value
-through the force-mask path, value-change callbacks as dynamic waiters (A3), region hooks in
-the scheduler (ReadWriteSynch / ReadOnlySynch) and an `AfterDelay` entry in the future queue.
-
-**A5. Multi-threading costs more than M8 suggests.** Absolute shared scratch slots, one NBA
-queue in `Hot`, one wake buffer, and exact event order to match. Needs per-thread scratch (a
-base pointer in the JIT ABI), per-thread NBA queues merged in a fixed order, parallel work
-only for processes without system tasks. Pays off only on large designs.
-
-**CDSP later.** Phase 2 history (CXXRTL's approach): periodic checkpoints of the whole state
-(`mem`, process states, queues, NBA buffer, RNG; file handles muted) and deterministic
-re-simulation from the nearest checkpoint. Setting values (when the spec adds it: force-like
-writes through the force mask), breakpoints on signal conditions, scope/item attributes
-(`(* ... *)` are dropped by the lexer today), a VCD/FST import mode as a read-only server.
-Upstream proposals: a four-state value encoding (value + unknown planes, e.g. a
-`base64(u32,4state)` feature) in CDSP and in Surfer's decoder; incremental `query_interval`;
-a configurable run step instead of the fixed 100 ns.
-
-**Open questions.** How large a CDSP history is useful by default (it is re-sent at every
-pause), and whether to expose x/z before the spec defines it. MCP: one server per design or
-several sessions; breakpoint conditions likely compiled by the normal expression compiler to a
-small process that wakes on the signals; how to present large memories.
-
-**Watch.** Elaboration and codegen run per instance (only the JIT shares code between
-instances); measure compile time and memory on a large netlist before assuming it scales.
+## Debug front ends (reference)
+- **CDSP** (https://cxxrtl.org/protocol.html, v0.14.0): NUL-terminated JSON over TCP/Unix
+  sockets; `cdsp.rs` runs the simulation in chunks of 10-40 ms and checks commands between
+  time steps; history in `rt/history.rs` (one change log, budget `FX_HISTORY_MB`). Values are
+  two-state in the protocol (x→1, z→0).
+- **Surfer as client**: needs all scopes in one `list_scopes`, answers strictly in order,
+  re-queries `[0, latest]` after every status change. Surfer 0.7.0 shows no live waves
+  because of two bugs (stale `cached_time_range`, `signal_id` not implemented for CXXRTL),
+  fixed locally in `/projects/surfer`, to report upstream.
+- **MCP** (`--mcp`, JSON-RPC 2.0 over stdio): load, lint, run, step, values, force/release,
+  watch, breakpoints, trace; results small and bounded, errors with locations.
 
 ## Differences from Icarus (the former reference)
-
-Notes from the time ferrooxide matched Icarus: orders IEEE leaves open and other known
-differences (Icarus deviations from the standard that we copied are in `DEVIATIONS.md`):
-- On a change, a ranked combinational process (`always_comb`, `always @*`) runs before the
-  other waiters of the signal; the reference wakes it among them (newest waiter first).
-- The reference propagates some net updates immediately, inside the writing process
-  (`a = 1; $display(z)` shows the new value). Here only for `assign z = a`-style aliases (see
-  Verilog notes); nets with several drivers, `wand`/`tri1`, strength drivers and
-  `assign z = m[i]` with a run-time index update in the combinational settle (immediately
-  there). Not immediate there either: logic (`a & b`), part selects, widening.
-- A genvar in a port expression is sized differently (`8'd10 + g` to an 8-bit port: "given 5
-  bits, padding" there, "given 32, pruning" here).
-- The VCD is not byte-identical: the reference orders variables by kind (events, nets, regs,
-  integers, reals), gives a port and the net it is connected to separate codes and names nets
-  `wire`; here one code, and an output port collapsed onto a variable is `reg`.
-- Beyond the reference: named and `default:` assignment patterns. Like the reference,
-  overlapping `unique` case/if items are not reported.
-- At time 0 the reference lets `always @(n)` see the first value of a net driven by an
-  operator (`assign n = d <<< 2;`: an x event) but not of one driven through a part select;
-  here continuous assignments settle before other processes wait [pr1002a].
-- Two processes woken by delays scheduled in the same time step and then waiting on the
-  same edge (tasks called hierarchically) run in another order than in the reference
-  [pr2001162].
-- An event-controlled NBA (`x <= @(e) v`) updates in the NBA region after the event, as the
-  standard says; the reference updates at the trigger (DEVIATIONS 3) [nb_ec_multi_ev].
-- An unpacked array assigned from, or passed as an argument for, an array of the opposite
-  direction (`byte z[1:3] = o[3:1]`): elements pair from the left (`z[1] = o[3]`) as 7.6
-  says; the reference pairs the lowest indexes (`z[1] = o[1]`).
+- A ranked combinational process runs before the other waiters of a change.
+- Some net updates are immediate in Icarus; here only `assign z = a`-style aliases.
+- An event-controlled NBA (`x <= @(e) v`) updates after the event, as the standard says.
+- Unpacked arrays of opposite directions pair from the left (7.6).
+- The VCD is not byte-identical (variable order, port codes, net kinds).
 
 ## Unsupported (known)
+Kept up to date as features stop short.
 
-Kept up to date as features stop short; regression-suite test names in brackets.
-
-SystemVerilog data types and testbench features:
-- `process` (done 2026-11-25: `self`, `status`, `kill`, `await`): `suspend`/`resume`
-  (need the scheduler to hold back a suspended process's wake-ups), `srandom`/
-  `get_randstate`/`set_randstate`; enum methods of a call's result (`p.status().name()`);
+SystemVerilog data and testbench:
+- `ref` arguments are copied in and out; calls where that differs from a reference are
+  rejected (a task with ref arguments that can wait, a ref argument whose variable the
+  subroutine also names) [sv-tests chapter-7/queues/persistence]. Needs A3.
+- `process`: `suspend`/`resume`, `srandom`/`get_randstate`/`set_randstate`;
   `process::self().kill();` as a statement.
-- unpacked array members of unpacked structs (2026-11-25) are laid out as packed arrays of
-  their elements: `$size` & co. and `%p` see a packed array; real, string and unpacked
-  struct elements are not supported. Type keys in patterns of unpacked arrays; a type key
-  does not tell `int` from `integer` members (`Packed` has no 2-state flag).
-- `ref` arguments are copied in and out (as `inout`); calls where that differs from a
-  reference are rejected: a task with ref arguments that can wait, a ref argument whose
-  variable the subroutine also names [sv-tests chapter-7/queues/persistence]. A real
-  reference needs subroutines that are not inlined (A3).
-- queues of structs as class properties (members of their elements), arrays of queues,
-  queue ports, `%p` of unpacked structs and associative arrays,
-  array methods of associative, multi-dimensional and struct arrays, assignments between
-  multi-dimensional and dynamic arrays, queue element writes with `<=` (done at once), keyed patterns for associative
-  arrays, class or wider keys (see R4 slice 4).
-- classes (first part done 2026-11-18: properties, constructors, methods inlined with
-  `this`, `extends`/`super`, virtual dispatch, file-scope and package classes, static
-  properties (2026-11-19: a variable `C$p` beside the class), parameters, typedefs and enums
-  in classes (constants in the class's scope, `C::P`, `obj.P`, `C::T`); objects never
-  freed). Typed constructor calls `C::new(args)` (2026-11-19). Queue, dynamic and
-  associative array properties (2026-11-19: the handle is read into a temporary, changed and
-  written back; shallow copies copy them). Arrays of handles (variables: an array of 64-bit
-  words typed `Class`) and fixed-size array properties (stored flat in the object,
-  `ObjOp::GetAt`/`SetAt` with a flat index), queues, dynamic and associative arrays of
-  handles (`Elem::class`), forward `typedef class`, static methods (`C::f()`,
-  `Expr::StaticCall`; called without an object), functions returning handles (`c = f()`,
-  `f().p`), a base class from a package (`extends P::B`; the compiler finds `P::B` in the
-  package's scope), `this.super` (2026-11-19). Left: members of a call to a function
-  declared after the use or in a package (`P::f().p`), a class in a package that refers to
-  file-scope names [sv_ps_type_class1], enum methods on an enum
-  property from outside the class, the rest of parameterized classes (Next steps 4), a
-  base class declared after the
-  class (forward typedef), whole array properties (assignments, selects of an element,
-  arrays of queues), `foreach` and array queries of properties through a handle (`foreach
-  (obj.a[i])`), class handle ports, string methods on properties, NBAs to properties,
-  `void'(obj.f())`, pure/extern methods, randomize, interface classes.
-- programs: processes run in the Active region, not the Reactive one (as the reference,
-  which warns about assignments to module variables), no implicit `$finish` when all
-  program `initial` blocks end, no `program` limits on what a module may reference.
-- `static` variables at the top level of an automatic function or task (in its blocks they
-  work since 2026-11-19: `Subr::static_vars`), static queues in subroutine blocks;
-  multi-dimensional arrays in subroutines (arguments and variables), array
-  arguments of recursive calls.
-- structs: members through hierarchical names (`inst.v.f`), unpacked array members, member
-  defaults, method calls on members (`s.name.len()`), `%p` of a whole struct; unpacked array slices with
-  run-time bounds, comparisons of whole unpacked arrays (`a == b`); `$is_signed` [struct_signed,
-  struct_member_signed].
-- nested modules with ports instantiated from outside their module; multi-dimensional
-  interface port arrays; modport directions are not enforced (writing an input of a modport, members not
-  listed in it) [sv_interface_port_*restrict_fail, *_write_fail, *unlisted_member_fail];
-  a forward typedef defined in another scope than its declaration.
-- assignments to properties of a package's class handle (`P::c.x = 1`); `import` in a
-  block of a package that exports names, and in subroutines.
-- `.triggered` only on events declared in a module (not in tasks, functions or blocks).
-- `iff` only when every item of an event control has the same condition, and only in an
-  event control before a statement (not in intra-assignment controls).
-- nets of 2-state types (`wire bit`, `wire int`; a reference extension, 6.7.1 allows only
-  4-state types) [implicit_cast4-13, br_gh337].
-- deferred assertions: a deferred assertion run several times in one activation (a loop)
-  reports only the last outcome; the reference does not support them, its tests
-  [sv_deferred_assert*] hold its "sorry" messages. Of concurrent
-  assertions (see Next steps): assertions inside procedures (clock inferred from the
-  procedure), local variables of sequences and properties, match items, `first_match`,
-  `nexttime`/`always`/`eventually`/`until`/`accept_on` & co., `#-#`/`#=#`, `case`
-  properties, strong sequences, several clocks, `.triggered`/`.matched` of sequences,
-  `expect`, global clocking and the `_gclk` functions, clocking blocks with clocking
-  signals; `edge` event controls [edge]; casts to a real type (`real'(x)`)
-  [cast_real]; a compound assignment or increment whose target index has an
-  increment (`x[i++] += 2`) [pr3390385, pr3390385c, pr3462145].
-- unsized constants inside concatenations (`{a - 1}`) are accepted; the standard forbids
-  them and the reference reports an error.
-- `unique` case/if: overlapping items are not reported (only "no item matches", as the
-  reference); `foreach` over hierarchical names or class/queue members; `inside` with
-  unpacked arrays as set items.
-- `string` (first version, 2026-11-14): no reclaiming of strings (every distinct text made at
-  run time stays in the table: a testbench building millions of different strings grows);
-  string parameters (2026-11-19) hold their text as a vector constant, typed `string`
-  (`Scope::string_params`); constant comparisons of them are evaluated in the compiler
-  (`const_str_cmp`), other string operations on them only at run time; implicit string ->
-  vector assignment is
-  accepted (the reference rejects it); bytes of a `string` variable that are not UTF-8
-  print as U+FFFD (those of vectors, `%c` and `%u`/`%z` print as the bytes, 2026-11-19); `%v` in
-  `$sformatf` [sformatf].
+- unpacked array members of unpacked structs are laid out as packed arrays of their
+  elements (`$size` & co. and `%p` see a packed array); real, string and unpacked-struct
+  elements; member defaults; members through hierarchical names (`inst.v.f`); type keys in
+  patterns of unpacked arrays.
+- queues of structs as class properties, arrays of queues, queue ports, `%p` of unpacked
+  structs, associative arrays and class handles, array methods of associative,
+  multi-dimensional and struct arrays, keyed patterns for associative arrays, class or wider
+  keys, queue element writes with `<=` (done at once).
+- classes: static properties of parameterized classes, body `parameter type` items, an
+  untyped `mailbox`, `this_type`-style self specializations, members of `P::f().p`, enum
+  methods on an enum property from outside the class, whole array properties, class handle
+  ports, NBAs to properties, interface classes, `randc`, `rand_mode`, `constraint_mode`,
+  extern/pure constraints, `disable soft`, rand dynamic arrays and real/string/class rand
+  properties, `randomize(null)`, `randsequence`, `$dist_*`/`$q_*`.
+- programs run in the Active region; no implicit `$finish` when all program blocks end.
+- `static` variables at the top level of an automatic subroutine; multi-dimensional arrays as
+  subroutine arguments; array arguments of recursive calls.
+- whole unpacked array comparisons (`a == b`), slices with run-time bounds, `$is_signed`.
+- nested modules with ports instantiated from outside; multi-dimensional interface port
+  arrays; modport directions are not enforced.
+- assignments to properties of a package's class handle (`P::c.x = 1`); `import` in
+  subroutines and in blocks of a package that exports names.
+- `.triggered` only on events declared in a module; `iff` only on a whole event control.
+- nets of 2-state types (`wire int`).
+- assertions: inside procedures, local variables of sequences and properties, match items,
+  `first_match`, `nexttime`/`always`/`eventually`/`until`/`accept_on` & co., `#-#`/`#=#`,
+  `case` properties, strong sequences, several clocks, `.triggered`/`.matched` of sequences,
+  `expect`, global clocking, clocking blocks with clocking signals; a deferred assertion run
+  several times in one activation reports only the last outcome.
+- tagged unions, `matches`, assignments in expressions, `edge` event controls, casts to real
+  (`real'(x)`), DPI, `x[i++] += 2`.
+- strings are never reclaimed; non-UTF-8 bytes of a `string` print as U+FFFD; `%v` in
+  `$sformatf`.
 
 Verilog / scheduling:
 - nets with several drivers, `wand`/`tri1`, strength drivers and `assign z = m[i]` update in
-  the combinational settle, the reference updates them immediately (see Differences).
-- `~`/`buf` of a never-driven input gives x, the reference z (DEVIATIONS 8) [sv_unit1c].
-- strength values on nets (`%v`, strength reduction through switches, `trireg` charge),
-  `$countdrivers`, `$fread`, `$ferror`, specify paths on inout ports and conditional paths, timing
-  checks, SDF, force on array elements.
-- compiler warnings the reference prints: port coercion to inout, constant out-of-range
-  selects, `@*` without sensitivities.
-- `$dist_*` and `$q_*` system functions.
-- `$value$plusargs` prints no warning for an invalid value or extra characters after a real
-  (the value is still what the reference gives); `$sscanf` conversions differ in details
-  (x/z digits, `%t`, reals, a conversion that fails part way) [scanf4].
-- hierarchical names of variables in a named block of a later process (`always @(blk.x)`
-  before `initial begin : blk`; the block's variables are made when its code is
-  generated) [sv_var_init2].
-- `` `line `` sets `` `__LINE__ `` / `` `__FILE__ `` only; messages keep the physical location.
-- a source file that is not UTF-8 is read as Latin-1: a byte above 127 in one of its
-  string literals becomes two bytes (its character in UTF-8); the reference keeps the byte.
-- a second `$dumpvars` does not print "ignoring signals in previously scanned scope";
-  `$dumpvars` scope/level arguments; `$dumplimit`, `$dumpports`; FST; VCD of arrays.
-- multi-dimensional arrays as ports and in whole-array assignments, array ports connected
-  to arrays of another shape (index range, direction), assignment patterns for unpacked
-  arrays, a timing control in a whole-array assignment; VPI (A4); configurations and libraries (`config`, `-y`/`-v`,
-  `` `uselib ``).
-- recursion copies frames (fine for testbench code, slow for deep recursion).
-- inout port expressions; port expressions are connected through a continuous assignment,
-  not collapsed as the reference does (an extra delta step between the port and the signal).
-- interactive/MCP `force` of a net made an alias of its source (`assign z = a`) forces the
-  source.
+  the combinational settle.
+- strength values on nets (`%v`, `trireg`), `$countdrivers`, `$fread`, `$ferror`, specify
+  paths on inout ports and conditional paths, timing checks, SDF, force on array elements.
+- `$sscanf` details (x/z digits, `%t`, reals, partial failures); `$value$plusargs` warnings.
+- hierarchical names of variables in a named block of a later process.
+- `` `line `` only sets `` `__LINE__ `` / `` `__FILE__ ``.
+- `$dumpvars` scope/level arguments, `$dumplimit`, `$dumpports`, FST, VCD of arrays.
+- multi-dimensional arrays as ports and in whole-array assignments, array ports of another
+  shape, a timing control in a whole-array assignment; VPI; configurations and libraries.
+- recursion copies frames (slow for deep recursion).
+- inout port expressions; port expressions add a delta step.
+- interactive/MCP `force` of an aliased net (`assign z = a`) forces the source.

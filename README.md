@@ -81,19 +81,21 @@ Verilog-2005 plus common SystemVerilog:
 - SystemVerilog testbench features: interfaces and modports, `program`, `string`, queues
   (also bounded), dynamic and associative arrays, unpacked structs, classes (properties,
   also arrays and queues, constructors, methods, `extends`/`super`, virtual methods,
-  static properties and methods, forward `typedef class`), arrays and queues of class
-  handles, parameterized classes, constraints and `randomize()`, mailboxes and semaphores,
-  array methods (`sort`, `find`, `sum`, ...), `string` parameters, `fork`
-  in loops with `automatic` variables, `wait fork`, immediate assertions, `inside`,
-  `foreach`, `unique`/`priority`
+  static properties and methods, extern and pure virtual methods, forward `typedef class`,
+  static members through type parameters), arrays and queues of class handles,
+  parameterized classes, constraints and `randomize()`, mailboxes, semaphores and
+  `std::process` (`self`, `status`, `kill`, `await`), array methods (`sort`, `find`, `sum`,
+  ...), `string` parameters, `chandle`, `ref` arguments, `fork` in loops with `automatic`
+  variables, `wait fork`, immediate assertions, `inside`, `foreach` (also over class members
+  and strings), `unique`/`priority`, assignment patterns with type keys and replication
 - concurrent assertions: `assert`/`assume`/`cover property`, `cover sequence`, sequence
   and property operators, named sequences and properties with arguments, default clocking,
   `disable iff`, `$past`/`$rose`/`$fell`/`$stable`/`$changed`/`$sampled`; deferred
   assertions (`assert #0`, `assert final`); elaboration system tasks; streaming
   concatenations (`{<<8{a, b}}`, also as assignment targets)
 
-Not yet: clocking blocks with clocking signals, concurrent assertions inside procedures,
-`%v` strength display, SDF, VPI.
+Not yet: interface classes, tagged unions, `randsequence`, clocking blocks with clocking
+signals, concurrent assertions inside procedures, DPI, `%v` strength display, SDF, VPI.
 The full list is "Unsupported (known)" in [PLAN.md](PLAN.md).
 [sv-tests](https://github.com/chipsalliance/sv-tests) pass at 93.1% (4758 of 5112, run as its
 ferrooxide runner runs them: `tests/svtests.py`).
@@ -235,6 +237,34 @@ tests/svtests.py          # chipsalliance sv-tests (in ~/projects/sv-tests or $S
 interpreter (`--no-jit`) and without process fusion (`--no-fuse`). A test is self-checking
 (prints `PASSED`) or is compared with a checked-in `<name>.expected`; expected behaviour comes
 from the standard. `tests/svtests.py` runs sv-tests and compares the results with a baseline.
+
+## How it is developed
+
+ferrooxide is written by an AI coding agent (Anthropic's Claude, working in Claude Code),
+directed by the author, who sets the goals, the priorities and the decisions between
+alternatives. The work follows an ordinary software development process rather than
+one-shot code generation:
+
+- **Plan**: [PLAN.md](PLAN.md) holds the goals, the architecture, what is done, a
+  prioritized list of next steps and the known gaps. It is updated as steps finish and
+  when priorities change.
+- **Architecture**: design decisions are written down before large features (the flat
+  value memory, JIT per process shape, handles for dynamic data, process instances), with
+  their costs and what they rule out.
+- **Work in small steps**: each feature or fix is a step that ends in a commit: code, a test
+  in the suite for each new behaviour (from the standard, never from another simulator), a
+  parser snapshot for new syntax, and the full test suite in all three execution modes.
+- **Review**: every step is checked against the regression measures before it is
+  committed: the own suite, the parser snapshots and the sv-tests baseline (no test may get
+  worse); benchmark cycles after changes to the scheduler or the JIT.
+- **Analyze**: failures are grouped by cause (sv-tests error tables, profiles, real designs)
+  to choose what to work on next by what it wins.
+- **Refactor**: when adding features gets slow, the structure is reviewed and rebuilt in
+  steps that change no behaviour (for example the separate IEEE 1800 parser and lowering,
+  types in the compiler, spans on expressions).
+- **Re-plan**: priorities change with what the measurements show and what the author
+  decides (for example dropping Icarus as the reference for behaviour in favour of the
+  standard and sv-tests).
 
 ## Structure
 
