@@ -95,7 +95,7 @@ Verilog-2005 plus common SystemVerilog:
 Not yet: clocking blocks with clocking signals, concurrent assertions inside procedures,
 `%v` strength display, SDF, VPI.
 The full list is "Unsupported (known)" in [PLAN.md](PLAN.md).
-[sv-tests](https://github.com/chipsalliance/sv-tests) pass at 92.4% (4725 of 5112, run as its
+[sv-tests](https://github.com/chipsalliance/sv-tests) pass at 92.7% (4740 of 5112, run as its
 ferrooxide runner runs them: `tests/svtests.py`).
 
 ## Usage

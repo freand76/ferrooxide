@@ -84,7 +84,7 @@ started (IEEE 1800 9.2.2.2.2).
 
 ## Status (2026-11-19)
 
-(2026-11-25: sv-tests 4725 of 5112; the regression-suite numbers below are the last ones,
+(2026-11-25: sv-tests 4740 of 5112; the regression-suite numbers below are the last ones,
 it is no longer run.) Regression suite (normal tests): main list 1405 of 1526 (92 %), SystemVerilog list
 (`--list regress-sv.list`) 650 of 701 (93 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
 to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
@@ -359,8 +359,15 @@ speed; the work is making sv-tests pass (`SV_TESTS.md` priorities, "Unsupported 
 Streaming concatenations of integral items done 2026-11-25 (`ExprKind::Stream`, as values
 and as targets, a constant or type slice size; a stream wider than its target is an
 error); left: streams of dynamic arrays and queues (sizes at run time) and `with` (3
-sv-tests). Next by sv-tests won: the remaining `…` expression errors (150, mostly UVM),
-interface classes (21), `$dist_*` (16), randsequence (12), extern methods (12), global
+sv-tests). Then (2026-11-25): macro argument defaults holding brackets (`RO=f()`), `p::T`
+inside package `p`, extern methods (prototype + `C::f` body after the class, merged in the
+lowering from the items that follow the class; defaults from either), pure virtual
+methods (an empty body), `T::f()` through a typedef parsed as a call, `foreach
+(a[i].m[j])` parsed: 4740 of 5112. UVM (about 150 sv-tests) now stops at `foreach` over
+a scoped or member array (`C::settings[i]`, `a[s].m[j]`): the lowering only knows plain
+array names; a `foreach` resolved in the compiler (with `type_of`) is the fix, and also
+`T::f()` through a type parameter (lowering: "this scoped task name"). Next by sv-tests
+won: that UVM chain, interface classes (21), `$dist_*` (16), randsequence (12), global
 clocking (11), tagged unions (10).
 
 **Next: R6** (decided 2026-11-20), before concurrent assertions and the other large
