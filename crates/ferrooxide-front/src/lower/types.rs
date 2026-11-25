@@ -575,11 +575,14 @@ impl Lower {
                         }
                         return Ok(Some(t));
                     }
-                    // `pkg::T`: the package's type becomes visible here
-                    let Some(p) = self.packages.get(&s.name).cloned() else { return Ok(None) };
-                    let Some(t) = p.types.get(&n.name) else { return Ok(None) };
-                    self.types.insert(n.name.clone(), t.clone());
-                    self.use_package(&s.name);
+                    // `pkg::T`: the package's type becomes visible here (inside `pkg` itself, its
+                    // own type, found below)
+                    if !self.pkg_ctx.as_ref().is_some_and(|c| c.name == s.name) {
+                        let Some(p) = self.packages.get(&s.name).cloned() else { return Ok(None) };
+                        let Some(t) = p.types.get(&n.name) else { return Ok(None) };
+                        self.types.insert(n.name.clone(), t.clone());
+                        self.use_package(&s.name);
+                    }
                 }
                 self.note_ref(&n.name);
                 if n.scopes.is_empty() {

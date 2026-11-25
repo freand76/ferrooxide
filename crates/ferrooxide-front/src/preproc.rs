@@ -208,12 +208,32 @@ impl Preprocessor {
                             i += 1;
                             let mut ps = Vec::new();
                             let mut cur = String::new();
-                            while i < s.len() && s[i] != ')' {
-                                if s[i] == ',' {
+                            // (a default may hold brackets and strings: `RO=f(a, b)`)
+                            let mut depth = 0;
+                            let mut in_str = false;
+                            while i < s.len() && (in_str || depth > 0 || s[i] != ')') {
+                                let c = s[i];
+                                if in_str {
+                                    if c == '\\' && i + 1 < s.len() {
+                                        cur.push(c);
+                                        i += 1;
+                                        cur.push(s[i]);
+                                        i += 1;
+                                        continue;
+                                    }
+                                    in_str = c != '"';
+                                } else if c == '"' {
+                                    in_str = true;
+                                } else if matches!(c, '(' | '[' | '{') {
+                                    depth += 1;
+                                } else if matches!(c, ')' | ']' | '}') {
+                                    depth -= 1;
+                                }
+                                if c == ',' && depth == 0 && !in_str {
                                     ps.push(cur.trim().to_string());
                                     cur.clear();
                                 } else {
-                                    cur.push(s[i]);
+                                    cur.push(c);
                                 }
                                 i += 1;
                             }

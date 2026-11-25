@@ -72,7 +72,7 @@ impl Parser {
             T::Ident(n) if self.is_type_name(n) => matches!(self.peek_at(1), T::Punct(")" | "," | "[" | "#" | "}")) || self.is_kw_at(1, Kw::Signed) || self.is_kw_at(1, Kw::Unsigned),
             T::Ident(n) if self.is_p_at(1, "::") => {
                 // `p::T` followed by the end of the argument
-                matches!(self.peek_at(2), T::Ident(t) if self.packages.get(n.as_str()).is_some_and(|p| p.contains(t.as_str())))
+                matches!(self.peek_at(2), T::Ident(t) if self.package_type(n, t))
                     && matches!(self.peek_at(3), T::Punct(")" | "," | "["))
             }
             _ => false,

@@ -211,6 +211,7 @@ impl Parser {
         let name = self.ident()?;
         self.expect_p(";")?;
         self.push_scope();
+        let outer = self.in_package.replace((name.clone(), self.scopes.len() - 1));
         let mut items = Vec::new();
         while !self.eat_kw(Kw::Endpackage) {
             if self.at_eof() {
@@ -218,6 +219,7 @@ impl Parser {
             }
             self.module_item(&mut items)?;
         }
+        self.in_package = outer;
         self.close_label(Some(&name))?;
         let types = self.pop_scope();
         self.packages.insert(name.clone(), types);

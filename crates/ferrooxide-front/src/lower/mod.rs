@@ -123,6 +123,8 @@ pub(crate) struct WildCheck {
 /// While lowering a package: what its `export` items need.
 #[derive(Default)]
 struct PkgCtx {
+    /// the package's name
+    name: String,
     /// `import p::n`: (p, n, the package declaring n)
     explicit: Vec<(String, String, String)>,
     /// `import p::*`
@@ -900,7 +902,7 @@ impl Lower {
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_tu = std::mem::take(&mut self.local_tu);
         let saved_scope = self.type_scope.replace(Default::default());
-        let saved_ctx = self.pkg_ctx.replace(PkgCtx::default());
+        let saved_ctx = self.pkg_ctx.replace(PkgCtx { name: name.clone(), ..Default::default() });
         let saved_classes = self.classes.clone();
         let saved_specs = std::mem::take(&mut self.specs);
         let mut own = Vec::new();

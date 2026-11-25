@@ -34,6 +34,8 @@ pub struct Parser {
     in_generate: u32,
     /// the label `l` of `l: begin`/`l: fork` (for the block's end label)
     block_label: Option<String>,
+    /// the package being parsed and the index of its scope (`p::T` inside `p`)
+    in_package: Option<(String, usize)>,
 }
 
 /// What a parser carries from one file to the next of the same compilation unit.
@@ -55,7 +57,7 @@ impl Parser {
             unit.insert(t.to_string());
             classes.entry(t.to_string()).or_default();
         }
-        Parser { toks, pos: 0, file, scopes: vec![unit], packages, classes, in_constraint: false, in_generate: 0, block_label: None }
+        Parser { toks, pos: 0, file, scopes: vec![unit], packages, classes, in_constraint: false, in_generate: 0, block_label: None, in_package: None }
     }
 
     pub fn into_state(mut self) -> UnitState {
@@ -224,6 +226,20 @@ impl Parser {
     pub(crate) fn is_type_name(&self, name: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(name))
     }
+    /// `p::t` names a type: one package `p` declares (also while `p` is being parsed).
+    pub(crate) fn package_type(&self, pkg: &str, t: &str) -> bool {
+        if let Some((n, k)) = &self.in_package {
+            if n == pkg {
+                return self.scopes.get(*k).is_some_and(|s| s.contains(t));
+            }
+        }
+        self.packages.get(pkg).is_some_and(|p| p.contains(t))
+    }
+    /// A package of that name is declared (or being parsed).
+    pub(crate) fn is_package(&self, pkg: &str) -> bool {
+        self.packages.contains_key(pkg) || self.in_package.as_ref().is_some_and(|(n, _)| n == pkg)
+    }
+
     /// `import p::*` / `import p::T`: the package's type names become visible.
     pub(crate) fn import_types(&mut self, pkg: &str, name: Option<&str>) {
         let Some(p) = self.packages.get(pkg) else { return };

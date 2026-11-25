@@ -138,8 +138,10 @@ impl Parser {
                 }
                 // `p::T`
                 if self.is_p_at(k + 1, "::") {
-                    if let (Some(p), T::Ident(t)) = (self.packages.get(n.as_str()), self.peek_at(k + 2)) {
-                        return p.contains(t.as_str()) && !self.is_p_at(k + 3, "'");
+                    if let T::Ident(t) = self.peek_at(k + 2) {
+                        if self.is_package(n) {
+                            return self.package_type(n, t) && !self.is_p_at(k + 3, "'");
+                        }
                     }
                 }
                 false
