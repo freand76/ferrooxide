@@ -525,7 +525,9 @@ impl Lower {
             t::ExprKind::Call { func, .. } => func,
             _ => e,
         };
-        matches!(&f.kind, t::ExprKind::Scoped(n) if n.scopes.len() == 1 && self.classes.contains_key(&n.scopes[0].name))
+        // (also of a class declared later, `typedef class C;`)
+        matches!(&f.kind, t::ExprKind::Scoped(n) if n.scopes.len() == 1 && (self.classes.contains_key(&n.scopes[0].name)
+            || (!self.packages.contains_key(&n.scopes[0].name) && self.types.get(&n.scopes[0].name).is_some_and(|t| t.class.is_some()))))
     }
 
     /// A call through a class handle (`obj.m(..)`, `this.m`, `super.new(..)`).

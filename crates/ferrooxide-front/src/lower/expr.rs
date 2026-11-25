@@ -408,6 +408,8 @@ impl Lower {
                     Some(v) => self.selects(ExprKind::Ident(v).into(), &ops),
                     // `P::v = ...`: a variable of a package
                     None if self.packages.contains_key(&n.scopes[0].name) => self.chain(b, &ops, true),
+                    // of a class declared later (`typedef class C;`)
+                    None if self.types.get(&n.scopes[0].name).is_some_and(|t| t.class.is_some()) => self.chain(b, &ops, true),
                     None => self.unsupported(*loc, "this assignment target"),
                 }
             }
@@ -703,6 +705,20 @@ impl Lower {
                     return self.unsupported(e.loc, "this scoped name");
                 }
                 let mut p = n.scopes[0].name.clone();
+                // a class declared later (`typedef class C;`, its body in the same scope, IEEE
+                // 1800-2017 8.27): `C::f(args)` a static method, `C::x` a static property
+                if !self.classes.contains_key(&p) && !self.packages.contains_key(&p) {
+                    if let Some(c) = self.types.get(&p).and_then(|t| t.class.clone()) {
+                        if let Some((Op::Call(a, _), rest)) = ops.split_first() {
+                            if !rest.is_empty() {
+                                return self.unsupported(e.loc, "a select of a call");
+                            }
+                            let args = self.call_args(a)?;
+                            return Ok(ExprKind::StaticCall(c, n.name.clone(), args).into());
+                        }
+                        return self.selects(ExprKind::Ident(format!("{c}${}", n.name)).into(), ops);
+                    }
+                }
                 // `P::v = x`, `P::v[i] = x`, `P::s.m = x`: a variable of package P
                 if lvalue {
                     let Some(mut pk) = self.packages.get(&p).cloned() else {
