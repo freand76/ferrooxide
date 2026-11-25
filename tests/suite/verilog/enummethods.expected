@@ -1,0 +1,10 @@
+[    AB] [AB]
+[RUN] [RUN] 4 0 0
+0 4 3
+[] x x
+[DONE] 0 3 0
+0: RED = 0, prev other
+1: GREEN = 5, prev   red
+2: BLUE = 6, prev other
+3: RED = 0, prev other
+last [    BLUE] [BLUE  ] next(3) 6

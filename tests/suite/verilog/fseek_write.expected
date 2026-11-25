@@ -1,0 +1,8 @@
+tell 0
+tell 10
+seek 0 tell 3
+tell 5
+seek 0 tell 9
+seek 0 tell 7
+tell 0
+abcXYfghij

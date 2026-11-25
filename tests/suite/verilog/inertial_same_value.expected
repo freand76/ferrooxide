@@ -1,0 +1,4 @@
+0 c=x g=x p=x
+50 c=1 g=1 p=1
+190 c=0 g=0 p=0
+inertial_same_value.v:28: $finish called at 250 (1s)

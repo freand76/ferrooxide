@@ -1,0 +1,4 @@
+t0=0 t1=1 gnd=0 vdd=1 wa=z wo=z pu=1 pd=0 | z 1 z 0 z 1 z
+t0=1 t1=0 gnd=0 vdd=1 wa=1 wo=1 pu=0 pd=0 | 1 z 0 z 1 z 1
+t0=1 t1=0 gnd=0 vdd=1 wa=0 wo=1 pu=0 pd=0 | x x x x x x x
+t0=0 t1=1 wa=1 wo=1 pu=1

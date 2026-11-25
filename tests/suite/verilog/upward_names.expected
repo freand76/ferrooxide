@@ -1,0 +1,10 @@
+top.o1.gb.t called
+top.o2.gb.t called
+top.o3.gb.t called
+top.o1.m.inner: gb.x=5a mid.v=3 inner.own=1
+top.o2.m.inner: gb.x=5a mid.v=3 inner.own=1
+top.o3.m.inner: gb.x=5a mid.v=3 inner.own=1
+top.o1: blk.k=11
+top.o2: blk.k=22
+top.o3: blk.k=33
+deep 2 3

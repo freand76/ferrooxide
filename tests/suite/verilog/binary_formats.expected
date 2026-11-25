@@ -1,0 +1,10 @@
+u: 1 00001000001000001010000010001110
+z: 1 000x100z001z000x101xxxzz100z111x
+WARNING: binary_formats.v:20: $sformat returned a value with an embedded NULL (see %u/%z).
+WARNING: binary_formats.v:21: $sscanf() only found 6 of 8 bytes needed by %u format code.
+u48: -1 xxxxxxxxxxxx
+u16: 1 00004546
+f: 2 414243444546 000x100z001z000x101xxxzz100z111x
+WARNING: binary_formats.v:32: $fscanf() only found 2 of 4 bytes needed by %u format code.
+short: -1
+high: [é] [Ã©]

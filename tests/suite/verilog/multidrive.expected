@@ -1,0 +1,8 @@
+none : bus=zz s1=zz s2=zz q=1234 pull=1
+d1   : bus=0f s1=0f s2=0f
+both : bus=xxxxxxx1
+same : bus=00001111
+d2   : bus=0f s1=0f
+lane0: q=zzef
+both : q=beef
+lane1: q=12zz

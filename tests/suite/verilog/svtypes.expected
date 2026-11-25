@@ -1,0 +1,21 @@
+bits 13 53 2 16
+P0 0b43 tag 5 data a1 valid 1
+st 0 nx 1 RUN=1 DONE=3
+st 1 nx 3
+pk 187f tag c data 3f d2 7e
+pk 193d data 9e bit3 1
+r 0b4312fffffffb p.data a1 nib1 1 nib0 2 count -5
+r 1f431700000005 count 5
+r 00000000000000
+arr[0] 0003 tag 0 data 01
+arr[1] 0223 tag 1 data 11
+arr[2] 0443 tag 2 data 21
+arr[3] 0663 tag 3 data 31
+arr[2] 01dd
+pair 08ce245 p1.data 33 pi.tag 1
+pair 08ce289
+u beef b1 be b0 ef
+u be01
+casts b ed 4 -1 010
+st cast 2
+svtypes.v:92: $finish called at 3 (1s)

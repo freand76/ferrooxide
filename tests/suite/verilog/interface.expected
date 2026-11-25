@@ -1,0 +1,9 @@
+0: data 0
+15: data 3
+25: data 6
+35: data 9
+40: show 7 data 9 parity 0
+45: data 12
+55: data 15
+sum 30 valid 1 ready 1 W 8 flag 1
+interface.v:56: $finish called at 62 (1s)

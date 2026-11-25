@@ -3,8 +3,10 @@
 A fast, 4-state, event-driven Verilog simulator written in Rust, with a Cranelift JIT.
 
 One command, no separate compile step: `ferrooxide tb.v dut.v` parses, elaborates, compiles the
-design to native code in milliseconds and simulates it. Output is compatible with Icarus Verilog,
-which is used as the reference in the test suite.
+design to native code in milliseconds and simulates it. The reference for behaviour is the
+standard (IEEE 1364-2005 and 1800-2017); the chipsalliance
+[sv-tests](https://github.com/chipsalliance/sv-tests) suite measures how much of it is covered.
+Icarus Verilog serves only as the baseline for speed.
 
 ```sh
 cargo build --release
@@ -20,7 +22,7 @@ CPU cycles (`perf stat`) on the same machine, Icarus Verilog 14 (`iverilog` + `v
 | [`bench/cpuish.v`](bench/cpuish.v): 32 lanes of LFSR + ALU + accumulator, 200k clock cycles | 33.6 G | 2.68 G | 2.60 G | 12.5x / **13x** |
 | [`bench/mixed.v`](bench/mixed.v): combinational chain, 128-bit datapath, memory, FSM, 300k cycles | 13.2 G | 0.72 G | 0.68 G | 18x / **19x** |
 
-Both produce output identical to Icarus. (Measured 2026-11-20, median of three runs.)
+Both simulators produce the same output. (Measured 2026-11-20, median of three runs.)
 
 `release` is the usual `cargo build --release`; `speed` is a release build with link-time
 optimisation (slower to build, a few percent faster), for measurements:
@@ -62,9 +64,10 @@ Verilog-2005 plus common SystemVerilog:
   `assign`/`deassign`
 - `fork`/`join` (and SystemVerilog `join_any`/`join_none`, `disable fork`), named events
   (`event`, `->`, `@(ev)`), `disable` of named blocks and tasks in any process, `automatic`
-  tasks and functions (per-call storage); processes woken together run in Icarus's order
+  tasks and functions (per-call storage); processes woken together run in a fixed,
+  deterministic order
 - `$display`/`$write`/`$monitor`/`$strobe` (and their `b`/`h`/`o` and file variants),
-  `$finish`, `$random`/`$urandom`/`$urandom_range` (Icarus's sequences), `$signed`/`$unsigned`/
+  `$finish`, `$random`/`$urandom`/`$urandom_range`, `$signed`/`$unsigned`/
   `$clog2`, `$readmemh`/`$readmemb`/`$writememh`/`$writememb`, `$fopen` (modes)/`$fclose`,
   file input (`$fgetc`/`$fgets`/`$ungetc`/`$feof`/`$fscanf`/`$sscanf`/`$fseek`/`$ftell`/
   `$rewind`), `$sformat`/`$swrite`, `$timeformat`/`$printtimescale`,
@@ -86,14 +89,14 @@ Verilog-2005 plus common SystemVerilog:
 - concurrent assertions: `assert`/`assume`/`cover property`, `cover sequence`, sequence
   and property operators, named sequences and properties with arguments, default clocking,
   `disable iff`, `$past`/`$rose`/`$fell`/`$stable`/`$changed`/`$sampled`; deferred
-  assertions (`assert #0`, `assert final`); elaboration system tasks
+  assertions (`assert #0`, `assert final`); elaboration system tasks; streaming
+  concatenations (`{<<8{a, b}}`, also as assignment targets)
 
 Not yet: clocking blocks with clocking signals, concurrent assertions inside procedures,
 `%v` strength display, SDF, VPI.
-The full list is "Unsupported (known)" in [PLAN.md](PLAN.md). Icarus's regression suite
-(ivtest) passes at about 91% (its SystemVerilog list at 92%); places where Icarus seems to
-deviate from the standard (ferrooxide matches Icarus) are listed in
-[ICARUS_NOTES.md](ICARUS_NOTES.md).
+The full list is "Unsupported (known)" in [PLAN.md](PLAN.md).
+[sv-tests](https://github.com/chipsalliance/sv-tests) pass at 92.4% (4725 of 5112, run as its
+ferrooxide runner runs them: `tests/svtests.py`).
 
 ## Usage
 
@@ -222,15 +225,16 @@ Debugging: `FX_TRACE=<time>` prints every process activation from that time on,
 
 ## Testing
 
-`tests/difftest.sh` runs every testbench in `tests/verilog/` through Icarus and ferrooxide and
-diffs the output (`cargo test` runs it too when `iverilog` is installed). `FX_FLAGS` selects
-other execution modes:
-
 ```sh
-tests/difftest.sh
-FX_FLAGS=--no-jit tests/difftest.sh
-FX_FLAGS=--no-fuse tests/difftest.sh
+cargo test --release      # own suite, lint test, parser snapshots
+tests/suite.sh [-v] [files|dirs]
+tests/svtests.py          # chipsalliance sv-tests (in ~/projects/sv-tests or $SV_TESTS)
 ```
+
+`tests/suite/<area>/*.v` is the test suite; `tests/suite.sh` runs every test with the JIT, the
+interpreter (`--no-jit`) and without process fusion (`--no-fuse`). A test is self-checking
+(prints `PASSED`) or is compared with a checked-in `<name>.expected`; expected behaviour comes
+from the standard. `tests/svtests.py` runs sv-tests and compares the results with a baseline.
 
 ## Structure
 

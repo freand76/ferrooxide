@@ -1,0 +1,17 @@
+0 sel=0 a=0 b=1 m=0 md=x | clk=0 d=0 q=0 | en=0 l=x
+3 sel=0 a=0 b=1 m=0 md=0 | clk=0 d=0 q=0 | en=0 l=x
+5 sel=0 a=1 b=1 m=1 md=0 | clk=0 d=0 q=0 | en=0 l=x
+8 sel=0 a=1 b=1 m=1 md=1 | clk=0 d=0 q=0 | en=0 l=x
+10 sel=1 a=1 b=1 m=1 md=1 | clk=0 d=0 q=0 | en=0 l=x
+15 sel=x a=1 b=1 m=1 md=1 | clk=0 d=0 q=0 | en=0 l=x
+20 sel=x a=0 b=0 m=0 md=1 | clk=0 d=0 q=0 | en=0 l=x
+23 sel=x a=0 b=0 m=0 md=0 | clk=0 d=0 q=0 | en=0 l=x
+25 sel=x a=0 b=0 m=0 md=0 | clk=0 d=1 q=0 | en=0 l=x
+30 sel=x a=0 b=0 m=0 md=0 | clk=1 d=1 q=1 | en=0 l=x
+35 sel=x a=0 b=0 m=0 md=0 | clk=0 d=0 q=1 | en=0 l=x
+40 sel=x a=0 b=0 m=0 md=0 | clk=0 d=0 q=1 | en=1 l=0
+45 sel=x a=0 b=0 m=0 md=0 | clk=0 d=1 q=1 | en=1 l=1
+50 sel=x a=0 b=0 m=0 md=0 | clk=0 d=0 q=1 | en=0 l=1
+55 sel=x a=0 b=0 m=0 md=0 | clk=x d=0 q=x | en=0 l=1
+60 sel=x a=0 b=0 m=0 md=0 | clk=1 d=0 q=x | en=0 l=1
+udp.v:62: $finish called at 65 (1s)

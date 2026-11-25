@@ -1,0 +1,4 @@
+25 a=4
+25 a=9
+6 32
+intrarepeat.v:23: $finish called at 25 (1s)

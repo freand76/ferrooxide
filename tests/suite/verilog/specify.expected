@@ -1,0 +1,13 @@
+0 EN=0 I=0 O=x a=0 q=x
+2 EN=0 I=0 O=0 a=0 q=x
+3 EN=0 I=0 O=0 a=0 q=1
+5 EN=0 I=1 O=0 a=0 q=1
+6 EN=1 I=1 O=0 a=0 q=1
+10 EN=1 I=1 O=1 a=0 q=1
+16 EN=1 I=0 O=1 a=0 q=1
+18 EN=1 I=0 O=0 a=0 q=1
+26 EN=1 I=0 O=0 a=1 q=1
+31 EN=1 I=0 O=0 a=1 q=0
+36 EN=1 I=0 O=0 a=0 q=0
+39 EN=1 I=0 O=0 a=0 q=1
+specify.v:29: $finish called at 46 (1s)

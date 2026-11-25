@@ -1,0 +1,9 @@
+0: waiter 2 got e1
+0: waiter 1 got e1
+5: waiter 1 got e1 or a
+15: e2
+20: sub saw go (1)
+21: sub saw go (2)
+23: e2
+24: sub saw go (3)
+25: seen=3

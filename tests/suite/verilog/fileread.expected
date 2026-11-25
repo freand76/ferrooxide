@@ -1,0 +1,21 @@
+getc 49 1 tell 1
+fscanf 3: 12 003f -7
+fgets 1: '
+'
+fgets 12: 'hello world
+'
+fscanf 3: ab1z 000010x1 2.500000
+at end: 0 feof 1
+rewound: '12 0x3f -7
+'
+seek: 0
+sscanf 3: 123 beaf 000001xz
+sscanf 2: alpha beta
+sscanf 2: 5 7
+sscanf 2: 42 abc
+sscanf 1: x
+sscanf empty -1
+sscanf mismatch 0
+sscanf width 2: 123 4567
+real -32.500000
+chars 2: a b

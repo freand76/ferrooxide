@@ -1,0 +1,21 @@
+WARNING: sv_unique_case.v:17: value is unhandled for priority or unique case statement
+         Time: 1  Scope: t.run
+1 s=00 y=3
+2 s=01 y=7
+WARNING: sv_unique_case.v:6: value is unhandled for priority or unique case statement
+         Time: 3  Scope: t.run
+WARNING: sv_unique_case.v:10: value is unhandled for priority or unique case statement
+         Time: 3  Scope: t.run
+3 s=10 y=6
+WARNING: sv_unique_case.v:6: value is unhandled for priority or unique case statement
+         Time: 4  Scope: t.run
+WARNING: sv_unique_case.v:10: value is unhandled for priority or unique case statement
+         Time: 4  Scope: t.run
+4 s=11 y=6
+WARNING: sv_unique_case.v:6: value is unhandled for priority or unique case statement
+         Time: 5  Scope: t.run
+WARNING: sv_unique_case.v:10: value is unhandled for priority or unique case statement
+         Time: 5  Scope: t.run
+WARNING: sv_unique_case.v:17: value is unhandled for priority or unique case statement
+         Time: 5  Scope: t.run
+5 s=xx y=6

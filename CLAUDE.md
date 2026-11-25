@@ -2,7 +2,9 @@
 
 4-state, event-driven Verilog simulator in Rust with a Cranelift JIT. One command parses,
 elaborates, compiles and simulates: `target/release/ferrooxide [opts] files... [+plusargs]`.
-Goal: output identical to Icarus Verilog, ≥10x its speed. Plan and status: `PLAN.md`.
+Goal: the behaviour the standard (IEEE 1364-2005 / 1800-2017) gives, measured with chipsalliance
+sv-tests; ≥10x the speed of Icarus Verilog (the speed baseline only, not a reference for
+behaviour). Plan and status: `PLAN.md`.
 
 ## Layout
 - `crates/ferrooxide-front`: preprocessor, lexer, parser, AST (UDP tables are lexed as raw text).
@@ -19,17 +21,14 @@ Goal: output identical to Icarus Verilog, ≥10x its speed. Plan and status: `PL
   `jit.rs` (Cranelift, one function per process *shape*), `fuse.rs`, `ops.rs`, `fmt.rs`, `vcd.rs`,
   `history.rs` (value change log for the debug front ends).
 - `crates/ferrooxide`: CLI (`main.rs`, `session.rs`), `-i` (`console.rs`, `repl.rs`), `mcp.rs`,
-  `cdsp.rs`. `tests/verilog/*.v`: Icarus diff tests. `bench/`: benchmarks.
+  `cdsp.rs`. `tests/suite/<area>/`: own test suite. `bench/`: benchmarks.
 
 ## Commands
 ```sh
 cargo build --release
-tests/difftest.sh [files]            # vs iverilog/vvp; FX_FLAGS=--no-jit / --no-fuse for other modes
 tests/suite.sh [-v] [files|dirs]     # own suite (tests/suite/<area>), all three modes, no iverilog
-cargo test --release                 # difftest + own suite + lint test + parser snapshots
+cargo test --release                 # own suite + lint test + parser snapshots
 FX_BLESS=1 cargo test --release -p ferrooxide-front --test parse   # rewrite parser snapshots
-tests/ivtest.py <copy of ivtest dir> # Icarus regression suite (use a copy: tests write files)
-tests/regress.sh [--baseline]        # both regression lists, per-test changes vs the baseline
 tests/parsecheck.py [--baseline]     # parser (--parse-only) over sv-tests, the regression
                                      # suite, tests/ and real designs; changes vs the baseline
 tests/svtests.py [--baseline] [--tags]  # sv-tests as its ferrooxide runner runs them (all
@@ -45,8 +44,9 @@ memory limit, default 2048), `FX_MEM_LIMIT_MB` (address-space cap of the process
 ## Rules
 - Every new feature gets a small test that passes in all three modes (default, `--no-jit`,
   `--no-fuse`): in `tests/suite/<area>/` (self-checking, or `// expected` with a checked-in
-  `.expected`; behaviour from the standard) and/or in `tests/verilog/` when matching Icarus's
-  exact output matters (diffed against it; `// args: +x=1` passes plusargs to both).
+  `.expected`; behaviour from the standard, never from another simulator; `// args: +x=1`
+  passes plusargs). The goal is passing sv-tests: run `tests/svtests.py` after each step,
+  no test worse than the baseline.
   New syntax also gets a parser snapshot in `crates/ferrooxide-front/tests/parse/` (a file,
   or a directory for a multi-file unit, with its `.ast`); review the `.ast` diff when blessing.
 - Front end: the parser (`syntax/`) builds what the source says and resolves no names except
@@ -58,21 +58,20 @@ memory limit, default 2048), `FX_MEM_LIMIT_MB` (address-space cap of the process
   check the parser on its own; `--elab-only` stops after elaboration and compilation.
 - Check benchmark cycles after scheduler/JIT changes (with the `speed` profile); don't regress them.
 - Memory: this machine has 14 GB and an out-of-memory crash kills the session (it has happened).
-  EVERY run of ferrooxide, iverilog/vvp or a test outside the scripts goes under a limit:
-  `(ulimit -v 2000000; timeout 60 target/release/ferrooxide ...)`. ferrooxide caps itself at
-  `FX_MEM_LIMIT_MB` (default 4096); difftest.sh and ivtest.py set limits (ivtest: 2 GB per test,
-  4 at a time). Long or parallel jobs run in the background. Never wait for a build with
+  EVERY run of ferrooxide, iverilog/vvp (speed comparisons) or a test outside the scripts
+  goes under a limit: `(ulimit -v 2000000; timeout 60 target/release/ferrooxide ...)`.
+  ferrooxide caps itself at `FX_MEM_LIMIT_MB` (default 4096); suite.sh and svtests.py set
+  limits. Long or parallel jobs run in the background. Never wait for a build with
   `pgrep -f "cargo build"` loops (they match themselves); just run `cargo build`.
 - Commit finished, tested steps locally; push only when asked.
 - Commit messages: title of about 50 characters (imperative, no period), blank line, body
   wrapped at 70 columns. The body says clearly what was done and mostly why, not how; no
-  reasoning or narrative. Don't name the reference simulator, its test suite or private
-  designs; say "the reference" / "the regression suite".
+  reasoning or narrative. Don't name other simulators or private designs.
 
-## Icarus quirks
-`ICARUS_NOTES.md` lists places where Icarus seems to deviate from the standard (we match it);
-add to it when you find one. ferrooxide defaults to SystemVerilog rules; `-g2005` selects
-Verilog-2005 where they differ (ivtest.py passes it unless a test asks for SV).
+## Standard deviations
+`DEVIATIONS.md` lists places where ferrooxide copied Icarus's departures from the standard
+(from when Icarus was the reference); change them to the standard when a test needs it.
+ferrooxide defaults to SystemVerilog rules; `-g2005` selects Verilog-2005 where they differ.
 
 ## Invariants worth knowing
 - Value = `nw` value words + `nw` unknown words (00=0, 10=1, 01=z, 11=x); bits above the width

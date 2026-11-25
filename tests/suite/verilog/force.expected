@@ -1,0 +1,6 @@
+r=1 w=3 s=5
+forced: r=a w=5
+forced follows s: r=a w=6
+released r: r=b
+assigned s=c
+deassigned s=2

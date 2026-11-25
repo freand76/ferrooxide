@@ -1,0 +1,20 @@
+4: join: a=1 b=2 n=2
+6: looper tick
+6: fast branch
+6: after join_any
+6: after join_none
+7: join_none branch
+12: looper tick
+14: slow branch
+18: looper tick
+27: task says 33
+28: nested fork 1
+29: task says 33
+30: nested fork 2
+30: nested done
+40: done seen
+40: after guard
+45: long_task step 1
+47: after disable task
+58: end
+fork.v:64: $finish called at 58 (1s)

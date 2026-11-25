@@ -1,0 +1,5 @@
+22 x0 44 55
+WARNING: writemem.v:16: $readmemb(wm_b.bin): Not enough words in the file for the requested range [0:3].
+x01z0000 01000100
+WARNING: writemem.v:18: $readmemh(wm_c.hex): Not enough words in the file for the requested range [0:3].
+55 44 x0

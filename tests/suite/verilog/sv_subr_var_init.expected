@@ -1,0 +1,7 @@
+P 11 12 13
+static 11 13
+auto 11 12
+count n=101 r=1.0
+count n=102 r=2.0
+m2 auto 2 3
+m2 static 2 4

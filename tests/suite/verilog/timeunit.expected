@@ -1,0 +1,9 @@
+Time scale of (top.m1) is 10us / 1us
+Time scale of (top.m2) is 100ps / 10ps
+Time scale of (top) is 1ns / 1ps
+Time scale of ($unit::) is 100ps / 10ps
+50 5
+38.100000
+38.178000
+1538000 f=0 d=1
+11538000 f=1 d=1

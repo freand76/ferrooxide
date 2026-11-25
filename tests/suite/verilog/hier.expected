@@ -1,0 +1,5 @@
+15: a.l.cnt bit1 rose, cnt=2
+a.l.cnt=3 b.cnt=3 W=6
+tb.a.l.report: report 1 cnt=3 note=ab T=2.500000
+tb.b.report: report 2 cnt=3 note=11 T=2.500000
+[cnt3_ab]

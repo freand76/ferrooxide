@@ -1,0 +1,9 @@
+Time scale of (top) is 1ns / 10ps
+Time scale of (top.s) is 1us / 1ns
+Time scale of (top.r) is 1ns / 10ps
+Time scale of (top.r[1:1]) is 1ns / 10ps
+Time scale of (other) is 1s / 1s
+[                 125]
+[     1.00 ns] [1.25 ns]
+[11250ps]
+[                1100]

@@ -1,0 +1,7 @@
+top.m1.l1 W=5 V=3
+top.m1.l2 W=4 V=15
+top.m2.l1 W=2 V=7
+top.m2.l2 W=8 V=6
+top.la[0] W=4 V=9
+top.la[1] W=4 V=1
+00011 00000110 1001

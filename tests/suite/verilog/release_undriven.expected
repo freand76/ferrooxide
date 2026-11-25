@@ -1,0 +1,8 @@
+                   0 out=z w=zzzz
+                   1 out=1 w=1010
+                   2 out=2 w=1010
+                   3 out=z w=10zz
+                   4 out=z w=zzzz
+12 d=1100 e=1000
+13 d=1101 e=1000
+14 d=0101 e=1010

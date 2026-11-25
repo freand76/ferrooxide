@@ -1,0 +1,22 @@
+mem[0]=  0
+mem[3]=  9
+mem[6]= 36
+mem[9]= 81
+mem[12]=144
+mem[15]=225
+F5=120
+show  49
+zero
+z: default
+one or two
+z: default
+one or two
+z: default
+three
+z: default
+other  4
+z: 01xx
+other  5
+z: 01xx
+casex hit
+xx

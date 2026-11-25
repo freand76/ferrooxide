@@ -1,0 +1,5 @@
+1 after join_any 0001
+4 after wait fork 1111
+4 again 1111
+10 other process
+10 second process done

@@ -1,0 +1,8 @@
+VCD info: dumpfile pkg_vars.vcd opened for output.
+VCD warning: $dumpvars: Package ($unit::) is not dumpable with VCD.
+VCD warning: $dumpvars: Package (P::) is not dumpable with VCD.
+VCD warning: $dumpvars: Package (Q::) is not dumpable with VCD.
+ports z x z x zz
+cnt=5 x=10 W=3
+m2 cnt=6 T=10 failed=1
+cnt=6 failed=1

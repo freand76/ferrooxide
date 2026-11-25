@@ -1,0 +1,4 @@
+y_comb 0 y_star x ones 4 counter 4 q 1
+y_comb 1 y_star x ones 4 counter 4 q 0
+y_comb 1 y_star x ones 6 counter 6 q 0
+y_comb 0 y_star x ones 6 counter 6 q 0

@@ -65,7 +65,7 @@ def jobs(only):
         for f in sorted(list(iv.rglob("*.v")) + list(iv.rglob("*.sv"))):
             out.append(("ivtest", str(f.relative_to(iv)), [f], ["-I", str(f.parent), "-I", str(iv / "ivltests")], None))
     if only in (None, "own"):
-        for d in ["tests/verilog", "tests/suite", "crates/ferrooxide-front/tests/parse", "bench"]:
+        for d in ["tests/suite", "crates/ferrooxide-front/tests/parse", "bench"]:
             for f in sorted(list((ROOT / d).rglob("*.v")) + list((ROOT / d).rglob("*.sv"))):
                 out.append(("own", str(f.relative_to(ROOT)), [f], ["-I", str(f.parent)], None))
     if only in (None, "designs"):

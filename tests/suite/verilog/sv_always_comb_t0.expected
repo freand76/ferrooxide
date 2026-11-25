@@ -1,0 +1,7 @@
+0 initial y=xxxx y2=xxxx l=xxxx
+0 sub comb s=10
+0 #0 y=0011 y2=0000 l=0111
+0 sub comb s=10
+1 y=0011 y2=0000 l=0111
+1 sub comb s=01
+2 y=0010

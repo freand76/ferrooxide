@@ -1,0 +1,3 @@
+ERROR: readmem_missing.v:7: $readmemh: Unable to open no_such_file_fx.mem for reading.
+ERROR: readmem_missing.v:8: $readmemb: Unable to open no_such_file_fx.mem for reading.
+12 34

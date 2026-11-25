@@ -1,0 +1,9 @@
+5 worker 4 done after 1 edges
+15 worker 3 done after 2 edges
+25 worker 2 done after 3 edges
+35 worker 1 done after 4 edges
+35 all workers done, total 10
+65 worker 10 done after 2 edges
+75 worker 11 done after 3 edges
+285 end
+fork_loop_instances.v:49: $finish called at 285 (1s)

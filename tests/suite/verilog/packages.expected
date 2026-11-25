@@ -1,0 +1,6 @@
+m 111 d 5a u ff W 8
+m 211 d 11
+ack
+inc 00 magic 5a bits 10
+own MAGIC 3
+packages.v:61: $finish called at 12 (1s)

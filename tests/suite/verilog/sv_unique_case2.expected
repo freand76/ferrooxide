@@ -1,0 +1,7 @@
+WARNING: sv_unique_case2.v:18: value is unhandled for priority or unique case statement
+         Time: 2000  Scope: t.gb[0]
+WARNING: sv_unique_case2.v:6: value is unhandled for priority or unique case statement
+         Time: 4000  Scope: t.u
+WARNING: sv_unique_case2.v:23: value is unhandled for priority or unique case statement
+         Time: 5000  Scope: t
+2 3

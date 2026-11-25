@@ -1,0 +1,4 @@
+op=00 f=00 g=00 out=00
+op=01 f=01 g=01 out=01
+op=12 f=10 g=11 out=55
+op=02 f=10 g=10 out=02 evals>0=1

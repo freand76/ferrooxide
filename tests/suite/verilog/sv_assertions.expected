@@ -1,0 +1,16 @@
+ERROR: sv_assertions.v:16: 
+       Time: 0  Scope: test
+ERROR: sv_assertions.v:17: 
+       Time: 0  Scope: test
+pass 1
+fail 2
+ERROR: sv_assertions.v:22: named 1
+       Time: 0  Scope: test.named
+WARNING: sv_assertions.v:11: check: v is 7
+         Time: 2500  Scope: test.check
+INFO: sv_assertions.v:26: info at 2500
+      Time: 2500  Scope: test
+ERROR: sv_assertions.v:28: 
+       Time: 2500  Scope: test.blk
+FATAL: sv_assertions.v:30: fatal end
+       Time: 2500  Scope: test

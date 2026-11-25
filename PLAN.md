@@ -5,9 +5,13 @@
   SystemVerilog (1800).
 - Full 4-state semantics (0/1/X/Z), IEEE stratified event scheduler (active / inactive / NBA /
   postponed).
-- **≥10x Icarus (vvp) throughput** on typical RTL + testbench workloads.
-- Output-compatible with Icarus for `$display`-style testbenches: differential testing against
-  `iverilog` is the main correctness oracle.
+- **≥10x Icarus (vvp) throughput** on typical RTL + testbench workloads. Icarus is the
+  baseline for speed only.
+- The standard (IEEE 1364-2005, 1800-2017) is the reference for behaviour (decided
+  2026-11-25; before, the output matched Icarus, and the regression suite was the main
+  oracle). Coverage is measured with chipsalliance *sv-tests* (`tests/svtests.py`); our own
+  suite (`tests/suite`) checks behaviour. Where ferrooxide still copies an Icarus deviation
+  (`DEVIATIONS.md`) it changes to the standard when a test needs it.
 
 ## Architecture
 
@@ -71,7 +75,7 @@ grouped per clock edge; deterministic event order so engines can be diffed exact
 behind a cargo `prof` feature.
 
 **Scheduling order** mimics Icarus where IEEE leaves it open: wakes are FIFO (sequence
-numbers) between active processes and the combinational settle (`tests/verilog/race.v`);
+numbers) between active processes and the combinational settle (`tests/suite/verilog/race.v`);
 waiters woken by one change run newest first (Icarus's LIFO waiting lists, also for edge
 groups, which alternate their member order); fork branches start last to first; time-0
 processes start by scope (instances before the instantiating module's own blocks,
@@ -80,11 +84,11 @@ started (IEEE 1800 9.2.2.2.2).
 
 ## Status (2026-11-19)
 
-Regression suite (normal tests): main list 1405 of 1526 (92 %), SystemVerilog list
+(2026-11-25: sv-tests 4725 of 5112; the regression-suite numbers below are the last ones,
+it is no longer run.) Regression suite (normal tests): main list 1405 of 1526 (92 %), SystemVerilog list
 (`--list regress-sv.list`) 650 of 701 (93 %; 52 % on 2026-11-15). Real design benchmark (TetrIC): output identical
 to Icarus byte for byte (run, fwd, sound), 10-13x faster. Interactive mode, MCP server,
 `--vcd`/`--trace`, the CDSP debug server with value history work.
-Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
 
 | # | Content | Status |
 |---|---------|--------|
@@ -133,7 +137,7 @@ Per-test regression baseline: `target/regress-baseline/{main,sv}.res`.
 
 ### SystemVerilog status
 Resolved in the lowering (`front/src/lower/types.rs`): `typedef` (module and file scope, unpacked
-dimensions: the type's first, ICARUS_NOTES 9, forward typedefs, array typedefs), `enum`
+dimensions: the type's first, DEVIATIONS 9, forward typedefs, array typedefs), `enum`
 (constants as localparams of the base type; methods, also without parentheses), packed
 `struct`/`union` (flat vectors; member/index/select chains become one `[off +: w]` select, also
 at run-time indexes and as lvalues), casts `T'(e)`, `N'(e)`, `signed'(e)`, `$bits(T)`,
@@ -322,15 +326,14 @@ bounded (truncation with counts, pattern filters), structured errors with locati
 deterministic, long runs cancellable, a memory budget for history.
 
 ## Testing
-- `tests/verilog/*.v`: self-contained testbenches; `tests/difftest.sh` runs each through
-  `iverilog`+`vvp` and `ferrooxide` and diffs stdout. `cargo test` runs the same comparison
-  (skipped if iverilog is absent).
 - `tests/suite/<area>/*.v` (`tests/suite.sh`, also in `cargo test`): our own suite, no other
   simulator needed, every test in all three modes. Self-checking (print `PASSED`, never a line
   starting `FAILED`) or compared with a checked-in `<name>.expected` (`// expected`; `--bless`
   writes it: review it). Expected behaviour comes from IEEE 1364/1800 (cite the section);
   where the reference agrees, that checks the test itself. Order IEEE leaves open (wakes of
-  one change, races) belongs in `tests/verilog`. Areas: `sched`, `sv`, `assert`, `expr`, `nets`,
+  one change, races) is checked by `.expected` files as ferrooxide orders it. Areas: `verilog`
+  (the former tests diffed against Icarus, 2026-11-25: outputs from it, may change where it
+  deviates from the standard), `sched`, `sv`, `assert`, `expr`, `nets`,
   `systasks`, `hier`, `subr`, `real`, `vcd` (reads its own dump back), `prims`, `arrays`,
   `directives`, `events`. Next areas: `$sformatf` corner cases, `` `timescale `` inheritance
   across files, `disable` corner cases; ideas from the regression suite's coverage, tests
@@ -341,13 +344,24 @@ deterministic, long runs cancellable, a memory budget for history.
   self-determined expressions in `{...}` and route signed values through `integer`.
 - Parser snapshots: `front/tests/parse.rs`, `tests/parse/*.sv` → checked-in `.ast`
   (`--dump-ast`, `front/src/dump.rs`).
-- Regression suite: `tests/ivtest.py` (`--show 40` groups failures), per-test comparison
-  against the baseline with `tests/regress.sh`. Also chipsalliance *sv-tests* for parser
-  coverage.
+- chipsalliance *sv-tests*: `tests/svtests.py` (as its ferrooxide runner runs them, with a
+  baseline in `target/svtests-baseline.res`; `--tags` for pass rates per tag) is the measure
+  of coverage. `tests/parsecheck.py` runs the parser alone over sv-tests, the Icarus
+  regression suite (as a corpus of Verilog only) and real designs. The Icarus regression
+  scripts (`ivtest.py`, `regress.sh`, `difftest.sh`) were removed 2026-11-25.
 - `bench/`: synthetic and realistic designs; `bench/run.sh` reports wall time for both
   simulators.
 
 ## Next steps (in priority order)
+
+**Direction (2026-11-25)**: the standard is the reference for behaviour, Icarus only for
+speed; the work is making sv-tests pass (`SV_TESTS.md` priorities, "Unsupported (known)").
+Streaming concatenations of integral items done 2026-11-25 (`ExprKind::Stream`, as values
+and as targets, a constant or type slice size; a stream wider than its target is an
+error); left: streams of dynamic arrays and queues (sizes at run time) and `with` (3
+sv-tests). Next by sv-tests won: the remaining `…` expression errors (150, mostly UVM),
+interface classes (21), `$dist_*` (16), randsequence (12), extern methods (12), global
+clocking (11), tagged unions (10).
 
 **Next: R6** (decided 2026-11-20), before concurrent assertions and the other large
 features: spans on `Expr`/`Stmt` instead of `self.line` (an inlined call moving
@@ -550,12 +564,9 @@ streaming concatenations.
    are unsigned and scalar `bit`/`logic` parameters are one bit wide (were the value's
    type). Next candidate: `Decl`'s flat form (`kind`/`signed`/`range`/`packed` beside `ty`,
    which the non-ANSI port merging reads).
-6. **Remaining regression failures** (`tests/ivtest.py ... --show 40` groups them; main
-   list: 14 compile errors, 105 wrong outputs): the Verilog items under "Unsupported
-   (known)", e.g. `$countdrivers` (5 tests),
-   compiler warnings (also the `always_*` warnings of the
-   SV list), nets of 2-state types (6 SV tests), `%v` (needs strength values on nets), force
-   on array elements.
+6. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
+   needs it. (The former step "remaining regression failures" was dropped 2026-11-25 with
+   the regression suite as a target.)
 7. **Debug front ends**: report the Surfer bugs upstream; MCP over streamable HTTP (attach to
    a running simulation), MCP history queries on the CDSP value history, MCP resources; CDSP
    arrays (per-element items for small memories; memories with `depth`/`zero_at`), port
@@ -692,10 +703,10 @@ small process that wakes on the signals; how to present large memories.
 **Watch.** Elaboration and codegen run per instance (only the JIT shares code between
 instances); measure compile time and memory on a large netlist before assuming it scales.
 
-## Differences from the reference
+## Differences from Icarus (the former reference)
 
-Orders IEEE leaves open and other deliberate or known differences (Icarus deviations from the
-standard that we match are in `ICARUS_NOTES.md`):
+Notes from the time ferrooxide matched Icarus: orders IEEE leaves open and other known
+differences (Icarus deviations from the standard that we copied are in `DEVIATIONS.md`):
 - On a change, a ranked combinational process (`always_comb`, `always @*`) runs before the
   other waiters of the signal; the reference wakes it among them (newest waiter first).
 - The reference propagates some net updates immediately, inside the writing process
@@ -717,7 +728,7 @@ standard that we match are in `ICARUS_NOTES.md`):
   same edge (tasks called hierarchically) run in another order than in the reference
   [pr2001162].
 - An event-controlled NBA (`x <= @(e) v`) updates in the NBA region after the event, as the
-  standard says; the reference updates at the trigger (ICARUS_NOTES 3) [nb_ec_multi_ev].
+  standard says; the reference updates at the trigger (DEVIATIONS 3) [nb_ec_multi_ev].
 - An unpacked array assigned from, or passed as an argument for, an array of the opposite
   direction (`byte z[1:3] = o[3:1]`): elements pair from the left (`z[1] = o[3]`) as 7.6
   says; the reference pairs the lowest indexes (`z[1] = o[1]`).
@@ -804,7 +815,7 @@ SystemVerilog data types and testbench features:
 Verilog / scheduling:
 - nets with several drivers, `wand`/`tri1`, strength drivers and `assign z = m[i]` update in
   the combinational settle, the reference updates them immediately (see Differences).
-- `~`/`buf` of a never-driven input gives x, the reference z (ICARUS_NOTES 8) [sv_unit1c].
+- `~`/`buf` of a never-driven input gives x, the reference z (DEVIATIONS 8) [sv_unit1c].
 - strength values on nets (`%v`, strength reduction through switches, `trireg` charge),
   `$countdrivers`, `$fread`, `$ferror`, specify paths on inout ports and conditional paths, timing
   checks, SDF, force on array elements.

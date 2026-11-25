@@ -1,0 +1,10 @@
+sum= 30 a=0a b=00010100
+sum=256 256 100
+i=0 a=  0 sum=1
+i=1 a=  3 sum=4
+i=2 a=  6 sum=7
+i=3 a=  9 sum=10
+         -5  -56
+  9  1
+time=                   6 now=6
+basic.v:20: $finish called at 6 (1s)

@@ -1,0 +1,15 @@
+top aa
+t.blk[0].q leaf 0000
+t.blk[1].q leaf 0001
+t.g.lg leaf 1001
+t.g gen
+t.m1.l1 leaf 0001
+t.m1.l2 leaf 1111
+t.m1 mid a
+t.m1 mid b
+t.z1 leaf 0011
+t.a1 leaf 0100
+t a
+t b
+t c
+top zz
