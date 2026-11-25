@@ -1,0 +1,18 @@
+module t ();
+  // imports $unit
+  class N a[0:(2 - 1)];
+  initial begin
+    foreach (N$st[i])
+      ;
+    foreach (a[i].m[j])
+      ;
+    foreach (a[0].m[j])
+      ;
+  end
+endmodule
+package $unit ();
+  class N;
+    int(32) signed m[0:(3 - 1)];
+  endclass
+  int(32) signed N$st[0:(3 - 1)];
+endpackage

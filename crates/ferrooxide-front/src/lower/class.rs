@@ -719,6 +719,13 @@ fn this_stmt(s: &mut Stmt, c: &ClassNames, locals: &mut Vec<String>) {
             this_stmt(body, c, locals);
         }
         Stmt::Forever { body, .. } => this_stmt(body, c, locals),
+        Stmt::Foreach { array, vars, body, .. } => {
+            ex(array, locals);
+            let n = locals.len();
+            locals.extend(vars.iter().flatten().cloned());
+            this_stmt(body, c, locals);
+            locals.truncate(n);
+        }
         Stmt::Timed { timing, body, .. } => {
             this_timing(timing, c, locals);
             this_stmt(body, c, locals);

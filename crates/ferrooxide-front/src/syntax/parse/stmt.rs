@@ -556,6 +556,9 @@ impl Parser {
         let mut array = if self.is_kw(Kw::This) {
             self.bump();
             Expr::new(ExprKind::This, loc)
+        } else if self.is_p_at(1, "::") || (self.is_p_at(1, "#") && self.is_p_at(2, "(")) {
+            // `C::arr[i]`, `p::arr[i]`
+            Expr::new(ExprKind::Scoped(Box::new(self.scoped_name()?)), loc)
         } else {
             Expr::new(ExprKind::Ident(self.ident()?), loc)
         };
@@ -573,9 +576,6 @@ impl Parser {
             }
             let m = self.member_name()?;
             array = Expr::new(ExprKind::Member(Box::new(array), m), loc);
-        }
-        if self.is_p("::") {
-            return self.err("foreach over a scoped name is not supported");
         }
         let mut vars = Vec::new();
         while self.eat_p("[") {

@@ -256,7 +256,7 @@ impl<'a> Compiler<'a> {
     /// elements index (`e` itself, or the array a slice selects from) and the dimensions it
     /// spans, each (lowest index, size, descending).
     #[allow(clippy::type_complexity)]
-    fn array_dims(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Expr, Vec<(i64, u32, bool)>)>> {
+    pub(crate) fn array_dims(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Expr, Vec<(i64, u32, bool)>)>> {
         if let ExprKind::Range(a, _, _) | ExprKind::IndexedRange(a, _, _, _) = &e.kind {
             if matches!(a.kind, ExprKind::Range(..) | ExprKind::IndexedRange(..)) {
                 return Ok(None); // a slice of a slice
@@ -507,7 +507,8 @@ impl<'a> Compiler<'a> {
             | Stmt::While { body, .. }
             | Stmt::DoWhile { body, .. }
             | Stmt::Repeat { body, .. }
-            | Stmt::Forever { body, .. } => self.check_final(body, sid),
+            | Stmt::Forever { body, .. }
+            | Stmt::Foreach { body, .. } => self.check_final(body, sid),
             _ => Ok(()),
         }
     }

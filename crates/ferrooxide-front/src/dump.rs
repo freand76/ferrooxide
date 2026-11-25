@@ -799,6 +799,10 @@ impl Printer {
             }
             Stmt::Repeat { count, body, .. } => self.stmt_prefixed(&format!("repeat ({})", expr(count)), body),
             Stmt::Forever { body, .. } => self.stmt_prefixed("forever", body),
+            Stmt::Foreach { array, vars, body, .. } => {
+                let v: Vec<String> = vars.iter().map(|v| v.clone().unwrap_or_default()).collect();
+                self.stmt_prefixed(&format!("foreach ({}[{}])", expr(array), v.join(", ")), body)
+            }
             Stmt::Timed { timing: t, body, .. } => self.stmt_prefixed(&timing(t), body),
             Stmt::Wait { cond, body, .. } => self.stmt_prefixed(&format!("wait ({})", expr(cond)), body),
             Stmt::SysTask { name: n, args, .. } => {

@@ -8,6 +8,7 @@ mod codegen;
 mod elab;
 mod enums;
 mod expr;
+mod foreach;
 mod arrmeth;
 mod assert;
 mod heap;

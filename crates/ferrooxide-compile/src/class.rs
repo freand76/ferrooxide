@@ -33,6 +33,8 @@ pub(crate) struct Prop {
     /// a fixed-size array: (lowest index, number of elements) per dimension, stored flat
     /// (row-major)
     pub dims: Vec<(i64, u32)>,
+    /// per dimension: declared with a descending range (`[4:2]`)
+    pub desc: Vec<bool>,
     /// the enum of the property (of an element; NONE: not an enum)
     pub enum_id: u32,
 }
@@ -155,14 +157,16 @@ impl<'a> Compiler<'a> {
                 };
                 // a fixed-size array
                 let mut dims = Vec::new();
+                let mut desc = Vec::new();
                 for (a, b) in &n.dims {
                     if n.heap.is_some() {
                         return self.err("an array of queues or dynamic arrays as a class property is not supported");
                     }
                     let (a, b) = (self.const_int(a, scope)?, self.const_int(b, scope)?);
                     dims.push((a.min(b), ((a - b).abs() + 1) as u32));
+                    desc.push(a > b);
                 }
-                let p = Prop { name: n.name.clone(), off: width, ty, dims, enum_id };
+                let p = Prop { name: n.name.clone(), off: width, ty, dims, desc, enum_id };
                 if four && n.heap.is_none() {
                     xs.push((width, p.size()));
                 }

@@ -968,6 +968,10 @@ impl<'a> Compiler<'a> {
                 self.patch(jz, h);
                 self.finish_loop(h);
             }
+            Stmt::Foreach { array, vars, body, line } => {
+                self.line = *line;
+                self.foreach(array, vars, body, *line, sid)?;
+            }
             Stmt::Forever { body, line } => {
                 self.line = *line;
                 let top = self.here();
@@ -1751,6 +1755,10 @@ impl<'a> Compiler<'a> {
                 self.reads_stmt_inner(body, sid, out, locals);
             }
             Stmt::Forever { body, .. } | Stmt::Timed { body, .. } => self.reads_stmt_inner(body, sid, out, locals),
+            Stmt::Foreach { array, body, .. } => {
+                self.reads_expr(array, sid, out);
+                self.reads_stmt_inner(body, sid, out, locals);
+            }
             Stmt::SysTask { args, .. } => {
                 for a in args.iter().flatten() {
                     self.reads_expr(a, sid, out);

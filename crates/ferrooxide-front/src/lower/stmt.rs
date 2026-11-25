@@ -843,16 +843,24 @@ impl Lower {
 
     fn foreach(&mut self, array: &t::Expr, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
         let line = loc.line;
-        let t::ExprKind::Ident(name) = &array.kind else {
-            return self.err(loc, "foreach over a hierarchical name is not supported");
+        // an array named here: loops made here; anything else (a member, an element, a
+        // name declared elsewhere): by the compiler, which knows its type
+        let local = match &array.kind {
+            t::ExprKind::Ident(n) if self.vars.get(n).is_some_and(|v| v.0.heap.is_some()) => {
+                let name = self.name(n, array.loc);
+                return self.foreach_heap(&name, vars, body, loc);
+            }
+            t::ExprKind::Ident(n) => self.var_dims(n).map(|d| (n.clone(), d)),
+            _ => None,
         };
-        let name = self.name(name, array.loc);
-        if self.vars.get(&name).is_some_and(|v| v.0.heap.is_some()) {
-            return self.foreach_heap(&name, vars, body, loc);
-        }
-        let Some(dims) = self.var_dims(&name) else {
-            return self.err(loc, format!("foreach: '{name}' is not an array declared here"));
+        let Some((name, dims)) = local else {
+            let array = self.expr(array)?;
+            let vars: Vec<Option<String>> = vars.iter().map(|v| v.as_ref().map(|n| self.name(n, loc))).collect();
+            self.wild.locals.extend(vars.iter().flatten().cloned());
+            let body = self.stmt(body)?;
+            return Ok(Stmt::Foreach { array, vars, body: Box::new(body), line });
         };
+        let name = self.name(&name, array.loc);
         let vars: Vec<Option<String>> = vars.iter().map(|v| v.as_ref().map(|n| self.name(n, loc))).collect();
         self.wild.locals.extend(vars.iter().flatten().cloned());
         if vars.len() > dims.len() {

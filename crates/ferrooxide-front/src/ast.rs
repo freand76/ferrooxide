@@ -523,6 +523,9 @@ pub enum Stmt {
     Discard { e: Expr, line: Line },
     /// `wait fork`: until the fork branches the process started have ended
     WaitFork { line: Line },
+    /// `foreach (array[i, j])` over an array the compiler resolves (a member, an element, a
+    /// name declared elsewhere): one loop per named variable (None: a skipped dimension)
+    Foreach { array: Expr, vars: Vec<Option<String>>, body: Box<Stmt>, line: Line },
     /// a deferred immediate assertion (IEEE 1800-2017 16.4): the condition is evaluated
     /// here, the action runs in the Reactive region (`#0`) or the Postponed region (`final`)
     /// of the time step, once for the last evaluation in it

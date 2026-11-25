@@ -231,6 +231,7 @@ impl<'a> Compiler<'a> {
                 | Stmt::DoWhile { body, .. }
                 | Stmt::Repeat { body, .. }
                 | Stmt::Forever { body, .. }
+                | Stmt::Foreach { body, .. }
                 | Stmt::Timed { body, .. }
                 | Stmt::Wait { body, .. } => stmt(body, out),
                 _ => {}
