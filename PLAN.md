@@ -745,6 +745,10 @@ differences (Icarus deviations from the standard that we copied are in `DEVIATIO
 Kept up to date as features stop short; regression-suite test names in brackets.
 
 SystemVerilog data types and testbench features:
+- `process` (done 2026-11-25: `self`, `status`, `kill`, `await`): `suspend`/`resume`
+  (need the scheduler to hold back a suspended process's wake-ups), `srandom`/
+  `get_randstate`/`set_randstate`; enum methods of a call's result (`p.status().name()`);
+  `process::self().kill();` as a statement.
 - `ref` arguments are copied in and out (as `inout`); calls where that differs from a
   reference are rejected: a task with ref arguments that can wait, a ref argument whose
   variable the subroutine also names [sv-tests chapter-7/queues/persistence]. A real

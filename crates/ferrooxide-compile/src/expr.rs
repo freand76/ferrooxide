@@ -1296,6 +1296,19 @@ impl<'a> Compiler<'a> {
                 let d = self.resize(d, 64, own, false);
                 Ok(self.resize(d, own, w, false))
             }
+            // the `std::process` class (std.sv): the running process's id, a process's state
+            "$__process_self" => {
+                let d = self.tmp(64);
+                self.emit(Instr::Proc { op: rt::ProcOp::Self_, d, a: NONE });
+                Ok(self.resize(d, 64, w, false))
+            }
+            "$__process_status" => {
+                let Some(id) = args.first() else { return self.err("$__process_status needs a process") };
+                let a = self.expr(id, sid, 64, false)?;
+                let d = self.tmp(32);
+                self.emit(Instr::Proc { op: rt::ProcOp::Status, d, a });
+                Ok(self.resize(d, 32, w, false))
+            }
             "$random" | "$urandom" => {
                 let d = self.tmp(32);
                 let f = match args.first().map(|a| &a.kind) {
@@ -1856,12 +1869,14 @@ impl<'a> Compiler<'a> {
         let bpath = format!("{}.{}", self.scopes[fs_def].name, f.name);
         let reg = self.open_block(bpath);
         let r = self.auto_inits(f, fscope, fresh).and_then(|_| self.stmt(&f.body, fscope));
+        self.subr.call_depth -= 1;
+        self.subr.inline_stack.pop();
+        // (an error inside a fork branch of the body leaves the branch's process open: the
+        // compilation ends here)
+        r?;
         self.close_block(reg);
         self.file = saved_file;
         let (_, patches) = self.code.pb.last_mut().unwrap().rets.pop().unwrap();
-        self.subr.call_depth -= 1;
-        self.subr.inline_stack.pop();
-        r?;
         let end = self.here();
         for p in patches {
             self.patch(p, end);

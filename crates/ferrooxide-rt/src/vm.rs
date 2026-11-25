@@ -165,6 +165,12 @@ pub struct Sim {
     /// FRAME_OFF while it is not shared, FRAME_FREE when nobody's data is there
     resident: Vec<u32>,
     any_swap: bool,
+    /// `std::process` handles were made: how each process (process, incarnation) ended
+    /// (0 finished, 4 killed), and the processes awaiting one (target, its incarnation,
+    /// waiter, the waiter's incarnation)
+    proc_handles: bool,
+    proc_ends: HashMap<(u32, u32), u8>,
+    awaiters: Vec<(u32, u32, u32, u32)>,
     /// frames of instances that are not resident
     saved_frames: HashMap<u32, Vec<u64>>,
     /// JIT entries of instances (by id - inst_base); their tables carry their own id
@@ -511,6 +517,9 @@ impl Sim {
             // (branches with fork-block variables share their frame from the start)
             resident: prog.procs.iter().map(|p| if p.capture { FRAME_FREE } else { FRAME_OFF }).collect(),
             any_swap: prog.procs.iter().any(|p| p.capture),
+            proc_handles: false,
+            proc_ends: HashMap::new(),
+            awaiters: Vec::new(),
             saved_frames: HashMap::new(),
             #[cfg(feature = "jit")]
             inst_entries: Vec::new(),
@@ -1245,6 +1254,9 @@ impl Sim {
 
     /// A process ran to its end: a finished fork branch lets its parent's join count down.
     fn proc_done(&mut self, p: u32) {
+        if self.proc_handles {
+            self.proc_end(p, 0);
+        }
         let pr = &mut self.procs[p as usize];
         if pr.class != ProcClass::Spawned || pr.done {
             return;
@@ -1261,6 +1273,104 @@ impl Sim {
         if self.any_insts || self.any_swap {
             self.instance_done(p);
         }
+    }
+
+    /// Process `p` (its current incarnation) ended in `state`: its awaiters continue.
+    fn proc_end(&mut self, p: u32, state: u8) {
+        let g = self.procs[p as usize].gen;
+        self.proc_ends.entry((p, g)).or_insert(state);
+        let mut k = 0;
+        while k < self.awaiters.len() {
+            let (t, tg, w, wg) = self.awaiters[k];
+            if t == p && tg == g {
+                self.awaiters.swap_remove(k);
+                if self.procs[w as usize].gen == wg {
+                    self.push_active(w);
+                }
+            } else {
+                k += 1;
+            }
+        }
+    }
+
+    /// The process and incarnation of a `std::process` id; None for an invalid one.
+    fn proc_of(&self, id: u64) -> Option<(u32, u32)> {
+        let p = (id & 0xffff_ffff) as u32;
+        (p > 0 && (p as usize) <= self.procs.len()).then(|| (p - 1, (id >> 32) as u32))
+    }
+
+    /// `Instr::Proc` for process `p`. Returns true if `p` suspended or ended.
+    fn exec_proc(&mut self, p: u32, op: ProcOp, d: u32, a: u32, pc: usize) -> bool {
+        self.proc_handles = true;
+        let (d, a) = (d as usize, a as usize);
+        let id = if a == NONE as usize || self.mem[a + 1] != 0 { 0 } else { self.mem[a] };
+        let target = self.proc_of(id);
+        // (an incarnation that is not the current one has ended)
+        let ended = |me: &Self, (q, g): (u32, u32)| -> Option<u8> {
+            me.proc_ends.get(&(q, g)).copied().or((me.procs[q as usize].gen != g).then_some(0))
+        };
+        match op {
+            ProcOp::Self_ => {
+                self.mem[d] = ((self.procs[p as usize].gen as u64) << 32) | (p as u64 + 1);
+                self.mem[d + 1] = 0;
+            }
+            ProcOp::Status => {
+                let s = match target {
+                    None => 0,
+                    Some(t) => match ended(self, t) {
+                        Some(s) => s as u64,
+                        None if t.0 == p => 1,
+                        None => 2,
+                    },
+                };
+                self.mem[d] = s;
+                self.mem[d + 1] = 0;
+            }
+            ProcOp::Kill => {
+                let Some(t) = target.filter(|&t| ended(self, t).is_none()) else { return false };
+                // the process and the branches it started (and theirs)
+                let mut stack = vec![t.0];
+                let mut killed = Vec::new();
+                let n = self.procs.len() as u32;
+                while let Some(q) = stack.pop() {
+                    killed.push(q);
+                    for c in (0..self.nprocs).chain(self.inst_base..n) {
+                        let ch = &self.procs[c as usize];
+                        if ch.parent == q && ch.class == ProcClass::Spawned && !ch.done {
+                            stack.push(c);
+                        }
+                    }
+                }
+                let mut stopped = false;
+                for q in killed {
+                    // (as at its end: the parent's join counts it, awaiters continue)
+                    self.proc_end(q, 4);
+                    self.proc_done(q);
+                    let pr = &mut self.procs[q as usize];
+                    pr.wait = NONE;
+                    pr.joining = 0;
+                    pr.done = true;
+                    pr.gen = pr.gen.wrapping_add(1);
+                    stopped |= q == p;
+                }
+                return stopped;
+            }
+            ProcOp::Await => {
+                let Some(t) = target.filter(|&t| ended(self, t).is_none()) else { return false };
+                if t.0 == p {
+                    let _ = writeln!(self.out, "ERROR: a process awaits itself");
+                    self.finished = true;
+                    return true;
+                }
+                let pr = &mut self.procs[p as usize];
+                pr.pc = pc as u32;
+                pr.wait = NONE;
+                let g = pr.gen;
+                self.awaiters.push((t.0, t.1, p, g));
+                return true;
+            }
+        }
+        false
     }
 
     /// Start fork branches. Returns true if the parent waits for them.
@@ -2457,6 +2567,9 @@ impl Sim {
         if let Instr::Assert(op) = ins {
             return self.exec_assert(p, *op, *pc);
         }
+        if let Instr::Proc { op, d, a } = ins {
+            return self.exec_proc(p, *op, *d, *a, *pc);
+        }
         {
             let m = &mut self.mem;
             match ins {
@@ -2759,7 +2872,7 @@ impl Sim {
                 | Instr::RToTicks { .. } => {
                     ops::exec_real(ins, m);
                 }
-                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } | Instr::Assert(_) => unreachable!("handled before"),
+                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } | Instr::Assert(_) | Instr::Proc { .. } => unreachable!("handled before"),
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -4519,7 +4632,7 @@ pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>)
         for ins in &p.code {
             match ins {
                 Instr::Wait { .. } => waits += 1,
-                Instr::Delay { .. } | Instr::Halt => ok = false,
+                Instr::Delay { .. } | Instr::Halt | Instr::Proc { .. } | Instr::WaitFork => ok = false,
                 Instr::Sys(t) if matches!(**t, SysTask::Finish { .. } | SysTask::Monitor { .. } | SysTask::Strobe { .. }) => {
                     ok = false
                 }

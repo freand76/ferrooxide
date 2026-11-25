@@ -498,6 +498,18 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// `obj.f` naming a method of the object's class that is no property: a call without
+    /// arguments (IEEE 1800-2017 13.5.5, `obj.f()`).
+    fn paren_free_call(&mut self, e: &Expr, sid: usize) -> R<Option<Expr>> {
+        let ExprKind::Member(b, m) = &e.kind else { return Ok(None) };
+        let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
+        let ci = &self.classes.list[c as usize];
+        if ci.props.iter().any(|p| p.name == *m) || self.class_const(c, m).is_some() || self.find_method(c, m).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Expr::new(ExprKind::MethodCall(b.clone(), m.clone(), vec![]), e.line)))
+    }
+
     /// The property `name` of class `c`.
     pub(crate) fn prop(&self, c: u32, name: &str) -> R<Prop> {
         let ci = &self.classes.list[c as usize];
@@ -598,6 +610,9 @@ impl<'a> Compiler<'a> {
 
     /// The type of a property access or a method call, None for other expressions.
     pub(crate) fn obj_type_of(&mut self, e: &Expr, sid: usize) -> R<Option<Type>> {
+        if let Some(call) = self.paren_free_call(e, sid)? {
+            return self.obj_type_of(&call, sid);
+        }
         match &e.kind {
             ExprKind::Null | ExprKind::New(_) => Ok(Some(Type::Class(NONE))),
             ExprKind::NewCopy(x) => self.type_of(x, sid).map(Some),
@@ -651,6 +666,9 @@ impl<'a> Compiler<'a> {
 
     /// A property read or a method call: (slot, type); None for other expressions.
     pub(crate) fn obj_value(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Type)>> {
+        if let Some(call) = self.paren_free_call(e, sid)? {
+            return self.obj_value(&call, sid);
+        }
         match &e.kind {
             ExprKind::Null => Ok(Some((self.const_slot(&Const::zero(64)), Type::Class(NONE)))),
             ExprKind::New(_) => self.err("`new` needs a class handle to assign to"),

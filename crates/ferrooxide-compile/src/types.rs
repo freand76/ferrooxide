@@ -313,6 +313,8 @@ impl<'a> Compiler<'a> {
                 "$stime" => v(32, false),
                 "$random" => v(32, true),
                 "$urandom" | "$urandom_range" => v(32, false),
+                "$__process_self" => v(64, false),
+                "$__process_status" => v(32, false),
                 "$signed" | "$unsigned" => {
                     let a = args.first().ok_or_else(|| self.mkerr(format!("{name} needs an argument")))?;
                     v(self.type_of(a, sid)?.width(), name == "$signed")

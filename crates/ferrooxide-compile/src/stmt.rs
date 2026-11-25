@@ -1588,6 +1588,13 @@ impl<'a> Compiler<'a> {
             "$monitoroff" => {
                 self.emit(sys(SysTask::MonitorOn(false)));
             }
+            // the `std::process` class (std.sv): end a process, wait for its end
+            "$__process_kill" | "$__process_await" => {
+                let Some(Some(id)) = args.first() else { return self.err(format!("{name} needs a process")) };
+                let a = self.expr(id, sid, 64, false)?;
+                let op = if name == "$__process_kill" { rt::ProcOp::Kill } else { rt::ProcOp::Await };
+                self.emit(Instr::Proc { op, d: NONE, a });
+            }
             "$finish" | "$stop" => {
                 // $finish(0) prints nothing; otherwise "file:line: $finish called at <time> (<unit>)"
                 let quiet = matches!(args.first(), Some(Some(Expr { kind: ExprKind::Num(n), .. })) if n.digits == "0");

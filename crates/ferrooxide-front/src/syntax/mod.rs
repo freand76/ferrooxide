@@ -45,11 +45,11 @@ pub fn parse_files(files: &[PathBuf], opts: &Options) -> Result<Vec<tree::Source
     Ok(out)
 }
 
-/// The text names a class of package `std` (a word `mailbox` or `semaphore`).
+/// The text names a class of package `std` (a word `mailbox`, `semaphore` or `process`).
 fn uses_std(text: &str) -> bool {
     let b = text.as_bytes();
     let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-    ["mailbox", "semaphore"].iter().any(|w| {
+    ["mailbox", "semaphore", "process"].iter().any(|w| {
         text.match_indices(w).any(|(i, _)| (i == 0 || !word(b[i - 1])) && b.get(i + w.len()).is_none_or(|&c| !word(c)))
     })
 }

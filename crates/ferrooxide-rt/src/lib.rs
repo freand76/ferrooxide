@@ -300,6 +300,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             [*d, *a, *b, *c].into_iter().filter(|&x| x != NONE).collect()
         }
         Instr::Obj { d, a, b, .. } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
+        Instr::Proc { d, a, .. } => [*d, *a].into_iter().filter(|&x| x != NONE).collect(),
         Instr::Assert(AssertOp::Tick { leaves, pass, fail, .. }) => vec![*leaves, *pass, *fail],
         Instr::Assert(_) => vec![],
         Instr::Unforce { t } => match t {
@@ -775,6 +776,8 @@ pub enum Instr {
     Evict { defs: Box<[u32]> },
     /// disable the named blocks / tasks of `Program::disables[target]`
     Disable { target: u32 },
+    /// the `std::process` class (IEEE 1800-2017 9.7), see `ProcOp`
+    Proc { op: ProcOp, d: u32, a: u32 },
     /// re-evaluate the waiting processes that write `sig` (a released net takes its drivers'
     /// value again)
     Kick { sig: u32 },
@@ -834,6 +837,20 @@ pub enum AssertOp {
     /// action process `proc` of a deferred assertion runs (from its start) in the Reactive
     /// region, or the Postponed one: once, also when scheduled again before it runs
     Defer { proc: u32, postponed: bool },
+}
+
+/// Operations of `Instr::Proc`. A process is named by a 64-bit id, (incarnation << 32) |
+/// (process + 1): a fork branch started again is another process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcOp {
+    /// d (64 bits) = the id of the running process
+    Self_,
+    /// d (32 bits) = the state of process a: 0 finished, 1 running, 2 waiting, 4 killed
+    Status,
+    /// end process a and the fork branches it started
+    Kill,
+    /// suspend until process a has ended
+    Await,
 }
 
 /// Operations on class objects in `Instr::Obj`. An object is on the simulator's heap; a

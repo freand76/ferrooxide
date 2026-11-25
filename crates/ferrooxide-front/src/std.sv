@@ -1,7 +1,34 @@
-// The built-in package `std` (IEEE 1800-2017 15.3, 15.4): semaphores and mailboxes,
-// parsed before the sources that use them and imported into every compilation unit.
-// A blocking method waits on a condition on the object's properties.
+// The built-in package `std` (IEEE 1800-2017 9.7, 15.3, 15.4): processes, semaphores and
+// mailboxes, parsed before the sources that use them and imported into every compilation
+// unit. A blocking method waits on a condition on the object's properties.
 package std;
+  // A process object stands for one process (a fork branch started again is another);
+  // `self` gives the same object each time. The `$__process_*` functions are the
+  // simulator's.
+  class process;
+    typedef enum { FINISHED, RUNNING, WAITING, SUSPENDED, KILLED } state;
+    local bit [63:0] id;
+    local static process all[bit [63:0]];
+    static function process self();
+      bit [63:0] i = $__process_self();
+      if (!all.exists(i)) begin
+        process p = new;
+        p.id = i;
+        all[i] = p;
+      end
+      return all[i];
+    endfunction
+    function state status();
+      return state'($__process_status(id));
+    endfunction
+    function void kill();
+      $__process_kill(id);
+    endfunction
+    task await();
+      $__process_await(id);
+    endtask
+  endclass
+
   class semaphore;
     local int keys;
     function new(int keyCount = 0);
