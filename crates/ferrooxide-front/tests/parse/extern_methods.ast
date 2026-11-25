@@ -1,0 +1,29 @@
+package $unit ();
+  class R;
+    // parameter port
+    parameter type T = int(32) signed;
+    // static
+    function automatic int(0) f;
+      input int(32) signed a;
+      begin
+      end
+    endfunction
+  endclass
+  virtual class C;
+    int(32) signed m[0:(3 - 1)];
+    function automatic reg [7:0] g;
+      input int(32) signed x = 3;
+      reg [7:0] r = x;
+      return r;
+    endfunction
+    task automatic t;
+      begin
+      end
+    endtask
+    // virtual
+    function automatic integer signed h;
+      begin
+      end
+    endfunction
+  endclass
+endpackage

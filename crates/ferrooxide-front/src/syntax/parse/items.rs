@@ -890,6 +890,14 @@ impl Parser {
         }
         let end = if s.is_task { Kw::Endtask } else { Kw::Endfunction };
         self.push_scope();
+        // an out-of-class body (`function C::f`) sees the class's type names
+        if let [c] = s.name.scopes.as_slice() {
+            if let Some(names) = self.classes.get(&c.name).cloned() {
+                for n in names {
+                    self.add_type(&n);
+                }
+            }
+        }
         let mut decls = Vec::new();
         let mut stmts = Vec::new();
         loop {

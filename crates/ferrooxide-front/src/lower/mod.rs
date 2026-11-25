@@ -90,6 +90,10 @@ pub(crate) struct Lower {
     classes: HashMap<String, Rc<class::ClassNames>>,
     /// the variables of the static properties of the class just lowered
     class_statics: Vec<Item>,
+    /// out-of-class bodies (`function C::f ... endfunction`) of the class being lowered, by
+    /// method name, and the bodies merged into their prototypes (name, line)
+    extern_bodies: HashMap<String, t::Subroutine>,
+    extern_done: HashSet<(String, usize)>,
     /// the wildcard imports of the module being lowered and the names used through them
     wild: WildCheck,
     /// the genvars declared in the module, and those of the generate loops being lowered
@@ -223,6 +227,8 @@ impl Lower {
             body_params_local: false,
             classes: HashMap::new(),
             class_statics: Vec::new(),
+            extern_bodies: HashMap::new(),
+            extern_done: HashSet::new(),
             wild: WildCheck::default(),
             genvars: Default::default(),
             in_generate: 0,
@@ -329,7 +335,7 @@ impl Lower {
             t::Item::Typedef(_) | t::Item::Subroutine(_) => self.unit_scoped(it, rest),
             t::Item::Class(c) => {
                 // in the `$unit` scope, as file-scope functions
-                let c = self.class_decl(c)?;
+                let c = self.class_decl(c, rest)?;
                 self.unit_vars.push(Item::Class(Rc::new(c)));
                 for it in std::mem::take(&mut self.class_statics) {
                     if let Item::Decl(d) = &it {

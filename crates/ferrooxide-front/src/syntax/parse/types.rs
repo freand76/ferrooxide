@@ -124,6 +124,12 @@ impl Parser {
                         if let (Some(c), T::Ident(t)) = (self.classes.get(n.as_str()), self.peek_at(k + 2)) {
                             return c.contains(t.as_str());
                         }
+                        // `T::x` through a typedef or type parameter (its class unknown
+                        // here): a type when a declared name follows (`T::U v`), else an
+                        // expression (`T::f(a)`, `T::p = 1`)
+                        if !self.classes.contains_key(n.as_str()) {
+                            return self.is_ident_at(k + 2) && self.is_plain_ident_at(k + 3);
+                        }
                     }
                     // `C #(...) x`: a parameterized class; `M #(...) u (...)` is an instance;
                     // `C #(...)::f()` an expression

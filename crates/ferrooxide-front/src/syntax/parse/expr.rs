@@ -98,6 +98,25 @@ impl Parser {
         }
     }
 
+    /// The position after the `[ ... ]` starting at `k` (nested brackets skipped).
+    pub(crate) fn after_brackets(&self, mut k: usize) -> Option<usize> {
+        let mut depth = 0;
+        loop {
+            match self.peek_at(k) {
+                T::Punct("[") => depth += 1,
+                T::Punct("]") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(k + 1);
+                    }
+                }
+                T::Eof => return None,
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+
     /// A type keyword with signing and packed dimensions, then the end of an argument (`)`,
     /// `,`, `}`): `$bits(logic [3:0])`, but not `byte[3].x` (a name).
     fn type_kw_ends_arg(&self) -> bool {

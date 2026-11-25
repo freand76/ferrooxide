@@ -559,7 +559,18 @@ impl Parser {
         } else {
             Expr::new(ExprKind::Ident(self.ident()?), loc)
         };
-        while self.eat_p(".") {
+        loop {
+            // `a[i].m[j]`: selects before a member belong to the array's name
+            if self.is_p("[") && self.after_brackets(0).is_some_and(|k| self.is_p_at(k, ".")) {
+                self.bump();
+                let i = self.expr()?;
+                self.expect_p("]")?;
+                array = Expr::new(ExprKind::Index(Box::new(array), Box::new(i)), loc);
+                continue;
+            }
+            if !self.eat_p(".") {
+                break;
+            }
             let m = self.member_name()?;
             array = Expr::new(ExprKind::Member(Box::new(array), m), loc);
         }

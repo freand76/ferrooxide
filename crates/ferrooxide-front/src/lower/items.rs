@@ -140,13 +140,17 @@ impl Lower {
             }
             t::Item::Class(c) => {
                 self.wild.skip += 1;
-                let c = self.class_decl(c);
+                let c = self.class_decl(c, rest);
                 self.wild.skip -= 1;
                 let c = c?;
                 items.push(Item::Class(std::rc::Rc::new(c)));
                 items.append(&mut self.class_statics);
             }
             t::Item::Subroutine(s) => {
+                // the body of an extern method, merged into its class
+                if !s.name.scopes.is_empty() && self.extern_done.contains(&(format!("{}::{}", s.name.scopes[0].name, s.name.name), s.loc.line as usize)) {
+                    return Ok(());
+                }
                 let s = self.subroutine_in(s, false)?;
                 items.push(Item::Subroutine(s));
             }

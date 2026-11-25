@@ -46,9 +46,22 @@ impl Lower {
     }
 
     /// `class name [#(params)] [extends base]; items endclass`
-    pub(crate) fn class_decl(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
+    /// `rest`: the items after it in its scope, which hold the bodies of its extern methods.
+    pub(crate) fn class_decl(&mut self, c: &t::ClassDecl, rest: &[&t::Item]) -> Result<ClassDecl> {
         let saved_specs = std::mem::take(&mut self.specs);
+        let mut bodies = HashMap::new();
+        for it in rest {
+            if let t::Item::Subroutine(s) = it {
+                if let [sc] = s.name.scopes.as_slice() {
+                    if sc.name == c.name && sc.params.is_none() {
+                        bodies.entry(s.name.name.clone()).or_insert_with(|| (**s).clone());
+                    }
+                }
+            }
+        }
+        let saved_bodies = std::mem::replace(&mut self.extern_bodies, bodies);
         let r = self.class_decl_inner(c);
+        self.extern_bodies = saved_bodies;
         let specs = std::mem::replace(&mut self.specs, saved_specs);
         r.map(|mut d| {
             d.specs = specs;
@@ -364,6 +377,24 @@ impl Lower {
             match it {
                 t::ClassItem::Property { .. } => {}
                 t::ClassItem::Method(m) => {
+                    let merged;
+                    let m = if m.quals.contains(&Kw::Extern) {
+                        merged = self.extern_method(m, &name)?;
+                        &merged
+                    } else if m.quals.contains(&Kw::Pure) {
+                        // a pure virtual method: never called (the class is abstract, a
+                        // derived class overrides it); an empty body
+                        if !m.quals.contains(&Kw::Virtual) || !c.virtual_ {
+                            return self.err(m.loc, format!("pure method '{}' must be virtual, in a virtual class", m.name.name));
+                        }
+                        let mut s = (**m).clone();
+                        s.quals.retain(|q| *q != Kw::Pure);
+                        s.body = Some((vec![], vec![]));
+                        merged = Box::new(s);
+                        &merged
+                    } else {
+                        m
+                    };
                     if let Some(q) = m.quals.iter().find(|q| !matches!(q, Kw::Virtual | Kw::Local | Kw::Protected | Kw::Static)) {
                         return self.unsupported(m.loc, &format!("a {} method", q.as_str()));
                     }
@@ -411,6 +442,35 @@ impl Lower {
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
         Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, rand: rands, constraints, line })
+    }
+
+    /// An extern method (IEEE 1800-2017 8.24): the prototype `m` with its body from the
+    /// `C::f` declaration after the class. Default argument values may be in either.
+    fn extern_method(&mut self, m: &t::Subroutine, class: &str) -> Result<Box<t::Subroutine>> {
+        let n = &m.name.name;
+        let Some(b) = self.extern_bodies.get(n).cloned() else {
+            return self.err(m.loc, format!("extern method '{n}' of class '{class}' has no body ('{class}::{n}')"));
+        };
+        if b.is_task != m.is_task {
+            return self.err(b.loc, format!("'{class}::{n}' is declared as a {} in the class", if m.is_task { "task" } else { "function" }));
+        }
+        let pn = m.ports.as_ref().map_or(0, |p| p.len());
+        let bn = b.ports.as_ref().map_or(0, |p| p.len());
+        if pn != bn {
+            return self.err(b.loc, format!("'{class}::{n}' has {bn} arguments, its prototype {pn}"));
+        }
+        self.extern_done.insert((format!("{class}::{n}"), b.loc.line as usize));
+        let mut s = b;
+        s.quals = m.quals.iter().copied().filter(|q| *q != Kw::Extern).collect();
+        s.name = m.name.clone();
+        if let (Some(ps), Some(bs)) = (&m.ports, &mut s.ports) {
+            for (p, q) in ps.iter().zip(bs.iter_mut()) {
+                if q.default.is_none() {
+                    q.default = p.default.clone();
+                }
+            }
+        }
+        Ok(Box::new(s))
     }
 
     /// The type of handles of class `name`.
