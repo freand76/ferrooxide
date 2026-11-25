@@ -562,12 +562,26 @@ impl Lower {
         self.decl_type = ret_type.clone();
         self.declare_var(&name, &[]);
         let mut decls = Vec::new();
+        // `ref` ports: passed in and out (`Inout`), checked by the compiler; `const ref`: in
+        let mut refs = Vec::new();
         if let Some(ports) = &s.ports {
             let mut cur: Option<Decl> = None;
+            let mut cur_ref = false;
             for p in ports {
                 if p.dir.is_some() || p.ty.is_some() || p.var || cur.is_none() {
                     let dir = match p.dir {
-                        Some(d) => Some(self.dir(d, p.loc)?),
+                        Some(t::Dir::Ref) => {
+                            cur_ref = true;
+                            Some(Dir::Inout)
+                        }
+                        Some(t::Dir::ConstRef) => {
+                            cur_ref = false;
+                            Some(Dir::Input)
+                        }
+                        Some(d) => {
+                            cur_ref = false;
+                            Some(self.dir(d, p.loc)?)
+                        }
                         None => Some(cur.as_ref().and_then(|c| c.dir).unwrap_or(Dir::Input)),
                     };
                     let implicit = t::DataType { kind: t::TypeKind::Implicit, signed: None, packed: vec![], loc: p.loc };
@@ -578,6 +592,9 @@ impl Lower {
                     cur = Some(d);
                 }
                 let n = self.name(&p.name, p.loc);
+                if cur_ref {
+                    refs.push(n.clone());
+                }
                 let (dims, heap) = self.declarator_dims(&p.dims, p.loc)?;
                 self.declare_var_heap(&n, &dims, heap.as_ref());
                 let init = match &p.default {
@@ -640,7 +657,7 @@ impl Lower {
         let written = decls.clone();
         let (decls, scalar_vec_ports) = super::merge_port_types(decls);
         let decls_written = if decls.len() != written.len() || decls.iter().zip(&written).any(|(a, b)| a.names.len() != b.names.len()) { written } else { Vec::new() };
-        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, scalar_vec_ports, decls_written, params, body, line })
+        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, refs, scalar_vec_ports, decls_written, params, body, line })
     }
 }
 

@@ -233,6 +233,9 @@ pub struct SubroutineDecl {
     pub ret_ty: Option<std::rc::Rc<crate::lower::SvType>>,
     /// ports in order + local declarations
     pub decls: Vec<Decl>,
+    /// the `ref` ports (declared `Inout`: copied in and out, IEEE 1800-2017 13.5.2; the
+    /// compiler rejects the calls where that differs from passing a reference)
+    pub refs: Vec<String>,
     /// ports declared without a range that a later declaration gives one (`input a;
     /// reg [3:0] a;`): the line of that declaration (the reference warns about them)
     pub scalar_vec_ports: Vec<(String, Line)>,

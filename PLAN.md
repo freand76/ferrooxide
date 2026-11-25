@@ -745,6 +745,10 @@ differences (Icarus deviations from the standard that we copied are in `DEVIATIO
 Kept up to date as features stop short; regression-suite test names in brackets.
 
 SystemVerilog data types and testbench features:
+- `ref` arguments are copied in and out (as `inout`); calls where that differs from a
+  reference are rejected: a task with ref arguments that can wait, a ref argument whose
+  variable the subroutine also names [sv-tests chapter-7/queues/persistence]. A real
+  reference needs subroutines that are not inlined (A3).
 - queues of structs as class properties (members of their elements), arrays of queues,
   queue ports, `%p` of unpacked structs and associative arrays,
   array methods of associative, multi-dimensional and struct arrays, assignments between

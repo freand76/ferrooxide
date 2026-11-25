@@ -1799,6 +1799,9 @@ impl<'a> Compiler<'a> {
         if args.len() > ports.len() {
             return self.err(format!("too many arguments to '{name}'"));
         }
+        if !f.refs.is_empty() {
+            self.check_ref_args(f, fscope, &ports, args, sid)?;
+        }
         // an automatic function's queue result starts empty on each call
         if let (true, Some(r)) = (f.automatic, ret) {
             if let Type::Dyn { .. } = self.sig_type(r) {
@@ -1883,6 +1886,49 @@ impl<'a> Compiler<'a> {
             }
             None => (None, 0, false),
         })
+    }
+
+    /// `ref` arguments are copied in and out like `inout` ones (IEEE 1800-2017 13.5.2 passes a
+    /// reference). The two differ only where the actual changes or is read through another
+    /// path during the call: a task that can wait, or a body that names the actual's
+    /// variable itself. Those calls are rejected.
+    fn check_ref_args(&mut self, f: &SubroutineDecl, fscope: usize, ports: &[(Dir, u32)], args: &[Expr], sid: usize) -> R<()> {
+        if f.is_task && may_wait(&f.body) {
+            return self.err(format!("a ref argument of task '{}', which can wait, is not supported (it is passed by copy)", f.name));
+        }
+        let mut used: Vec<u32> = Vec::new();
+        let mut reads = Vec::new();
+        self.reads_stmt(&f.body, fscope, &mut reads);
+        used.extend(reads.into_iter().map(|r| r.0));
+        self.blocking_writes(&f.body, fscope, &mut used);
+        for (i, a) in args.iter().enumerate() {
+            let pname = self.sig(ports[i].1).name.rsplit('.').next().unwrap_or_default().to_string();
+            if !f.refs.contains(&pname) {
+                continue;
+            }
+            let mut base = a;
+            while let ExprKind::Index(b, _) | ExprKind::Range(b, _, _) | ExprKind::IndexedRange(b, _, _, _) = &base.kind {
+                base = b;
+            }
+            if !matches!(base.kind, ExprKind::Ident(_) | ExprKind::Hier(_)) {
+                if !matches!(base.kind, ExprKind::Member(..) | ExprKind::Concat(_)) {
+                    return self.err(format!("ref argument '{pname}' of '{}' needs a variable", f.name));
+                }
+                continue;
+            }
+            if let Ok(Some(Base::Sig(s))) = self.resolve_base(base, sid) {
+                let s = self.redir(s);
+                let used_r: Vec<u32> = used.iter().map(|&u| self.redir(u)).collect();
+                if used_r.contains(&s) {
+                    return self.err(format!(
+                        "ref argument '{pname}' of '{}' is given '{}', which the subroutine also uses by name: not supported (a ref is passed by copy)",
+                        f.name,
+                        self.sig(s).name
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// An unpacked array argument `a` (in scope `sid`) of array port `ps` (of the subroutine
@@ -2523,5 +2569,21 @@ impl<'a> Compiler<'a> {
         }
         let (s, w, _) = self.self_expr(e, sid)?;
         Ok(rt::FileName::Val { s, w })
+    }
+}
+
+/// A statement can suspend its process: a timing control, `wait`, `wait fork`, a fork that
+/// waits for its branches, or a call (which may be of a task).
+fn may_wait(st: &Stmt) -> bool {
+    match st {
+        Stmt::Timed { .. } | Stmt::Wait { .. } | Stmt::WaitFork { .. } | Stmt::TaskCall { .. } | Stmt::MethodCall { .. } | Stmt::StaticCall { .. } => true,
+        Stmt::Assign { timing: Some(_), .. } => true,
+        Stmt::Block { fork: Some(j), .. } if *j != Join::None => true,
+        Stmt::Block { stmts, .. } => stmts.iter().any(may_wait),
+        Stmt::If { then_s, else_s, .. } => may_wait(then_s) || else_s.as_deref().is_some_and(may_wait),
+        Stmt::Case { arms, default, .. } => arms.iter().any(|a| may_wait(&a.1)) || default.as_deref().is_some_and(may_wait),
+        Stmt::For { init, step, body, .. } => may_wait(init) || may_wait(step) || may_wait(body),
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Repeat { body, .. } | Stmt::Forever { body, .. } | Stmt::Foreach { body, .. } => may_wait(body),
+        _ => false,
     }
 }
