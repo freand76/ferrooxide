@@ -18,6 +18,10 @@ impl<'a> Compiler<'a> {
     /// Value of an assignment RHS converted to the LHS width.
     pub(crate) fn rhs_value(&mut self, rhs: &Expr, sid: usize, lw: u32) -> R<u32> {
         let (rw, rs) = self.type_of(rhs, sid)?.ws();
+        // a stream wider than its target is an error (IEEE 1800-2017 11.4.14)
+        if matches!(rhs.kind, ExprKind::Stream { .. }) && rw > lw {
+            return self.err(format!("a streaming concatenation of {rw} bits is wider than its {lw}-bit target"));
+        }
         let w = rw.max(lw);
         let v = self.expr(rhs, sid, w, rs)?;
         Ok(self.resize(v, w, lw, false))
@@ -688,6 +692,17 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 self.close_block(reg);
+            }
+            Stmt::Assign { lhs: Expr { kind: ExprKind::Stream { left, slice, items }, .. }, rhs, nonblocking, timing, line } => {
+                self.line = *line;
+                if timing.is_some() {
+                    return self.err("a streaming concatenation target with a delay or event control is not supported");
+                }
+                for x in items {
+                    self.check_proc_target(x, sid)?;
+                }
+                let mode = if *nonblocking { StoreMode::Nba } else { StoreMode::Blocking };
+                self.stream_assign(*left, slice.as_deref(), items, rhs, mode, sid)?;
             }
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;

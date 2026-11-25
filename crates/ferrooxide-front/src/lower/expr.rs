@@ -301,7 +301,23 @@ impl Lower {
             t::ExprKind::Assign(..) => return self.unsupported(loc, "an assignment in an expression"),
             t::ExprKind::Dist(..) => return self.unsupported(loc, "dist"),
             t::ExprKind::Matches(..) | t::ExprKind::TripleAnd(..) => return self.unsupported(loc, "pattern matching"),
-            t::ExprKind::Stream { .. } => return self.unsupported(loc, "a streaming concatenation"),
+            t::ExprKind::Stream { left, slice, items } => {
+                let slice = match slice {
+                    Some(s) => Some(Box::new(match &s.kind {
+                        t::ExprKind::Type(dt) => ExprKind::Type(Rc::new(self.data_type_req(dt)?)).into(),
+                        _ => self.expr(s)?,
+                    })),
+                    None => None,
+                };
+                let mut v = Vec::new();
+                for (x, with) in items {
+                    if with.is_some() {
+                        return self.unsupported(loc, "`with` in a streaming concatenation");
+                    }
+                    v.push(self.expr(x)?);
+                }
+                ExprKind::Stream { left: *left, slice, items: v }.into()
+            }
             t::ExprKind::Tagged(..) => return self.unsupported(loc, "a tagged union expression"),
             // Verilog code may name a variable `new`
             t::ExprKind::New { size: None, args: None, copy: None } if self.vars.contains_key("new") => ExprKind::Ident(self.name("new", loc)).into(),
@@ -352,6 +368,24 @@ impl Lower {
     }
 
     fn lvalue_at(&mut self, e: &t::Expr) -> Result<Expr> {
+        // `{>> {a, b}} = x`: the items are targets
+        if let t::ExprKind::Stream { left, slice, items } = &e.kind {
+            let slice = match slice {
+                Some(s) => Some(Box::new(match &s.kind {
+                    t::ExprKind::Type(dt) => ExprKind::Type(Rc::new(self.data_type_req(dt)?)).into(),
+                    _ => self.expr(s)?,
+                })),
+                None => None,
+            };
+            let mut v = Vec::new();
+            for (x, with) in items {
+                if with.is_some() {
+                    return self.unsupported(e.loc, "`with` in a streaming concatenation");
+                }
+                v.push(self.lvalue(x)?);
+            }
+            return Ok(ExprKind::Stream { left: *left, slice, items: v }.into());
+        }
         if let t::ExprKind::Concat(v) = &e.kind {
             let mut out = Vec::new();
             for x in v {

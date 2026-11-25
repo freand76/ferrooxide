@@ -157,6 +157,10 @@ pub fn expr(e: &Expr) -> String {
             let op = if *inc { "++" } else { "--" };
             if *prefix { format!("({op}{})", expr(e)) } else { format!("({}{op})", expr(e)) }
         }
+        ExprKind::Stream { left, slice, items } => {
+            let s = slice.as_ref().map(|s| expr(s)).unwrap_or_default();
+            format!("{{{}{s}{{{}}}}}", if *left { "<<" } else { ">>" }, list(items))
+        }
         ExprKind::Null => "null".into(),
         ExprKind::EmptyArg => String::new(),
         ExprKind::NamedArg(n, e) => format!(".{n}({})", expr(e)),

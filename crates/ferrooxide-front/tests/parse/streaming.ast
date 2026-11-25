@@ -1,0 +1,15 @@
+module t ();
+  // imports $unit
+  reg [15:0] a, x;
+  reg [7:0] p, q;
+  initial begin
+    x = {<<8{a}};
+    x = {<<{a}};
+    x = {>>{a, p}};
+    x = {<<type(int(8) signed){a}};
+    x = {<<type(reg [3:0]){a}};
+    x = {<<(2 + 2){a}};
+    {<<8{p, q}} = a;
+    {>>{p, q}} <= a;
+  end
+endmodule

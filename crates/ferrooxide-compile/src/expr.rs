@@ -400,6 +400,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Unary(_, a) => self.is_const(a, sid),
             ExprKind::Binary(_, a, b) => self.is_const(a, sid) && self.is_const(b, sid),
             ExprKind::Concat(v) => v.iter().all(|x| self.is_const(x, sid)),
+            ExprKind::Stream { items, .. } => items.iter().all(|x| self.is_const(x, sid)),
             ExprKind::Repl(n, v) => self.is_const(n, sid) && v.iter().all(|x| self.is_const(x, sid)),
             ExprKind::Call(..) => false,
             ExprKind::SysCall(n, args) => {
@@ -812,6 +813,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Mux { d, c: cv, cw, t: tv, f: fv, w });
                 Ok(d)
             }
+            ExprKind::Stream { left, slice, items } => self.stream(*left, slice.as_deref(), items, sid, w),
             ExprKind::Concat(v) => {
                 let mut parts = Vec::new();
                 let mut tw = 0;
@@ -897,6 +899,97 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(true)
+    }
+
+    /// A streaming concatenation (IEEE 1800-2017 11.4.14) as a `w`-bit value: the items as
+    /// one stream; `<<` cuts it into blocks of the slice size from its right end and reverses
+    /// their order. A wider target gets the stream left-justified (11.4.14.2).
+    fn stream(&mut self, left: bool, slice: Option<&Expr>, items: &[Expr], sid: usize, w: u32) -> R<u32> {
+        for x in items {
+            if !matches!(self.type_of(x, sid)?, Type::Vec { .. }) {
+                return self.err("a streaming concatenation of this type (only integral items) is not supported");
+            }
+        }
+        let cat: Expr = ExprKind::Concat(items.to_vec()).into();
+        let (v, sw, _) = self.self_expr(&cat, sid)?;
+        let v = if left {
+            let k = self.stream_slice(slice, sid)?;
+            let mut parts = Vec::new();
+            let mut lsb = 0u32;
+            while lsb < sw {
+                let bw = (k as u32).min(sw - lsb);
+                let t = self.tmp(bw);
+                self.emit(Instr::Slice { d: t, s: v, sw, lsb, w: bw });
+                parts.push((t, bw));
+                lsb += bw;
+            }
+            let d = self.tmp(sw);
+            self.emit_concat(d, sw, &parts);
+            d
+        } else {
+            v
+        };
+        if w > sw {
+            let z = self.const_slot(&Const::zero(w - sw));
+            let d = self.tmp(w);
+            self.emit_concat(d, w, &[(v, sw), (z, w - sw)]);
+            return Ok(d);
+        }
+        if w < sw {
+            return self.err(format!("a streaming concatenation of {sw} bits where {w} bits are expected"));
+        }
+        Ok(v)
+    }
+
+    /// A streaming concatenation as an assignment target (IEEE 1800-2017 11.4.14.3): the
+    /// value's leftmost bits as a stream; `<<` undoes the reordering, the blocks taken from
+    /// the stream's left end.
+    pub(crate) fn stream_assign(&mut self, left: bool, slice: Option<&Expr>, items: &[Expr], rhs: &Expr, mode: rt::StoreMode, sid: usize) -> R<()> {
+        let cat: Expr = ExprKind::Concat(items.to_vec()).into();
+        let w = self.type_of(&cat, sid)?.width();
+        let (v, rw, _) = self.self_expr(rhs, sid)?;
+        if rw < w {
+            return self.err(format!("a streaming concatenation of {w} bits is assigned only {rw} bits"));
+        }
+        let mut v = v;
+        if rw > w {
+            let t = self.tmp(w);
+            self.emit(Instr::Slice { d: t, s: v, sw: rw, lsb: rw - w, w });
+            v = t;
+        }
+        if left {
+            let k = self.stream_slice(slice, sid)? as u32;
+            let mut parts = Vec::new();
+            let mut hi = w;
+            while hi > 0 {
+                let bw = k.min(hi);
+                let t = self.tmp(bw);
+                self.emit(Instr::Slice { d: t, s: v, sw: w, lsb: hi - bw, w: bw });
+                parts.push((t, bw));
+                hi -= bw;
+            }
+            parts.reverse();
+            let d = self.tmp(w);
+            self.emit_concat(d, w, &parts);
+            v = d;
+        }
+        self.store_value(&crate::stmt::Lhs::Expr(&cat, sid), v, w, mode)
+    }
+
+    /// The block size of a `<<` streaming concatenation (default 1).
+    fn stream_slice(&mut self, slice: Option<&Expr>, sid: usize) -> R<i64> {
+        let k = match slice {
+            None => 1,
+            Some(Expr { kind: ExprKind::Type(t), .. }) => {
+                let t = self.resolve_type(t, sid)?;
+                self.const_int(&t.width(), sid)?
+            }
+            Some(e) => self.const_int(e, sid)?,
+        };
+        if k <= 0 {
+            return self.err("the slice size of a streaming concatenation must be positive");
+        }
+        Ok(k)
     }
 
     /// Concatenation (parts msb-first). Two ≤64-bit parts use one Concat; otherwise the value is
@@ -1997,6 +2090,7 @@ impl<'a> Compiler<'a> {
             ExprKind::IncDec { e, .. } | ExprKind::NamedArg(_, e) => self.reads_expr(e, sid, out),
             ExprKind::New(v) | ExprKind::NewTyped(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             ExprKind::NewCopy(x) => self.reads_expr(x, sid, out),
+            ExprKind::Stream { items, .. } => items.iter().for_each(|x| self.reads_expr(x, sid, out)),
             ExprKind::ArrayWith { arr, .. } => self.reads_expr(arr, sid, out),
             ExprKind::Randomize { obj, .. } => {
                 if let Some(o) = obj {

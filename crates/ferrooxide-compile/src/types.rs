@@ -152,6 +152,13 @@ impl<'a> Compiler<'a> {
         Ok(match &e.kind {
             ExprKind::Type(_) => return self.err("a data type is not a value"),
             ExprKind::Randomize { .. } => Type::vec(32, true),
+            ExprKind::Stream { items, .. } => {
+                let mut w = 0;
+                for x in items {
+                    w += self.type_of(x, sid)?.width();
+                }
+                Type::vec(w, false)
+            }
             ExprKind::ArrayWith { method, .. } => return self.err(format!("array method '{method}' with `with` is not supported for this array (only for queues, dynamic arrays and one-dimensional fixed-size arrays of vectors, reals, strings or class handles)")),
             ExprKind::Member(..) => return self.member_error(e, sid),
             ExprKind::NewArray(..) => return self.err("new[] needs a dynamic array to assign to"),

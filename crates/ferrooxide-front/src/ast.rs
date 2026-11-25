@@ -612,6 +612,12 @@ impl Expr {
             }
             K::Unary(_, a) | K::Member(a, _) | K::NamedArg(_, a) | K::NewCopy(a) | K::IncDec { e: a, .. } => f(a),
             K::Concat(v) | K::Call(_, v) | K::SysCall(_, v) | K::New(v) | K::NewTyped(_, v) | K::StaticCall(_, _, v) => v.iter_mut().for_each(f),
+            K::Stream { slice, items, .. } => {
+                if let Some(s) = slice {
+                    f(s);
+                }
+                items.iter_mut().for_each(f);
+            }
             K::Repl(a, v) | K::MethodCall(a, _, v) => {
                 f(a);
                 v.iter_mut().for_each(f);
@@ -766,6 +772,10 @@ pub enum ExprKind {
     Last,
     /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value
     IncDec { prefix: bool, inc: bool, e: Box<Expr> },
+    /// a streaming concatenation (IEEE 1800-2017 11.4.14): `{>> {items}}` (the items as a
+    /// stream), `{<< slice {items}}` (blocks of `slice` bits, a constant or a type, from the
+    /// right end in reverse order; default 1)
+    Stream { left: bool, slice: Option<Box<Expr>>, items: Vec<Expr> },
 }
 
 /// An item of an assignment pattern.

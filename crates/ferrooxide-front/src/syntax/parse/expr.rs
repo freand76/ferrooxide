@@ -737,7 +737,21 @@ impl Parser {
         if (self.is_p("<<") || self.is_p(">>")) && !self.is_p_at(1, "}") {
             let left = self.is_p("<<");
             self.bump();
-            let slice = if self.is_p("{") { None } else { Some(bx(self.expr_or_type()?)) };
+            // (the slice: a constant or a type, `{<< byte {x}}`)
+            let type_here = match self.peek() {
+                T::Kw(k) => is_type_kw(*k),
+                T::Ident(n) => self.is_type_name(n),
+                _ => false,
+            };
+            let slice = if self.is_p("{") {
+                None
+            } else if type_here && self.is_p_at(1, "{") {
+                let loc = self.loc();
+                let t = self.data_type()?.unwrap();
+                Some(bx(Expr::new(ExprKind::Type(Box::new(t)), loc)))
+            } else {
+                Some(bx(self.expr_or_type()?))
+            };
             self.expect_p("{")?;
             let mut items = Vec::new();
             loop {
