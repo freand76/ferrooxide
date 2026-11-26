@@ -33,6 +33,9 @@ pub(crate) struct ClassNames {
     pub types: HashMap<String, Rc<SvType>>,
     /// parameters and enum constants declared in the class (`C::P`, `obj.P`)
     pub consts: HashSet<String>,
+    /// a class declared later (`typedef class C;`) or a specialization of one: its names
+    /// are not known yet
+    pub later: bool,
     /// a parameterized class (not a specialization of one): outside the class, `C::x`
     /// needs parameter values (`C #(..)::x`)
     pub parameterized: bool,
@@ -83,7 +86,7 @@ impl Lower {
                 None => match self.classes.get(&n.name) {
                     Some(c) => (n.name.clone(), c.clone()),
                     // a class declared later (`typedef class C;`): its names come with it
-                    None if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) => (n.name.clone(), Rc::new(ClassNames::default())),
+                    None if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) => (n.name.clone(), Rc::new(ClassNames { later: true, ..Default::default() })),
                     None => return self.err(loc, format!("'{}' is not a class", n.name)),
                 },
                 Some(p) => match self.packages.get(&p.name).and_then(|k| k.classes.get(&n.name)).cloned() {
@@ -97,13 +100,19 @@ impl Lower {
             let spec = self.new_spec(&full, &n.name, names, args, loc)?;
             return Ok(t::Name { scopes: vec![], name: spec, params: None, loc: n.loc });
         }
-        if let [s] = n.scopes.as_slice() {
-            if let Some(args) = &s.params {
-                let Some(names) = self.classes.get(&s.name).cloned() else {
-                    return self.err(loc, format!("'{}' is not a class", s.name));
+        // `C #(..)::x`, `C #(..)::T::x`
+        if let Some((s, more)) = n.scopes.split_first() {
+            if let (Some(args), true) = (&s.params, more.iter().all(|m| m.params.is_none())) {
+                let names = match self.classes.get(&s.name) {
+                    Some(c) => c.clone(),
+                    // a class declared later (`typedef class C;`): its names come with it
+                    None if self.types.get(&s.name).is_some_and(|t| t.class.is_some()) => Rc::new(ClassNames { later: true, ..Default::default() }),
+                    None => return self.err(loc, format!("'{}' is not a class", s.name)),
                 };
                 let spec = self.new_spec(&s.name, &s.name, names, args, loc)?;
-                return Ok(t::Name { scopes: vec![t::NamePart { name: spec, params: None }], name: n.name.clone(), params: None, loc: n.loc });
+                let mut scopes = vec![t::NamePart { name: spec, params: None }];
+                scopes.extend(more.iter().cloned());
+                return Ok(t::Name { scopes, name: n.name.clone(), params: None, loc: n.loc });
             }
         }
         if n.scopes.iter().any(|s| s.params.is_some()) {

@@ -717,7 +717,7 @@ impl Lower {
                 // compiler finds in C's scope
                 if let ([c, td], Some((Op::Call(a, _), rest))) = (n.scopes.as_slice(), ops.split_first()) {
                     let class = match self.classes.get(&c.name) {
-                        Some(cn) => cn.types.get(&td.name).filter(|t| t.class.is_some()).map(|_| c.name.clone()),
+                        Some(cn) => (cn.later || cn.types.get(&td.name).is_some_and(|t| t.class.is_some())).then(|| c.name.clone()),
                         None => self.types.get(&c.name).and_then(|t| t.class.clone()),
                     };
                     if let Some(class) = class.filter(|_| c.params.is_none() && td.params.is_none() && n.params.is_none()) {
@@ -897,10 +897,15 @@ impl Lower {
         let var = self.vars.get(&name).map(|v| v.0.clone());
         // `a[k].m(args)`, `a[k][i]`: an element of an array of queues, dynamic or associative
         // arrays is one itself
-        if let (Some(t), Some(Op::Index(k))) = (&var, ops.first()) {
+        if let (Some(t), Some(Op::Index(_))) = (&var, ops.first()) {
             if t.inner_heap.is_some() {
-                let e: Expr = ExprKind::Index(Box::new(ExprKind::Ident(name).into()), Box::new(self.expr(k)?)).into();
-                return match &ops[1..] {
+                let mut e: Expr = ExprKind::Ident(name).into();
+                let mut n = 0;
+                while let Some(Op::Index(k)) = ops.get(n) {
+                    e = ExprKind::Index(Box::new(e), Box::new(self.expr(k)?)).into();
+                    n += 1;
+                }
+                return match &ops[n..] {
                     [Op::Member(m, _), Op::Call(a, l), rest @ ..] => {
                         if lvalue {
                             return self.unsupported(*l, "a method call as an assignment target");
@@ -932,7 +937,9 @@ impl Lower {
             return self.selects(base.into(), &ops[k..]);
         }
         if let (Some(t), Some(Op::Member(m, mloc))) = (&var, ops.first()) {
-            if t.enum_names.is_some() && ENUM_METHODS.contains(m) {
+            // (not of an array of an enum: `num`, `first`, ... are its methods)
+            let array = t.heap.is_some() || self.vars.get(&name).is_some_and(|v| !v.1.is_empty());
+            if t.enum_names.is_some() && ENUM_METHODS.contains(m) && !array {
                 let (arg, used) = match ops.get(1) {
                     Some(Op::Call(a, l)) => match a {
                         [] => (None, 2),

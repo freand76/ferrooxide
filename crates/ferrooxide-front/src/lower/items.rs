@@ -265,7 +265,7 @@ impl Lower {
                     let n = self.name(n, *loc);
                     self.genvars.0.insert(n.clone());
                     self.declare_var(&n, &[]);
-                    names.push(Declarator { name: n, dims: vec![], heap: None, inner: None, init: None, line: loc.line });
+                    names.push(Declarator { name: n, dims: vec![], heap: None, inner: vec![], init: None, line: loc.line });
                 }
                 let d = Decl::var(super::SvType::flat(NetKind::Genvar, false, vec![]), names, false, line);
                 items.append(&mut self.pending);
@@ -561,7 +561,7 @@ impl Lower {
                     None => None,
                 };
                 let mut d = cur.clone().unwrap();
-                d.names = vec![Declarator { name: n, dims, heap, inner: None, init, line: p.loc.line }];
+                d.names = vec![Declarator { name: n, dims, heap, inner: vec![], init, line: p.loc.line }];
                 decls.push(d);
             }
         }

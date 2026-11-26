@@ -36,7 +36,7 @@ fn index(a: &Expr, i: Expr) -> Expr {
 
 /// An automatic variable for a loop.
 fn var_decl(kind: NetKind, signed: bool, range: Option<Range>, n: &str, line: Line) -> Decl {
-    let names = vec![Declarator { name: n.to_string(), dims: vec![], heap: None, inner: None, init: None, line }];
+    let names = vec![Declarator { name: n.to_string(), dims: vec![], heap: None, inner: vec![], init: None, line }];
     Decl::var(SvType::flat(kind, signed, range.into_iter().collect()), names, true, line)
 }
 

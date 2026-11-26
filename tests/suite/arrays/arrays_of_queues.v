@@ -1,7 +1,12 @@
-// Associative arrays and queues whose elements are queues (IEEE 1800-2017
-// 7.2): element methods, element reads and writes, copies (arrays are
-// values), foreach over both dimensions; reading a missing key creates none.
+// Associative arrays and queues whose elements are queues or associative
+// arrays (IEEE 1800-2017 7.2), from a typedef or declared with several
+// dimensions: element methods, element reads and writes, copies (arrays are
+// values), foreach over all dimensions; reading a missing key creates none.
 module top;
+  typedef enum {X, Y, Z} e_t;
+  class obj; endclass
+  e_t states[obj][obj][int];
+  int qs[string][$];
   typedef int q_t[$];
   q_t all[int];
   q_t by_name[string];
@@ -53,6 +58,19 @@ module top;
     qq[0].push_back(7);
     check(qq.size() == 1 && qq[0].size() == 3 && qq[0][2] == 7 && q.size() == 2, "a queue of queues");
     check(total(10) == 45, "an automatic array of queues");
+    begin
+      obj a = new, b = new;
+      int n = 0;
+      states[a][b][1] = Y;
+      states[a][a][2] = Z;
+      check(states.num() == 1 && states[a].num() == 2 && states[a][b][1] == Y, "three associative levels");
+      check(states[b].num() == 0 && states.num() == 1 && states[a][a].exists(2), "missing keys of three levels");
+      foreach (states[i, j, k]) n++;
+      check(n == 2, "foreach over three levels");
+      qs["x"].push_back(4);
+      qs["x"].push_back(5);
+      check(qs["x"].size() == 2 && qs["x"][1] == 5, "int qs[string][$]");
+    end
     if (fails == 0) $display("PASSED");
   end
 endmodule

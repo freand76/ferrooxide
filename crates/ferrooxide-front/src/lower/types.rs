@@ -339,6 +339,29 @@ impl Lower {
     /// The unpacked dimensions of a declarator: ranges, or the one dimension of a queue or
     /// dynamic array.
     pub(crate) fn unpacked_dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Option<HeapKind>)> {
+        let (dims, mut heaps) = self.unpacked_dims_all(v, loc)?;
+        if heaps.len() > 1 {
+            return self.unsupported(loc, "an array of queues or dynamic arrays here");
+        }
+        Ok((dims, heaps.pop()))
+    }
+
+    /// The unpacked dimensions of a declarator: ranges, or its queue, dynamic and associative
+    /// dimensions (outermost first).
+    pub(crate) fn unpacked_dims_all(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Vec<HeapKind>)> {
+        let heap = |d: &t::Dim| matches!(d, t::Dim::Unsized | t::Dim::Queue(_) | t::Dim::Assoc(_));
+        if v.len() > 1 && v.iter().all(heap) {
+            let mut out = Vec::new();
+            for d in v {
+                out.extend(self.unpacked_dims_all(std::slice::from_ref(d), loc)?.1);
+            }
+            return Ok((vec![], out));
+        }
+        let (dims, heap) = self.unpacked_dims_one(v, loc)?;
+        Ok((dims, heap.into_iter().collect()))
+    }
+
+    fn unpacked_dims_one(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Option<HeapKind>)> {
         let heap = |d: &t::Dim| matches!(d, t::Dim::Unsized | t::Dim::Queue(_) | t::Dim::Assoc(_));
         match v {
             [t::Dim::Unsized] => Ok((vec![], Some(HeapKind::Dynamic))),
@@ -979,7 +1002,7 @@ impl Lower {
             let (dims, heap, inner) = self.declarator_dims_inner(&d.dims, d.loc)?;
             // (the variable is declared in its own initializer: `T e = e.first();`)
             self.declare_var_heap(&name, &dims, heap.as_ref());
-            if let (Some(i), Some(v)) = (&inner, self.vars.get_mut(&name)) {
+            if let (Some(i), Some(v)) = (inner.first(), self.vars.get_mut(&name)) {
                 Rc::make_mut(&mut v.0).inner_heap = Some(i.clone());
             }
             let init = match &d.init {
@@ -995,7 +1018,7 @@ impl Lower {
     /// the declarator's (or the typedef's) queue or dynamic dimension.
     pub(crate) fn declarator_dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Option<HeapKind>)> {
         let (dims, heap, inner) = self.declarator_dims_inner(v, loc)?;
-        if inner.is_some() {
+        if !inner.is_empty() {
             return self.unsupported(loc, "an array of queues or dynamic arrays here");
         }
         Ok((dims, heap))
@@ -1003,23 +1026,23 @@ impl Lower {
 
     /// `declarator_dims`, also of a queue, dynamic or associative array of the typedef's
     /// queues, dynamic or associative arrays (`q_t a[string]`): their kind (the third).
-    pub(crate) fn declarator_dims_inner(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Option<HeapKind>, Option<HeapKind>)> {
-        let (mut dims, mut heap) = self.unpacked_dims(v, loc)?;
-        let mut inner = None;
+    pub(crate) fn declarator_dims_inner(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<(Vec<Range>, Option<HeapKind>, Vec<HeapKind>)> {
+        let (mut dims, mut inner) = self.unpacked_dims_all(v, loc)?;
         if let Some(t) = &self.decl_type {
             if let Some(h) = &t.heap {
                 if !dims.is_empty() || !t.unpacked.is_empty() {
                     return self.unsupported(loc, "a fixed-size array of queues or dynamic arrays");
                 }
-                match heap {
-                    Some(_) => inner = Some(h.clone()),
-                    None => heap = Some(h.clone()),
-                }
+                inner.push(h.clone());
             }
-            if heap.is_some() && !t.unpacked.is_empty() {
+            if !inner.is_empty() && !t.unpacked.is_empty() {
                 return self.unsupported(loc, "a queue or dynamic array of unpacked arrays");
             }
             dims.splice(0..0, t.unpacked.iter().cloned());
+        }
+        let heap = (!inner.is_empty()).then(|| inner.remove(0));
+        if heap.is_some() && !dims.is_empty() {
+            return self.unsupported(loc, "a queue or dynamic array of unpacked arrays");
         }
         Ok((dims, heap, inner))
     }

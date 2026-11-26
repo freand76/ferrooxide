@@ -373,7 +373,7 @@ impl Lower {
                             self.wild.locals.push(name.clone());
                             let v = self.expr(init)?;
                             let Some(d) = decls.last_mut() else { return self.unsupported(*loc, "this for-loop initialization") };
-                            d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, inner: None, init: None, line: loc.line });
+                            d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, inner: vec![], init: None, line: loc.line });
                             inits.push(Stmt::Assign { lhs: ExprKind::Ident(name).into(), rhs: v, nonblocking: false, timing: None, line: loc.line });
                         }
                         t::ForInit::Assign(st) => inits.push(self.simple_assign(st)?),
@@ -536,6 +536,10 @@ impl Lower {
         let t::ExprKind::Call { func, .. } = &e.kind else { return false };
         let t::ExprKind::Member(a, _) = &func.kind else { return false };
         let t::ExprKind::Index(b, _) = &a.kind else { return false };
+        let mut b: &t::Expr = b;
+        while let t::ExprKind::Index(x, _) = &b.kind {
+            b = x;
+        }
         matches!(&b.kind, t::ExprKind::Ident(n) if self.vars.get(n).is_some_and(|v| v.0.inner_heap.is_some()))
     }
 
@@ -759,7 +763,7 @@ impl Lower {
         };
         let body = Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: chain.into_iter().collect(), fork: None };
         let run = Stmt::If { cond: bin(BinOp::Ne, total, ExprKind::Num(dec(0)).into()).into(), then_s: Box::new(Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: vec![pick, body], fork: None }), else_s: None, line };
-        let d = Decl::var(super::SvType::flat(NetKind::Reg, false, vec![(ExprKind::Num(dec(63)).into(), ExprKind::Num(dec(0)).into())]), vec![Declarator { name: r, dims: vec![], heap: None, inner: None, init: None, line }], true, line);
+        let d = Decl::var(super::SvType::flat(NetKind::Reg, false, vec![(ExprKind::Num(dec(63)).into(), ExprKind::Num(dec(0)).into())]), vec![Declarator { name: r, dims: vec![], heap: None, inner: vec![], init: None, line }], true, line);
         Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![run], fork: None })
     }
 
@@ -775,7 +779,7 @@ impl Lower {
             line,
         };
         let decl = |kind: NetKind, signed: bool, range: Option<Range>, n: &str| {
-            Decl::var(super::SvType::flat(kind, signed, range.into_iter().collect()), vec![Declarator { name: n.to_string(), dims: vec![], heap: None, inner: None, init: None, line }], true, line)
+            Decl::var(super::SvType::flat(kind, signed, range.into_iter().collect()), vec![Declarator { name: n.to_string(), dims: vec![], heap: None, inner: vec![], init: None, line }], true, line)
         };
         // the loop variable: of the key type (`[*]`: 64-bit)
         let kd = match key {
@@ -818,7 +822,7 @@ impl Lower {
             body: Box::new(body),
             line,
         };
-        let d = Decl::var(super::SvType::flat(NetKind::Int(32), true, vec![]), vec![Declarator { name: v.clone(), dims: vec![], heap: None, inner: None, init: None, line }], true, line);
+        let d = Decl::var(super::SvType::flat(NetKind::Int(32), true, vec![]), vec![Declarator { name: v.clone(), dims: vec![], heap: None, inner: vec![], init: None, line }], true, line);
         Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![lp], fork: None })
     }
 
@@ -878,7 +882,7 @@ impl Lower {
                 body: Box::new(body),
                 line,
             };
-            names.push(Declarator { name: v.clone(), dims: vec![], heap: None, inner: None, init: None, line });
+            names.push(Declarator { name: v.clone(), dims: vec![], heap: None, inner: vec![], init: None, line });
         }
         let d = Decl::var(super::SvType::flat(NetKind::Int(32), true, vec![]), names, true, line);
         Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![body], fork: None })

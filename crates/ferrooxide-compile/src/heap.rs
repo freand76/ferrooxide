@@ -87,14 +87,16 @@ impl<'a> Compiler<'a> {
         Ok(Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: c, nested: NONE })
     }
 
-    /// `elem`, or for an array of arrays of kind `inner` (`Declarator::inner`) the handle of
-    /// such an array of `elem`.
-    pub(crate) fn nest_elem(&mut self, elem: Elem, inner: Option<&HeapKind>, sid: usize) -> R<Elem> {
-        let Some(h) = inner else { return Ok(elem) };
-        let kind = self.dyn_kind(h, sid)?;
-        self.sigs.nested.push((kind, elem));
-        let nested = self.sigs.nested.len() as u32 - 1;
-        Ok(Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: NONE, nested })
+    /// `elem`, or for an array of arrays of the kinds `inner` (`Declarator::inner`) the
+    /// handle of such an array (of such arrays ...) of `elem`.
+    pub(crate) fn nest_elem(&mut self, mut elem: Elem, inner: &[HeapKind], sid: usize) -> R<Elem> {
+        for h in inner.iter().rev() {
+            let kind = self.dyn_kind(h, sid)?;
+            self.sigs.nested.push((kind, elem));
+            let nested = self.sigs.nested.len() as u32 - 1;
+            elem = Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: NONE, nested };
+        }
+        Ok(elem)
     }
 
     /// The type of an element value (an array of arrays: an array).

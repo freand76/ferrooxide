@@ -319,7 +319,8 @@ impl<'a> Compiler<'a> {
             _ => return None,
         };
         match sym {
-            Sym::Sig(s) => self.enums.sigs.get(&s).copied(),
+            // (not an array of an enum: `num`, `first`, ... are its methods)
+            Sym::Sig(s) if self.sig(s).depth == 0 && !matches!(self.sig_type(s), crate::types::Type::Dyn { .. }) => self.enums.sigs.get(&s).copied(),
             _ => None,
         }
     }

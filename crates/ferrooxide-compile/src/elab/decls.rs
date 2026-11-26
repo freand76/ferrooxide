@@ -24,7 +24,7 @@ struct Merged<'d> {
     /// a queue or dynamic array
     heap: Option<&'d HeapKind>,
     /// of queues, dynamic or associative arrays of this kind
-    inner: Option<&'d HeapKind>,
+    inner: &'d [HeapKind],
     line: u32,
     /// declared as a port without a range (`input a;`)
     scalar_port: bool,
@@ -137,7 +137,7 @@ impl<'a> Compiler<'a> {
                             mg.ty = Some(&d.ty);
                             if dl.heap.is_some() {
                                 mg.heap = dl.heap.as_ref();
-                                mg.inner = dl.inner.as_ref();
+                                mg.inner = &dl.inner;
                             }
                         }
                         None => {
@@ -159,7 +159,7 @@ impl<'a> Compiler<'a> {
                                     tparam: d.type_param(),
                                     ty: Some(&d.ty),
                                     heap: dl.heap.as_ref(),
-                                    inner: dl.inner.as_ref(),
+                                    inner: &dl.inner,
                                     line: dl.line,
                                     scalar_port,
                                     vec_line,
