@@ -2,8 +2,9 @@ module m ();
   // imports $unit
   reg [(C.W - 1):0] x;
   class C c;
+  reg [(C.W - 1):0] q;
   initial
-    x = ((C::W + c.W) + C::B1);
+    x = ((((C::W + c.W) + C::B1) + ((((C.W - 1) >= 0) ? (C.W - 1) : (0 - (C.W - 1))) + 1)) + $size(type(int(8) signed), 1));
 endmodule
 package $unit ();
   class C;

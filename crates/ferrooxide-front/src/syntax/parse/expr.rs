@@ -69,12 +69,13 @@ impl Parser {
             T::Ident(n) if self.is_type_name(n) && self.is_p_at(1, "#") && self.is_p_at(2, "(") => {
                 !self.after_parens(2).is_some_and(|k| self.is_p_at(k, "::"))
             }
-            T::Ident(n) if self.is_type_name(n) => matches!(self.peek_at(1), T::Punct(")" | "," | "[" | "#" | "}")) || self.is_kw_at(1, Kw::Signed) || self.is_kw_at(1, Kw::Unsigned),
             T::Ident(n) if self.is_p_at(1, "::") => {
-                // `p::T` followed by the end of the argument
-                matches!(self.peek_at(2), T::Ident(t) if self.package_type(n, t))
+                // `p::T` or `C::T` (a type of package p or class C) followed by the end of
+                // the argument
+                matches!(self.peek_at(2), T::Ident(t) if self.package_type(n, t) || self.classes.get(n.as_str()).is_some_and(|c| c.contains(t.as_str())))
                     && matches!(self.peek_at(3), T::Punct(")" | "," | "["))
             }
+            T::Ident(n) if self.is_type_name(n) => matches!(self.peek_at(1), T::Punct(")" | "," | "[" | "#" | "}")) || self.is_kw_at(1, Kw::Signed) || self.is_kw_at(1, Kw::Unsigned),
             _ => false,
         }
     }

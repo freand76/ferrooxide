@@ -330,7 +330,21 @@ impl Lower {
                 // constants in the class's types refer to the class's parameters (`C::W`)
                 let known: HashMap<String, String> = consts.iter().map(|p: &ParamDecl| p.name.clone()).chain(names.consts.iter().cloned()).map(|n| (n, name.clone())).collect();
                 let saved_scope = self.type_scope.replace(known);
-                let r = self.module_item(i, &items, &mut v);
+                let r = match i {
+                    // a type parameter of the class body: nothing overrides it (a class is
+                    // specialized through its parameter port list), so it names its type as
+                    // a typedef does (IEEE 1800-2017 8.25)
+                    t::Item::Param(t::ParamDecl { kind: t::ParamKind::Type { assigns }, .. }) => (|| {
+                        for (n, d, loc) in assigns {
+                            let Some(d) = d else { return self.err(*loc, format!("type parameter '{n}' of a class body needs a type")) };
+                            let td = t::Typedef::Type { ty: d.clone(), name: n.clone(), dims: vec![], loc: *loc };
+                            self.typedef(&td, &items)?;
+                            v.append(&mut self.pending);
+                        }
+                        Ok(())
+                    })(),
+                    _ => self.module_item(i, &items, &mut v),
+                };
                 self.type_scope = saved_scope;
                 r?;
                 for x in v.into_iter().chain(std::mem::take(&mut self.pending)) {
@@ -346,6 +360,12 @@ impl Lower {
                 if let t::Item::Typedef(t::Typedef::Type { name: n, loc, .. }) = i {
                     self.own_name(&mut own, n, loc.line, &name)?;
                     names.origins.insert(n.clone(), name.clone());
+                }
+                if let t::Item::Param(t::ParamDecl { kind: t::ParamKind::Type { assigns }, .. }) = i {
+                    for (n, _, loc) in assigns {
+                        self.own_name(&mut own, n, loc.line, &name)?;
+                        names.origins.insert(n.clone(), name.clone());
+                    }
                 }
                 for (k, t) in &self.types {
                     if before.get(k).is_none_or(|o| !Rc::ptr_eq(o, t)) {

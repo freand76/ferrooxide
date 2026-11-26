@@ -215,7 +215,7 @@ SystemVerilog data and testbench:
   multi-dimensional and struct arrays, class or wider
   keys, queue element writes with `<=` (done at once).
 - classes: events as properties (A3), assignments through a call's result
-  (`C::get().v = 1`), body `parameter type` items, an untyped `mailbox`, members of
+  (`C::get().v = 1`), an untyped `mailbox`, members of
   `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle
   ports, NBAs to properties, `randc`, `rand_mode`, `constraint_mode`,
