@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4822 of 5112 (94.3%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4825 of 5112 (94.4%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -241,7 +241,7 @@ SystemVerilog data and testbench:
   `case` properties, strong sequences, several clocks, `.triggered`/`.matched` of sequences,
   `expect`, global clocking, clocking blocks with clocking signals; a deferred assertion run
   several times in one activation reports only the last outcome.
-- tagged unions, `matches`, assignments in expressions, `edge` event controls, DPI, `x[i++] += 2`.
+- tagged unions, `matches`, assignments in expressions, `edge` event controls, DPI.
 - strings are never reclaimed; non-UTF-8 bytes of a `string` print as U+FFFD; `%v` in
   `$sformatf`.
 

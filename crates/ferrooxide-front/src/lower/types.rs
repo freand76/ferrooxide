@@ -705,7 +705,7 @@ impl Lower {
 
     /// The self-determined type of an expression for `type(e)` (IEEE 1800-2017 6.23, 11.6,
     /// 11.8.1), for variables and the operators on them; None for anything else.
-    fn expr_type(&mut self, e: &t::Expr) -> Result<Option<SvType>> {
+    pub(crate) fn expr_type(&mut self, e: &t::Expr) -> Result<Option<SvType>> {
         let real = real_type;
         let is_real = |t: &SvType| t.kind == NetKind::Real;
         let four = |t: &SvType| !matches!(t.kind, NetKind::Bit | NetKind::Int(_));
@@ -720,6 +720,8 @@ impl Lower {
                 _ => None,
             },
             t::ExprKind::Real(_) => Some(real()),
+            // (`i++`, `(a = b)`: the variable's type)
+            t::ExprKind::IncDec { e, .. } | t::ExprKind::Assign(_, e, _) => self.expr_type(e)?,
             t::ExprKind::Unary(op, a) => {
                 let Some(ta) = self.expr_type(a)? else { return Ok(None) };
                 match op {

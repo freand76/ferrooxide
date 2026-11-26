@@ -40,6 +40,19 @@ pub(crate) fn side_effects(e: &Expr) -> bool {
     }
 }
 
+/// A syntax-tree expression that changes a variable (`i++`, `(a = b)`).
+fn syn_side_effects(e: &t::Expr) -> bool {
+    use t::ExprKind as K;
+    match &e.kind {
+        K::IncDec { .. } | K::Assign(..) => true,
+        K::Index(a, b) | K::Binary(_, a, b) => syn_side_effects(a) || syn_side_effects(b),
+        K::Range(a, _, b, c) | K::Cond(a, b, c) => syn_side_effects(a) || syn_side_effects(b) || syn_side_effects(c),
+        K::Unary(_, a) | K::Member(a, _) => syn_side_effects(a),
+        K::Call { args, .. } | K::SysCall { args, .. } => args.iter().any(|x| matches!(x, t::Arg::Pos(Some(e)) | t::Arg::Named(_, Some(e)) if syn_side_effects(e))),
+        _ => false,
+    }
+}
+
 fn block(stmts: Vec<Stmt>) -> Stmt {
     Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts, fork: None }
 }
@@ -637,7 +650,9 @@ impl Lower {
             t::StmtKind::Expr(t::Expr { kind: t::ExprKind::IncDec { inc, e, .. }, .. }) => {
                 let lhs = self.lvalue(e)?;
                 if side_effects(&lhs) {
-                    return self.unsupported(s.loc, "an increment of a target with side effects");
+                    let op = if *inc { t::AssignOp::Add } else { t::AssignOp::Sub };
+                    let one = t::Expr::new(t::ExprKind::Num(crate::lexer::Number { size: None, signed: true, base: 10, based: false, digits: "1".into(), fill: false }), s.loc);
+                    return self.hoisted_assign(e, op, &one, s.loc, "an increment of a target with side effects");
                 }
                 let op = if *inc { BinOp::Add } else { BinOp::Sub };
                 let rhs = ExprKind::Binary(op, Box::new(lhs.clone()), Box::new(ExprKind::Num(dec(1)).into()));
@@ -647,10 +662,11 @@ impl Lower {
                 if timing.is_some() {
                     return self.unsupported(s.loc, "a timing control in a compound assignment");
                 }
-                let lhs = self.lvalue(lhs)?;
-                if side_effects(&lhs) {
-                    return self.unsupported(s.loc, "a compound assignment to a target with side effects");
+                let l = self.lvalue(lhs)?;
+                if side_effects(&l) {
+                    return self.hoisted_assign(lhs, *op, rhs, s.loc, "a compound assignment to a target with side effects");
                 }
+                let lhs = l;
                 let r = self.expr(rhs)?;
                 let rhs = ExprKind::Binary(assign_binop(*op).unwrap(), Box::new(lhs.clone()), Box::new(r));
                 Ok(Stmt::Assign { lhs, rhs: rhs.into(), nonblocking: false, timing: None, line })
@@ -666,6 +682,51 @@ impl Lower {
                 Ok(Stmt::Assign { lhs, rhs, nonblocking, timing, line })
             }
             _ => self.unsupported(s.loc, "this statement here"),
+        }
+    }
+
+    /// `lhs op= rhs` where indexes of `lhs` have side effects (`x[i++] += 2`): those are
+    /// evaluated once, into variables of their types, before the assignment (IEEE 1800-2017
+    /// 11.4.1: the target's index expressions are evaluated once). `what` names it where a
+    /// type is not known.
+    fn hoisted_assign(&mut self, lhs: &t::Expr, op: t::AssignOp, rhs: &t::Expr, loc: t::Loc, what: &str) -> Result<Stmt> {
+        let mut decls = Vec::new();
+        let mut lhs = lhs.clone();
+        self.hoist_indexes(&mut lhs, &mut decls, loc, what)?;
+        let assign = t::Stmt { kind: t::StmtKind::Assign { lhs, op, timing: None, rhs: rhs.clone() }, label: None, loc };
+        self.stmt(&t::Stmt { kind: t::StmtKind::Block { fork: None, name: None, decls, stmts: vec![assign] }, label: None, loc })
+    }
+
+    fn hoist_indexes(&mut self, e: &mut t::Expr, decls: &mut Vec<t::Item>, loc: t::Loc, what: &str) -> Result<()> {
+        let hoist = |l: &mut Self, x: &mut t::Expr, decls: &mut Vec<t::Item>| -> Result<()> {
+            if !syn_side_effects(x) {
+                return Ok(());
+            }
+            if l.expr_type(x)?.is_none() {
+                return l.unsupported(loc, what);
+            }
+            l.spec_count += 1;
+            let n = format!("idx${}", l.spec_count);
+            let init = std::mem::replace(x, t::Expr::new(t::ExprKind::Ident(n.clone()), x.loc));
+            // (`var type(e) n = e;`: the index's own type)
+            let dt = t::DataType { kind: t::TypeKind::TypeOf(Box::new(init.clone())), signed: None, packed: vec![], loc };
+            decls.push(t::Item::Var(t::VarDecl { const_: false, var: true, lifetime: None, ty: dt, decls: vec![t::Declarator { name: n, dims: vec![], init: Some(init), loc }], loc }));
+            Ok(())
+        };
+        let other = syn_side_effects(e);
+        match &mut e.kind {
+            t::ExprKind::Index(a, i) => {
+                self.hoist_indexes(a, decls, loc, what)?;
+                hoist(self, i, decls)
+            }
+            t::ExprKind::Range(a, _, b, c) => {
+                self.hoist_indexes(a, decls, loc, what)?;
+                hoist(self, b, decls)?;
+                hoist(self, c, decls)
+            }
+            t::ExprKind::Member(a, _) => self.hoist_indexes(a, decls, loc, what),
+            _ if other => self.unsupported(loc, what),
+            _ => Ok(()),
         }
     }
 
