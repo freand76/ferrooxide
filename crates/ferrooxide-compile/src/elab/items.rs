@@ -109,10 +109,46 @@ impl<'a> Compiler<'a> {
                 _ => {}
             }
         }
+        // (IEEE 1800-2017 6.10: also the names used in the terminals of primitive instances and
+        // in the expressions connected to ports; a name connected alone to a module's port
+        // gets the port's width, `declare_port`)
+        fn names_in<'e>(e: &'e Expr, out: &mut Vec<&'e String>) {
+            match &e.kind {
+                ExprKind::Ident(n) => out.push(n),
+                ExprKind::Concat(v) => v.iter().for_each(|x| names_in(x, out)),
+                ExprKind::Unary(_, a) => names_in(a, out),
+                ExprKind::Binary(_, a, b) => {
+                    names_in(a, out);
+                    names_in(b, out);
+                }
+                ExprKind::Cond(a, b, c) => {
+                    names_in(a, out);
+                    names_in(b, out);
+                    names_in(c, out);
+                }
+                ExprKind::Index(a, i) => {
+                    names_in(a, out);
+                    names_in(i, out);
+                }
+                _ => {}
+            }
+        }
         for it in items {
             match it {
                 Item::ContAssign { lhs, .. } => lhs_names(lhs, &mut implicit),
                 Item::Gate { terms, .. } => terms.iter().for_each(|t| lhs_names(t, &mut implicit)),
+                Item::Instances { module, insts, .. } => {
+                    let udp = self.find_module(module, sid).is_some_and(|m| m.udp.is_some());
+                    for inst in insts {
+                        for c in &inst.conns {
+                            if let Conn::Positional(Some(e)) | Conn::Named(_, Some(e)) = c {
+                                if udp || !matches!(e.kind, ExprKind::Ident(_)) {
+                                    names_in(e, &mut implicit);
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
