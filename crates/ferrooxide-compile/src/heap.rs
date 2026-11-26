@@ -541,13 +541,13 @@ impl<'a> Compiler<'a> {
     }
 
     /// An element value (`e` of the element type) for storing into an array of `elem`.
-    fn elem_value(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<u32> {
+    fn elem_value(&mut self, e: &Expr, elem: Elem, layout: Option<&Packed>, sid: usize) -> R<u32> {
         // an array (into an array of arrays): its copy, unless it is a new one
         if let Some((k, inner)) = self.inner_arr(elem) {
             let (h, new) = self.dyn_rhs_k(e, inner, Self::kind_key(k), sid)?;
             return Ok(if new { h } else { self.dyn_copy(h, k, inner) });
         }
-        self.value_for(e, sid, elem.w, elem.ty(), None)
+        self.value_for(e, sid, elem.w, elem.ty(), layout)
     }
 
     /// A queue or dynamic array value: the slot of its handle and whether the array is new
@@ -606,7 +606,7 @@ impl<'a> Compiler<'a> {
                         PatItem::Default(v) => (None, v),
                         _ => return self.err("an assignment pattern for an associative array needs keys (`'{key: value, default: value}`)"),
                     };
-                    let v = self.elem_value(v, elem, sid)?;
+                    let v = self.elem_value(v, elem, None, sid)?;
                     match k {
                         Some(k) => {
                             let k = self.key_value(&k, key, sid)?;
@@ -629,7 +629,7 @@ impl<'a> Compiler<'a> {
                         if elem.leaf == Leaf::Bits {
                             return self.err("`new[n](v)` with a value that is not an array is not supported for vector elements");
                         }
-                        (self.elem_value(i, elem, sid)?, NONE)
+                        (self.elem_value(i, elem, None, sid)?, NONE)
                     }
                     Some(i) => (NONE, self.dyn_rhs(i, elem, sid)?.0),
                     None => (NONE, NONE),
@@ -664,7 +664,7 @@ impl<'a> Compiler<'a> {
                         let (h, _) = self.dyn_rhs(p, elem, sid)?;
                         self.heap_op(HeapOp::Append, NONE, d, NONE, h, elem);
                     } else {
-                        let v = self.elem_value(p, elem, sid)?;
+                        let v = self.elem_value(p, elem, None, sid)?;
                         self.heap_op(HeapOp::PushBack, NONE, d, NONE, v, elem);
                     }
                 }
@@ -779,7 +779,9 @@ impl<'a> Compiler<'a> {
     pub(crate) fn dyn_elem_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
         let ExprKind::Index(a, _) = &lhs.kind else { return Ok(false) };
         let Some((_, elem)) = self.dyn_arr_type(a, sid)? else { return Ok(false) };
-        let v = self.elem_value(rhs, elem, sid)?;
+        // (a struct element of an array property: its layout, for an assignment pattern)
+        let layout = self.prop_elem_layout(lhs, sid);
+        let v = self.elem_value(rhs, elem, layout.as_ref(), sid)?;
         self.dyn_elem_store(lhs, v, sid)
     }
 
@@ -935,13 +937,13 @@ impl<'a> Compiler<'a> {
         let (op, b, c) = match m {
             "push_back" | "push_front" => {
                 nargs(self, 1)?;
-                let v = self.elem_value(&args[0], elem, sid)?;
+                let v = self.elem_value(&args[0], elem, None, sid)?;
                 (if m == "push_back" { HeapOp::PushBack } else { HeapOp::PushFront }, NONE, v)
             }
             "insert" => {
                 nargs(self, 2)?;
                 let ix = self.dyn_index(base, &args[0], sid)?;
-                let v = self.elem_value(&args[1], elem, sid)?;
+                let v = self.elem_value(&args[1], elem, None, sid)?;
                 (HeapOp::Insert, ix, v)
             }
             "delete" => {

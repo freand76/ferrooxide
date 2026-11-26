@@ -290,13 +290,13 @@ impl<'a> Compiler<'a> {
         // pre_randomize(), then the values, then post_randomize() after a success
         let at = self.loc();
         if let Some((f, owner)) = self.find_method(d, "pre_randomize") {
-            let scope = self.classes.list[owner as usize].scope;
+            let scope = self.class_scope(owner);
             self.call_resolved(f, scope, "pre_randomize", Some(h), &[], sid)?;
         }
         self.solve(&rv, &items, Some(h), res, &at)?;
         if let Some((f, owner)) = self.find_method(d, "post_randomize") {
             let skip = self.emit(Instr::Jz { c: res, w: 32, to: 0 });
-            let scope = self.classes.list[owner as usize].scope;
+            let scope = self.class_scope(owner);
             self.call_resolved(f, scope, "post_randomize", Some(h), &[], sid)?;
             let here = self.here();
             self.patch(skip, here);

@@ -114,9 +114,9 @@ machinery must not assume static targets only (A3).
    breakpoints. The gate for UVM. (Event properties wait through per-object waiter lists,
    `EvOp::Arm`.)
 5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`; after A3). Stops at
-   `uvm_comparer.svh:116` (an associative array of associative arrays with class handle
-   keys, of structs, as a property). Then fix the blockers one at a time, each with a
-   test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
+   `uvm_report_message.svh:567` (`process::get_randstate`: per-process random generators,
+   IEEE 1800-2017 18.14, replacing deviation 5 of `DEVIATIONS.md`). Then fix the blockers
+   one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
@@ -213,8 +213,8 @@ SystemVerilog data and testbench:
   member; fixed-size arrays of queues, arrays of queues as
   class properties or ports, `%p` of an element array (`$display("%p", a[k])`), queue ports, `%p` of unpacked
   structs, associative arrays and class handles, array methods of associative,
-  multi-dimensional and struct arrays, class handle
-  keys, queue element writes with `<=` (done at once).
+  multi-dimensional and struct arrays, foreach over class handle keys (the key
+  variable is a vector), queue element writes with `<=` (done at once).
 - classes: `->>` of an event property, events of a subroutine or module assigned to an
   event property, queues and dynamic arrays of events; assignments through a call's result
   (`C::get().v = 1`), an untyped `mailbox`, members of

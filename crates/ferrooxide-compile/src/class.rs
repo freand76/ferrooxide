@@ -131,9 +131,89 @@ impl<'a> Compiler<'a> {
         let r = self.declare_class_here(c, sid, name, id, scope);
         self.classes.declaring.pop();
         r?;
-        while self.classes.declaring.is_empty() && !self.classes.pending_bodies.is_empty() {
+        if self.classes.declaring.is_empty() {
+            self.declare_pending()?;
+        }
+        Ok(())
+    }
+
+    /// Declare the specializations whose declaration waits (`declare_class_body`).
+    pub(crate) fn declare_pending(&mut self) -> R<()> {
+        while !self.classes.pending_bodies.is_empty() {
             let (x, xd, xs, xn, xscope) = self.classes.pending_bodies.remove(0);
             self.at(0, |me| me.declare_class_body(xd, xs, &xn, x, xscope))?;
+        }
+        Ok(())
+    }
+
+    /// The scope class `c`'s methods are compiled in, also while it is being declared.
+    pub(crate) fn class_scope(&self, c: u32) -> usize {
+        match self.classes.list[c as usize].scope {
+            UNDECLARED => self.classes.of_scope.iter().filter(|(_, &x)| x == c).map(|(&s, _)| s).max().unwrap_or(UNDECLARED),
+            s => s,
+        }
+    }
+
+    /// The parameter values of `C #(args)` (class `g`) in scope `sid`, and the key of the
+    /// specialization by them as written.
+    fn spec_written(&mut self, g: u32, args: &[Conn], sid: usize) -> R<(Vec<(Option<String>, PVal)>, String)> {
+        let mut ovs = Vec::new();
+        for a in args {
+            ovs.push(match a {
+                Conn::Positional(Some(e)) => (None, self.pval(e, sid)?),
+                Conn::Positional(None) => (None, PVal::Default),
+                Conn::Named(n, Some(e)) => (Some(n.clone()), self.pval(e, sid)?),
+                Conn::Named(_, None) => continue,
+                Conn::Wildcard => return self.err("`.*` in class parameters"),
+            });
+        }
+        let written = format!("{g}#{:?}", ovs.iter().map(|(n, v)| (n.clone(), Self::pval_key(v))).collect::<Vec<_>>());
+        Ok((ovs, written))
+    }
+
+    /// A base class of class `decl` (with its parameters in `scope`), or one of its base
+    /// classes, is being declared: `decl` must wait for it.
+    fn base_in_progress(&mut self, decl: &ClassDecl, scope: usize) -> bool {
+        // (a specialization the class itself makes, `extends B #(T)`: the one with these
+        // values, if it exists)
+        let spec = decl.base.as_deref().and_then(|b| {
+            decl.specs.iter().find_map(|s| match s {
+                Item::ClassSpec { name, class, args, .. } if name == b => Some((class.clone(), args.clone())),
+                _ => None,
+            })
+        });
+        let mut cur = match spec {
+            Some((class, args)) => {
+                let g = self.find_class(&class, scope);
+                g.and_then(|g| self.spec_written(g, &args, scope).ok()).and_then(|(_, w)| self.classes.specs.get(&w).copied())
+            }
+            None => decl.base.as_deref().and_then(|b| self.find_class(b, scope)),
+        };
+        for _ in 0..64 {
+            let Some(x) = cur else { return false };
+            if self.classes.declaring.contains(&x) {
+                return true;
+            }
+            let xi = &self.classes.list[x as usize];
+            cur = match xi.base {
+                Some(b) => Some(b),
+                // (not declared yet: its base as written)
+                None if xi.scope == UNDECLARED => xi.decl.base.as_deref().and_then(|b| self.find_class(b, self.classes.decl_scope[&x])),
+                None => None,
+            };
+        }
+        false
+    }
+
+    /// Code that uses class `c` (a call, `new`) is compiled while classes are declared (a
+    /// static property's initializer): `c` is declared first if its declaration waits.
+    pub(crate) fn ensure_declared(&mut self, c: u32) -> R<()> {
+        let mut x = Some(c);
+        while let Some(k) = x {
+            if self.classes.list[k as usize].scope == UNDECLARED && self.class_scope(k) == UNDECLARED {
+                self.declare_now(k)?;
+            }
+            x = self.classes.list[k as usize].base;
         }
         Ok(())
     }
@@ -243,9 +323,9 @@ impl<'a> Compiler<'a> {
             let four = !matches!(d.kind(), NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class | NetKind::Event);
             for n in &d.names {
                 // a queue, dynamic or associative array: a handle (0: empty)
-                let ty = match &n.heap {
-                    Some(h) => self.dyn_prop_type(d, base_ty, h, scope)?,
-                    None => base_ty,
+                let ty = match (&n.heap, self.dyn_prop_type_of(d, base_ty, n, scope)?) {
+                    (Some(_), Some(t)) => t,
+                    _ => base_ty,
                 };
                 // a fixed-size array
                 let mut dims = Vec::new();
@@ -258,9 +338,9 @@ impl<'a> Compiler<'a> {
                     dims.push((a.min(b), ((a - b).abs() + 1) as u32));
                     desc.push(a > b);
                 }
-                // (a queue, dynamic or associative array of structs: `layout` is that of
-                // its elements)
-                if layout.is_some() && (!n.dims.is_empty() || !n.inner.is_empty()) {
+                // (a queue, dynamic or associative array of structs, also of arrays of
+                // them: `layout` is that of its elements)
+                if layout.is_some() && !n.dims.is_empty() {
                     return self.err("an array of structs as a class property is not supported");
                 }
                 let p = Prop { name: n.name.clone(), off: width, ty, dims, desc, enum_id, layout: layout.clone() };
@@ -354,17 +434,13 @@ impl<'a> Compiler<'a> {
         if decl.params.is_empty() {
             return self.err(format!("class '{class}' has no parameters"));
         }
-        let mut ovs = Vec::new();
-        for a in args {
-            ovs.push(match a {
-                Conn::Positional(Some(e)) => (None, self.pval(e, sid)?),
-                Conn::Positional(None) => (None, PVal::Default),
-                Conn::Named(n, Some(e)) => (Some(n.clone()), self.pval(e, sid)?),
-                Conn::Named(_, None) => continue,
-                Conn::Wildcard => return self.err("`.*` in class parameters"),
-            });
+        // (the class itself first, when no class is being declared: a specialization with
+        // its parameters' default values is the class)
+        let free = self.classes.declaring.iter().all(|&x| x == NONE);
+        if free && self.classes.list[g as usize].scope == UNDECLARED && !Self::needs_params(decl) && self.classes.list[g as usize].name == decl.name {
+            self.declare_now(g)?;
         }
-        let written = format!("{g}#{:?}", ovs.iter().map(|(n, v)| (n.clone(), Self::pval_key(v))).collect::<Vec<_>>());
+        let (ovs, written) = self.spec_written(g, args, sid)?;
         let id = match self.classes.specs.get(&written) {
             Some(&id) => id,
             None => {
@@ -383,10 +459,10 @@ impl<'a> Compiler<'a> {
                     Some(&other) => other,
                     None if generic && key == self.spec_key(g, self.classes.list[g as usize].scope) => g,
                     None => {
-                        if self.classes.declaring.is_empty() {
-                            self.at(0, |c| c.declare_class_body(decl, dscope, &own, id, scope))?;
-                        } else {
+                        if self.base_in_progress(decl, scope) {
                             self.classes.pending_bodies.push((id, decl, dscope, own, scope));
+                        } else {
+                            self.at(0, |c| c.declare_class_body(decl, dscope, &own, id, scope))?;
                         }
                         id
                     }
@@ -493,6 +569,19 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    /// The type of property `n` of declaration `d` (of type `elem`) when it is a queue,
+    /// dynamic or associative array (also of such arrays: `int m[string][$]`).
+    fn dyn_prop_type_of(&mut self, d: &Decl, elem: Type, n: &Declarator, sid: usize) -> R<Option<Type>> {
+        let Some(h) = &n.heap else { return Ok(None) };
+        let t = self.dyn_prop_type(d, elem, h, sid)?;
+        if n.inner.is_empty() {
+            return Ok(Some(t));
+        }
+        let Type::Dyn { kind, elem } = t else { unreachable!() };
+        let elem = self.nest_elem(elem, &n.inner, sid)?;
+        Ok(Some(Type::Dyn { kind, elem }))
+    }
+
     /// The type of a property that is a queue, dynamic or associative array of `elem`.
     fn dyn_prop_type(&mut self, d: &Decl, elem: Type, h: &HeapKind, sid: usize) -> R<Type> {
         let (w, signed) = match elem {
@@ -540,6 +629,10 @@ impl<'a> Compiler<'a> {
 
     /// The class named `name` visible from scope `sid`.
     pub(crate) fn find_class(&self, name: &str, mut sid: usize) -> Option<u32> {
+        // (a class itself, `pval`)
+        if let Some(id) = name.strip_prefix("$class#") {
+            return id.parse().ok();
+        }
         // a type parameter (or typedef) naming a class
         if let Some(Sym::Type(t)) = self.lookup(name, sid) {
             if let Some(cn) = t.class.as_deref().filter(|cn| *cn != name) {
@@ -572,7 +665,9 @@ impl<'a> Compiler<'a> {
                 None if name.contains('#') => {
                     return self.classes.by_name.iter().filter(|((_, n), _)| n == name).map(|(_, &c)| c).min();
                 }
-                None => return None,
+                // a class of the built-in package `std`, imported into every scope (IEEE
+                // 1800-2017 26.7)
+                None => return self.hier.pkg_scopes.get("std").and_then(|ps| self.classes.by_name.get(&(*ps, name.to_string()))).copied(),
             }
         }
     }
@@ -843,11 +938,13 @@ impl<'a> Compiler<'a> {
             ExprKind::NewCopy(x) => self.type_of(x, sid).map(Some),
             ExprKind::NewTyped(c, _) => Ok(Some(Type::Class(self.named_class(c, sid)?))),
             ExprKind::StaticCall(cn, m, _) => {
+                let c = self.named_class(cn, sid)?;
+                self.ensure_declared(c)?;
                 let (f, owner) = self.static_method(cn, m, sid)?;
                 if f.is_task || f.ret_kind() == NetKind::Int(0) {
                     return self.err(format!("'{m}' gives no value"));
                 }
-                let scope = self.classes.list[owner as usize].scope;
+                let scope = self.class_scope(owner);
                 self.func_ret_type(f, scope).map(Some)
             }
             ExprKind::Member(b, m) => match self.handle_class(b, sid)? {
@@ -884,7 +981,7 @@ impl<'a> Compiler<'a> {
                 if f.is_task || f.ret_kind() == NetKind::Int(0) {
                     return self.err(format!("'{m}' gives no value"));
                 }
-                let scope = self.classes.list[owner as usize].scope;
+                let scope = self.class_scope(owner);
                 self.func_ret_type(f, scope).map(Some)
             }
             _ => Ok(None),
@@ -1090,7 +1187,7 @@ impl<'a> Compiler<'a> {
                 }
                 Some((f, k, _)) => {
                     let ks = self.classes.list[k as usize].scope;
-                    let os = self.classes.list[owner as usize].scope;
+                    let os = self.class_scope(owner);
                     if !self.same_signature(f, ks, proto, os)? {
                         return self.err(format!(
                             "method '{}' of class '{cname}' does not match its prototype in interface class '{iname}'",
@@ -1130,6 +1227,7 @@ impl<'a> Compiler<'a> {
 
     /// `new(args)` for class `c`: the slot of the new object's handle.
     fn construct(&mut self, c: u32, args: &[Expr], sid: usize) -> R<u32> {
+        self.ensure_declared(c)?;
         let ci = &self.classes.list[c as usize];
         if ci.decl.abstract_ {
             let what = if ci.decl.interface { "interface" } else { "virtual" };
@@ -1217,6 +1315,7 @@ impl<'a> Compiler<'a> {
             }
             return self.err(format!("'.{m}()' of a value that is not an object"));
         };
+        self.ensure_declared(c)?;
         let Some((f, owner)) = self.find_method(c, m) else {
             return self.err(format!("class '{}' has no method '{m}'", self.classes.list[c as usize].name));
         };
@@ -1226,7 +1325,7 @@ impl<'a> Compiler<'a> {
         }
         // a static method needs no object (8.10)
         if self.classes.list[owner as usize].decl.statics.iter().any(|s| s == m) {
-            let scope = self.classes.list[owner as usize].scope;
+            let scope = self.class_scope(owner);
             return self.call_resolved(f, scope, m, None, args, sid);
         }
         let h = self.handle_value(obj, sid)?;
@@ -1238,7 +1337,7 @@ impl<'a> Compiler<'a> {
         } else {
             h
         };
-        let scope = self.classes.list[owner as usize].scope;
+        let scope = self.class_scope(owner);
         if is_super || !self.is_virtual(owner, m) {
             return self.call_resolved(f, scope, m, Some(h), args, sid);
         }
@@ -1256,6 +1355,21 @@ impl<'a> Compiler<'a> {
         let c = self.class_of_scope(sid)?;
         let found = if prop { self.prop(c, name).is_ok() } else { self.find_method(c, name).is_some() };
         found.then_some(c)
+    }
+
+    /// Static method `name` of the class whose scope `sid` is in (the initializer of a
+    /// static property of a parameterized class, declared in the class's scope): the method
+    /// and the scope it is compiled in.
+    pub(crate) fn class_static_method(&self, name: &str, sid: usize) -> Option<(&'a SubroutineDecl, usize)> {
+        if name.contains('.') {
+            return None;
+        }
+        let c = self.class_of_scope(sid)?;
+        let (f, owner) = self.find_method(c, name)?;
+        let o = &self.classes.list[owner as usize];
+        // (the class may be being declared: its scope is the one `sid` is in)
+        let scope = if owner == c { self.enclosing_class_scope(sid)?.0 } else { o.scope };
+        o.decl.statics.iter().any(|s| s == name).then_some((f, scope))
     }
 
     /// `p` as `this.p` (`this_class_member`).
@@ -1277,8 +1391,13 @@ impl<'a> Compiler<'a> {
         }
         let (base, m) = name.rsplit_once('.')?;
         let parts: Vec<String> = base.split('.').map(String::from).collect();
-        if parts.len() < 2 {
-            return None;
+        // `h.m`: a handle of a type given by a type parameter (the lowering did not know it
+        // is one)
+        if parts.len() == 1 {
+            return match self.lookup(&parts[0], sid)? {
+                Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) => Some((ExprKind::Ident(parts[0].clone()).into(), m.to_string())),
+                _ => None,
+            };
         }
         match self.lookup_hier(&parts, sid)? {
             Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) => Some((ExprKind::Hier(parts).into(), m.to_string())),
@@ -1349,8 +1468,10 @@ impl<'a> Compiler<'a> {
 
     /// `C::m(args)`: a call of a static method, without an object.
     pub(crate) fn static_call(&mut self, cn: &str, m: &str, args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
+        let c = self.named_class(cn, sid)?;
+        self.ensure_declared(c)?;
         let (f, owner) = self.static_method(cn, m, sid)?;
-        let scope = self.classes.list[owner as usize].scope;
+        let scope = self.class_scope(owner);
         self.call_resolved(f, scope, m, None, args, sid)
     }
 
@@ -1388,7 +1509,7 @@ impl<'a> Compiler<'a> {
             }
         }
         if impls.is_empty() {
-            let scope = self.classes.list[dflt.1 as usize].scope;
+            let scope = self.class_scope(dflt.1);
             return self.call_resolved(dflt.0, scope, m, Some(h), args, sid);
         }
         let cls = self.tmp(32);
@@ -1396,7 +1517,7 @@ impl<'a> Compiler<'a> {
         let ret_t = if dflt.0.is_task || dflt.0.ret_kind() == NetKind::Int(0) {
             None
         } else {
-            Some(self.func_ret_type(dflt.0, self.classes.list[dflt.1 as usize].scope)?)
+            Some(self.func_ret_type(dflt.0, self.class_scope(dflt.1))?)
         };
         let res = ret_t.map(|t| (self.tmp(t.width()), t));
         let mut ends = Vec::new();
@@ -1421,14 +1542,14 @@ impl<'a> Compiler<'a> {
             }
             let skip = self.emit(Instr::Jz { c: any, w: 1, to: 0 });
             let (f, _) = self.find_method(owner, m).unwrap();
-            let scope = self.classes.list[owner as usize].scope;
+            let scope = self.class_scope(owner);
             let r = self.call_resolved(f, scope, m, Some(h), args, sid)?;
             result(self, r);
             ends.push(self.emit(Instr::Jmp { to: 0 }));
             let here = self.here();
             self.patch(skip, here);
         }
-        let scope = self.classes.list[dflt.1 as usize].scope;
+        let scope = self.class_scope(dflt.1);
         let r = self.call_resolved(dflt.0, scope, m, Some(h), args, sid)?;
         result(self, r);
         let end = self.here();

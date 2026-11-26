@@ -805,7 +805,9 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
         }
         ExprKind::Call(n, args) => {
             args.iter_mut().for_each(|a| this_expr(a, c, locals));
-            if static_call(n, c, locals) {
+            if let Some(m) = static_member_call(n, c, locals) {
+                *n = m;
+            } else if static_call(n, c, locals) {
                 *e = ExprKind::StaticCall(c.name.clone(), n.clone(), std::mem::take(args)).into();
             } else if let Some(x) = this_call(n, c, locals) {
                 *e = ExprKind::MethodCall(Box::new(x.0), x.1, std::mem::take(args)).into();
@@ -877,6 +879,13 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
         }
         _ => {}
     }
+}
+
+/// A call `p.m(...)` of a method of static property p (`q.push_back(x)`): the name through
+/// the property's variable.
+fn static_member_call(n: &str, c: &ClassNames, locals: &[String]) -> Option<String> {
+    let (p, rest) = n.split_once('.')?;
+    Some(format!("{}.{rest}", static_name(p, c, locals)?))
 }
 
 /// A call `m(...)` of a static method of the class.
@@ -1016,7 +1025,9 @@ fn this_stmt(s: &mut Stmt, c: &ClassNames, locals: &mut Vec<String>) {
         Stmt::SysTask { args, .. } => args.iter_mut().flatten().for_each(|a| ex(a, locals)),
         Stmt::TaskCall { name, args, line } => {
             args.iter_mut().for_each(|a| ex(a, locals));
-            if static_call(name, c, locals) {
+            if let Some(m) = static_member_call(name, c, locals) {
+                *name = m;
+            } else if static_call(name, c, locals) {
                 *s = Stmt::StaticCall { class: c.name.clone(), name: name.clone(), args: std::mem::take(args), line: *line };
             } else if let Some((obj, m)) = this_call(name, c, locals) {
                 *s = Stmt::MethodCall { obj, name: m, args: std::mem::take(args), line: *line };

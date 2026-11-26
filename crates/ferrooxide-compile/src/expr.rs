@@ -2052,6 +2052,9 @@ impl<'a> Compiler<'a> {
             if let Some((obj, m)) = self.hier_handle(name, sid) {
                 return self.method_call(&obj, &m, args, sid);
             }
+            if let Some((f, scope)) = self.class_static_method(name, sid) {
+                return self.call_resolved(f, scope, name, None, args, sid);
+            }
             let p: Vec<String> = name.split('.').map(String::from).collect();
             self.fixed_arr_method(&p, sid)?;
             return self.err(format!("unknown {} '{name}'", if as_task { "task" } else { "function" }));

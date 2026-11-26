@@ -412,7 +412,13 @@ impl<'a> Compiler<'a> {
     /// evaluate a parameter override in the instantiating scope
     pub(crate) fn pval(&mut self, e: &Expr, sid: usize) -> R<PVal> {
         if let ExprKind::Type(t) = &e.kind {
-            return Ok(PVal::Type(Rc::new(self.resolve_type(t, sid)?)));
+            let mut r = self.resolve_type(t, sid)?;
+            // a class: named so that it is found where the parameter is used (a class
+            // declared in another scope, e.g. `std::mailbox #(C)`)
+            if let Some(c) = r.class.as_deref().and_then(|n| self.find_class(n, sid)) {
+                r.class = Some(format!("$class#{c}"));
+            }
+            return Ok(PVal::Type(Rc::new(r)));
         }
         // another unpacked array parameter: its elements
         let sym = match &e.kind {

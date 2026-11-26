@@ -318,7 +318,7 @@ impl<'a> Compiler<'a> {
                         return Ok(v(w, s));
                     }
                 }
-                let Some((f, fs)) = self.lookup_func(name, sid) else {
+                let Some((f, fs)) = self.lookup_func(name, sid).or_else(|| self.class_static_method(name, sid)) else {
                     if let Some((obj, m)) = self.hier_handle(name, sid) {
                         return self.type_of(&Expr::from(ExprKind::MethodCall(Box::new(obj), m, args.clone())), sid);
                     }
@@ -418,7 +418,7 @@ impl<'a> Compiler<'a> {
             NetKind::Event => return self.err("an event type given by a type parameter is not supported here"),
             NetKind::Class => match r.class.as_deref().and_then(|n| self.find_class(n, sid)) {
                 Some(c) => Type::Class(c),
-                None => return self.err("unknown class of a type parameter"),
+                None => return self.err(format!("unknown class '{}' of a type parameter", r.class.as_deref().unwrap_or(""))),
             },
             _ => Type::vec(packed_of(r).width() as u32, r.signed),
         })
@@ -839,6 +839,12 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The layout of `e`, a struct element of an array property (`obj.q[i]`).
+    pub(crate) fn prop_elem_layout(&self, e: &Expr, sid: usize) -> Option<Packed> {
+        let (base, ops) = chain(e);
+        self.prop_root(base, &ops, sid).filter(|r| matches!(r.1.kind, ExprKind::Index(..)) && r.2 == ops.len()).map(|r| r.0)
+    }
+
     /// `e` is a member (or a part of one) of a struct element of an array property
     /// (`obj.q[i].f`).
     pub(crate) fn prop_elem_member(&self, e: &Expr, sid: usize) -> bool {
@@ -859,9 +865,19 @@ impl<'a> Compiler<'a> {
             _ => return None,
         };
         let Sym::Sig(s) = sym else { return None };
-        let Type::Class(mut c) = self.sig_type(s) else { return None };
         let mut cur = base.clone();
-        for (k, &op) in ops.iter().enumerate() {
+        // (an element of a queue or array of handles: `q[i].p.f`)
+        let (mut c, mut k) = match self.sig_type(s) {
+            Type::Class(c) => (c, 0),
+            Type::Dyn { elem, .. } if elem.class != NONE && elem.nested == NONE => {
+                let Some(&ix @ Sel::Index(_)) = ops.first() else { return None };
+                cur = apply(cur, ix);
+                (elem.class, 1)
+            }
+            _ => return None,
+        };
+        while k < ops.len() {
+            let op = ops[k];
             let Sel::Member(m) = op else { return None };
             let p = self.classes.list.get(c as usize)?.props.iter().rev().find(|p| p.name == m)?;
             if !p.dims.is_empty() {
@@ -869,15 +885,32 @@ impl<'a> Compiler<'a> {
             }
             cur = apply(cur, op);
             match (&p.layout, p.ty) {
-                // an element of an array of structs (`obj.q[i].f`)
-                (Some(l), Type::Dyn { .. }) => {
-                    let Some(&ix @ Sel::Index(_)) = ops.get(k + 1) else { return None };
-                    return Some(((**l).clone(), apply(cur, ix), k + 2));
+                // an element of an array of structs (`obj.q[i].f`, `obj.m[a][b].f`)
+                (Some(l), Type::Dyn { elem, .. }) => {
+                    let mut depth = 1;
+                    let mut e = elem;
+                    while let Some((_, inner)) = self.inner_arr(e) {
+                        depth += 1;
+                        e = inner;
+                    }
+                    for j in 0..depth {
+                        let Some(&ix @ Sel::Index(_)) = ops.get(k + 1 + j) else { return None };
+                        cur = apply(cur, ix);
+                    }
+                    return Some(((**l).clone(), cur, k + 1 + depth));
                 }
                 (Some(l), _) => return Some(((**l).clone(), cur, k + 1)),
                 (None, Type::Class(x)) if x != NONE => c = x,
+                // (a queue of handles: `obj.q[i].p.f`)
+                (None, Type::Dyn { elem, .. }) if elem.class != NONE && elem.nested == NONE => {
+                    let Some(&ix @ Sel::Index(_)) = ops.get(k + 1) else { return None };
+                    cur = apply(cur, ix);
+                    c = elem.class;
+                    k += 1;
+                }
                 _ => return None,
             }
+            k += 1;
         }
         None
     }

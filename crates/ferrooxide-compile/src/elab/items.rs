@@ -219,6 +219,19 @@ impl<'a> Compiler<'a> {
                 ids.push(id);
             }
         }
+        // the specializations of parameterized classes this scope uses: their names first
+        // (the classes' properties may name them), their declarations once the classes'
+        // are done (or when one is a base class)
+        self.classes.declaring.push(NONE);
+        let r = items.iter().try_for_each(|it| match it {
+            Item::ClassSpec { name, class, args, line } => {
+                self.line = *line;
+                self.class_spec(name, class, args, sid)
+            }
+            _ => Ok(()),
+        });
+        self.classes.declaring.pop();
+        r?;
         let mut k = 0;
         for it in items {
             if let Item::Class(c) = it {
@@ -230,14 +243,7 @@ impl<'a> Compiler<'a> {
                 k += 1;
             }
         }
-        // the specializations of parameterized classes this scope uses
-        for it in items {
-            if let Item::ClassSpec { name, class, args, line } = it {
-                self.line = *line;
-                self.class_spec(name, class, args, sid)?;
-            }
-        }
-        Ok(())
+        self.declare_pending()
     }
 
     /// 4. an item other than a declaration (`genblk`: the number of the last generate block)
