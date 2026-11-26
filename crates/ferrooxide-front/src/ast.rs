@@ -710,6 +710,10 @@ impl Expr {
                 f(c);
             }
             K::Unary(_, a) | K::Member(a, _) | K::NamedArg(_, a) | K::NewCopy(a) | K::IncDec { e: a, .. } => f(a),
+            K::AssignExpr { lhs, rhs } => {
+                f(lhs);
+                f(rhs);
+            }
             K::Concat(v) | K::Call(_, v) | K::SysCall(_, v) | K::New(v) | K::NewTyped(_, v) | K::StaticCall(_, _, v) => v.iter_mut().for_each(f),
             K::Stream { slice, items, .. } => {
                 if let Some(s) = slice {
@@ -875,6 +879,9 @@ pub enum ExprKind {
     Last,
     /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value
     IncDec { prefix: bool, inc: bool, e: Box<Expr> },
+    /// `(lhs = rhs)` in an expression (IEEE 1800-2017 11.3.6; `(a += b)` has `a + b` as
+    /// `rhs`): assigns lhs (blocking) and gives its new value
+    AssignExpr { lhs: Box<Expr>, rhs: Box<Expr> },
     /// `T::x` through a type parameter `T` (a class, known per specialization): a static
     /// property or a constant of the class (`T::f()` is a `StaticCall` of `T`)
     ClassMember { class: String, name: String },

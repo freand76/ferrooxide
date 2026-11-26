@@ -299,7 +299,17 @@ impl Lower {
             t::ExprKind::Default => return self.unsupported(loc, "`default` here"),
             t::ExprKind::Root => return self.unsupported(loc, "$root alone"),
             t::ExprKind::IncDec { prefix, inc, e } => ExprKind::IncDec { prefix: *prefix, inc: *inc, e: Box::new(self.lvalue(e)?) }.into(),
-            t::ExprKind::Assign(..) => return self.unsupported(loc, "an assignment in an expression"),
+            t::ExprKind::Assign(op, l, r) => {
+                let lhs = self.lvalue(l)?;
+                let r = self.expr(r)?;
+                let rhs = match super::stmt::assign_binop(*op) {
+                    None => r,
+                    // (the target once: no side effects in it)
+                    Some(_) if super::stmt::side_effects(&lhs) => return self.unsupported(loc, "a compound assignment in an expression to a target with side effects"),
+                    Some(b) => ExprKind::Binary(b, Box::new(lhs.clone()), Box::new(r)).into(),
+                };
+                ExprKind::AssignExpr { lhs: Box::new(lhs), rhs: Box::new(rhs) }.into()
+            }
             t::ExprKind::Dist(..) => return self.unsupported(loc, "dist"),
             t::ExprKind::Matches(..) | t::ExprKind::TripleAnd(..) => return self.unsupported(loc, "pattern matching"),
             t::ExprKind::Stream { left, slice, items } => {

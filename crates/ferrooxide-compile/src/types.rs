@@ -185,7 +185,7 @@ impl<'a> Compiler<'a> {
             ExprKind::EmptyArg => return self.err("an empty argument is allowed only in a call of a function or task"),
             ExprKind::NamedArg(..) => return self.err("a named argument is allowed only in a call of a function or task"),
             ExprKind::Last => return self.err("`$` outside an index of a queue"),
-            ExprKind::IncDec { e, .. } => return self.type_of(e, sid),
+            ExprKind::IncDec { e, .. } | ExprKind::AssignExpr { lhs: e, .. } => return self.type_of(e, sid),
             ExprKind::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
                 return self.type_of(&r, sid);

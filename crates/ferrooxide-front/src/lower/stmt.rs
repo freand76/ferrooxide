@@ -31,7 +31,7 @@ pub(crate) fn assign_binop(op: t::AssignOp) -> Option<BinOp> {
 /// Whether evaluating an expression assigns something (an increment in it).
 pub(crate) fn side_effects(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::IncDec { .. } => true,
+        ExprKind::IncDec { .. } | ExprKind::AssignExpr { .. } => true,
         ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => side_effects(a) || side_effects(b),
         ExprKind::Range(a, b, c) | ExprKind::IndexedRange(a, b, c, _) | ExprKind::Cond(a, b, c) => side_effects(a) || side_effects(b) || side_effects(c),
         ExprKind::Unary(_, a) | ExprKind::Member(a, _) => side_effects(a),

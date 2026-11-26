@@ -839,6 +839,7 @@ impl<'a> Compiler<'a> {
                     self.check_enum_assign(lhs, rhs, *scope)?;
                     self.check_const_selects(lhs, *scope)?;
                     self.check_const_var(lhs, *scope)?;
+                    self.check_no_assign_expr(rhs)?;
                     if delay.is_none() {
                         self.const_assign_init(lhs, rhs, *scope)?;
                     }
@@ -847,6 +848,7 @@ impl<'a> Compiler<'a> {
                 Job::PortIn { child_sig, expr, scope, line } => {
                     self.line = *line;
                     self.file = self.scopes[*scope].file.clone();
+                    self.check_no_assign_expr(expr)?;
                     self.assign_proc(stmt::Lhs::Sig(*child_sig), stmt::Rhs::Expr(expr, *scope), None)?;
                 }
                 Job::Udp { module, terms, delay, scope, line } => {

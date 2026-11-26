@@ -282,6 +282,10 @@ pub(crate) fn qualify_expr(e: &mut Expr, names: &std::collections::HashMap<Strin
             qualify_expr(c, names);
         }
         ExprKind::Unary(_, a) | ExprKind::IncDec { e: a, .. } => qualify_expr(a, names),
+        ExprKind::AssignExpr { lhs, rhs } => {
+            qualify_expr(lhs, names);
+            qualify_expr(rhs, names);
+        }
         ExprKind::Binary(_, a, b) => {
             qualify_expr(a, names);
             qualify_expr(b, names);

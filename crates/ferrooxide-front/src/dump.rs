@@ -153,6 +153,7 @@ pub fn expr(e: &Expr) -> String {
             None => format!("new[{}]", expr(n)),
         },
         ExprKind::Last => "$".into(),
+        ExprKind::AssignExpr { lhs, rhs } => format!("({} = {})", expr(lhs), expr(rhs)),
         ExprKind::IncDec { prefix, inc, e } => {
             let op = if *inc { "++" } else { "--" };
             if *prefix { format!("({op}{})", expr(e)) } else { format!("({}{op})", expr(e)) }

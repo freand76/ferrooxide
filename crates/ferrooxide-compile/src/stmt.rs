@@ -1371,6 +1371,23 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// An assignment or increment inside `e`, outside procedural code (a continuous
+    /// assignment, a port connection): an error (IEEE 1800-2017 11.3.6).
+    pub(crate) fn check_no_assign_expr(&self, e: &Expr) -> R<()> {
+        fn has(e: &mut Expr) -> bool {
+            if matches!(e.kind, ExprKind::AssignExpr { .. } | ExprKind::IncDec { .. }) {
+                return true;
+            }
+            let mut found = false;
+            e.for_each_child_mut(&mut |c| found |= has(c));
+            found
+        }
+        if has(&mut e.clone()) {
+            return self.err("an assignment or increment in an expression is allowed only in procedural code");
+        }
+        Ok(())
+    }
+
     /// A write of signal `s` outside its initializer: an error for a `const` variable.
     pub(crate) fn check_konst(&self, s: u32) -> R<()> {
         if self.code.init_write || !self.sigs.konst.contains(&s) {

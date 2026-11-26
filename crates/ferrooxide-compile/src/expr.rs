@@ -9,7 +9,7 @@ use ferrooxide_rt::{BinOp as RB, CmpOp, Index, RedOp, ShOp, SysFn, Target, UnOp 
 /// have side effects, so only what the operators select may run.
 pub(crate) fn has_call(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::IncDec { .. } => true,
+        ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::IncDec { .. } | ExprKind::AssignExpr { .. } => true,
         ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => has_call(a) || has_call(b),
         ExprKind::Range(a, b, c) | ExprKind::Cond(a, b, c) | ExprKind::IndexedRange(a, b, c, _) => has_call(a) || has_call(b) || has_call(c),
         ExprKind::Unary(_, a) => has_call(a),
@@ -393,7 +393,7 @@ impl<'a> Compiler<'a> {
             return self.is_const(&n, s);
         }
         match &e.kind {
-            ExprKind::Type(_) | ExprKind::Pattern(..) | ExprKind::NewArray(..) | ExprKind::Last | ExprKind::IncDec { .. } => false,
+            ExprKind::Type(_) | ExprKind::Pattern(..) | ExprKind::NewArray(..) | ExprKind::Last | ExprKind::IncDec { .. } | ExprKind::AssignExpr { .. } => false,
             ExprKind::Null | ExprKind::New(_) | ExprKind::NewTyped(..) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::EmptyArg | ExprKind::NamedArg(..) => false,
             ExprKind::ArrayWith { .. } | ExprKind::Randomize { .. } | ExprKind::ClassMember { .. } => false,
             // a member of a struct parameter
@@ -536,6 +536,12 @@ impl<'a> Compiler<'a> {
             Some(d) => Ok(d),
             None => read(self),
         }
+    }
+
+    /// The assignment of an `AssignExpr` (its value is then read from `lhs`).
+    pub(crate) fn assign_expr(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<()> {
+        let st = Stmt::Assign { lhs: lhs.clone(), rhs: rhs.clone(), nonblocking: false, timing: None, line: self.line };
+        self.stmt(&st, sid)
     }
 
     pub(crate) fn self_expr(&mut self, e: &Expr, sid: usize) -> R<(u32, u32, bool)> {
@@ -709,6 +715,14 @@ impl<'a> Compiler<'a> {
                 let (tw, ts) = self.type_of(t, sid)?.ws();
                 let r = self.inc_dec(*prefix, *inc, t, sid, false)?;
                 Ok(self.resize(r, tw, w, s && ts))
+            }
+            ExprKind::AssignExpr { lhs, rhs } => {
+                let (tw, ts) = self.type_of(lhs, sid)?.ws();
+                self.assign_expr(lhs, rhs, sid)?;
+                let r = self.expr(lhs, sid, tw, ts)?;
+                let d = self.tmp(tw);
+                self.emit(Instr::Copy { d, s: r, w: tw });
+                Ok(self.resize(d, tw, w, s && ts))
             }
             ExprKind::Null | ExprKind::New(_) | ExprKind::NewTyped(..) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) => {
                 self.err("no classes are declared")
@@ -2346,6 +2360,10 @@ impl<'a> Compiler<'a> {
         match &e.kind {
             ExprKind::Type(_) | ExprKind::Last | ExprKind::Null | ExprKind::EmptyArg | ExprKind::ClassMember { .. } => {}
             ExprKind::IncDec { e, .. } | ExprKind::NamedArg(_, e) => self.reads_expr(e, sid, out),
+            ExprKind::AssignExpr { lhs, rhs } => {
+                self.reads_expr(lhs, sid, out);
+                self.reads_expr(rhs, sid, out);
+            }
             ExprKind::New(v) | ExprKind::NewTyped(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().for_each(|x| self.reads_expr(x, sid, out)),
             ExprKind::NewCopy(x) => self.reads_expr(x, sid, out),
             ExprKind::Stream { items, .. } => items.iter().for_each(|x| self.reads_expr(x, sid, out)),
@@ -2517,6 +2535,15 @@ impl<'a> Compiler<'a> {
         if let ExprKind::IncDec { prefix, inc, e: t } = &e.kind {
             if self.type_of(t, sid)?.is_real() {
                 return self.inc_dec(*prefix, *inc, t, sid, true);
+            }
+        }
+        if let ExprKind::AssignExpr { lhs, rhs } = &e.kind {
+            if self.type_of(lhs, sid)?.is_real() {
+                self.assign_expr(lhs, rhs, sid)?;
+                let r = self.rexpr(lhs, sid)?;
+                let d = self.tmp(64);
+                self.emit(Instr::Copy { d, s: r, w: 64 });
+                return Ok(d);
             }
         }
         if !self.type_of(e, sid)?.is_real() {

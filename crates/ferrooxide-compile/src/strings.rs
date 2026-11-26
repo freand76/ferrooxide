@@ -133,6 +133,13 @@ impl<'a> Compiler<'a> {
         if let Some(x) = self.typename_str(e, sid)? {
             return self.str_expr(&x, sid);
         }
+        if let ExprKind::AssignExpr { lhs, rhs } = &e.kind {
+            self.assign_expr(lhs, rhs, sid)?;
+            let h = self.str_expr(lhs, sid)?;
+            let d = self.tmp(64);
+            self.emit(Instr::Copy { d, s: h, w: 64 });
+            return Ok(d);
+        }
         if let Some(h) = self.str_member(e, sid)? {
             return Ok(h);
         }

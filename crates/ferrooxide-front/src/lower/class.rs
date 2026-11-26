@@ -758,6 +758,10 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
             this_expr(d, c, locals);
         }
         ExprKind::Unary(_, a) | ExprKind::Member(a, _) | ExprKind::NewCopy(a) | ExprKind::IncDec { e: a, .. } => this_expr(a, c, locals),
+        ExprKind::AssignExpr { lhs, rhs } => {
+            this_expr(lhs, c, locals);
+            this_expr(rhs, c, locals);
+        }
         ExprKind::Binary(_, a, b) => {
             this_expr(a, c, locals);
             this_expr(b, c, locals);
