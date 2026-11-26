@@ -1155,6 +1155,8 @@ pub fn exec_real(ins: &crate::Instr, m: &mut [u64]) -> bool {
                 crate::RealOp::Atanh => x.atanh(),
                 crate::RealOp::Atan2 => x.atan2(y),
                 crate::RealOp::Hypot => x.hypot(y),
+                crate::RealOp::ToShortBits => f64::from_bits((x as f32).to_bits() as u64),
+                crate::RealOp::FromShortBits => f32::from_bits(x.to_bits() as u32) as f64,
             };
             wr_real(m, d as usize, v);
         }

@@ -818,7 +818,7 @@ impl Printer {
             Stmt::Disable { name: n, .. } => self.line(format!("disable {n};")),
             Stmt::Force { lhs, rhs: Some(r), .. } => self.line(format!("force {} = {};", expr(lhs), expr(r))),
             Stmt::Force { lhs, rhs: None, .. } => self.line(format!("release {};", expr(lhs))),
-            Stmt::Trigger { name: n, .. } => self.line(format!("-> {n};")),
+            Stmt::Trigger { name: n, nonblocking, .. } => self.line(format!("{} {n};", if *nonblocking { "->>" } else { "->" })),
             Stmt::Return { value, .. } => match value {
                 Some(v) => self.line(format!("return {};", expr(v))),
                 None => self.line("return;"),

@@ -130,6 +130,9 @@ impl<'a> Compiler<'a> {
         if let Some((n, s)) = self.class_member(e, sid)? {
             return self.str_expr(&n, s);
         }
+        if let Some(x) = self.typename_str(e, sid)? {
+            return self.str_expr(&x, sid);
+        }
         if let Some(h) = self.str_member(e, sid)? {
             return Ok(h);
         }

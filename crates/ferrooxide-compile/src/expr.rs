@@ -603,6 +603,9 @@ impl<'a> Compiler<'a> {
         if let Some(x) = self.array_equality(e, sid)? {
             return self.expr(&x, sid, w, s);
         }
+        if let Some(x) = self.typename_str(e, sid)? {
+            return self.expr(&x, sid, w, s);
+        }
         // a property of an object, a method's result, null
         if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_)) {
             if let Some((v, t)) = self.obj_value(e, sid)? {
@@ -1601,6 +1604,13 @@ impl<'a> Compiler<'a> {
                 let d = self.tmp(32);
                 self.emit(Instr::RToI { d, s: v, w: 32, trunc: true });
                 Ok(self.resize(d, 32, w, true))
+            }
+            "$shortrealtobits" => {
+                let [a] = args else { return self.err("$shortrealtobits takes one argument") };
+                let v = self.rexpr(a, sid)?;
+                let d = self.tmp(64);
+                self.emit(Instr::RBin { op: rt::RealOp::ToShortBits, d, a: v, b: v });
+                Ok(self.resize(d, 32, w, false))
             }
             "$realtobits" => {
                 let v = self.rexpr(&args[0], sid)?;
@@ -2636,6 +2646,15 @@ impl<'a> Compiler<'a> {
                     let (s, w, signed) = self.self_expr(a, sid)?;
                     let d = self.tmp(64);
                     self.emit(Instr::IToR { d, s, w, signed });
+                    Ok(d)
+                }
+                "$bitstoshortreal" => {
+                    let [a] = args.as_slice() else { return self.err("$bitstoshortreal takes one argument") };
+                    let v = self.expr(a, sid, 32, false)?;
+                    let k = self.tmp(64);
+                    self.emit(Instr::Copy { d: k, s: v, w: 32 });
+                    let d = self.tmp(64);
+                    self.emit(Instr::RBin { op: rt::RealOp::FromShortBits, d, a: k, b: k });
                     Ok(d)
                 }
                 _ => {

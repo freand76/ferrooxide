@@ -538,6 +538,26 @@ impl Lower {
     }
 
     fn sys_call(&mut self, name: &str, args: &[t::Arg], loc: t::Loc) -> Result<Expr> {
+        // `$typename(x)`: of the type of x, which the compiler names (IEEE 1800-2017 20.6.1)
+        if name == "$typename" {
+            let [t::Arg::Pos(Some(a))] = args else { return self.err(loc, "$typename takes one argument") };
+            let ty = match &a.kind {
+                t::ExprKind::Type(dt) => self.data_type_req(dt)?,
+                t::ExprKind::Ident(n) if self.vars.get(n).is_some_and(|v| !v.1.is_empty()) => {
+                    let (t, unpacked) = self.vars[n].clone();
+                    let mut t = (*t).clone();
+                    let mut u = unpacked;
+                    u.extend(t.unpacked);
+                    t.unpacked = u;
+                    t
+                }
+                _ => match self.expr_type(a)? {
+                    Some(t) => t,
+                    None => return self.unsupported(loc, "$typename of this expression"),
+                },
+            };
+            return Ok(ExprKind::SysCall("$typename".into(), vec![ExprKind::Type(Rc::new(ty)).into()]).into());
+        }
         if name == "$bits" {
             if let Some(t::Arg::Pos(Some(t::Expr { kind: t::ExprKind::Type(dt), .. }))) = args.first() {
                 return Ok(self.data_type_req(dt)?.bits());

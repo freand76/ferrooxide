@@ -280,7 +280,7 @@ impl Lower {
                 t::Timing::Cycle(_) => return self.unsupported(s.loc, "a cycle delay"),
                 t::Timing::Repeat(..) => return self.unsupported(s.loc, "repeat as a statement's timing control"),
             },
-            t::StmtKind::Trigger { nonblocking: false, timing: None, target } => {
+            t::StmtKind::Trigger { nonblocking, timing: None, target } => {
                 let p = match self.dotted(target)? {
                     Some(p) => p,
                     // `-> P::e`: an event of a package; `-> a.g[1].e`: through an indexed scope
@@ -290,9 +290,9 @@ impl Lower {
                         _ => return self.unsupported(s.loc, "this event trigger"),
                     },
                 };
-                Stmt::Trigger { name: p, line }
+                Stmt::Trigger { name: p, nonblocking: *nonblocking, line }
             }
-            t::StmtKind::Trigger { .. } => return self.unsupported(s.loc, "a nonblocking event trigger"),
+            t::StmtKind::Trigger { .. } => return self.unsupported(s.loc, "a nonblocking event trigger with a delay or event control"),
             t::StmtKind::If { qual, cond, then_, else_ } => {
                 if matches!(cond.kind, t::ExprKind::Matches(..) | t::ExprKind::TripleAnd(..)) {
                     return self.unsupported(cond.loc, "a pattern-matching condition");
@@ -760,18 +760,22 @@ impl Lower {
                 let mut v = Vec::new();
                 let mut guards = Vec::new();
                 for it in items {
-                    let edge = match it.edge {
-                        None => Edge::Any,
-                        Some(t::Edge::Pos) => Edge::Pos,
-                        Some(t::Edge::Neg) => Edge::Neg,
-                        Some(t::Edge::Both) => return self.unsupported(it.loc, "an `edge` event"),
+                    // (`edge e`: a posedge or a negedge of e, IEEE 1800-2017 9.4.2)
+                    let edges: &[Edge] = match it.edge {
+                        None => &[Edge::Any],
+                        Some(t::Edge::Pos) => &[Edge::Pos],
+                        Some(t::Edge::Neg) => &[Edge::Neg],
+                        Some(t::Edge::Both) => &[Edge::Pos, Edge::Neg],
                     };
                     let e = self.expr(&it.expr)?;
-                    v.push((edge, e));
-                    guards.push(match &it.iff {
+                    let g = match &it.iff {
                         Some(g) => Some(self.expr(g)?),
                         None => None,
-                    });
+                    };
+                    for &edge in edges {
+                        v.push((edge, e.clone()));
+                        guards.push(g.clone());
+                    }
                 }
                 let guard = match guards.first() {
                     Some(Some(g)) if guards.iter().all(|x| x.as_ref().is_some_and(|x| format!("{x:?}") == format!("{g:?}"))) => Some(g.clone()),

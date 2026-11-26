@@ -1166,7 +1166,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Disable { target });
                 }
             }
-            Stmt::Trigger { name, line } => {
+            Stmt::Trigger { name, nonblocking, line } => {
                 self.line = *line;
                 let e: Expr = if name.contains('.') {
                     ExprKind::Hier(name.split('.').map(String::from).collect())
@@ -1177,22 +1177,47 @@ impl<'a> Compiler<'a> {
                 let Some(expr::Base::Sig(s)) = self.resolve_base(&e, sid)? else {
                     return self.err(format!("'{name}' is not an event"));
                 };
-                // the trigger time, for `.triggered` (before the waiters wake)
-                let mut te = e.clone();
-                match &mut te.kind {
-                    ExprKind::Ident(n) => *n = format!("{n}$trig"),
-                    ExprKind::Hier(p) => {
-                        let l = p.last_mut().unwrap();
-                        *l = format!("{l}$trig");
+                // a hidden companion of a module-level event (`e$trig`, `e$nba`)
+                let companion = |me: &Self, suffix: &str| -> (Expr, Option<Sym>) {
+                    let mut te = e.clone();
+                    match &mut te.kind {
+                        ExprKind::Ident(n) => *n = format!("{n}{suffix}"),
+                        ExprKind::Hier(p) => {
+                            let l = p.last_mut().unwrap();
+                            *l = format!("{l}{suffix}");
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                // (only module-level events have one)
-                let hidden = match &te.kind {
-                    ExprKind::Ident(n) => self.lookup(n, sid),
-                    ExprKind::Hier(p) => self.lookup_hier(p, sid),
-                    _ => None,
+                    let sym = match &te.kind {
+                        ExprKind::Ident(n) => me.lookup(n, sid),
+                        ExprKind::Hier(p) => me.lookup_hier(p, sid),
+                        _ => None,
+                    };
+                    (te, sym)
                 };
+                // `->> e` (IEEE 1800-2017 15.5.1): a toggle of `e$nba` in the NBA region,
+                // on which a process (made once per event) triggers e
+                if *nonblocking {
+                    let (ne, Some(Sym::Sig(nb))) = companion(self, "$nba") else {
+                        return self.err(format!("a nonblocking trigger of event '{name}' (not declared in a module) is not supported"));
+                    };
+                    if self.sigs.nba_events.insert(s) {
+                        self.begin_proc(format!("{}$nba", self.sig(s).name), ProcClass::Normal);
+                        let trig = Stmt::Trigger { name: name.clone(), nonblocking: false, line: *line };
+                        let wait = Stmt::Timed { timing: Timing::Event(EventCtl::List(vec![(Edge::Any, ne)])), body: Box::new(trig), line: *line };
+                        let r = self.stmt(&Stmt::Forever { body: Box::new(wait), line: *line }, sid);
+                        self.end_proc();
+                        r?;
+                    }
+                    let slot = self.sig(nb).slot;
+                    let t = self.tmp(1);
+                    self.emit(Instr::Un { op: rt::UnOp::Not, d: t, s: slot, w: 1 });
+                    self.emit(Instr::Store { t: Target::Whole { sig: nb }, s: t, mode: StoreMode::Nba });
+                    return Ok(());
+                }
+                // the trigger time, for `.triggered` (before the waiters wake)
+                // (only module-level events have one)
+                let (_, hidden) = companion(self, "$trig");
                 if let Some(Sym::Sig(ht)) = hidden {
                     let d = self.tmp(64);
                     self.emit(Instr::SysF { f: rt::SysFn::Time(0), d });

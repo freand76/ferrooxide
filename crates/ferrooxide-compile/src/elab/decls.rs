@@ -405,6 +405,11 @@ impl<'a> Compiler<'a> {
             self.prog.mem[slot] = !0;
             self.prog.mem[slot + 1] = 0;
             self.scopes[sid].syms.insert(format!("{name}$trig"), Sym::Sig(ht));
+            // toggled by `->>` in the NBA region; a process then triggers the event
+            let nb = self.new_signal(format!("{}.{name}$nba", self.scopes[sid].name), 1, false, 0, 0, 0, 0, SigKind::Reg);
+            self.prog.names.pop();
+            self.zero_init(nb);
+            self.scopes[sid].syms.insert(format!("{name}$nba"), Sym::Sig(nb));
             self.sigs.has_events = true;
         }
         self.mark_two_state(s, mg.kind);

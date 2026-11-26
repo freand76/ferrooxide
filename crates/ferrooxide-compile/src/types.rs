@@ -109,7 +109,7 @@ pub(crate) const STR_METHODS: &[&str] = &["substr", "toupper", "tolower"];
 
 /// System functions that give a real.
 const REAL_FUNCS: &[&str] = &[
-    "$realtime", "$itor", "$__toreal", "$bitstoreal", "$sqrt", "$ln", "$log10", "$exp", "$floor", "$ceil", "$sin", "$cos", "$tan",
+    "$realtime", "$itor", "$__toreal", "$bitstoreal", "$bitstoshortreal", "$sqrt", "$ln", "$log10", "$exp", "$floor", "$ceil", "$sin", "$cos", "$tan",
     "$asin", "$acos", "$atan", "$sinh", "$cosh", "$tanh", "$asinh", "$acosh", "$atanh", "$atan2", "$hypot", "$pow",
 ];
 
@@ -139,6 +139,9 @@ impl<'a> Compiler<'a> {
             return self.type_of(&n, s);
         }
         if let Some(x) = self.array_equality(e, sid)? {
+            return self.type_of(&x, sid);
+        }
+        if let Some(x) = self.typename_str(e, sid)? {
             return self.type_of(&x, sid);
         }
         if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..)) {
@@ -349,6 +352,7 @@ impl<'a> Compiler<'a> {
                 }
                 "$rtoi" => v(32, true),
                 "$realtobits" | "$__ticks" | "$__strbits" => v(64, false),
+                "$shortrealtobits" => v(32, false),
                 "$countones" | "$countbits" => v(32, false),
                 "$left" | "$right" | "$low" | "$high" | "$size" | "$increment" | "$dimensions" | "$unpacked_dimensions" => v(32, true),
                 "$onehot" | "$onehot0" | "$isunknown" => v(1, false),
@@ -1121,5 +1125,51 @@ impl<'a> Compiler<'a> {
             t.dims.iter().chain(&t.unpacked).map(|(a, b)| Ok((c.const_int(a, sid)?, c.const_int(b, sid)?))).collect()
         };
         Ok(dims(self, &rx, sx)? == dims(self, &ry, sy)? && rx.dims.len() == ry.dims.len())
+    }
+}
+
+impl<'a> Compiler<'a> {
+    /// `$typename(T)` (IEEE 1800-2017 20.6.1) as its string literal: the resolved type, its
+    /// signing where it is not the default, ranges as decimal numbers, `$` for an unpacked
+    /// array; one space between keywords. None for any other expression.
+    pub(crate) fn typename_str(&mut self, e: &Expr, sid: usize) -> R<Option<Expr>> {
+        let ExprKind::SysCall(n, args) = &e.kind else { return Ok(None) };
+        let (true, [Expr { kind: ExprKind::Type(t), .. }]) = (n == "$typename", args.as_slice()) else { return Ok(None) };
+        let r = self.resolve_type(t, sid)?;
+        if r.enum_names.is_some() || r.fields.is_some() || r.class.is_some() || r.heap.is_some() || r.inner_heap.is_some() {
+            return self.err("$typename of an enum, struct, union, class or dynamic type is not supported");
+        }
+        let (name, dflt_signed) = match r.kind {
+            NetKind::Int(32) => ("int", true),
+            NetKind::Int(8) => ("byte", true),
+            NetKind::Int(16) => ("shortint", true),
+            NetKind::Int(64) => ("longint", true),
+            NetKind::Integer => ("integer", true),
+            NetKind::Time => ("time", false),
+            NetKind::Reg | NetKind::Wire => ("logic", false),
+            NetKind::Bit => ("bit", false),
+            NetKind::Real => ("real", true),
+            NetKind::String => ("string", false),
+            NetKind::Event => ("event", false),
+            _ => return self.err("$typename of this type is not supported"),
+        };
+        let mut s = name.to_string();
+        let atom = matches!(r.kind, NetKind::Real | NetKind::String | NetKind::Event);
+        if !atom && r.signed != dflt_signed {
+            s.push_str(if r.signed { " signed" } else { " unsigned" });
+        }
+        let range = |c: &mut Self, (a, b): &(Expr, Expr)| -> R<String> { Ok(format!("[{}:{}]", c.const_int(a, sid)?, c.const_int(b, sid)?)) };
+        if !(r.int_kind || atom) {
+            for d in &r.dims {
+                s.push_str(&range(self, d)?);
+            }
+        }
+        if !r.unpacked.is_empty() {
+            s.push('$');
+            for d in &r.unpacked {
+                s.push_str(&range(self, d)?);
+            }
+        }
+        Ok(Some(Expr::new(ExprKind::Str(s), e.line)))
     }
 }

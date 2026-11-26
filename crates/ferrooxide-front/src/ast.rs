@@ -609,7 +609,8 @@ pub enum Stmt {
     Disable { name: String, line: Line },
     /// `force lhs = rhs` (`rhs` None: `release lhs`)
     Force { lhs: Expr, rhs: Option<Expr>, line: Line },
-    Trigger { name: String, line: Line },
+    /// `-> e`, `->> e` (nonblocking: in the NBA region)
+    Trigger { name: String, nonblocking: bool, line: Line },
     Return { value: Option<Expr>, line: Line },
     Break { line: Line },
     Continue { line: Line },

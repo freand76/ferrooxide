@@ -325,6 +325,8 @@ pub(crate) struct Sigs {
     pub(crate) const_arrays: HashSet<u32>,
     /// `const` variables: only their initializers write them (IEEE 1800-2017 6.20.6)
     pub(crate) konst: HashSet<u32>,
+    /// events with a process for their nonblocking triggers (`->>`)
+    pub(crate) nba_events: HashSet<u32>,
     /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
     pub(crate) two_state: HashSet<u32>,
     /// automatic variables (of automatic subroutines and automatic blocks)

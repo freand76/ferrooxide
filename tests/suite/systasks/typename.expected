@@ -1,0 +1,4 @@
+bit[2:0]|int|logic[7:0]|logic signed[3:0]|bit
+logic|logic|integer unsigned|real|string
+byte$[0:3]|logic[8:1]|logic[7:0]
+compared

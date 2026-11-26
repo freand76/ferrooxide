@@ -639,6 +639,10 @@ pub struct ScanOut {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RealOp {
+    /// the bits of a as a shortreal (IEEE 754 single precision) in the low 32 bits
+    ToShortBits,
+    /// the shortreal whose bits are the low 32 bits of a
+    FromShortBits,
     Add,
     Sub,
     Mul,
