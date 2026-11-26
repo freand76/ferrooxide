@@ -461,6 +461,8 @@ pub struct ClassDecl {
     pub base_args: Option<Vec<Expr>>,
     /// properties (each object has its own), with their initializers
     pub props: Vec<Decl>,
+    /// the typedefs declared in the class and its base classes (`C::T`)
+    pub types: Vec<(String, std::rc::Rc<crate::lower::SvType>)>,
     /// parameters, local parameters and enum constants declared in the class (in its scope)
     pub consts: Vec<ParamDecl>,
     /// methods; a constructor is named `new`. Methods are automatic.

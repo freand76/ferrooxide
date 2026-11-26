@@ -110,6 +110,17 @@ impl Lower {
         Ok(n.clone())
     }
 
+    /// `n` with leading scopes `C::T` (T a typedef in class C that names a class D) replaced
+    /// by D, as often as they occur.
+    pub(crate) fn class_typedef_scopes(&self, n: &t::Name) -> t::Name {
+        let mut n = n.clone();
+        while n.scopes.len() > 1 && n.scopes[..2].iter().all(|s| s.params.is_none()) {
+            let Some(d) = self.classes.get(&n.scopes[0].name).and_then(|c| c.types.get(&n.scopes[1].name)).and_then(|t| t.class.clone()) else { break };
+            n.scopes.splice(0..2, [t::NamePart { name: d, params: None }]);
+        }
+        n
+    }
+
     /// A new specialization of class `full` (named `base` without its package) with
     /// parameter values `args`: its name, known as a class with `names` from here on.
     fn new_spec(&mut self, full: &str, base: &str, names: Rc<ClassNames>, args: &[t::ParamArg], loc: t::Loc) -> Result<String> {
@@ -441,7 +452,9 @@ impl Lower {
             }
         }
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
-        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, rand: rands, constraints, line })
+        let mut class_types: Vec<_> = names.types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        class_types.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, types: class_types, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, rand: rands, constraints, line })
     }
 
     /// An extern method (IEEE 1800-2017 8.24): the prototype `m` with its body from the

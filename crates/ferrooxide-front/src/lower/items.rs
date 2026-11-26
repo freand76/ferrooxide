@@ -74,6 +74,9 @@ impl Lower {
         }
         match it {
             t::Item::Empty(_) => {}
+            // `export "DPI-C" function f;`: f callable from foreign code, of which there is none
+            // (IEEE 1800-2017 35.7)
+            t::Item::Dpi(d) if !d.import => {}
             t::Item::Directive(d, _) => self.directive(d),
             t::Item::Timeunits { unit, precision, loc } => {
                 let (u, p) = self.timeunits(*unit, *precision, *loc)?;

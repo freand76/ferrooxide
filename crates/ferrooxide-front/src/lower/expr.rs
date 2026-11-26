@@ -710,6 +710,27 @@ impl Lower {
                 } else {
                     n
                 };
+                // `C::T::x`, T a typedef of class C naming class D: `D::x`
+                let collapsed;
+                let n = if n.scopes.len() > 1 {
+                    collapsed = self.class_typedef_scopes(n);
+                    &collapsed
+                } else {
+                    n
+                };
+                // `C::T::f(args)`, C declared later (`typedef class C;`): a static method of the
+                // class T names, resolved by the compiler
+                if let ([c, td], Some((Op::Call(a, _), rest))) = (n.scopes.as_slice(), ops.split_first()) {
+                    let later = !self.classes.contains_key(&c.name) && self.types.get(&c.name).is_some_and(|t| t.class.is_some());
+                    if later && c.params.is_none() && td.params.is_none() && n.params.is_none() {
+                        if !rest.is_empty() {
+                            return self.unsupported(e.loc, "a select of a call");
+                        }
+                        let class = self.types[&c.name].class.clone().unwrap();
+                        let args = self.call_args(a)?;
+                        return Ok(ExprKind::StaticCall(format!("{class}::{}", td.name), n.name.clone(), args).into());
+                    }
+                }
                 if n.scopes.len() != 1 || n.params.is_some() || n.scopes[0].params.is_some() || n.scopes[0].name == "$unit" {
                     return self.unsupported(e.loc, "this scoped name");
                 }

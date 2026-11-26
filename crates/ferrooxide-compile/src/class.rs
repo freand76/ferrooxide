@@ -372,9 +372,15 @@ impl<'a> Compiler<'a> {
                 return self.find_class(cn, sid);
             }
         }
-        // `P::C`: class C of package P
-        if let Some((p, n)) = name.split_once("::") {
-            return self.classes.by_name.get(&(*self.hier.pkg_scopes.get(p)?, n.to_string())).copied();
+        if let Some((a, n)) = name.rsplit_once("::") {
+            // `P::C`: class C of package P
+            if let Some(c) = self.hier.pkg_scopes.get(a).and_then(|ps| self.classes.by_name.get(&(*ps, n.to_string()))) {
+                return Some(*c);
+            }
+            // `C::T`: the class typedef T of class C names (in C's scope)
+            let c = &self.classes.list[self.find_class(a, sid)? as usize];
+            let t = c.decl.types.iter().find(|(k, _)| k == n)?.1.class.clone()?;
+            return self.find_class(&t, c.scope);
         }
         loop {
             if let Some(&c) = self.classes.by_name.get(&(sid, name.to_string())) {

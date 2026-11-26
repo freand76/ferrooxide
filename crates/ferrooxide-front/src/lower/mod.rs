@@ -319,7 +319,9 @@ impl Lower {
     fn unit_item(&mut self, it: &t::Item, rest: &[&t::Item]) -> Result<()> {
         match it {
             t::Item::Import(v, _) => self.import(v, true),
+            // (see `module_item`)
             t::Item::Empty(_) => Ok(()),
+            t::Item::Dpi(d) if !d.import => Ok(()),
             t::Item::Directive(d, _) => {
                 self.directive(d);
                 Ok(())
