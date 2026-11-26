@@ -42,7 +42,7 @@ pub(crate) struct FixedArr {
 }
 
 /// An int element (the indexes `*_index` give).
-const INT: Elem = Elem { w: 32, signed: true, leaf: Leaf::Bits, two_state: true, class: NONE };
+const INT: Elem = Elem { w: 32, signed: true, leaf: Leaf::Bits, two_state: true, class: NONE, nested: NONE };
 
 impl<'a> Compiler<'a> {
     /// `e` as a reduction or locator method call of a queue or dynamic array.
@@ -372,9 +372,9 @@ impl<'a> Compiler<'a> {
                 };
                 let key_elem = match kt {
                     _ if with.is_none() => elem,
-                    Type::Vec { w, signed } => Elem { w, signed, leaf: Leaf::Bits, two_state: false, class: NONE },
-                    Type::Str => Elem { w: 64, signed: false, leaf: Leaf::Str, two_state: true, class: NONE },
-                    Type::Real => Elem { w: 64, signed: false, leaf: Leaf::Real, two_state: true, class: NONE },
+                    Type::Vec { w, signed } => Elem { w, signed, leaf: Leaf::Bits, two_state: false, class: NONE, nested: NONE },
+                    Type::Str => Elem { w: 64, signed: false, leaf: Leaf::Str, two_state: true, class: NONE, nested: NONE },
+                    Type::Real => Elem { w: 64, signed: false, leaf: Leaf::Real, two_state: true, class: NONE, nested: NONE },
                     _ => return self.err(format!("'{m}' with this `with` expression is not supported")),
                 };
                 let seen = self.empty_queue();
@@ -423,9 +423,9 @@ impl<'a> Compiler<'a> {
         let (isid, it, ix) = self.iter_scope(we, *depth, a.elem, arr, sid)?;
         let kt = self.type_of(we, isid)?;
         let key = match kt {
-            Type::Vec { w, signed } => Elem { w, signed, leaf: Leaf::Bits, two_state: false, class: NONE },
-            Type::Str => Elem { w: 64, signed: false, leaf: Leaf::Str, two_state: true, class: NONE },
-            Type::Real => Elem { w: 64, signed: false, leaf: Leaf::Real, two_state: true, class: NONE },
+            Type::Vec { w, signed } => Elem { w, signed, leaf: Leaf::Bits, two_state: false, class: NONE, nested: NONE },
+            Type::Str => Elem { w: 64, signed: false, leaf: Leaf::Str, two_state: true, class: NONE, nested: NONE },
+            Type::Real => Elem { w: 64, signed: false, leaf: Leaf::Real, two_state: true, class: NONE, nested: NONE },
             _ => return self.err(format!("'{m}' with this `with` expression is not supported")),
         };
         // the key of each element, then the elements reordered by them
@@ -496,7 +496,7 @@ impl<'a> Compiler<'a> {
             _ => NONE,
         };
         let two_state = self.sigs.two_state.contains(&self.canon(s));
-        let elem = Elem { w: i.width, signed: i.signed, leaf, two_state, class };
+        let elem = Elem { w: i.width, signed: i.signed, leaf, two_state, class, nested: NONE };
         Ok(Some(FixedArr { sig: s, n: i.depth, desc: self.sigs.desc_arrays.contains(&s), elem }))
     }
 

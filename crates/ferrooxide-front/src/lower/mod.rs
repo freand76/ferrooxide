@@ -619,7 +619,7 @@ impl Lower {
             items.push(Item::Decl(Decl {
                 dir: Some(dir),
                 explicit_kind: false,
-                ..Decl::var(SvType::vector(NetKind::Wire, false, vec![(msb.into(), ExprKind::Num(crate::ast::dec(0)).into())]), vec![Declarator { name: pn.clone(), dims: vec![], heap: None, init: None, line }], false, line)
+                ..Decl::var(SvType::vector(NetKind::Wire, false, vec![(msb.into(), ExprKind::Num(crate::ast::dec(0)).into())]), vec![Declarator { name: pn.clone(), dims: vec![], heap: None, inner: None, init: None, line }], false, line)
             }));
             let p: Expr = ExprKind::Ident(pn).into();
             let (lhs, rhs) = if dir == Dir::Input { (x, p) } else { (p, x) };
@@ -800,7 +800,7 @@ impl Lower {
             items.append(&mut self.pending);
             let mut d = cur.clone().unwrap();
             d.line = pline;
-            d.names = vec![Declarator { name: pname.clone(), dims, heap, init, line: pline }];
+            d.names = vec![Declarator { name: pname.clone(), dims, heap, inner: None, init, line: pline }];
             items.push(Item::Decl(d));
             ports.push(pname);
         }
@@ -847,7 +847,7 @@ impl Lower {
                         init = Some(v);
                     }
                 }
-                names.push(Declarator { name: n, dims: vec![], heap: None, init: None, line: x.loc.line });
+                names.push(Declarator { name: n, dims: vec![], heap: None, inner: None, init: None, line: x.loc.line });
             }
             d.names = names;
             items.push(Item::Decl(d));

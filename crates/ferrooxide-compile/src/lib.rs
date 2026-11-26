@@ -347,6 +347,10 @@ pub(crate) struct Sigs {
     pub(crate) has_struct_values: bool,
     /// some queue or dynamic array exists (`q.size` needs the rewrite in `md_norm`)
     pub(crate) has_dyn: bool,
+    /// the arrays that are elements of arrays (`Elem::nested`): their kind and element type
+    pub(crate) nested: Vec<(types::DynKind, types::Elem)>,
+    /// the arrays holding arrays elements of which are being changed (`DynHome::Elem`)
+    pub(crate) outers: Vec<(heap::DynArr, u32)>,
 }
 
 /// Compile parsed modules into a runnable program. `top`: explicit top-level module(s).

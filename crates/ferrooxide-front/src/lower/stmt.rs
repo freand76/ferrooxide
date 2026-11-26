@@ -373,7 +373,7 @@ impl Lower {
                             self.wild.locals.push(name.clone());
                             let v = self.expr(init)?;
                             let Some(d) = decls.last_mut() else { return self.unsupported(*loc, "this for-loop initialization") };
-                            d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, init: None, line: loc.line });
+                            d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, inner: None, init: None, line: loc.line });
                             inits.push(Stmt::Assign { lhs: ExprKind::Ident(name).into(), rhs: v, nonblocking: false, timing: None, line: loc.line });
                         }
                         t::ForInit::Assign(st) => inits.push(self.simple_assign(st)?),
@@ -489,7 +489,7 @@ impl Lower {
             }
             // `obj.randomize();`: its value is not used
             t::ExprKind::Call { func, .. } if Self::randomize_form(func).is_some() => Ok(Stmt::Discard { e: self.expr(e)?, line }),
-            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Member(..) if self.class_call(e) => match self.expr(e)?.kind {
+            t::ExprKind::Call { with_: None, .. } | t::ExprKind::Member(..) if self.class_call(e) || self.nested_call(e) => match self.expr(e)?.kind {
                 ExprKind::MethodCall(obj, name, args) => Ok(Stmt::MethodCall { obj: *obj, name, args, line }),
                 ExprKind::Member(obj, name) => Ok(Stmt::MethodCall { obj: *obj, name, args: vec![], line }),
                 _ => self.unsupported(loc, "this expression as a statement"),
@@ -528,6 +528,15 @@ impl Lower {
         // (also of a class declared later, `typedef class C;`, and through a type parameter)
         matches!(&f.kind, t::ExprKind::Scoped(n) if n.scopes.len() == 1 && (self.classes.contains_key(&n.scopes[0].name)
             || (!self.packages.contains_key(&n.scopes[0].name) && self.types.get(&n.scopes[0].name).is_some_and(|t| t.class.is_some() || t.param.is_some()))))
+    }
+
+    /// A method call of an element of an array of queues, dynamic or associative arrays
+    /// (`a[k].push_back(x)`).
+    fn nested_call(&self, e: &t::Expr) -> bool {
+        let t::ExprKind::Call { func, .. } = &e.kind else { return false };
+        let t::ExprKind::Member(a, _) = &func.kind else { return false };
+        let t::ExprKind::Index(b, _) = &a.kind else { return false };
+        matches!(&b.kind, t::ExprKind::Ident(n) if self.vars.get(n).is_some_and(|v| v.0.inner_heap.is_some()))
     }
 
     /// A call through a class handle (`obj.m(..)`, `this.m`, `super.new(..)`).
@@ -750,7 +759,7 @@ impl Lower {
         };
         let body = Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: chain.into_iter().collect(), fork: None };
         let run = Stmt::If { cond: bin(BinOp::Ne, total, ExprKind::Num(dec(0)).into()).into(), then_s: Box::new(Stmt::Block { name: None, decls: vec![], imports: vec![], params: vec![], stmts: vec![pick, body], fork: None }), else_s: None, line };
-        let d = Decl::var(super::SvType::flat(NetKind::Reg, false, vec![(ExprKind::Num(dec(63)).into(), ExprKind::Num(dec(0)).into())]), vec![Declarator { name: r, dims: vec![], heap: None, init: None, line }], true, line);
+        let d = Decl::var(super::SvType::flat(NetKind::Reg, false, vec![(ExprKind::Num(dec(63)).into(), ExprKind::Num(dec(0)).into())]), vec![Declarator { name: r, dims: vec![], heap: None, inner: None, init: None, line }], true, line);
         Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![run], fork: None })
     }
 
@@ -766,7 +775,7 @@ impl Lower {
             line,
         };
         let decl = |kind: NetKind, signed: bool, range: Option<Range>, n: &str| {
-            Decl::var(super::SvType::flat(kind, signed, range.into_iter().collect()), vec![Declarator { name: n.to_string(), dims: vec![], heap: None, init: None, line }], true, line)
+            Decl::var(super::SvType::flat(kind, signed, range.into_iter().collect()), vec![Declarator { name: n.to_string(), dims: vec![], heap: None, inner: None, init: None, line }], true, line)
         };
         // the loop variable: of the key type (`[*]`: 64-bit)
         let kd = match key {
@@ -809,7 +818,7 @@ impl Lower {
             body: Box::new(body),
             line,
         };
-        let d = Decl::var(super::SvType::flat(NetKind::Int(32), true, vec![]), vec![Declarator { name: v.clone(), dims: vec![], heap: None, init: None, line }], true, line);
+        let d = Decl::var(super::SvType::flat(NetKind::Int(32), true, vec![]), vec![Declarator { name: v.clone(), dims: vec![], heap: None, inner: None, init: None, line }], true, line);
         Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![lp], fork: None })
     }
 
@@ -818,10 +827,12 @@ impl Lower {
         // an array named here: loops made here; anything else (a member, an element, a
         // name declared elsewhere): by the compiler, which knows its type
         let local = match &array.kind {
-            t::ExprKind::Ident(n) if self.vars.get(n).is_some_and(|v| v.0.heap.is_some()) => {
+            // (an array of arrays: by the compiler)
+            t::ExprKind::Ident(n) if self.vars.get(n).is_some_and(|v| v.0.heap.is_some() && v.0.inner_heap.is_none()) => {
                 let name = self.name(n, array.loc);
                 return self.foreach_heap(&name, vars, body, loc);
             }
+            t::ExprKind::Ident(n) if self.vars.get(n).is_some_and(|v| v.0.inner_heap.is_some()) => None,
             // (fewer dimensions than variables: a string, or a packed type; the compiler)
             t::ExprKind::Ident(n) => self.var_dims(n).filter(|d| d.len() >= vars.len()).map(|d| (n.clone(), d)),
             _ => None,
@@ -867,7 +878,7 @@ impl Lower {
                 body: Box::new(body),
                 line,
             };
-            names.push(Declarator { name: v.clone(), dims: vec![], heap: None, init: None, line });
+            names.push(Declarator { name: v.clone(), dims: vec![], heap: None, inner: None, init: None, line });
         }
         let d = Decl::var(super::SvType::flat(NetKind::Int(32), true, vec![]), names, true, line);
         Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![body], fork: None })

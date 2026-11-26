@@ -23,6 +23,8 @@ struct Merged<'d> {
     ty: Option<&'d Rc<SvType>>,
     /// a queue or dynamic array
     heap: Option<&'d HeapKind>,
+    /// of queues, dynamic or associative arrays of this kind
+    inner: Option<&'d HeapKind>,
     line: u32,
     /// declared as a port without a range (`input a;`)
     scalar_port: bool,
@@ -135,6 +137,7 @@ impl<'a> Compiler<'a> {
                             mg.ty = Some(&d.ty);
                             if dl.heap.is_some() {
                                 mg.heap = dl.heap.as_ref();
+                                mg.inner = dl.inner.as_ref();
                             }
                         }
                         None => {
@@ -156,6 +159,7 @@ impl<'a> Compiler<'a> {
                                     tparam: d.type_param(),
                                     ty: Some(&d.ty),
                                     heap: dl.heap.as_ref(),
+                                    inner: dl.inner.as_ref(),
                                     line: dl.line,
                                     scalar_port,
                                     vec_line,
@@ -295,6 +299,7 @@ impl<'a> Compiler<'a> {
                 return self.err(format!("port '{name}': a queue or dynamic array port is not supported"));
             }
             let elem = self.elem_for(mg.kind, width, signed, mg.ty.map(|t| &**t), sid)?;
+            let elem = self.nest_elem(elem, mg.inner, sid)?;
             let s = self.new_dyn(full, &name, elem, h, sid)?;
             // (of a type parameter: its type)
             let et = match mg.tparam.map(|tp| self.lookup(tp, sid)) {

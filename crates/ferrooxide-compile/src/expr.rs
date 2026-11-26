@@ -1625,6 +1625,7 @@ impl<'a> Compiler<'a> {
                 if let Some(h) = &dl.heap {
                     // a queue or dynamic array argument or variable
                     let elem = self.elem_for(d.kind(), w, signed, Some(&*d.ty), fs)?;
+                    let elem = self.nest_elem(elem, dl.inner.as_ref(), fs)?;
                     let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, fs)?;
                     self.dyn_layout(sg, layout.as_ref());
                     if let Some(dir) = d.dir {

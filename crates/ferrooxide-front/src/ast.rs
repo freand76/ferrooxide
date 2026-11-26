@@ -102,6 +102,9 @@ pub struct Declarator {
     pub dims: Vec<Range>,
     /// a queue or dynamic array (then `dims` is empty)
     pub heap: Option<HeapKind>,
+    /// each element of the queue, dynamic or associative array `heap` is itself one of this
+    /// kind (`typedef int q_t[$]; q_t a[string];`)
+    pub inner: Option<HeapKind>,
     pub init: Option<Expr>,
     pub line: Line,
 }

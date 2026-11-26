@@ -42,6 +42,9 @@ enum DynHome {
     /// a temporary copy of a fixed-size array (`arrmeth.rs`) whose leftmost element has
     /// index `left`, the indexes descending to the right (`desc`)
     Temp { left: i64, desc: bool },
+    /// an element of another array: `Sigs::outers[i]` (that array and the slot of the
+    /// element's index or key)
+    Elem(u32),
 }
 
 impl DynArr {
@@ -71,7 +74,7 @@ impl<'a> Compiler<'a> {
         };
         let two_state = matches!(kind, NetKind::Bit) || matches!(kind, NetKind::Int(n) if n > 0);
         let w = if leaf == Leaf::Bits { w } else { 64 };
-        Elem { w, signed: signed || leaf == Leaf::Real, leaf, two_state, class: NONE }
+        Elem { w, signed: signed || leaf == Leaf::Real, leaf, two_state, class: NONE, nested: NONE }
     }
 
     /// `elem_of` for a declaration of data type `ty` (a class: its handles).
@@ -81,7 +84,31 @@ impl<'a> Compiler<'a> {
         }
         let name = ty.and_then(|t| t.class.clone()).unwrap_or_default();
         let c = self.class_named(&name, sid)?;
-        Ok(Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: c })
+        Ok(Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: c, nested: NONE })
+    }
+
+    /// `elem`, or for an array of arrays of kind `inner` (`Declarator::inner`) the handle of
+    /// such an array of `elem`.
+    pub(crate) fn nest_elem(&mut self, elem: Elem, inner: Option<&HeapKind>, sid: usize) -> R<Elem> {
+        let Some(h) = inner else { return Ok(elem) };
+        let kind = self.dyn_kind(h, sid)?;
+        self.sigs.nested.push((kind, elem));
+        let nested = self.sigs.nested.len() as u32 - 1;
+        Ok(Elem { w: 64, signed: false, leaf: Leaf::Bits, two_state: true, class: NONE, nested })
+    }
+
+    /// The type of an element value (an array of arrays: an array).
+    pub(crate) fn elem_type(&self, elem: Elem) -> Type {
+        match self.inner_arr(elem) {
+            Some((kind, elem)) => Type::Dyn { kind, elem },
+            None => elem.ty(),
+        }
+    }
+
+    /// The kind and element type of the arrays that are the elements of an array of `elem`
+    /// (None: they are no arrays).
+    pub(crate) fn inner_arr(&self, elem: Elem) -> Option<(DynKind, Elem)> {
+        (elem.nested != NONE).then(|| self.sigs.nested[elem.nested as usize])
     }
 
     /// Declare `name` in scope `sid` as a queue (or dynamic array) of `elem` (full name
@@ -193,6 +220,27 @@ impl<'a> Compiler<'a> {
     /// The array `e` names (a variable or a property), None if it names none. A property's
     /// handle is read into a temporary; `dyn_done` writes it back after a change.
     pub(crate) fn dyn_arr(&mut self, e: &Expr, sid: usize) -> R<Option<DynArr>> {
+        // an element of an array of arrays: its handle in a temporary, written back by
+        // `dyn_done`
+        if let ExprKind::Index(a, i) = &e.kind {
+            if let Some((okind, oelem)) = self.dyn_arr_type(a, sid)? {
+                if let Some((kind, elem)) = self.inner_arr(oelem) {
+                    let ix = match okind {
+                        DynKind::Assoc(key) => self.key_value(i, key, sid)?,
+                        _ => self.dyn_index(a, i, sid)?,
+                    };
+                    let outer = self.dyn_arr(a, sid)?.unwrap();
+                    let slot = self.tmp(64);
+                    match Self::assoc_key(&outer) {
+                        Some(key) => self.assoc_op(AssocOp::Get, slot, outer.slot, ix, NONE, outer.elem, key),
+                        None => self.arr_op(&outer, HeapOp::Get, slot, ix, NONE),
+                    }
+                    self.sigs.outers.push((outer, ix));
+                    let home = DynHome::Elem(self.sigs.outers.len() as u32 - 1);
+                    return Ok(Some(DynArr { slot, kind, elem, home }));
+                }
+            }
+        }
         if let Some((s, elem)) = self.dyn_var(e, sid) {
             let kind = match self.sig_type(s) {
                 Type::Dyn { kind, .. } => kind,
@@ -218,6 +266,15 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Obj { op: rt::ObjOp::Set, d: NONE, a: h, b: a.slot, off, w: 64 });
             }
             DynHome::Temp { .. } => {}
+            DynHome::Elem(i) => {
+                // (an assoc. array gets the key when its element changes)
+                let (outer, ix) = self.sigs.outers[i as usize];
+                match Self::assoc_key(&outer) {
+                    Some(key) => self.assoc_op(AssocOp::Set, NONE, outer.slot, ix, a.slot, outer.elem, key),
+                    None => self.arr_op(&outer, HeapOp::Set, NONE, ix, a.slot),
+                }
+                self.dyn_done(&outer);
+            }
         }
     }
 
@@ -317,6 +374,11 @@ impl<'a> Compiler<'a> {
 
     /// The kind and element type of the array `e` names, without code.
     pub(crate) fn dyn_arr_type(&mut self, e: &Expr, sid: usize) -> R<Option<(DynKind, Elem)>> {
+        if let ExprKind::Index(a, _) = &e.kind {
+            if let Some((_, oelem)) = self.dyn_arr_type(a, sid)? {
+                return Ok(self.inner_arr(oelem));
+            }
+        }
         if let Some((s, _)) = self.dyn_var(e, sid) {
             if let Type::Dyn { kind, elem } = self.sig_type(s) {
                 return Ok(Some((kind, elem)));
@@ -328,7 +390,7 @@ impl<'a> Compiler<'a> {
     /// The type of an element read, a method call or a slice of a queue or dynamic array.
     pub(crate) fn dyn_type_of(&mut self, e: &Expr, sid: usize) -> R<Option<Type>> {
         match &e.kind {
-            ExprKind::Index(a, _) => Ok(self.dyn_arr_type(a, sid)?.map(|(_, el)| el.ty())),
+            ExprKind::Index(a, _) => Ok(self.dyn_arr_type(a, sid)?.map(|(_, el)| self.elem_type(el))),
             ExprKind::Range(a, ..) => Ok(self.dyn_arr_type(a, sid)?.map(|(kind, elem)| Type::Dyn { kind, elem })),
             _ => {
                 if let Some(am) = self.arr_method(e, sid)? {
@@ -400,6 +462,10 @@ impl<'a> Compiler<'a> {
             match Self::assoc_key(&arr) {
                 Some(key) => self.assoc_op(AssocOp::Get, d, arr.slot, ix, NONE, elem, key),
                 None => self.arr_op(&arr, HeapOp::Get, d, ix, NONE),
+            }
+            // an array element of an array of arrays: a copy (arrays are values)
+            if let Some((kind, inner)) = self.inner_arr(elem) {
+                return Ok(Some((self.dyn_copy(d, kind, inner), Type::Dyn { kind, elem: inner })));
             }
             return Ok(Some((d, elem.ty())));
         }
@@ -474,6 +540,11 @@ impl<'a> Compiler<'a> {
 
     /// An element value (`e` of the element type) for storing into an array of `elem`.
     fn elem_value(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<u32> {
+        // an array (into an array of arrays): its copy, unless it is a new one
+        if let Some((k, inner)) = self.inner_arr(elem) {
+            let (h, new) = self.dyn_rhs_k(e, inner, matches!(k, DynKind::Assoc(_)), sid)?;
+            return Ok(if new { h } else { self.dyn_copy(h, k, inner) });
+        }
         self.value_for(e, sid, elem.w, elem.ty(), None)
     }
 
@@ -741,6 +812,11 @@ impl<'a> Compiler<'a> {
             _ => self.dyn_index(a, i, sid)?,
         };
         let arr = self.dyn_arr(a, sid)?.unwrap();
+        // an array into an array of arrays: a copy of it (arrays are values)
+        let v = match self.inner_arr(elem) {
+            Some((k, inner)) => self.dyn_copy(v, k, inner),
+            None => v,
+        };
         match Self::assoc_key(&arr) {
             Some(key) => self.assoc_op(AssocOp::Set, NONE, arr.slot, ix, v, elem, key),
             None => self.arr_op(&arr, HeapOp::Set, NONE, ix, v),

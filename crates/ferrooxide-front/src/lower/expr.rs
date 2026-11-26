@@ -895,6 +895,26 @@ impl Lower {
             return self.class_chain(ExprKind::Ident(name).into(), ops, lvalue);
         }
         let var = self.vars.get(&name).map(|v| v.0.clone());
+        // `a[k].m(args)`, `a[k][i]`: an element of an array of queues, dynamic or associative
+        // arrays is one itself
+        if let (Some(t), Some(Op::Index(k))) = (&var, ops.first()) {
+            if t.inner_heap.is_some() {
+                let e: Expr = ExprKind::Index(Box::new(ExprKind::Ident(name).into()), Box::new(self.expr(k)?)).into();
+                return match &ops[1..] {
+                    [Op::Member(m, _), Op::Call(a, l), rest @ ..] => {
+                        if lvalue {
+                            return self.unsupported(*l, "a method call as an assignment target");
+                        }
+                        if !rest.is_empty() {
+                            return self.unsupported(*l, "a select of a call");
+                        }
+                        let args = self.call_args(a)?;
+                        Ok(ExprKind::MethodCall(Box::new(e), m.to_string(), args).into())
+                    }
+                    rest => self.members(e, rest),
+                };
+            }
+        }
         // a variable whose type has members (a struct, or a type parameter): members are
         // resolved in elaboration
         // (a queue's method call, `q.size()`, is not a member)

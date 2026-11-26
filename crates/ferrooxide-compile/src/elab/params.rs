@@ -282,7 +282,7 @@ impl<'a> Compiler<'a> {
     /// the parameter, its elements written at elaboration (constant in constant expressions).
     fn array_param(&mut self, p: &ParamDecl, ov: Option<PVal>, sid: usize) -> R<Sym> {
         let ty = p.ty.clone().unwrap();
-        let names = vec![Declarator { name: p.name.clone(), dims: p.unpacked.clone(), heap: None, init: None, line: p.line }];
+        let names = vec![Declarator { name: p.name.clone(), dims: p.unpacked.clone(), heap: None, inner: None, init: None, line: p.line }];
         let decl = Decl::var(ty, names, false, p.line);
         // (the declaration lives as long as the elaboration)
         let items: &'a [Item] = Box::leak(vec![Item::Decl(decl)].into_boxed_slice());

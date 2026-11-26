@@ -544,6 +544,7 @@ impl<'a> Compiler<'a> {
                                 }
                                 // a queue or dynamic array
                                 let elem = self.elem_for(d.kind(), w, signed, Some(&*d.ty), b)?;
+                                let elem = self.nest_elem(elem, dl.inner.as_ref(), b)?;
                                 let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
                                 self.dyn_layout(s, layout.as_ref());
                                 if d.automatic || in_auto {

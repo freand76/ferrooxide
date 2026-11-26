@@ -38,6 +38,9 @@ pub(crate) struct Elem {
     pub(crate) two_state: bool,
     /// a handle of an object of this class (`NONE`: not a handle); 64 bits, null outside
     pub(crate) class: u32,
+    /// the handle of a queue, dynamic or associative array (`Sigs::nested`, `NONE`: none);
+    /// 64 bits, the empty array outside
+    pub(crate) nested: u32,
 }
 
 impl Elem {
