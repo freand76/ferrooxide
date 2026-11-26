@@ -1051,6 +1051,10 @@ impl Lower {
                         d.ty = t;
                         return Ok(d);
                     }
+                    // (IEEE 1800-2017 6.7.1: a net's data type is 4-state)
+                    t::TypeKind::Int(t::IntKw::Bit | t::IntKw::Byte | t::IntKw::Shortint | t::IntKw::Int | t::IntKw::Longint) => {
+                        return self.err(ty.loc, "a net cannot have a 2-state data type (bit, byte, shortint, int, longint)");
+                    }
                     _ => return self.unsupported(ty.loc, "a net of this data type (only 4-state types)"),
                 }
                 net_type(n)

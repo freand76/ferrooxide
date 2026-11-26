@@ -233,7 +233,7 @@ SystemVerilog data and testbench:
 - assignments to properties of a package's class handle (`P::c.x = 1`); `import` in
   subroutines and in blocks of a package that exports names.
 - `.triggered` only on events declared in a module; `iff` only on a whole event control.
-- nets of 2-state types (`wire int`); nets of a nettype with a resolution function, nettypes
+- nets of a nettype with a resolution function, nettypes
   from packages; interconnect nets connect only 4-state ports of their own width.
 - `type(e)` of expressions other than variables and operators on them.
 - assertions: inside procedures, local variables of sequences and properties, match items,
