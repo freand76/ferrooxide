@@ -340,6 +340,7 @@ impl<'a> Compiler<'a> {
                     v(self.type_of(a, sid)?.width(), name == "$signed")
                 }
                 "$clog2" | "$bits" => v(32, false),
+                "$isunbounded" => v(1, false),
                 // SV cast T'(e) / N'(e): (width, sign: 0, 1, 2 = the expression's, e)
                 "$__cast" => {
                     let w = self.const_int(&args[0], sid)?;

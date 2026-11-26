@@ -389,6 +389,7 @@ impl<'a> Compiler<'a> {
         let lo = self.const_int(&c.lo, sid)?;
         let hi = match (&c.hi, c.unbounded) {
             (_, true) => None,
+            (Some(h), false) if self.is_unbounded(h, sid) => None,
             (Some(h), false) => Some(self.const_int(h, sid)?),
             (None, false) => Some(lo),
         };

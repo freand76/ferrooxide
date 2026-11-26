@@ -438,7 +438,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Repl(n, v) => self.is_const(n, sid) && v.iter().all(|x| self.is_const(x, sid)),
             ExprKind::Call(..) => false,
             ExprKind::SysCall(n, args) => {
-                matches!(n.as_str(), "$clog2" | "$signed" | "$unsigned" | "$bits" | "$__cast" | "$__str")
+                matches!(n.as_str(), "$clog2" | "$signed" | "$unsigned" | "$bits" | "$__cast" | "$__str" | "$isunbounded")
                     && args.iter().all(|x| self.is_const(x, sid))
             }
         }
@@ -1626,6 +1626,14 @@ impl<'a> Compiler<'a> {
                 let d = self.tmp(32);
                 self.emit(Instr::CountBits { d, s: v, w: vw, ctl: ctl.into_boxed_slice() });
                 Ok(self.resize(d, 32, w, false))
+            }
+            "$isunbounded" => {
+                let [a] = args else { return self.err("$isunbounded needs one argument") };
+                let u = self.is_unbounded(a, sid);
+                if !u && !self.is_const(a, sid) {
+                    return self.err("the argument of $isunbounded must be a constant expression");
+                }
+                Ok(self.const_slot(&Const::from_i64(u as i64, w, false)))
             }
             "$clog2" => {
                 let (v, vw, _) = self.self_expr(&args[0], sid)?;

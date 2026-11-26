@@ -85,6 +85,9 @@ pub(crate) struct Scope<'a> {
     pub string_params: HashSet<String>,
     /// the specparams declared here
     pub specparams: HashSet<String>,
+    /// parameters whose value is `$` (unbounded, IEEE 1800-2017 6.20.2): x as a number,
+    /// `$` in cycle ranges, true for $isunbounded
+    pub unbounded_params: HashSet<String>,
     pub file: String,
     /// time unit and precision of the enclosing module (powers of ten of seconds)
     pub tunit: i32,
@@ -762,6 +765,7 @@ impl<'a> Compiler<'a> {
             funcs: HashMap::new(),
             param_ranges: HashMap::new(),
             str_params: HashSet::new(),
+            unbounded_params: HashSet::new(),
             string_params: HashSet::new(),
             specparams: HashSet::new(),
             file,

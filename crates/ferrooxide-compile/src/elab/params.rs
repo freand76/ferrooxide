@@ -184,6 +184,21 @@ impl<'a> Compiler<'a> {
             (None, Some(_)) => &Expr::from(ExprKind::Num(ferrooxide_front::ast::dec(0))),
             (None, None) => return self.err(format!("parameter '{}' has no value: it must be overridden", p.name)),
         };
+        if matches!(value.kind, ExprKind::Last) && ov.is_none() {
+            self.scopes[sid].unbounded_params.insert(p.name.clone());
+            let w = match p.range() {
+                Some(_) => {
+                    let (a, b) = self.range_vals(&p.range(), sid)?;
+                    ((a - b).abs() + 1) as u32
+                }
+                None => 32,
+            };
+            let mut c = Const::zero(w);
+            c.a.fill(!0);
+            c.b.fill(!0);
+            c.signed = p.signed || p.integer();
+            return Ok(Sym::Const(c.resize(w, c.signed)));
+        }
         if p.value.is_none() && self.dialect.v2005 {
             return self.err(format!("parameter '{}' needs a default value in Verilog-2005 (a SystemVerilog parameter port may leave it out)", p.name));
         }
@@ -451,6 +466,15 @@ impl<'a> Compiler<'a> {
     /// `n` names a parameter whose value is a string literal (see `Scope::str_params`).
     pub(crate) fn is_str_param(&self, n: &str, sid: usize) -> bool {
         self.param_in(n, sid, |s| &s.str_params)
+    }
+
+    /// `e` is `$` or names a parameter whose value is `$`.
+    pub(crate) fn is_unbounded(&self, e: &Expr, sid: usize) -> bool {
+        match &e.kind {
+            ExprKind::Last => true,
+            ExprKind::Ident(n) => self.param_in(n, sid, |s| &s.unbounded_params),
+            _ => false,
+        }
     }
 
     /// `n` names a parameter declared `string` (see `Scope::string_params`).
