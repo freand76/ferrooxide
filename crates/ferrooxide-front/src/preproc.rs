@@ -109,6 +109,18 @@ impl Preprocessor {
 
         while i < s.len() {
             let c = s[i];
+            // an escaped identifier (IEEE 1800-2017 5.6.1): all characters up to white space
+            // are its own (`\a`b"c//d` holds no macro, string or comment)
+            if c == '\\' && s.get(i + 1).is_some_and(|c| !c.is_whitespace()) {
+                let start = i;
+                while i < s.len() && !s[i].is_whitespace() {
+                    i += 1;
+                }
+                if active(&conds) {
+                    out.extend(&s[start..i]);
+                }
+                continue;
+            }
             // comments
             if c == '/' && i + 1 < s.len() && s[i + 1] == '/' {
                 while i < s.len() && s[i] != '\n' {
