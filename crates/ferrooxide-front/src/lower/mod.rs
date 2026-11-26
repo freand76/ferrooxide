@@ -96,6 +96,8 @@ pub(crate) struct Lower {
     /// out-of-class bodies (`function C::f ... endfunction`) of the class being lowered, by
     /// method name, and the bodies merged into their prototypes (name, line)
     extern_bodies: HashMap<String, t::Subroutine>,
+    /// the bodies of the constraint prototypes of the class being lowered
+    extern_cbodies: HashMap<String, t::ConstraintDecl>,
     extern_done: HashSet<(String, usize)>,
     /// the wildcard imports of the module being lowered and the names used through them
     wild: WildCheck,
@@ -232,6 +234,7 @@ impl Lower {
             classes: HashMap::new(),
             class_statics: Vec::new(),
             extern_bodies: HashMap::new(),
+            extern_cbodies: HashMap::new(),
             extern_done: HashSet::new(),
             wild: WildCheck::default(),
             genvars: Default::default(),
@@ -339,6 +342,7 @@ impl Lower {
                 Ok(())
             }
             t::Item::Typedef(_) | t::Item::Subroutine(_) => self.unit_scoped(it, rest),
+            t::Item::Constraint(k) if k.name.scopes.len() == 1 => self.constraint_body_done(k),
             t::Item::Class(c) => {
                 // in the `$unit` scope, as file-scope functions
                 let c = self.class_decl(c, rest)?;

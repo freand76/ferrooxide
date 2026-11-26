@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4816 of 5112 (94.2%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4822 of 5112 (94.3%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -100,10 +100,10 @@ UVM must run eventually (item 5): new work keeps it possible. In particular, cla
 features must work per specialization and for classes declared later, and the event/wait
 machinery must not assume static targets only (A3).
 
-1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 9, 16: ~29,
+1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
    11: 16, 20: 5): global clocking and `_gclk` functions (11), tagged unions (10),
    assignments in expressions (8), arrays assigned from arrays of another shape (6),
-   extern/pure constraints (5), streams of dynamic arrays and `with` (3), a function
+   streams of dynamic arrays and `with` (3), a function
    returning an unpacked array in a parameter value (1).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
@@ -219,7 +219,7 @@ SystemVerilog data and testbench:
   `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle
   ports, NBAs to properties, `randc`, `rand_mode`, `constraint_mode`,
-  extern/pure constraints, `disable soft`, rand dynamic arrays and real/string/class rand
+  `disable soft`, rand dynamic arrays and real/string/class rand
   properties, `randomize(null)`.
 - randsequence: productions that return values or use themselves (it is expanded), `rand
   join` of productions with arguments, alternatives or `return`; the `rand join` weight

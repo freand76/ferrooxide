@@ -41,6 +41,9 @@ pub(crate) struct ClassNames {
     pub parameterized: bool,
     /// an interface class
     pub interface: bool,
+    /// the pure constraints (IEEE 1800-2017 18.5.2) of the class and its base classes that
+    /// no class overrides yet
+    pub pure_constraints: HashSet<String>,
     /// the types, parameters and constants of the class (also inherited ones) -> the class
     /// declaring them (name conflicts of interface classes, IEEE 1800-2017 8.26.6)
     pub origins: HashMap<String, String>,
@@ -60,6 +63,7 @@ impl Lower {
     pub(crate) fn class_decl(&mut self, c: &t::ClassDecl, rest: &[&t::Item]) -> Result<ClassDecl> {
         let saved_specs = std::mem::take(&mut self.specs);
         let mut bodies = HashMap::new();
+        let mut cbodies = HashMap::new();
         for it in rest {
             if let t::Item::Subroutine(s) = it {
                 if let [sc] = s.name.scopes.as_slice() {
@@ -68,7 +72,16 @@ impl Lower {
                     }
                 }
             }
+            // the bodies of constraint prototypes (IEEE 1800-2017 18.5.1)
+            if let t::Item::Constraint(k) = it {
+                if let [sc] = k.name.scopes.as_slice() {
+                    if sc.name == c.name && sc.params.is_none() {
+                        cbodies.entry(k.name.name.clone()).or_insert_with(|| (**k).clone());
+                    }
+                }
+            }
         }
+        let saved_cbodies = std::mem::replace(&mut self.extern_cbodies, cbodies);
         // (the bodies are lowered here: classes declared before the last of them are known)
         let is_body = |it: &&t::Item| matches!(it, t::Item::Subroutine(s) if matches!(s.name.scopes.as_slice(), [sc] if sc.name == c.name && sc.params.is_none()));
         if let Some(last) = rest.iter().rposition(is_body) {
@@ -83,6 +96,7 @@ impl Lower {
         let saved_bodies = std::mem::replace(&mut self.extern_bodies, bodies);
         let r = self.class_decl_inner(c);
         self.extern_bodies = saved_bodies;
+        self.extern_cbodies = saved_cbodies;
         let specs = std::mem::replace(&mut self.specs, saved_specs);
         r.map(|mut d| {
             d.specs = specs;
@@ -270,6 +284,7 @@ impl Lower {
                     return self.err(c.loc, format!("class '{name}' extends interface class '{}' (a class implements it)", n.name));
                 }
                 names.origins.extend(b.origins.iter().map(|(k, v)| (k.clone(), v.clone())));
+                names.pure_constraints.extend(b.pure_constraints.iter().cloned());
                 names.props.extend(b.props.iter().cloned());
                 names.methods.extend(b.methods.iter().cloned());
                 names.static_methods.extend(b.static_methods.iter().cloned());
@@ -430,6 +445,27 @@ impl Lower {
             }
         }
         names.consts.extend(consts.iter().map(|p| p.name.clone()));
+        // pure constraints: declared in a virtual class, overridden by a constraint of that
+        // name in a derived class; a class that is not virtual has none left
+        for it in &c.items {
+            if let t::ClassItem::Constraint(k) = it {
+                if k.quals.contains(&Kw::Pure) {
+                    if !c.virtual_ {
+                        return self.err(k.loc, format!("pure constraint '{}' must be in a virtual class", k.name.name));
+                    }
+                    names.pure_constraints.insert(k.name.name.clone());
+                } else {
+                    names.pure_constraints.remove(&k.name.name);
+                }
+            }
+        }
+        if !c.virtual_ {
+            let mut left: Vec<&String> = names.pure_constraints.iter().collect();
+            left.sort();
+            if let Some(k) = left.first() {
+                return self.err(c.loc, format!("class '{name}' does not override pure constraint '{k}'"));
+            }
+        }
         // (the class's names are known before its methods, which may call each other)
         let names = Rc::new(names);
         self.classes.insert(name.clone(), names.clone());
@@ -499,7 +535,38 @@ impl Lower {
                 t::ClassItem::Constraint(k) if c.interface => {
                     return self.err(k.loc, format!("interface class '{name}' cannot have constraints"));
                 }
+                t::ClassItem::Constraint(k) if k.quals.contains(&Kw::Pure) => {
+                    if k.items.is_some() {
+                        return self.err(k.loc, format!("pure constraint '{}' has no body", k.name.name));
+                    }
+                    self.own_name(&mut own_c, &k.name.name, k.loc.line, &name)?;
+                }
                 t::ClassItem::Constraint(k) => {
+                    let ext = k.quals.contains(&Kw::Extern);
+                    if ext && k.items.is_some() {
+                        return self.err(k.loc, format!("extern constraint '{}' has its body outside the class", k.name.name));
+                    }
+                    // a prototype: the body declared after the class (IEEE 1800-2017 18.5.1);
+                    // without one, an `extern` prototype is an error, an implicit one empty
+                    let merged;
+                    let k = if k.items.is_none() {
+                        let n = &k.name.name;
+                        let items = match self.extern_cbodies.get(n).cloned() {
+                            Some(b) => {
+                                if b.static_ != k.static_ {
+                                    return self.err(b.loc, format!("'{name}::{n}' and its prototype differ in `static`"));
+                                }
+                                self.extern_done.insert((format!("{name}::{n}"), b.loc.line as usize));
+                                b.items.unwrap_or_default()
+                            }
+                            None if ext => return self.err(k.loc, format!("extern constraint '{n}' of class '{name}' has no body ('{name}::{n}')")),
+                            None => vec![],
+                        };
+                        merged = t::ConstraintDecl { quals: vec![], items: Some(items), ..(**k).clone() };
+                        &merged
+                    } else {
+                        &**k
+                    };
                     let mut k = self.constraint_decl(k)?;
                     self.own_name(&mut own_c, &k.name, k.line, &name)?;
                     for it in &mut k.items {
@@ -607,6 +674,15 @@ impl Lower {
             }
         }
         Ok(Box::new(s))
+    }
+
+    /// `constraint C::c { ... }` after class C: merged into it, the body of a prototype.
+    pub(crate) fn constraint_body_done(&self, k: &t::ConstraintDecl) -> Result<()> {
+        let (c, n) = (&k.name.scopes[0].name, &k.name.name);
+        if !self.extern_done.contains(&(format!("{c}::{n}"), k.loc.line as usize)) {
+            return self.err(k.loc, format!("constraint '{c}::{n}' has no prototype in class '{c}'"));
+        }
+        Ok(())
     }
 
     /// The type of handles of class `name`.

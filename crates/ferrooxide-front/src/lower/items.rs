@@ -177,6 +177,8 @@ impl Lower {
                 items.push(Item::Class(std::rc::Rc::new(c)));
                 items.append(&mut self.class_statics);
             }
+            // the body of a constraint prototype, merged into its class
+            t::Item::Constraint(k) if k.name.scopes.len() == 1 => self.constraint_body_done(k)?,
             t::Item::Subroutine(s) => {
                 // the body of an extern method, merged into its class
                 if !s.name.scopes.is_empty() && self.extern_done.contains(&(format!("{}::{}", s.name.scopes[0].name, s.name.name), s.loc.line as usize)) {
