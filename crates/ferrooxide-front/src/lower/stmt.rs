@@ -573,6 +573,10 @@ impl Lower {
                     self.use_package(p);
                     return Ok(n.name.clone());
                 }
+                // `P::t` inside package P: its own t
+                if self.pkg_ctx.as_ref().is_some_and(|c| c.name == *p) {
+                    return Ok(n.name.clone());
+                }
             }
             return self.unsupported(loc, "this scoped task name");
         }

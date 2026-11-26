@@ -143,6 +143,19 @@ impl Lower {
                 items.push(Item::Process { kind, body, line: p.loc.line });
             }
             t::Item::Class(c) => {
+                let key = &**c as *const t::ClassDecl as usize;
+                if self.early.contains(&key) {
+                    return Ok(());
+                }
+                // a base class declared later in this scope (`typedef class B;`): lowered first
+                if let Some((b, _)) = c.extends.as_ref().filter(|(b, _)| b.scopes.is_empty() && !self.classes.contains_key(&b.name)) {
+                    if let Some(pos) = rest.iter().position(|it| matches!(it, t::Item::Class(x) if x.name == b.name)) {
+                        if let t::Item::Class(bc) = rest[pos] {
+                            self.module_item(rest[pos], &rest[pos + 1..], items)?;
+                            self.early.insert(&**bc as *const t::ClassDecl as usize);
+                        }
+                    }
+                }
                 self.wild.skip += 1;
                 let c = self.class_decl(c, rest);
                 self.wild.skip -= 1;
@@ -461,6 +474,14 @@ impl Lower {
     /// A function or task.
     /// A function or task; `method`: of a class (its qualifiers are the class's business).
     pub(crate) fn subroutine_in(&mut self, s: &t::Subroutine, method: bool) -> Result<SubroutineDecl> {
+        // (its typedefs stay inside)
+        let saved_types = self.types.clone();
+        let r = self.subroutine_here(s, method);
+        self.types = saved_types;
+        r
+    }
+
+    fn subroutine_here(&mut self, s: &t::Subroutine, method: bool) -> Result<SubroutineDecl> {
         let line = s.loc.line;
         if !s.quals.is_empty() && !method {
             return self.unsupported(s.loc, "a qualified subroutine (class method)");
@@ -584,6 +605,17 @@ impl Lower {
                 }
                 t::Item::Param(_) => {
                     params.extend(self.local_params(it)?);
+                    continue;
+                }
+                // (an enum's constants: parameters of the subroutine)
+                t::Item::Typedef(td) => {
+                    self.typedef(td, &[])?;
+                    for x in std::mem::take(&mut self.pending) {
+                        match x {
+                            Item::Param(p) => params.push(p),
+                            _ => return self.unsupported(item_loc(it), "this typedef in a subroutine"),
+                        }
+                    }
                     continue;
                 }
                 other => return self.unsupported(item_loc(other), &format!("{} in a subroutine", item_what(other))),

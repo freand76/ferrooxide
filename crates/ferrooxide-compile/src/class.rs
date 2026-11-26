@@ -64,6 +64,9 @@ pub(crate) struct Classes<'a> {
     pub spec_count: u32,
     /// the scope declaring each class
     pub decl_scope: HashMap<u32, usize>,
+    /// names of specializations of classes still being declared (`C #(T)` inside C): their
+    /// scopes (`Hier::pkg_scopes`) once the classes are declared
+    pub pending_names: Vec<(String, u32)>,
 }
 
 /// The scope of a class that is reserved but not yet declared (`ClassInfo::scope`).
@@ -125,8 +128,14 @@ impl<'a> Compiler<'a> {
         // reaches them like a package's
         if let Some(b) = base {
             let bs = self.classes.list[b as usize].scope;
-            let inherited: Vec<(String, Sym)> =
-                self.scopes[bs].syms.iter().filter(|(_, s)| matches!(s, Sym::Const(_) | Sym::Real(_))).map(|(k, s)| (k.clone(), s.clone())).collect();
+            // (and the static properties of a parameterized base, declared in its scope)
+            let statics: HashSet<&str> = self.base_static_props(b);
+            let inherited: Vec<(String, Sym)> = self.scopes[bs]
+                .syms
+                .iter()
+                .filter(|(k, s)| matches!(s, Sym::Const(_) | Sym::Real(_)) || statics.contains(k.as_str()))
+                .map(|(k, s)| (k.clone(), s.clone()))
+                .collect();
             for (k, s) in inherited {
                 self.scopes[scope].syms.entry(k).or_insert(s);
             }
@@ -204,7 +213,29 @@ impl<'a> Compiler<'a> {
         self.classes.list[id as usize] = ClassInfo { name: name.to_string(), decl: c, base, scope, props, init_scope, init_this };
         self.classes.by_name.insert((sid, name.to_string()), id);
         self.classes.of_scope.insert(scope, id);
+        for (n, _) in self.classes.pending_names.iter().filter(|(_, c)| *c == id) {
+            self.hier.pkg_scopes.insert(n.clone(), scope);
+        }
+        self.classes.pending_names.retain(|(_, c)| *c != id);
         Ok(())
+    }
+
+    /// The names of the static properties of parameterized classes that class `c` (and its
+    /// base classes) declare in their scopes.
+    fn base_static_props(&self, mut c: u32) -> HashSet<&'a str> {
+        let mut out = HashSet::new();
+        loop {
+            let ci = &self.classes.list[c as usize];
+            for it in &ci.decl.static_props {
+                if let Item::Decl(d) = it {
+                    out.extend(d.names.iter().map(|n| n.name.as_str()));
+                }
+            }
+            match ci.base {
+                Some(b) => c = b,
+                None => return out,
+            }
+        }
     }
 
     /// `C #(args)` used in scope `sid` as class `name` (`Item::ClassSpec`): the class with
@@ -252,7 +283,11 @@ impl<'a> Compiler<'a> {
         };
         self.classes.by_name.insert((sid, name.to_string()), id);
         let cs = self.classes.list[id as usize].scope;
-        self.hier.pkg_scopes.insert(name.to_string(), cs);
+        if cs == UNDECLARED {
+            self.classes.pending_names.push((name.to_string(), id));
+        } else {
+            self.hier.pkg_scopes.insert(name.to_string(), cs);
+        }
         Ok(())
     }
 
@@ -604,7 +639,7 @@ impl<'a> Compiler<'a> {
                 };
             }
         }
-        if !matches!(&e.kind, ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Member(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Call(..)) {
+        if !matches!(&e.kind, ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Member(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Call(..) | ExprKind::StaticCall(..)) {
             return Ok(None);
         }
         Ok(match self.type_of(e, sid)? {

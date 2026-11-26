@@ -64,6 +64,17 @@ impl Lower {
                 }
             }
         }
+        // (the bodies are lowered here: classes declared before the last of them are known)
+        let is_body = |it: &&t::Item| matches!(it, t::Item::Subroutine(s) if matches!(s.name.scopes.as_slice(), [sc] if sc.name == c.name && sc.params.is_none()));
+        if let Some(last) = rest.iter().rposition(is_body) {
+            for it in &rest[..last] {
+                if let t::Item::Class(x) = it {
+                    if !self.types.contains_key(&x.name) {
+                        self.types.insert(x.name.clone(), Self::class_type(&x.name));
+                    }
+                }
+            }
+        }
         let saved_bodies = std::mem::replace(&mut self.extern_bodies, bodies);
         let r = self.class_decl_inner(c);
         self.extern_bodies = saved_bodies;
@@ -239,6 +250,7 @@ impl Lower {
                 names.methods.extend(b.methods.iter().cloned());
                 names.static_methods.extend(b.static_methods.iter().cloned());
                 names.statics.extend(b.statics.iter().map(|(k, v)| (k.clone(), v.clone())));
+                names.spec_statics.extend(b.spec_statics.iter().cloned());
                 names.types.extend(b.types.iter().map(|(k, v)| (k.clone(), v.clone())));
                 names.consts.extend(b.consts.iter().cloned());
                 let args = match args {
