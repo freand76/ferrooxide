@@ -544,7 +544,7 @@ impl<'a> Compiler<'a> {
     fn elem_value(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<u32> {
         // an array (into an array of arrays): its copy, unless it is a new one
         if let Some((k, inner)) = self.inner_arr(elem) {
-            let (h, new) = self.dyn_rhs_k(e, inner, matches!(k, DynKind::Assoc(_)), sid)?;
+            let (h, new) = self.dyn_rhs_k(e, inner, Self::kind_key(k), sid)?;
             return Ok(if new { h } else { self.dyn_copy(h, k, inner) });
         }
         self.value_for(e, sid, elem.w, elem.ty(), None)
@@ -553,13 +553,21 @@ impl<'a> Compiler<'a> {
     /// A queue or dynamic array value: the slot of its handle and whether the array is new
     /// (else it belongs to a variable and is copied where it is stored).
     fn dyn_rhs(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<(u32, bool)> {
-        self.dyn_rhs_k(e, elem, false, sid)
+        self.dyn_rhs_k(e, elem, None, sid)
     }
 
-    /// `dyn_rhs` for a target that is an associative array (`assoc`) or not.
-    pub(crate) fn dyn_rhs_k(&mut self, e: &Expr, elem: Elem, assoc: bool, sid: usize) -> R<(u32, bool)> {
+    /// The key type of an array kind (None: not an associative array).
+    pub(crate) fn kind_key(k: DynKind) -> Option<KeyKind> {
+        match k {
+            DynKind::Assoc(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// `dyn_rhs` for a target that is an associative array (`assoc`: its key type) or not.
+    pub(crate) fn dyn_rhs_k(&mut self, e: &Expr, elem: Elem, assoc: Option<KeyKind>, sid: usize) -> R<(u32, bool)> {
         // a fixed-size array: its elements in a new array
-        if !assoc {
+        if assoc.is_none() {
             if let Some(f) = self.fixed_arr(e, sid)? {
                 if f.elem.w != elem.w || f.elem.leaf != elem.leaf {
                     return self.err("the arrays have different element types");
@@ -568,7 +576,7 @@ impl<'a> Compiler<'a> {
             }
         }
         if let Some(am) = self.arr_method(e, sid)? {
-            if crate::arrmeth::LOCATE.contains(&am.m.as_str()) && !assoc {
+            if crate::arrmeth::LOCATE.contains(&am.m.as_str()) && assoc.is_none() {
                 let Type::Dyn { elem: el, .. } = self.arr_method_type(&am, sid)? else { unreachable!() };
                 if el.w != elem.w || el.leaf != elem.leaf {
                     return self.err("the arrays have different element types");
@@ -584,7 +592,32 @@ impl<'a> Compiler<'a> {
             return Ok((a.slot, false));
         }
         match &e.kind {
-            ExprKind::NewArray(..) | ExprKind::Concat(_) | ExprKind::Pattern(..) | ExprKind::Range(..) if assoc => {
+            // `'{key: v, ..., default: v}` (IEEE 1800-2017 7.9.11): the entries, and the value
+            // of keys without one
+            ExprKind::Pattern(None, items) if let Some(key) = assoc => {
+                let items = self.expand_pattern(items, sid)?;
+                let d = self.tmp(64);
+                let z = self.const_slot(&Const::zero(64));
+                self.emit(Instr::Copy { d, s: z, w: 64 });
+                for it in &items {
+                    let (k, v) = match it {
+                        PatItem::Index(k, v) => (Some(k.clone()), v),
+                        PatItem::Key(n, v) => (Some(Expr::from(ExprKind::Ident(n.clone()))), v),
+                        PatItem::Default(v) => (None, v),
+                        _ => return self.err("an assignment pattern for an associative array needs keys (`'{key: value, default: value}`)"),
+                    };
+                    let v = self.elem_value(v, elem, sid)?;
+                    match k {
+                        Some(k) => {
+                            let k = self.key_value(&k, key, sid)?;
+                            self.assoc_op(AssocOp::Set, NONE, d, k, v, elem, key);
+                        }
+                        None => self.assoc_op(AssocOp::SetDefault, NONE, d, NONE, v, elem, key),
+                    }
+                }
+                Ok((d, true))
+            }
+            ExprKind::NewArray(..) | ExprKind::Concat(_) | ExprKind::Pattern(..) | ExprKind::Range(..) if assoc.is_some() => {
                 self.err("expected an associative array value")
             }
             ExprKind::NewArray(n, init) => {
@@ -656,7 +689,10 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Cond(c, x, y) => {
                 // (both arrays are made; the condition picks one)
-                let k = if assoc { DynKind::Assoc(KeyKind::Str) } else { DynKind::Queue(0) };
+                let k = match assoc {
+                    Some(key) => DynKind::Assoc(key),
+                    None => DynKind::Queue(0),
+                };
                 let x = self.dyn_owned(x, k, elem, sid)?;
                 let y = self.dyn_owned(y, k, elem, sid)?;
                 let (cv, cw) = self.truth(c, sid)?;
@@ -691,7 +727,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let (h, fresh) = self.dyn_rhs_k(e, elem, matches!(kind, DynKind::Assoc(_)), sid)?;
+        let (h, fresh) = self.dyn_rhs_k(e, elem, Self::kind_key(kind), sid)?;
         let h = if fresh {
             h
         } else {

@@ -632,7 +632,7 @@ impl<'a> Compiler<'a> {
         if !dynamic {
             return Ok(false);
         }
-        let (q, fresh) = self.dyn_rhs_k(rhs, f.elem, false, sid)?;
+        let (q, fresh) = self.dyn_rhs_k(rhs, f.elem, None, sid)?;
         let mode = if nonblocking { StoreMode::Nba } else { StoreMode::Blocking };
         self.queue_to_fixed(q, &f, mode, fresh);
         Ok(true)

@@ -212,7 +212,7 @@ SystemVerilog data and testbench:
 - queues of structs as class properties, fixed-size arrays of queues, arrays of queues as
   class properties or ports, `%p` of an element array (`$display("%p", a[k])`), queue ports, `%p` of unpacked
   structs, associative arrays and class handles, array methods of associative,
-  multi-dimensional and struct arrays, keyed patterns for associative arrays, class or wider
+  multi-dimensional and struct arrays, class or wider
   keys, queue element writes with `<=` (done at once).
 - classes: events as properties (A3), assignments through a call's result
   (`C::get().v = 1`), body `parameter type` items, an untyped `mailbox`, members of

@@ -968,6 +968,8 @@ pub enum AssocOp {
     /// c = the key after / before b (d = 1), or c = b when there is none (d = 0)
     Next,
     Prev,
+    /// c is the value read for keys without an entry (`'{default: v}`, IEEE 1800-2017 7.9.11)
+    SetDefault,
 }
 
 /// The key type of an associative array.

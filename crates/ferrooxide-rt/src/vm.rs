@@ -3842,7 +3842,7 @@ impl Sim {
             HeapOp::Copy => {
                 let h = match self.hobj(a) {
                     // (an associative array: a new object with the same entries)
-                    Some(o) if !o.map.is_empty() => {
+                    Some(o) if !o.map.is_empty() || o.dflt.is_some() => {
                         let o = o.clone();
                         self.alloc_obj(o)
                     }
@@ -4189,12 +4189,17 @@ impl Sim {
                 self.put_int(d, 32, len);
             }
             AssocOp::Get => {
+                let o = self.hobj(a);
                 let v = match &k {
-                    Some(k) => self.hobj(a).and_then(|o| o.map.get(k)).cloned(),
+                    Some(k) => o.and_then(|o| o.map.get(k)),
                     None => None,
                 };
-                let v = v.unwrap_or_else(dflt);
+                let v = v.or_else(|| o.and_then(|o| o.dflt.as_ref())).cloned().unwrap_or_else(dflt);
                 self.mem[d as usize..d as usize + n].copy_from_slice(&v);
+            }
+            AssocOp::SetDefault => {
+                let v = self.mem[c as usize..c as usize + n].to_vec();
+                self.hobj_mut(a).dflt = Some(v);
             }
             AssocOp::Set => {
                 if let Some(k) = k {
@@ -5611,6 +5616,8 @@ fn udp_eval(t: &UdpTable, cur: &[u8], prev: &[u8], q: u8) -> u8 {
 struct HObj {
     data: Vec<u64>,
     map: BTreeMap<AKey, Vec<u64>>,
+    /// an associative array: the value of keys without an entry, if one was given
+    dflt: Option<Vec<u64>>,
     /// a class object: its class (`Program::classes`)
     class: u32,
 }
