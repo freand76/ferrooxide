@@ -415,6 +415,8 @@ impl Lower {
                     None => self.unsupported(*loc, "this assignment target"),
                 }
             }
+            // `C #(..)::p = ...`: a static property of a specialization
+            Base::Other(t::Expr { kind: t::ExprKind::Scoped(n), .. }) if n.params.is_some() || n.scopes.iter().any(|s| s.params.is_some()) => self.chain(b, &ops, true),
             Base::Other(x) => self.unsupported(x.loc, "this assignment target"),
         }
     }
@@ -710,6 +712,22 @@ impl Lower {
                 } else {
                     n
                 };
+                // `C::T::f(args)`, T a typedef of class C naming a class (also of a class C
+                // declared later, `typedef class C;`): a static method of that class, which the
+                // compiler finds in C's scope
+                if let ([c, td], Some((Op::Call(a, _), rest))) = (n.scopes.as_slice(), ops.split_first()) {
+                    let class = match self.classes.get(&c.name) {
+                        Some(cn) => cn.types.get(&td.name).filter(|t| t.class.is_some()).map(|_| c.name.clone()),
+                        None => self.types.get(&c.name).and_then(|t| t.class.clone()),
+                    };
+                    if let Some(class) = class.filter(|_| c.params.is_none() && td.params.is_none() && n.params.is_none()) {
+                        if !rest.is_empty() {
+                            return self.unsupported(e.loc, "a select of a call");
+                        }
+                        let args = self.call_args(a)?;
+                        return Ok(ExprKind::StaticCall(format!("{class}::{}", td.name), n.name.clone(), args).into());
+                    }
+                }
                 // `C::T::x`, T a typedef of class C naming class D: `D::x`
                 let collapsed;
                 let n = if n.scopes.len() > 1 {
@@ -718,19 +736,6 @@ impl Lower {
                 } else {
                     n
                 };
-                // `C::T::f(args)`, C declared later (`typedef class C;`): a static method of the
-                // class T names, resolved by the compiler
-                if let ([c, td], Some((Op::Call(a, _), rest))) = (n.scopes.as_slice(), ops.split_first()) {
-                    let later = !self.classes.contains_key(&c.name) && self.types.get(&c.name).is_some_and(|t| t.class.is_some());
-                    if later && c.params.is_none() && td.params.is_none() && n.params.is_none() {
-                        if !rest.is_empty() {
-                            return self.unsupported(e.loc, "a select of a call");
-                        }
-                        let class = self.types[&c.name].class.clone().unwrap();
-                        let args = self.call_args(a)?;
-                        return Ok(ExprKind::StaticCall(format!("{class}::{}", td.name), n.name.clone(), args).into());
-                    }
-                }
                 if n.scopes.len() != 1 || n.params.is_some() || n.scopes[0].params.is_some() || n.scopes[0].name == "$unit" {
                     return self.unsupported(e.loc, "this scoped name");
                 }
@@ -765,6 +770,12 @@ impl Lower {
                         }
                         return self.selects(ExprKind::Ident(format!("{c}${}", n.name)).into(), ops);
                     }
+                }
+                // `C #(..)::x`: a static property of a specialization, in its scope (reached
+                // like a package's variable)
+                if self.classes.get(&p).is_some_and(|c| c.spec_statics.contains(&n.name)) && !matches!(ops.first(), Some(Op::Call(..))) {
+                    let m: Expr = ExprKind::Hier(vec![p, n.name.clone()]).into();
+                    return if ops.iter().any(|o| matches!(o, Op::Member(..))) { self.class_chain(m, ops, lvalue) } else { self.selects(m, ops) };
                 }
                 // `P::v = x`, `P::v[i] = x`, `P::s.m = x`: a variable of package P
                 if lvalue {
@@ -817,6 +828,14 @@ impl Lower {
                 let call = matches!(ops.first(), Some(Op::Call(..)));
                 if let Some(v) = pk.vars.get(&n.name).filter(|_| !call) {
                     let t = &v.0;
+                    // `P::q.size()`: a method of a queue or an array (as `q.size()` here)
+                    if let [Op::Member(m, _), Op::Call(a, _), rest @ ..] = ops {
+                        if (t.heap.is_some() || !v.1.is_empty()) && rest.is_empty() {
+                            let args = self.call_args(a)?;
+                            self.use_package(&p);
+                            return Ok(ExprKind::Call(format!("{p}.{}.{m}", n.name), args).into());
+                        }
+                    }
                     if !matches!(ops.first(), Some(Op::Member(..))) || !(t.has_struct() || t.enum_names.is_some() || t.class.is_some()) {
                         return self.selects(ExprKind::Hier(vec![p, n.name.clone()]).into(), ops);
                     }
@@ -881,6 +900,10 @@ impl Lower {
         // (a queue's method call, `q.size()`, is not a member)
         let queue_call = var.as_ref().is_some_and(|t| t.heap.is_some()) && ops.iter().any(|o| matches!(o, Op::Call(..)));
         if var.as_ref().is_some_and(|t| t.has_struct() || t.param.is_some()) && !matches!(ops.first(), Some(Op::Call(..))) && !queue_call {
+            // (of a type parameter: also method calls, of a class or an enum)
+            if var.as_ref().is_some_and(|t| t.param.is_some() && !t.has_struct()) && ops.iter().any(|o| matches!(o, Op::Call(..))) {
+                return self.class_chain(ExprKind::Ident(name).into(), ops, lvalue);
+            }
             return self.members(ExprKind::Ident(name).into(), ops);
         }
         if lvalue {

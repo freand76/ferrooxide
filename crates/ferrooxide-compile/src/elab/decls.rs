@@ -52,7 +52,7 @@ struct Shape {
 
 impl<'a> Compiler<'a> {
     /// 2. the declarations of a scope, merged by name: the directions of its ports
-    pub(super) fn declarations(
+    pub(crate) fn declarations(
         &mut self,
         items: &'a [Item],
         sid: usize,
@@ -296,7 +296,12 @@ impl<'a> Compiler<'a> {
             }
             let elem = self.elem_for(mg.kind, width, signed, mg.ty.map(|t| &**t), sid)?;
             let s = self.new_dyn(full, &name, elem, h, sid)?;
-            self.dyn_enum(s, mg.ty.map(|t| &**t), sid);
+            // (of a type parameter: its type)
+            let et = match mg.tparam.map(|tp| self.lookup(tp, sid)) {
+                Some(Some(Sym::Type(t))) => Some(t),
+                _ => mg.ty.cloned(),
+            };
+            self.dyn_enum(s, et.as_deref(), sid);
             self.dyn_layout(s, layout.as_ref());
             if let Some(init) = mg.init {
                 let line = self.line;

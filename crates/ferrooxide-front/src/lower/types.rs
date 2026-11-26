@@ -974,11 +974,12 @@ impl Lower {
         for d in v {
             let name = self.name(&d.name, d.loc);
             let (dims, heap) = self.declarator_dims(&d.dims, d.loc)?;
+            // (the variable is declared in its own initializer: `T e = e.first();`)
+            self.declare_var_heap(&name, &dims, heap.as_ref());
             let init = match &d.init {
                 Some(e) => Some(self.expr(e)?),
                 None => None,
             };
-            self.declare_var_heap(&name, &dims, heap.as_ref());
             out.push(Declarator { name, dims, heap, init, line: d.loc.line });
         }
         Ok(out)

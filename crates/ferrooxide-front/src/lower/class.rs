@@ -27,6 +27,8 @@ pub(crate) struct ClassNames {
     pub static_methods: HashSet<String>,
     /// static properties: name -> the variable holding it
     pub statics: HashMap<String, String>,
+    /// static properties of a parameterized class (one per specialization, `C #(..)::x`)
+    pub spec_statics: HashSet<String>,
     /// typedefs declared in the class (`C::T`)
     pub types: HashMap<String, Rc<SvType>>,
     /// parameters and enum constants declared in the class (`C::P`, `obj.P`)
@@ -175,6 +177,28 @@ impl Lower {
         }
         let name = self.name(&c.name, c.loc);
         let mut names = ClassNames { name: name.clone(), ..Default::default() };
+        // the class is a type from here on (also inside itself)
+        self.types.insert(name.clone(), Self::class_type(&name));
+        // (the class's parameters and typedefs, and those of its base class, stay inside)
+        let saved_types = self.types.clone();
+        // the parameter ports: constants of the class (`C::P`), type parameters
+        let mut params = Vec::new();
+        let mut own: HashSet<String> = HashSet::new();
+        names.parameterized = c.params.is_some();
+        if let Some(ps) = &c.params {
+            self.param_ports(ps, &mut params)?;
+            for p in &params {
+                match p {
+                    Item::Param(p) => {
+                        self.own_name(&mut own, &p.name, p.line, &name)?;
+                        names.consts.insert(p.name.clone());
+                    }
+                    Item::TypeParam { name: n, line, .. } => self.own_name(&mut own, n, *line, &name)?,
+                    _ => {}
+                }
+            }
+        }
+        // (after the parameter ports: `extends B #(T)` may use them)
         let (base, base_args) = match &c.extends {
             None => (None, None),
             Some((n, args)) => {
@@ -215,29 +239,8 @@ impl Lower {
                 (Some(bname), args)
             }
         };
-        // the class is a type from here on (also inside itself)
-        self.types.insert(name.clone(), Self::class_type(&name));
-        // (typedefs of a base class are visible in this one; its own stay inside)
-        let saved_types = self.types.clone();
         for (k, v) in &names.types {
             self.types.insert(k.clone(), v.clone());
-        }
-        // the parameter ports: constants of the class (`C::P`), type parameters
-        let mut params = Vec::new();
-        let mut own: HashSet<String> = HashSet::new();
-        names.parameterized = c.params.is_some();
-        if let Some(ps) = &c.params {
-            self.param_ports(ps, &mut params)?;
-            for p in &params {
-                match p {
-                    Item::Param(p) => {
-                        self.own_name(&mut own, &p.name, p.line, &name)?;
-                        names.consts.insert(p.name.clone());
-                    }
-                    Item::TypeParam { name: n, line, .. } => self.own_name(&mut own, n, *line, &name)?,
-                    _ => {}
-                }
-            }
         }
         // properties are names in the methods (their types for member chains)
         let saved_vars = self.vars.clone();
@@ -245,6 +248,7 @@ impl Lower {
         let mut statics = Vec::new();
         let mut consts = Vec::new();
         let mut rands: Vec<(String, bool)> = Vec::new();
+        let mut static_props = Vec::new();
         let mut hidden: Vec<(String, bool)> = Vec::new();
         // (the names the class itself declares, one item each, IEEE 1800-2017 8.3: `own`)
         let vis = |quals: &[Kw]| {
@@ -320,7 +324,9 @@ impl Lower {
             }
             if is_static {
                 if c.params.is_some() {
-                    return self.unsupported(v.loc, "a static property of a parameterized class");
+                    names.spec_statics.extend(d.names.iter().map(|n| n.name.clone()));
+                    static_props.push(Item::Decl(d));
+                    continue;
                 }
                 for n in &mut d.names {
                     let var = format!("{name}${}", n.name);
@@ -454,7 +460,7 @@ impl Lower {
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
         let mut class_types: Vec<_> = names.types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         class_types.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, types: class_types, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, rand: rands, constraints, line })
+        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, static_props, types: class_types, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, rand: rands, constraints, line })
     }
 
     /// An extern method (IEEE 1800-2017 8.24): the prototype `m` with its body from the

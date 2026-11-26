@@ -125,6 +125,14 @@ impl<'a> Compiler<'a> {
 
     /// The enum type of `e`.
     pub(crate) fn enum_of(&mut self, e: &Expr, sid: usize) -> R<EnumOf> {
+        // an enum method of a type parameter's enum variable that gives a value of it
+        if let ExprKind::MethodCall(o, m, _) = &e.kind {
+            if matches!(m.as_str(), "first" | "last" | "next" | "prev") {
+                if let Some(id) = self.var_enum(o, sid) {
+                    return Ok(EnumOf::Id(id));
+                }
+            }
+        }
         Ok(match &e.kind {
             ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Index(..) => {
                 // an enum constant (also through a hierarchical name: `top.A`)
@@ -151,6 +159,10 @@ impl<'a> Compiler<'a> {
                     _ => None,
                 };
                 if let Some(Sym::Sig(s)) = sym {
+                    // an element of a queue, dynamic or associative array of an enum
+                    if nidx == 1 && matches!(self.sig_type(s), crate::types::Type::Dyn { .. }) {
+                        return Ok(self.enums.dyn_sigs.get(&s).map_or(EnumOf::No, |&id| EnumOf::Id(id)));
+                    }
                     let i = self.sig(s);
                     let nun = if i.depth > 0 { self.sigs.md_dims.get(&s).map_or(1, |d| d.len()) } else { 0 };
                     if nidx == nun {
@@ -283,3 +295,78 @@ impl<'a> Compiler<'a> {
         }
     }
 }
+
+/// `c` as a sized binary literal.
+fn const_lit(c: &Const) -> Expr {
+    let digits: String = (0..c.w)
+        .rev()
+        .map(|i| match c.bit(i) {
+            (0, 0) => '0',
+            (1, 0) => '1',
+            (0, _) => 'z',
+            _ => 'x',
+        })
+        .collect();
+    ExprKind::Num(Number { size: Some(c.w), signed: c.signed, base: 2, based: true, digits, fill: false }).into()
+}
+
+impl<'a> Compiler<'a> {
+    /// The enum of variable `e` (none for anything else).
+    pub(crate) fn var_enum(&self, e: &Expr, sid: usize) -> Option<u32> {
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid)?,
+            ExprKind::Hier(p) => self.lookup_hier(p, sid)?,
+            _ => return None,
+        };
+        match sym {
+            Sym::Sig(s) => self.enums.sigs.get(&s).copied(),
+            _ => None,
+        }
+    }
+
+    /// `v.first()`, `.last()`, `.num()`, `.next(N)`, `.prev(N)`, `.name()` of an enum
+    /// variable whose enum only elaboration knows (declared with a type parameter): the
+    /// expression it stands for, as the lowering writes it for other enum variables (IEEE
+    /// 1800-2017 6.19.5). None for any other expression.
+    pub(crate) fn enum_method(&self, e: &Expr, sid: usize) -> R<Option<Expr>> {
+        let ExprKind::MethodCall(o, m, args) = &e.kind else { return Ok(None) };
+        if !matches!(m.as_str(), "first" | "last" | "num" | "next" | "prev" | "name") {
+            return Ok(None);
+        }
+        let Some(id) = self.var_enum(o, sid) else { return Ok(None) };
+        let vals = self.enums.values.get(&id).cloned().unwrap_or_default();
+        let n = vals.len();
+        if n == 0 {
+            return Ok(None);
+        }
+        let w = vals[0].0.w;
+        let bx = |e: Expr| Box::new(e);
+        let chain = |val: &dyn Fn(usize) -> Expr, dflt: Expr| -> Expr {
+            (0..n).rev().fold(dflt, |acc, i| {
+                let c = ExprKind::Binary(BinOp::CaseEq, o.clone(), bx(const_lit(&vals[i].0)));
+                ExprKind::Cond(bx(c.into()), bx(val(i)), bx(acc)).into()
+            })
+        };
+        let x: Expr = ExprKind::Num(Number { size: Some(w), signed: false, base: 2, based: true, digits: "x".into(), fill: true }).into();
+        let x = ExprKind::SysCall("$__cast".into(), vec![ExprKind::Num(dec(w as u64)).into(), ExprKind::Num(dec(2)).into(), x]).into();
+        Ok(Some(match m.as_str() {
+            "first" => const_lit(&vals[0].0),
+            "last" => const_lit(&vals[n - 1].0),
+            "num" => ExprKind::Num(dec(n as u64)).into(),
+            "name" => chain(&|i| ExprKind::Str(vals[i].1.clone()).into(), ExprKind::Str(String::new()).into()),
+            _ => {
+                let k = match args.iter().map(|a| &a.kind).collect::<Vec<_>>().as_slice() {
+                    [] => 1,
+                    [ExprKind::Num(a)] => match Const::from_number(a).ok().and_then(|c| c.to_i64()) {
+                        Some(k) if k >= 0 => k as usize,
+                        _ => return self.err(format!(".{m}() needs a count of at least 0")),
+                    },
+                    _ => return self.err(format!("a count of .{m}() that is not a literal is not supported here")),
+                };
+                let step = if m == "next" { k % n } else { n - k % n };
+                chain(&|i| const_lit(&vals[(i + step) % n].0), x)
+            }
+        }))
+    }
+}
+

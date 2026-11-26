@@ -137,6 +137,7 @@ impl<'a> Compiler<'a> {
             self.insert_param(p, v, scope)?;
         }
         self.hier.pkg_scopes.entry(name.to_string()).or_insert(scope);
+        self.declarations(&c.static_props, scope, false, &HashMap::new(), None)?;
         let mut props = base.map(|b| self.classes.list[b as usize].props.clone()).unwrap_or_default();
         let mut width = props.last().map(|p| p.off + p.size()).unwrap_or(0);
         // (4-state properties start as x)
@@ -229,7 +230,8 @@ impl<'a> Compiler<'a> {
             Some(&id) => id,
             None => {
                 self.classes.spec_count += 1;
-                let own = format!("{}#{}", decl.name, self.classes.spec_count);
+                // (`C#sN`: not a name of the lowering's specializations, `C#N`)
+                let own = format!("{}#s{}", decl.name, self.classes.spec_count);
                 let id = self.reserve_class(decl, &own, dscope);
                 // (the class may use this specialization itself: `typedef C #(T) this_type;`)
                 self.classes.specs.insert(written.clone(), id);
@@ -477,18 +479,24 @@ impl<'a> Compiler<'a> {
     /// instead and the scope to evaluate it in, a constant of the class (in the class's
     /// scope) or a static property (its variable `C$x`, beside the class); also of a base
     /// class. None for any other expression.
+    /// Also an enum method of a variable of a type parameter's enum (`enum_method`).
     pub(crate) fn class_member(&self, e: &Expr, sid: usize) -> R<Option<(Expr, usize)>> {
+        if let Some(x) = self.enum_method(e, sid)? {
+            return Ok(Some((x, sid)));
+        }
         let ExprKind::ClassMember { class, name } = &e.kind else { return Ok(None) };
         let cn = match self.lookup(class, sid) {
             Some(Sym::Type(t)) => t.class.clone(),
-            _ => None,
+            // (a specialization `C#k`)
+            _ => Some(class.clone()),
         };
         let Some(mut c) = cn.and_then(|n| self.find_class(&n, sid)) else {
             return self.err(format!("'{class}::{name}': '{class}' is not a class here"));
         };
         loop {
             let ci = &self.classes.list[c as usize];
-            if self.class_const(c, name).is_some() {
+            // (a static property of a parameterized class: in the class's scope)
+            if self.class_const(c, name).is_some() || ci.decl.static_props.iter().any(|d| matches!(d, Item::Decl(d) if d.names.iter().any(|x| x.name == *name))) {
                 return Ok(Some((ExprKind::Ident(name.clone()).into(), ci.scope)));
             }
             let var = format!("{}${name}", ci.decl.name);

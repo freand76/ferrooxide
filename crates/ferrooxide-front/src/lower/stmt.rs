@@ -563,6 +563,28 @@ impl Lower {
             }
             return self.unsupported(loc, "this scoped task name");
         }
+        // `P::v.m(..)`: a method of package P's variable v (`q.push_back(x)`)
+        let mut members = Vec::new();
+        let mut base = f;
+        while let t::ExprKind::Member(a, m) = &base.kind {
+            members.push(m.clone());
+            base = a;
+        }
+        if let t::ExprKind::Scoped(n) = &base.kind {
+            if let ([p], false, None) = (n.scopes.as_slice(), members.is_empty(), &n.params) {
+                if p.params.is_none() && self.packages.get(&p.name).is_some_and(|pk| pk.vars.contains_key(&n.name)) {
+                    let mut path = vec![p.name.clone(), n.name.clone()];
+                    self.use_package(&p.name);
+                    path.extend(members.into_iter().rev());
+                    return Ok(path.join("."));
+                }
+                if p.params.is_none() && self.pkg_ctx.as_ref().is_some_and(|c| c.name == p.name) {
+                    let mut path = vec![n.name.clone()];
+                    path.extend(members.into_iter().rev());
+                    return Ok(path.join("."));
+                }
+            }
+        }
         match self.hier_path(f)? {
             Some(p) => Ok(p.join(".")),
             None => self.unsupported(loc, "this task call"),
