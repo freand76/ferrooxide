@@ -12,8 +12,8 @@
 - One command, no intermediate files: `ferrooxide tb.v dut.v` parses, elaborates, compiles
   (milliseconds) and simulates.
 
-## Status (2026-11-25)
-- sv-tests: 4758 of 5112 (93.1%); all of chapter 5. Baseline in
+## Status (2026-11-26)
+- sv-tests: 4763 of 5112 (93.2%); all of chapter 5. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -86,13 +86,20 @@ first, time-0 processes by scope, `always_comb` after all others at time 0 (9.2.
   lowering; the compiler split into elaboration, types and codegen; `Type`/`type_of` in the
   compiler; spans on expressions; one declared type per parameter (R4 slice 5); declarations
   and function returns keep only their type, kind, sign and ranges derived from it.
+- For UVM (2026-11-26): class typedef scopes (`C::type_id::create()`), DPI exports, static
+  properties of parameterized classes (per specialization, inherited), enum methods through
+  type parameters, bases specialized with the class's parameters or declared later,
+  queues/associative arrays of queues and arrays of several dynamic dimensions, typedefs in
+  subroutines, method calls on static calls' results.
 - Process: own test suite in three modes (no other simulator needed), parser snapshots,
   sv-tests runner with baseline, regenerated sv-tests (`make generate-tests`, Python
   requirements in a scratch venv).
 
 ## Next (in priority order)
-1. **UVM** (about 130 sv-tests, run with `-DUVM_NO_DPI`). Stops at `uvm_coreservice.svh:379`
-   ("this scoped name is not supported"). Fix the blockers one at a time, each with a test.
+1. **UVM** (about 130 sv-tests, run with `-DUVM_NO_DPI`). Stops at `uvm_objection.svh:792`
+   (`->m_events[m_top].all_dropped`): events as class properties, which need waiters on
+   run-time targets (A3, item 5); `uvm_event` and the phases need them too. Then fix the
+   blockers one at a time, each with a test.
 2. **sv-tests features, by tests won**: interface classes (21), `$dist_*` (16), randsequence
    (12), global clocking and `_gclk` functions (11), tagged unions (10), assignments in
    expressions (8), arrays assigned from arrays of another shape (6), `type()` operator (4),
@@ -100,9 +107,7 @@ first, time-0 processes by scope, `always_comb` after all others at time 0 (9.2.
    dynamic arrays and `with` (3). DPI (9) needs a C interface: last.
 3. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
-   patterns also lack); enum methods of a call's result (`p.status().name()`); two
-   specializations of one class called in one expression (`C#(byte)::f(x)` and
-   `C#(int unsigned)::f(y)`): the first takes the result type of the other.
+   patterns also lack); enum methods of a call's result (`p.status().name()`).
 4. **sv-tests invalid code** (16 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
 5. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
@@ -197,12 +202,14 @@ SystemVerilog data and testbench:
   elements (`$size` & co. and `%p` see a packed array); real, string and unpacked-struct
   elements; member defaults; members through hierarchical names (`inst.v.f`); type keys in
   patterns of unpacked arrays.
-- queues of structs as class properties, arrays of queues, queue ports, `%p` of unpacked
+- queues of structs as class properties, fixed-size arrays of queues, arrays of queues as
+  class properties or ports, `%p` of an element array (`$display("%p", a[k])`), queue ports, `%p` of unpacked
   structs, associative arrays and class handles, array methods of associative,
   multi-dimensional and struct arrays, keyed patterns for associative arrays, class or wider
   keys, queue element writes with `<=` (done at once).
-- classes: static properties of parameterized classes, body `parameter type` items, an
-  untyped `mailbox`, `this_type`-style self specializations, members of `P::f().p`, enum
+- classes: events as properties (A3), assignments through a call's result
+  (`C::get().v = 1`), body `parameter type` items, an untyped `mailbox`, members of
+  `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle
   ports, NBAs to properties, interface classes, `randc`, `rand_mode`, `constraint_mode`,
   extern/pure constraints, `disable soft`, rand dynamic arrays and real/string/class rand
