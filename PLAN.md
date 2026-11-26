@@ -109,7 +109,7 @@ machinery must not assume static targets only (A3).
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
    patterns also lack); enum methods of a call's result (`p.status().name()`) and of a
    struct member (`r.size.name()`).
-3. **sv-tests invalid code** (12 accepted that must fail): see the ACCEPT lines of the
+3. **sv-tests invalid code** (8 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
 4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
    reference, `process::suspend`/`resume`, recursion from fork branches, waits on run-time
