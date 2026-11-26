@@ -491,16 +491,16 @@ impl<'a> Compiler<'a> {
                     self.local_params(params, b)?;
                     self.code.block_scopes.insert((sid, st as *const Stmt), b);
                     for d in decls {
-                        let (mut m, mut l) = self.range_vals(&d.range, b)?;
-                        let mut signed = d.signed;
-                        let kind = match d.kind {
+                        let (mut m, mut l) = self.range_vals(&d.range(), b)?;
+                        let mut signed = d.signed();
+                        let kind = match d.kind() {
                             NetKind::Integer => {
                                 (m, l) = (31, 0);
                                 signed = true;
                                 SigKind::Integer
                             }
                             NetKind::Int(n) => {
-                                if d.range.is_none() {
+                                if d.range().is_none() {
                                     (m, l) = (n as i64 - 1, 0);
                                 }
                                 SigKind::Integer
@@ -511,12 +511,12 @@ impl<'a> Compiler<'a> {
                             }
                             _ => SigKind::Reg,
                         };
-                        let is_real = d.kind == NetKind::Real;
+                        let is_real = d.kind() == NetKind::Real;
                         // packed dimensions: one flat vector [W-1:0], the dimensions kept
                         let mut pk: Option<Vec<(i64, i64)>> = None;
-                        if !d.packed.is_empty() {
+                        if !d.packed().is_empty() {
                             let mut dims = vec![(m, l)];
-                            for (a, b2) in &d.packed {
+                            for (a, b2) in d.packed() {
                                 dims.push((self.const_int(a, b)?, self.const_int(b2, b)?));
                             }
                             let w: i64 = dims.iter().map(|(x, y)| (x - y).abs() + 1).product();
@@ -524,7 +524,7 @@ impl<'a> Compiler<'a> {
                             pk = Some(dims);
                         }
                         let w = ((m - l).abs() + 1) as u32;
-                        let layout = self.layout_for(d.ty.as_ref(), b)?;
+                        let layout = self.layout_for(Some(&d.ty), b)?;
                         // a `static` variable of a subroutine's block: one for all calls (not in
                         // a constant function call, which starts afresh)
                         let shared = d.static_ && self.subr.inline_stack.last().is_some_and(|f| !f.2 .1.ends_with("$const"));
@@ -543,7 +543,7 @@ impl<'a> Compiler<'a> {
                                     return self.err(format!("'{}': a static queue or dynamic array in a subroutine's block is not supported", dl.name));
                                 }
                                 // a queue or dynamic array
-                                let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), b)?;
+                                let elem = self.elem_for(d.kind(), w, signed, Some(&*d.ty), b)?;
                                 let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
                                 self.dyn_layout(s, layout.as_ref());
                                 if d.automatic || in_auto {
@@ -597,25 +597,25 @@ impl<'a> Compiler<'a> {
                             if is_real {
                                 self.mark_real(s);
                             }
-                            if d.kind == NetKind::String {
+                            if d.kind() == NetKind::String {
                                 self.mark_string(s);
                             }
-                            if d.kind == NetKind::Event {
+                            if d.kind() == NetKind::Event {
                                 self.zero_init(s);
                             }
-                            if d.kind == NetKind::Class {
+                            if d.kind() == NetKind::Class {
                                 let c = self.class_of_decl(d, b)?;
                                 self.sigs.types[s as usize] = Type::Class(c);
                                 self.zero_init(s);
                             }
-                            self.mark_two_state(s, d.kind);
+                            self.mark_two_state(s, d.kind());
                             self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));
                             self.set_layout(s, &dl.name, layout.clone(), b)?;
                             if shared {
                                 // its initial value once, as for a module variable
                                 self.subr.static_vars.insert(key, s);
                                 if let Some(init) = &dl.init {
-                                    self.decl_init(init, s, kind, d.kind, is_real, depth, w, None, None, &dl.name, b)?;
+                                    self.decl_init(init, s, kind, d.kind(), is_real, depth, w, None, None, &dl.name, b)?;
                                 }
                                 continue;
                             }

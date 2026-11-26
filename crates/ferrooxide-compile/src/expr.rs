@@ -1595,14 +1595,14 @@ impl<'a> Compiler<'a> {
         };
         let mut ports = Vec::new();
         for d in &f.decls {
-            let (mut m, mut l) = self.range_vals(&d.range, fs)?;
-            let mut signed = d.signed;
-            match d.kind {
+            let (mut m, mut l) = self.range_vals(&d.range(), fs)?;
+            let mut signed = d.signed();
+            match d.kind() {
                 NetKind::Integer => {
                     (m, l) = (31, 0);
                     signed = true;
                 }
-                NetKind::Int(n) if d.range.is_none() => {
+                NetKind::Int(n) if d.range().is_none() => {
                     (m, l) = (n as i64 - 1, 0);
                 }
                 NetKind::Time | NetKind::Real | NetKind::String | NetKind::Class => (m, l) = (63, 0),
@@ -1610,9 +1610,9 @@ impl<'a> Compiler<'a> {
             }
             // packed dimensions: one flat vector [W-1:0], the dimensions kept for selects
             let mut pk: Option<Vec<(i64, i64)>> = None;
-            if !d.packed.is_empty() {
+            if !d.packed().is_empty() {
                 let mut dims = vec![(m, l)];
-                for (a, b) in &d.packed {
+                for (a, b) in d.packed() {
                     dims.push((self.const_int(a, fs)?, self.const_int(b, fs)?));
                 }
                 let w: i64 = dims.iter().map(|(a, b)| (a - b).abs() + 1).product();
@@ -1620,11 +1620,11 @@ impl<'a> Compiler<'a> {
                 pk = Some(dims);
             }
             let w = ((m - l).abs() + 1) as u32;
-            let layout = self.layout_for(d.ty.as_ref(), fs)?;
+            let layout = self.layout_for(Some(&d.ty), fs)?;
             for dl in &d.names {
                 if let Some(h) = &dl.heap {
                     // a queue or dynamic array argument or variable
-                    let elem = self.elem_for(d.kind, w, signed, d.ty.as_deref(), fs)?;
+                    let elem = self.elem_for(d.kind(), w, signed, Some(&*d.ty), fs)?;
                     let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, fs)?;
                     self.dyn_layout(sg, layout.as_ref());
                     if let Some(dir) = d.dir {
@@ -1649,21 +1649,21 @@ impl<'a> Compiler<'a> {
                     self.sigs.packed_dims.insert(sg, d.clone());
                     self.scopes[fs].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(sg));
                 }
-                if d.kind == NetKind::Real {
+                if d.kind() == NetKind::Real {
                     self.mark_real(sg);
                 }
-                if d.kind == NetKind::String {
+                if d.kind() == NetKind::String {
                     self.mark_string(sg);
                 }
-                if d.kind == NetKind::Event {
+                if d.kind() == NetKind::Event {
                     self.zero_init(sg);
                 }
-                if d.kind == NetKind::Class {
+                if d.kind() == NetKind::Class {
                     let c = self.class_of_decl(d, fs)?;
                     self.sigs.types[sg as usize] = Type::Class(c);
                     self.zero_init(sg);
                 }
-                self.mark_two_state(sg, d.kind);
+                self.mark_two_state(sg, d.kind());
                 self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
                 self.set_layout(sg, &dl.name, layout.clone(), fs)?;
                 if let Some(dir) = d.dir {
@@ -1671,8 +1671,8 @@ impl<'a> Compiler<'a> {
                 } else if let (Some(init), false) = (&dl.init, f.automatic || key.1.ends_with("$const")) {
                     // a static variable: its initial value once, as for a module variable
                     // (automatic ones get it on each call, `auto_inits`)
-                    let real = d.kind == NetKind::Real;
-                    self.decl_init(init, sg, SigKind::Reg, d.kind, real, depth, w, None, None, &dl.name, fs)?;
+                    let real = d.kind() == NetKind::Real;
+                    self.decl_init(init, sg, SigKind::Reg, d.kind(), real, depth, w, None, None, &dl.name, fs)?;
                 }
             }
         }

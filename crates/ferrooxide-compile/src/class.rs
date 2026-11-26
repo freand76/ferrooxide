@@ -144,11 +144,11 @@ impl<'a> Compiler<'a> {
         for d in &c.props {
             self.line = d.line;
             let base_ty = self.prop_type(d, scope)?;
-            let enum_id = match d.ty.as_ref().and_then(|t| t.enum_names.clone().filter(|_| t.dims.len() <= 1)) {
+            let enum_id = match d.ty.enum_names.clone().filter(|_| d.ty.dims.len() <= 1) {
                 Some(n) => self.enum_id(&n, scope),
                 None => NONE,
             };
-            let four = !matches!(d.kind, NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class);
+            let four = !matches!(d.kind(), NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class);
             for n in &d.names {
                 // a queue, dynamic or associative array: a handle (0: empty)
                 let ty = match &n.heap {
@@ -290,31 +290,31 @@ impl<'a> Compiler<'a> {
     /// The type of a class property.
     fn prop_type(&mut self, d: &Decl, sid: usize) -> R<Type> {
         // a type parameter (of a parameterized class)
-        if let Some(t) = d.ty.as_ref().filter(|t| t.param.is_some() && !t.has_struct()) {
+        if let Some(t) = Some(&d.ty).filter(|t| t.param.is_some() && !t.has_struct()) {
             let r = self.resolve_type(t, sid)?;
             if r.has_struct() {
                 return self.err("a class property of a struct type given by a type parameter is not supported");
             }
             return self.resolved_type(&r, sid);
         }
-        if d.ty.as_ref().is_some_and(|t| t.has_struct() || t.param.is_some()) {
+        if d.ty.has_struct() || d.ty.param.is_some() {
             return self.err("a class property of a struct type or a type parameter is not supported");
         }
-        Ok(match d.kind {
+        Ok(match d.kind() {
             NetKind::Real => Type::Real,
             NetKind::String => Type::Str,
             NetKind::Class => Type::Class(self.class_of_decl(d, sid)?),
             NetKind::Event => return self.err("an event as a class property is not supported"),
             NetKind::Integer => Type::vec(32, true),
-            NetKind::Int(n) if d.range.is_none() => Type::vec(n, d.signed),
-            NetKind::Time if d.range.is_none() => Type::vec(64, false),
+            NetKind::Int(n) if d.range().is_none() => Type::vec(n, d.signed()),
+            NetKind::Time if d.range().is_none() => Type::vec(64, false),
             _ => {
-                let (m, l) = self.range_vals(&d.range, sid)?;
+                let (m, l) = self.range_vals(&d.range(), sid)?;
                 let mut w = ((m - l).abs() + 1) as u32;
-                for (a, b) in &d.packed {
+                for (a, b) in d.packed() {
                     w *= ((self.const_int(a, sid)? - self.const_int(b, sid)?).abs() + 1) as u32;
                 }
-                Type::vec(w, d.signed)
+                Type::vec(w, d.signed())
             }
         })
     }
@@ -326,13 +326,13 @@ impl<'a> Compiler<'a> {
             _ => (64, false),
         };
         let kind = self.dyn_kind(h, sid)?;
-        let elem = match d.ty.as_ref().filter(|t| t.param.is_some()) {
+        let elem = match Some(&d.ty).filter(|t| t.param.is_some()) {
             // elements of a type parameter's type
             Some(t) => {
                 let r = self.resolve_type(t, sid)?;
                 self.elem_for(r.kind, w, r.signed, Some(&r), sid)?
             }
-            None => self.elem_for(d.kind, w, signed, d.ty.as_deref(), sid)?,
+            None => self.elem_for(d.kind(), w, signed, Some(&*d.ty), sid)?,
         };
         if elem.leaf == crate::types::Leaf::Str || matches!(kind, DynKind::Assoc(rt::KeyKind::Str)) {
             self.intern(b"");
@@ -343,7 +343,7 @@ impl<'a> Compiler<'a> {
 
     /// The class a declaration of a class type names.
     pub(crate) fn class_of_decl(&self, d: &Decl, sid: usize) -> R<u32> {
-        let name = d.ty.as_ref().and_then(|t| t.class.clone()).unwrap_or_default();
+        let name = d.ty.class.clone().unwrap_or_default();
         self.class_named(&name, sid)
     }
 

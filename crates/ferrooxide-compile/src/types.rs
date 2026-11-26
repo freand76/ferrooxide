@@ -402,7 +402,7 @@ impl<'a> Compiler<'a> {
     /// itself where it uses none.
     pub(crate) fn subr_resolved(&mut self, f: &'a SubroutineDecl, sid: usize) -> R<&'a SubroutineDecl> {
         let ret_param = f.ret_ty.as_ref().is_some_and(|t| t.param.is_some());
-        if !ret_param && !f.decls.iter().any(|d| d.type_param.is_some()) {
+        if !ret_param && !f.decls.iter().any(|d| d.type_param().is_some()) {
             return Ok(f);
         }
         let mut g = f.clone();
@@ -425,19 +425,14 @@ impl<'a> Compiler<'a> {
             g.ret_ty = Some(Rc::new(r));
         }
         for d in &mut g.decls {
-            let Some(tp) = d.type_param.take() else { continue };
+            let Some(tp) = d.type_param().map(str::to_string) else { continue };
             let Some(Sym::Type(t)) = self.lookup(&tp, sid) else {
                 return self.err(format!("'{tp}' is not a type"));
             };
             if t.has_struct() {
                 return self.err("an argument of a struct type given by a type parameter is not supported");
             }
-            let (k, s, range, packed) = t.decl_parts();
-            d.kind = k;
-            d.signed = s;
-            d.range = range;
-            d.packed = packed;
-            d.ty = Some(t.clone());
+            d.ty = t.clone();
         }
         Ok(Box::leak(Box::new(g)))
     }
@@ -644,7 +639,7 @@ impl<'a> Compiler<'a> {
     /// `sid` before the declared name is in it (`input [w-1:0] w` uses an outer `w`).
     pub(crate) fn layout_for(&mut self, t: Option<&Rc<SvType>>, sid: usize) -> R<Option<Packed>> {
         match t {
-            Some(t) if !matches!(t.kind, NetKind::Real | NetKind::String | NetKind::Event) => Ok(Some(self.packed(t, sid)?)),
+            Some(t) if !matches!(t.kind, NetKind::Real | NetKind::String | NetKind::Event | NetKind::Genvar) => Ok(Some(self.packed(t, sid)?)),
             _ => Ok(None),
         }
     }

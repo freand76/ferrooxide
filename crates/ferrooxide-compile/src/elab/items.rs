@@ -26,7 +26,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn check_redeclared<'d>(&mut self, decls: impl Iterator<Item = &'d Decl>, sid: usize) -> R<()> {
         let mut seen: HashMap<&str, (Option<&Decl>, Option<&Decl>)> = HashMap::new();
         for d in decls {
-            if d.kind == NetKind::Genvar {
+            if d.kind() == NetKind::Genvar {
                 continue;
             }
             for dl in &d.names {
@@ -47,7 +47,7 @@ impl<'a> Compiler<'a> {
                         dl.name
                     ));
                 }
-                if p.type_param.is_some() || v.type_param.is_some() || !p.range_written {
+                if p.type_param().is_some() || v.type_param().is_some() || !p.range_written {
                     continue; // (a range on the net only: the scalar port check)
                 }
                 // (ranges that cannot be evaluated here, e.g. with a subroutine's own
@@ -55,7 +55,7 @@ impl<'a> Compiler<'a> {
                 let same = v.range_written && {
                     let mut ranges = |d: &Decl| -> Option<Vec<(i64, i64)>> {
                         let mut r = Vec::new();
-                        for (a, b) in d.range.iter().chain(&d.packed) {
+                        for (a, b) in d.range().iter().chain(d.packed()) {
                             r.push((self.const_int(a, sid).ok()?, self.const_int(b, sid).ok()?));
                         }
                         Some(r)
@@ -94,8 +94,8 @@ impl<'a> Compiler<'a> {
             let written = if f.decls_written.is_empty() { &f.decls } else { &f.decls_written };
             self.check_redeclared(written.iter(), sid)?;
             for (n, l) in &f.scalar_vec_ports {
-                let Some((a, b)) = f.decls.iter().find(|d| d.dir.is_some() && d.names.iter().any(|x| &x.name == n)).and_then(|d| d.range.as_ref()) else { continue };
-                let (a, b) = (self.const_int(a, sid)?, self.const_int(b, sid)?);
+                let Some((a, b)) = f.decls.iter().find(|d| d.dir.is_some() && d.names.iter().any(|x| &x.name == n)).and_then(|d| d.range()) else { continue };
+                let (a, b) = (self.const_int(&a, sid)?, self.const_int(&b, sid)?);
                 self.scalar_port(n, *l, a, b)?;
             }
         }

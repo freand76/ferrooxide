@@ -36,25 +36,8 @@ fn index(a: &Expr, i: Expr) -> Expr {
 
 /// An automatic variable for a loop.
 fn var_decl(kind: NetKind, signed: bool, range: Option<Range>, n: &str, line: Line) -> Decl {
-    Decl {
-        dir: None,
-        kind,
-        net: NetType::Wire,
-        explicit_kind: true,
-        real_net: false,
-        strength: None,
-        delay: None,
-        signed,
-        range,
-        range_written: false,
-        packed: vec![],
-        type_param: None,
-        ty: None,
-        names: vec![Declarator { name: n.to_string(), dims: vec![], heap: None, init: None, line }],
-        automatic: true,
-        static_: false,
-        line,
-    }
+    let names = vec![Declarator { name: n.to_string(), dims: vec![], heap: None, init: None, line }];
+    Decl::var(SvType::flat(kind, signed, range.into_iter().collect()), names, true, line)
 }
 
 fn assign(n: &str, rhs: Expr, line: Line) -> Stmt {

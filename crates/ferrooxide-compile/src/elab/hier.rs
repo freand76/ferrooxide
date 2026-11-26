@@ -438,11 +438,11 @@ impl<'a> Compiler<'a> {
         let mut w = HashMap::new();
         for it in &m.items {
             if let Item::Decl(d) = it {
-                let pw = match d.kind {
+                let pw = match d.kind() {
                     NetKind::Integer => Some(32),
-                    NetKind::Int(n) if d.range.is_none() => Some(n),
+                    NetKind::Int(n) if d.range().is_none() => Some(n),
                     NetKind::Real | NetKind::Time => Some(64),
-                    _ => match &d.range {
+                    _ => match &d.range() {
                         Some(r) => {
                             let (a, b) = self.range_vals(&Some(r.clone()), sid)?;
                             Some(((a - b).abs() + 1) as u32)

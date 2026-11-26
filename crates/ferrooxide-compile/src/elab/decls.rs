@@ -13,7 +13,7 @@ struct Merged<'d> {
     strength: Option<(u8, u8)>,
     delay: Option<&'d Expr>,
     signed: bool,
-    range: Option<&'d Range>,
+    range: Option<Range>,
     packed: &'d [Range],
     dims: &'d [Range],
     init: Option<&'d Expr>,
@@ -69,7 +69,7 @@ impl<'a> Compiler<'a> {
             let mut mg = merged.remove(&name).unwrap();
             self.line = mg.line;
             if let (true, Some(l)) = (mg.scalar_port && mg.dir.is_some(), mg.vec_line) {
-                if let Some((a, b)) = mg.range {
+                if let Some((a, b)) = &mg.range {
                     let (a, b) = (self.const_int(a, sid)?, self.const_int(b, sid)?);
                     self.scalar_port(&name, l, a, b)?;
                 }
@@ -92,10 +92,10 @@ impl<'a> Compiler<'a> {
         let mut merged: HashMap<String, Merged> = HashMap::new();
         for it in items {
             if let Item::Decl(d) = it {
-                if d.kind == NetKind::Genvar {
+                if d.kind() == NetKind::Genvar {
                     continue;
                 }
-                let scalar_port = d.dir.is_some() && d.range.is_none() && d.packed.is_empty() && d.ty.as_ref().is_none_or(|t| t.fields.is_none() && t.enum_names.is_none()) && matches!(d.kind, NetKind::Wire | NetKind::Reg);
+                let scalar_port = d.dir.is_some() && d.range().is_none() && d.packed().is_empty() && d.ty.fields.is_none() && d.ty.enum_names.is_none() && matches!(d.kind(), NetKind::Wire | NetKind::Reg);
                 let vec_line = (d.dir.is_none() && d.range_written).then_some(d.line);
                 for dl in &d.names {
                     match merged.get_mut(&dl.name) {
@@ -105,8 +105,8 @@ impl<'a> Compiler<'a> {
                             if d.dir.is_some() {
                                 mg.dir = d.dir;
                             }
-                            if d.explicit_kind && d.kind != NetKind::Wire {
-                                mg.kind = d.kind;
+                            if d.explicit_kind && d.kind() != NetKind::Wire {
+                                mg.kind = d.kind();
                             }
                             if d.net != NetType::Wire {
                                 mg.net = d.net;
@@ -118,10 +118,10 @@ impl<'a> Compiler<'a> {
                             if d.delay.is_some() {
                                 mg.delay = d.delay.as_ref();
                             }
-                            mg.signed |= d.signed;
-                            if d.range.is_some() {
-                                mg.range = d.range.as_ref();
-                                mg.packed = &d.packed;
+                            mg.signed |= d.signed();
+                            if d.range().is_some() {
+                                mg.range = d.range();
+                                mg.packed = d.packed();
                             }
                             if !dl.dims.is_empty() {
                                 mg.dims = &dl.dims;
@@ -129,12 +129,10 @@ impl<'a> Compiler<'a> {
                             if dl.init.is_some() {
                                 mg.init = dl.init.as_ref();
                             }
-                            if d.type_param.is_some() {
-                                mg.tparam = d.type_param.as_deref();
+                            if d.type_param().is_some() {
+                                mg.tparam = d.type_param();
                             }
-                            if d.ty.is_some() {
-                                mg.ty = d.ty.as_ref();
-                            }
+                            mg.ty = Some(&d.ty);
                             if dl.heap.is_some() {
                                 mg.heap = dl.heap.as_ref();
                             }
@@ -145,18 +143,18 @@ impl<'a> Compiler<'a> {
                                 dl.name.clone(),
                                 Merged {
                                     dir: d.dir,
-                                    kind: d.kind,
+                                    kind: d.kind(),
                                     net: d.net,
                                     real_net: d.real_net,
                                     strength: d.strength,
                                     delay: d.delay.as_ref(),
-                                    signed: d.signed,
-                                    range: d.range.as_ref(),
-                                    packed: &d.packed,
+                                    signed: d.signed(),
+                                    range: d.range(),
+                                    packed: &d.packed(),
                                     dims: &dl.dims,
                                     init: dl.init.as_ref(),
-                                    tparam: d.type_param.as_deref(),
-                                    ty: d.ty.as_ref(),
+                                    tparam: d.type_param(),
+                                    ty: Some(&d.ty),
                                     heap: dl.heap.as_ref(),
                                     line: dl.line,
                                     scalar_port,
@@ -191,7 +189,7 @@ impl<'a> Compiler<'a> {
                 packed_v.push((self.const_int(a, sid)?, self.const_int(b, sid)?));
             }
         } else {
-            if let Some((a, b)) = mg.range {
+            if let Some((a, b)) = &mg.range {
                 range_v = Some((self.const_int(a, sid)?, self.const_int(b, sid)?));
             }
             for (a, b) in mg.packed {

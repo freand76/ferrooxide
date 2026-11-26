@@ -444,12 +444,12 @@ impl Printer {
                 Dir::Inout => "inout ",
             });
         }
-        if d.kind == NetKind::Wire {
+        if d.kind() == NetKind::Wire {
             s.push_str(&format!("{:?}", d.net).to_lowercase());
-        } else if let Some(c) = d.ty.as_ref().and_then(|t| t.class.as_ref()) {
+        } else if let Some(c) = d.ty.class.as_ref() {
             let _ = write!(s, "class {c}");
         } else {
-            s.push_str(&format!("{:?}", d.kind).to_lowercase());
+            s.push_str(&format!("{:?}", d.kind()).to_lowercase());
         }
         if !d.explicit_kind {
             s.push_str("(implicit)");
@@ -457,21 +457,21 @@ impl Printer {
         if d.real_net {
             s.push_str(" real");
         }
-        if let Some(t) = &d.type_param {
+        if let Some(t) = &d.type_param() {
             let _ = write!(s, " type {t}");
         }
-        if let Some(t) = d.ty.as_ref().filter(|t| t.has_struct()) {
+        if let Some(t) = Some(&d.ty).filter(|t| t.has_struct()) {
             let _ = write!(s, " type({})", sv_type(t));
         }
         s.push_str(&strength(&d.strength));
         s.push_str(&delay(&d.delay));
-        if d.signed {
+        if d.signed() {
             s.push_str(" signed");
         }
-        if let Some(r) = &d.range {
+        if let Some(r) = &d.range() {
             let _ = write!(s, " {}", range(r));
         }
-        s.push_str(&ranges(&d.packed));
+        s.push_str(&ranges(&d.packed()));
         let names: Vec<String> = d
             .names
             .iter()

@@ -124,6 +124,21 @@ impl SvType {
         SvType { kind, signed, dims, fields: None, int_kind: false, enum_names: None, unpacked: vec![], heap: None, param: None, class: None }
     }
 
+    /// A type of `kind` with packed dimensions `dims`; an integer kind without dimensions
+    /// has its implicit range.
+    pub fn flat(kind: NetKind, signed: bool, dims: Vec<Range>) -> SvType {
+        let iw = match kind {
+            NetKind::Integer => Some(32),
+            NetKind::Int(n) => Some(n),
+            NetKind::Time => Some(64),
+            _ => None,
+        };
+        match iw.filter(|_| dims.is_empty()) {
+            Some(w) => SvType { int_kind: true, ..SvType::vector(kind, signed, vec![(num(w as i64 - 1), num(0))]) },
+            None => SvType::vector(kind, signed, dims),
+        }
+    }
+
     /// Width of one element after the packed dimensions.
     pub fn leaf_width(&self) -> Expr {
         if let Some(p) = &self.param {
@@ -160,11 +175,24 @@ impl SvType {
             let kind = if self.kind == NetKind::Bit { NetKind::Bit } else { NetKind::Reg };
             return (kind, self.signed, Some((sub(self.width(), num(1)), num(0))), vec![]);
         }
-        if self.int_kind {
-            return (self.kind, self.signed, None, vec![]);
+        (self.kind, self.signed, self.decl_range().cloned(), self.packed_rest().to_vec())
+    }
+
+    /// Without a struct: the first packed range (none for `int` & co., whose range is
+    /// implicit; a `wire integer` net has its [31:0]).
+    fn decl_range(&self) -> Option<&Range> {
+        if self.int_kind && self.kind != NetKind::Wire {
+            return None;
         }
-        let mut it = self.dims.iter().cloned();
-        (self.kind, self.signed, it.next(), it.collect())
+        self.dims.first()
+    }
+
+    /// The packed dimensions after the first (none for a struct or an integer type).
+    pub fn packed_rest(&self) -> &[Range] {
+        if self.has_struct() || (self.int_kind && self.kind != NetKind::Wire) || self.dims.is_empty() {
+            return &[];
+        }
+        &self.dims[1..]
     }
 }
 
@@ -851,13 +879,11 @@ impl Lower {
         if self.is_sv_type(ty) {
             let named = matches!(ty.kind, t::TypeKind::Named(_));
             let t = self.data_type_req(ty)?;
-            let (kind, signed, range, packed) = t.decl_parts();
-            let type_param = t.param.clone();
+            let range_written = t.decl_parts().2.is_some() && !named;
             let ty = Rc::new(t);
             self.decl_type = Some(ty.clone());
             let netk = net.map(net_type).unwrap_or_default();
-            let range_written = range.is_some() && !named;
-            return Ok(Decl { dir, kind, net: netk, explicit_kind: true, real_net: false, strength, delay, signed, range, range_written, packed, type_param, ty: Some(ty), names: vec![], automatic: false, static_: false, line });
+            return Ok(Decl { dir, net: netk, explicit_kind: true, real_net: false, strength, delay, range_written, ty, names: vec![], automatic: false, static_: false, line });
         }
         let mut kind = NetKind::Wire;
         let mut explicit_kind = false;
@@ -878,14 +904,13 @@ impl Lower {
                         let integer = *k == t::IntKw::Integer;
                         let w = if integer { 31 } else { 63 };
                         let mut d = self.decl_head(dir, net, var, &t::DataType { kind: t::TypeKind::Implicit, signed: Some(ty.signed.unwrap_or(integer)), packed: vec![], loc: ty.loc }, None, None, loc)?;
-                        d.range = Some((ExprKind::Num(dec(w)).into(), ExprKind::Num(dec(0)).into()));
                         d.strength = strength;
                         d.delay = delay;
-                        let mut t = SvType::vector(NetKind::Wire, d.signed, vec![d.range.clone().unwrap()]);
+                        let mut t = SvType::vector(d.kind(), d.signed(), vec![(ExprKind::Num(dec(w)).into(), ExprKind::Num(dec(0)).into())]);
                         t.int_kind = true;
                         let t = Rc::new(t);
                         self.decl_type = Some(t.clone());
-                        d.ty = Some(t);
+                        d.ty = t;
                         return Ok(d);
                     }
                     _ => return self.unsupported(ty.loc, "a net of this data type (only 4-state types)"),
@@ -928,34 +953,19 @@ impl Lower {
         if kind == NetKind::Real && !ty.packed.is_empty() {
             return self.err(ty.loc, "a real type cannot have packed dimensions");
         }
-        let mut pd = self.packed_dims(&ty.packed, ty.loc)?.into_iter();
-        let range = pd.next();
-        let packed: Vec<Range> = pd.collect();
-        // the type (assignment patterns, $left & co.)
-        if !matches!(kind, NetKind::Real | NetKind::Event | NetKind::Genvar) {
-            let iw = match kind {
-                NetKind::Integer => Some(32),
-                NetKind::Int(n) => Some(n),
-                NetKind::Time => Some(64),
-                _ => None,
-            };
-            let mut t = SvType::vector(kind, signed, vec![]);
-            if let Some(w) = iw.filter(|_| range.is_none()) {
-                t.dims.push((ExprKind::Num(dec(w as u64 - 1)).into(), ExprKind::Num(dec(0)).into()));
-                t.int_kind = true;
-            }
-            t.dims.extend(range.iter().cloned());
-            t.dims.extend(packed.iter().cloned());
-            self.decl_type = Some(Rc::new(t));
+        let dims = self.packed_dims(&ty.packed, ty.loc)?;
+        let range_written = !dims.is_empty();
+        // the type (assignment patterns, $left & co.; none for a real or an event)
+        let mut t = Rc::new(SvType::flat(kind, signed, dims));
+        if !matches!(kind, NetKind::Real | NetKind::Event) {
+            self.decl_type = Some(t.clone());
         }
         // `var` without a type: a logic variable (not a net, also as a port)
         if var && kind == NetKind::Wire {
-            kind = NetKind::Reg;
+            Rc::make_mut(&mut t).kind = NetKind::Reg;
             explicit_kind = true;
         }
-        let ty = self.decl_type.clone();
-        let range_written = range.is_some();
-        Ok(Decl { dir, kind, net: netk, explicit_kind, real_net, strength, delay, signed, range, range_written, packed, type_param: None, ty, names: Vec::new(), automatic: false, static_: false, line })
+        Ok(Decl { dir, net: netk, explicit_kind, real_net, strength, delay, range_written, ty: t, names: Vec::new(), automatic: false, static_: false, line })
     }
 
     /// The declarators of a declaration (after `decl_head`).

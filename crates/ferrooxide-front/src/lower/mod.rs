@@ -616,22 +616,8 @@ impl Lower {
             let msb = ExprKind::Binary(BinOp::Sub, Box::new(ExprKind::SysCall("$bits".into(), vec![x.clone()]).into()), Box::new(one.into()));
             items.push(Item::Decl(Decl {
                 dir: Some(dir),
-                kind: NetKind::Wire,
-                net: NetType::Wire,
                 explicit_kind: false,
-                real_net: false,
-                strength: None,
-                delay: None,
-                signed: false,
-                range: Some((msb.into(), ExprKind::Num(crate::ast::dec(0)).into())),
-                range_written: false,
-                packed: vec![],
-                type_param: None,
-                ty: None,
-                names: vec![Declarator { name: pn.clone(), dims: vec![], heap: None, init: None, line }],
-                automatic: false,
-                static_: false,
-                line,
+                ..Decl::var(SvType::vector(NetKind::Wire, false, vec![(msb.into(), ExprKind::Num(crate::ast::dec(0)).into())]), vec![Declarator { name: pn.clone(), dims: vec![], heap: None, init: None, line }], false, line)
             }));
             let p: Expr = ExprKind::Ident(pn).into();
             let (lhs, rhs) = if dir == Dir::Input { (x, p) } else { (p, x) };
@@ -840,7 +826,7 @@ impl Lower {
                 Some(_) => return self.unsupported(loc, "this port direction in a primitive"),
             };
             let mut d = self.decl_head(dir, net, var, ty, None, None, loc)?;
-            if d.kind == NetKind::Reg {
+            if d.kind() == NetKind::Reg {
                 sequential = true;
             }
             let mut names = Vec::new();
@@ -851,7 +837,7 @@ impl Lower {
                 }
                 // `output reg q = 1'b0`: the initial value
                 if let Some(e) = &x.init {
-                    if d.kind != NetKind::Reg {
+                    if d.kind() != NetKind::Reg {
                         return self.err(x.loc, "an initial value needs an `output reg`");
                     }
                     let v = self.expr(e)?;
@@ -1320,23 +1306,18 @@ pub(crate) fn merge_port_types(decls: Vec<Decl>) -> (Vec<Decl>, Vec<(String, cra
                 let mut nd = d.clone();
                 nd.names = vec![x.clone()];
                 if let Some(t) = find(&x.name) {
-                    nd.kind = t.kind;
                     nd.net = t.net;
                     nd.explicit_kind = true;
-                    nd.signed |= t.signed;
-                    if t.range_written && d.range.is_none() && d.packed.is_empty() && matches!(d.kind, NetKind::Wire | NetKind::Reg) {
+                    if t.range_written && d.range().is_none() && d.packed().is_empty() && matches!(d.kind(), NetKind::Wire | NetKind::Reg) {
                         scalar_vec.push((x.name.clone(), t.line));
                     }
-                    if t.range.is_some() {
-                        nd.range = t.range.clone();
-                        nd.packed = t.packed.clone();
+                    // the port takes the type; a plain kind without a range keeps the port's
+                    let mut ty = (*t.ty).clone();
+                    if ty.dims.is_empty() && ty.fields.is_none() && ty.param.is_none() && matches!(ty.kind, NetKind::Wire | NetKind::Reg | NetKind::Bit) {
+                        ty.dims = d.ty.dims.clone();
                     }
-                    if t.type_param.is_some() {
-                        nd.type_param = t.type_param.clone();
-                    }
-                    if t.ty.is_some() {
-                        nd.ty = t.ty.clone();
-                    }
+                    ty.signed |= d.signed();
+                    nd.ty = Rc::new(ty);
                 }
                 out.push(nd);
             }

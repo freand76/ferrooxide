@@ -225,7 +225,7 @@ impl Lower {
                 d.names = self.declarators(&n.decls)?;
                 // (IEEE 1800-2017 6.7.1: a net holds a 4-state integral or real value, or an
                 // unpacked array or struct of them)
-                if d.ty.as_ref().is_some_and(|t| t.class.is_some() || t.heap.is_some()) || d.names.iter().any(|x| x.heap.is_some()) {
+                if (d.ty.class.is_some() || d.ty.heap.is_some()) || d.names.iter().any(|x| x.heap.is_some()) {
                     return self.err(n.loc, "a net cannot be of a class, dynamic array, queue or associative array type");
                 }
                 items.append(&mut self.pending);
@@ -263,25 +263,7 @@ impl Lower {
                     self.declare_var(&n, &[]);
                     names.push(Declarator { name: n, dims: vec![], heap: None, init: None, line: loc.line });
                 }
-                let d = Decl {
-                    dir: None,
-                    kind: NetKind::Genvar,
-                    net: NetType::Wire,
-                    explicit_kind: true,
-                    real_net: false,
-                    strength: None,
-                    delay: None,
-                    signed: false,
-                    range: None,
-                    range_written: false,
-                    packed: vec![],
-                    type_param: None,
-                    ty: None,
-                    names,
-                    automatic: false,
-                    static_: false,
-                    line,
-                };
+                let d = Decl::var(super::SvType::flat(NetKind::Genvar, false, vec![]), names, false, line);
                 items.append(&mut self.pending);
                 items.push(Item::Decl(d));
             }
@@ -587,7 +569,7 @@ impl Lower {
                     let implicit = t::DataType { kind: t::TypeKind::Implicit, signed: None, packed: vec![], loc: p.loc };
                     let mut d = self.decl_head(dir, None, p.var, p.ty.as_ref().unwrap_or(&implicit), None, None, p.loc)?;
                     if !d.explicit_kind {
-                        d.kind = NetKind::Reg;
+                        d.set_kind(NetKind::Reg);
                     }
                     cur = Some(d);
                 }
@@ -631,7 +613,7 @@ impl Lower {
             };
             let mut d = self.decl_head(dir, net, var, ty, None, None, loc)?;
             if !d.explicit_kind {
-                d.kind = NetKind::Reg;
+                d.set_kind(NetKind::Reg);
             }
             d.names = self.declarators(dl)?;
             // (`automatic` in a static subroutine: initialized at each call)

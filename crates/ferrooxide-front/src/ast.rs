@@ -120,7 +120,6 @@ pub enum HeapKind {
 #[derive(Debug, Clone)]
 pub struct Decl {
     pub dir: Option<Dir>,
-    pub kind: NetKind,
     /// the net type of a `NetKind::Wire` declaration
     pub net: NetType,
     /// true if the kind was given explicitly (e.g. `output reg`) vs. implied
@@ -131,17 +130,10 @@ pub struct Decl {
     pub strength: Option<(u8, u8)>,
     /// net delay (`wire #5 w = e;`)
     pub delay: Option<Expr>,
-    pub signed: bool,
-    pub range: Option<Range>,
     /// the range is written in the declaration (not that of a named type)
     pub range_written: bool,
-    /// further packed dimensions (`reg [3:0][7:0] x`: range [3:0], packed [[7:0]])
-    pub packed: Vec<Range>,
-    /// declared with a type parameter: its type (per instance) replaces kind, sign and ranges
-    pub type_param: Option<String>,
-    /// the declared data type, where there is one (struct members and assignment patterns are
-    /// resolved against it); kind, sign and ranges above are its flat form
-    pub ty: Option<std::rc::Rc<crate::lower::SvType>>,
+    /// the declared data type; kind, sign and ranges (`kind()` & co.) are its flat form
+    pub ty: std::rc::Rc<crate::lower::SvType>,
     pub names: Vec<Declarator>,
     /// declared `automatic` in a block: each activation (each instance of a fork branch) has
     /// its own copy
@@ -150,6 +142,54 @@ pub struct Decl {
     /// initializer applied once
     pub static_: bool,
     pub line: Line,
+}
+
+impl Decl {
+    /// A variable of type `ty` (declared by the lowering, not in the source).
+    pub fn var(ty: impl Into<std::rc::Rc<crate::lower::SvType>>, names: Vec<Declarator>, automatic: bool, line: Line) -> Decl {
+        Decl {
+            dir: None,
+            net: NetType::Wire,
+            explicit_kind: true,
+            real_net: false,
+            strength: None,
+            delay: None,
+            range_written: false,
+            ty: ty.into(),
+            names,
+            automatic,
+            static_: false,
+            line,
+        }
+    }
+
+    /// The kind (a struct type: a vector of `bit` or `logic`).
+    pub fn kind(&self) -> NetKind {
+        self.ty.decl_parts().0
+    }
+
+    pub fn set_kind(&mut self, k: NetKind) {
+        std::rc::Rc::make_mut(&mut self.ty).kind = k;
+    }
+
+    pub fn signed(&self) -> bool {
+        self.ty.signed
+    }
+
+    /// The first packed range (none for `int` & co.; a struct: its whole width).
+    pub fn range(&self) -> Option<Range> {
+        self.ty.decl_parts().2
+    }
+
+    /// Further packed dimensions (`reg [3:0][7:0] x`: range [3:0], packed [[7:0]]).
+    pub fn packed(&self) -> &[Range] {
+        self.ty.packed_rest()
+    }
+
+    /// Declared with a type parameter: its type (per instance) replaces kind, sign and ranges.
+    pub fn type_param(&self) -> Option<&str> {
+        self.ty.param.as_deref()
+    }
 }
 
 #[derive(Debug, Clone)]
