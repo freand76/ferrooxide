@@ -543,6 +543,28 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        // a net that takes one driver: a driver of the whole net is its only one (IEEE
+        // 1800-2017 6.6.2, 6.6.7)
+        if !self.nets.single.is_empty() {
+            for job in &jobs {
+                if let Job::Assign { lhs, scope, line, .. } | Job::PortOut { lhs, scope, line, .. } = job {
+                    let sym = match &lhs.kind {
+                        ExprKind::Ident(n) => self.lookup(n, *scope),
+                        ExprKind::Hier(p) => self.lookup_hier(p, *scope),
+                        _ => None,
+                    };
+                    if let Some(Sym::Sig(s)) = sym {
+                        let s = self.canon(s);
+                        if self.nets.single.iter().any(|&x| self.canon(x) == s) && count.get(&s).is_some_and(|&n| n > 1) {
+                            self.line = *line;
+                            self.file = self.scopes[*scope].file.clone();
+                            let n = self.sig(s).name.clone();
+                            return self.err(format!("net '{n}' takes only one driver (uwire, or a nettype without a resolution function) but has more"));
+                        }
+                    }
+                }
+            }
+        }
         for &(s, scope, line) in &whole {
             if count.get(&s).is_some_and(|&n| n > 1) {
                 self.line = line;
@@ -804,7 +826,10 @@ impl<'a> Compiler<'a> {
                     let name = self.scopes[*scope].name.clone();
                     self.begin_proc(name, ProcClass::Normal);
                     let st = Stmt::Assign { lhs: lhs.clone(), rhs: rhs.clone(), nonblocking: false, timing: None, line: *line };
-                    self.stmt(&st, *scope)?;
+                    self.code.init_write = true;
+                    let r = self.stmt(&st, *scope);
+                    self.code.init_write = false;
+                    r?;
                     self.emit(Instr::Halt);
                     self.end_proc();
                 }
@@ -813,6 +838,7 @@ impl<'a> Compiler<'a> {
                     self.file = self.scopes[*scope].file.clone();
                     self.check_enum_assign(lhs, rhs, *scope)?;
                     self.check_const_selects(lhs, *scope)?;
+                    self.check_const_var(lhs, *scope)?;
                     if delay.is_none() {
                         self.const_assign_init(lhs, rhs, *scope)?;
                     }

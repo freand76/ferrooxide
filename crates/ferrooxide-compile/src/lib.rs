@@ -221,6 +221,8 @@ pub(crate) struct Code<'a> {
     pub(crate) jobs: Vec<Job<'a>>,
     /// variables procedural assignments write (for the check against continuous ones)
     pub(crate) proc_writes: HashSet<u32>,
+    /// the assignment being compiled is a declaration's initializer (it may write a `const`)
+    pub(crate) init_write: bool,
     pub(crate) consts: HashMap<Const, u32>,
     pub(crate) pb: Vec<PState>,
     pub(crate) scratch_top: u32,
@@ -296,6 +298,11 @@ pub(crate) struct Nets {
     pub(crate) alias_vars: HashSet<u32>,
     /// nets of a special type (tri0, wand, ...): resolved even with one or no driver
     pub(crate) net_types: HashMap<u32, NetType>,
+    /// nets that take one driver only (`uwire`, a user-defined nettype without a resolution
+    /// function)
+    pub(crate) single: HashSet<u32>,
+    /// interconnect nets (only port connections use them)
+    pub(crate) interconnect: HashSet<u32>,
     /// nets with a pullup (true) or pulldown (false) gate
     pub(crate) pulls: HashMap<u32, Vec<(u32, u32, bool)>>,
     /// nets with several continuous drivers -> their driver signals
@@ -316,6 +323,8 @@ pub(crate) struct Sigs {
     pub(crate) sampled: HashMap<u32, u32>,
     /// unpacked array parameters: read-only arrays, constant in constant expressions
     pub(crate) const_arrays: HashSet<u32>,
+    /// `const` variables: only their initializers write them (IEEE 1800-2017 6.20.6)
+    pub(crate) konst: HashSet<u32>,
     /// 2-state variables (bit, int, byte, ...): stores turn x/z into 0, they start at 0
     pub(crate) two_state: HashSet<u32>,
     /// automatic variables (of automatic subroutines and automatic blocks)
@@ -974,6 +983,9 @@ impl<'a> Compiler<'a> {
         }
         if let Some(c) = self.const_str_cmp(e, sid) {
             return Ok(c);
+        }
+        if let Some(m) = self.type_cmp(e, sid)? {
+            return Ok(Const::from_i64(m as i64, 1, false));
         }
         if let ExprKind::Real(r) = &e.kind {
             return Ok(Const::from_i64(r.round() as i64, 64, false));

@@ -627,6 +627,13 @@ impl<'a> Compiler<'a> {
                                 self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
                             }
                         }
+                        if d.konst {
+                            for dl in &d.names {
+                                if let Some(Sym::Sig(s)) = self.scopes[b].syms.get(&dl.name) {
+                                    self.sigs.konst.insert(*s);
+                                }
+                            }
+                        }
                     }
                     b
                 } else {
@@ -846,6 +853,21 @@ impl<'a> Compiler<'a> {
                 } else {
                     let h = self.here();
                     self.patch(jz, h);
+                }
+            }
+            Stmt::Case { expr: Expr { kind: ExprKind::Type(t), .. }, arms, default, line, .. } => {
+                // a case on a type (IEEE 1800-2017 6.23): the arm is chosen here
+                self.line = *line;
+                for (labels, body) in arms {
+                    for l in labels {
+                        let ExprKind::Type(lt) = &l.kind else { return self.err("a case item of a case on a type must be a type") };
+                        if self.types_match(t, lt, sid)? {
+                            return self.stmt(body, sid);
+                        }
+                    }
+                }
+                if let Some(d) = default {
+                    self.stmt(d, sid)?;
                 }
             }
             Stmt::Case { kind, expr, arms, default, line } => {
@@ -1309,6 +1331,7 @@ impl<'a> Compiler<'a> {
             _ => None,
         };
         if let Some(Sym::Sig(s)) = sym {
+            self.check_konst(s)?;
             if self.sigs.const_arrays.contains(&s) {
                 let n = self.sig(s).name.rsplit('.').next().unwrap_or_default().to_string();
                 return self.err(format!("assignment to parameter '{n}'"));
@@ -1321,6 +1344,39 @@ impl<'a> Compiler<'a> {
             self.code.proc_writes.insert(c);
         }
         Ok(())
+    }
+
+    /// A write of signal `s` outside its initializer: an error for a `const` variable.
+    pub(crate) fn check_konst(&self, s: u32) -> R<()> {
+        if self.code.init_write || !self.sigs.konst.contains(&s) {
+            return Ok(());
+        }
+        let n = self.sig(s).name.rsplit('.').next().unwrap_or_default().to_string();
+        self.err(format!("assignment to const variable '{n}'"))
+    }
+
+    /// The `const` variables and interconnect nets among the targets of a continuous
+    /// assignment are an error.
+    pub(crate) fn check_const_var(&self, lhs: &Expr, sid: usize) -> R<()> {
+        let mut v = Vec::new();
+        self.lvalue_bases(lhs, sid, &mut v);
+        // (by its own name: a port connected to it is another name for it)
+        let mut b = lhs;
+        while let ExprKind::Index(a, _) | ExprKind::Range(a, ..) | ExprKind::IndexedRange(a, ..) = &b.kind {
+            b = a;
+        }
+        let parts: Vec<&Expr> = match &b.kind {
+            ExprKind::Concat(xs) => xs.iter().collect(),
+            _ => vec![b],
+        };
+        for x in parts {
+            if let (Some(s), ExprKind::Ident(n)) = (self.interconnect_of(x, sid), &x.kind) {
+                if self.sig(s).name == format!("{}.{n}", self.scopes[sid].name) {
+                    return self.err(format!("interconnect net '{n}' in a continuous assignment (only port connections may use it)"));
+                }
+            }
+        }
+        v.into_iter().try_for_each(|s| self.check_konst(s))
     }
 
     /// The name of an automatic variable `e` writes (`lvalue`) or reads, if any.
@@ -1417,6 +1473,22 @@ impl<'a> Compiler<'a> {
                 if name == "$fatal" {
                     self.emit(sys(SysTask::Finish { loc: String::new(), stop: false, fatal: true }));
                 }
+            }
+            "$cast" => {
+                let a: Vec<Expr> = args.iter().map(|x| x.clone().unwrap_or_else(|| ExprKind::Null.into())).collect();
+                let ok = self.dyn_cast(&a, sid)?;
+                // (as a task, a failed cast is a run-time error)
+                let fail = self.emit(Instr::Jz { c: ok, w: 1, to: 0 });
+                let skip = self.emit(Instr::Jmp { to: 0 });
+                let h = self.here();
+                self.patch(fail, h);
+                let msg = format!("ERROR: {}: $cast failed\n       Time: %0d  Scope: %m", self.loc().replace('%', "%%"));
+                let a = [Some(ExprKind::Str(msg).into()), Some(ExprKind::SysCall("$__ticks".into(), Vec::new()).into())];
+                let args = self.fmt_args(&a, sid)?;
+                let texp = self.texp(sid);
+                self.emit(sys(SysTask::Display { nl: true, args, scope, fd: None, prefix: "", texp, radix: 'd' }));
+                let h = self.here();
+                self.patch(skip, h);
             }
             "$__unhandled_case" | "$__unhandled_if" => {
                 let what = if name == "$__unhandled_if" {

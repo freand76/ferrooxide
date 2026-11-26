@@ -26,6 +26,8 @@ pub(crate) struct Lower {
     file: String,
     timescale: Option<(i32, i32)>,
     default_nettype: Option<String>,
+    /// user-defined nettypes: name -> (data type, has a resolution function)
+    nettypes: HashMap<String, (t::DataType, bool)>,
     unconnected_drive: Option<bool>,
     /// counter for names of unnamed instances (per file)
     unnamed: u32,
@@ -193,6 +195,7 @@ impl Lower {
             file: String::new(),
             timescale: None,
             default_nettype: None,
+            nettypes: HashMap::new(),
             unconnected_drive: None,
             unnamed: 0,
             types: HashMap::new(),

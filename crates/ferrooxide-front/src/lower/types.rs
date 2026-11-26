@@ -112,6 +112,12 @@ pub(crate) fn mul(a: Expr, b: Expr) -> Expr {
     bin(BinOp::Mul, a, b)
 }
 
+/// `real` (as a data type: 64 bits wide).
+pub(crate) fn real_type() -> SvType {
+    let (kind, signed, iw) = builtin("real").unwrap();
+    SvType { int_kind: true, ..SvType::vector(kind, signed, vec![(num(iw.unwrap() as i64 - 1), num(0))]) }
+}
+
 /// Number of elements of a dimension [a:b].
 pub(crate) fn dim_size(r: &Range) -> Expr {
     if let (Some(a), Some(b)) = (lit(&r.0), lit(&r.1)) {
@@ -415,7 +421,7 @@ impl Lower {
     /// The type is resolved through the type tables (struct, enum, a type name).
     fn is_sv_type(&self, ty: &t::DataType) -> bool {
         match &ty.kind {
-            t::TypeKind::Struct(_) | t::TypeKind::Enum(_) => true,
+            t::TypeKind::Struct(_) | t::TypeKind::Enum(_) | t::TypeKind::TypeOf(_) => true,
             t::TypeKind::Named(n) => n.scopes.is_empty() || n.scopes.len() == 1,
             _ => false,
         }
@@ -620,10 +626,7 @@ impl Lower {
                 if !ty.packed.is_empty() {
                     return self.err(ty.loc, "a real type cannot have packed dimensions");
                 }
-                let (kind, signed, iw) = builtin("real").unwrap();
-                let mut dims = vec![(num(iw.unwrap() as i64 - 1), num(0))];
-                dims.extend(self.packed_dims(&ty.packed, ty.loc)?);
-                Ok(Some(SvType { kind, signed, dims, fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, inner_heap: None, param: None, class: None }))
+                Ok(Some(real_type()))
             }
             t::TypeKind::Named(n) => {
                 // `C #(..)`: a specialization of a parameterized class
@@ -684,8 +687,85 @@ impl Lower {
                 }
                 Ok(Some(t))
             }
+            t::TypeKind::TypeOf(e) => {
+                if !ty.packed.is_empty() || ty.signed.is_some() {
+                    return self.unsupported(ty.loc, "packed dimensions or a signing after type()");
+                }
+                match &e.kind {
+                    t::ExprKind::Type(dt) => self.data_type(dt),
+                    _ => match self.expr_type(e)? {
+                        Some(t) => Ok(Some(t)),
+                        None => self.unsupported(e.loc, "type() of this expression"),
+                    },
+                }
+            }
             _ => Ok(None),
         }
+    }
+
+    /// The self-determined type of an expression for `type(e)` (IEEE 1800-2017 6.23, 11.6,
+    /// 11.8.1), for variables and the operators on them; None for anything else.
+    fn expr_type(&mut self, e: &t::Expr) -> Result<Option<SvType>> {
+        let real = real_type;
+        let is_real = |t: &SvType| t.kind == NetKind::Real;
+        let four = |t: &SvType| !matches!(t.kind, NetKind::Bit | NetKind::Int(_));
+        let bit1 = |four_state: bool| SvType::vector(if four_state { NetKind::Reg } else { NetKind::Bit }, false, vec![(num(0), num(0))]);
+        // an integral operand: its width, sign and state (no arrays, strings, handles)
+        let integral = |t: &SvType| {
+            t.unpacked.is_empty() && t.heap.is_none() && t.class.is_none() && t.param.is_none() && !matches!(t.kind, NetKind::String | NetKind::Event | NetKind::Class)
+        };
+        Ok(match &e.kind {
+            t::ExprKind::Ident(n) => match self.vars.get(n) {
+                Some((t, unpacked)) if unpacked.is_empty() => Some((**t).clone()),
+                _ => None,
+            },
+            t::ExprKind::Real(_) => Some(real()),
+            t::ExprKind::Unary(op, a) => {
+                let Some(ta) = self.expr_type(a)? else { return Ok(None) };
+                match op {
+                    t::UnOp::Plus | t::UnOp::Neg if is_real(&ta) => Some(real()),
+                    _ if !integral(&ta) || is_real(&ta) => None,
+                    t::UnOp::Plus | t::UnOp::Neg | t::UnOp::Not => Some(SvType::vector(if four(&ta) { NetKind::Reg } else { NetKind::Bit }, ta.signed, vec![(sub(ta.width(), num(1)), num(0))])),
+                    _ => Some(bit1(four(&ta))),
+                }
+            }
+            t::ExprKind::Binary(op, a, b) => {
+                let (Some(ta), Some(tb)) = (self.expr_type(a)?, self.expr_type(b)?) else { return Ok(None) };
+                use t::BinOp as B;
+                let arith = matches!(op, B::Add | B::Sub | B::Mul | B::Div | B::Mod | B::Pow);
+                let bitwise = matches!(op, B::And | B::Or | B::Xor | B::Xnor);
+                let shift = matches!(op, B::Shl | B::Shr | B::AShl | B::AShr);
+                let compare = matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge | B::LAnd | B::LOr | B::LImpl | B::LEquiv);
+                if (arith || compare) && (is_real(&ta) || is_real(&tb)) {
+                    if !(integral(&ta) || is_real(&ta)) || !(integral(&tb) || is_real(&tb)) || *op == B::Mod {
+                        return Ok(None);
+                    }
+                    return Ok(Some(if arith { real() } else { bit1(false) }));
+                }
+                if !integral(&ta) || !integral(&tb) || is_real(&ta) || is_real(&tb) {
+                    return Ok(None);
+                }
+                let fs = four(&ta) || four(&tb);
+                let kind = if fs { NetKind::Reg } else { NetKind::Bit };
+                if compare || matches!(op, B::CaseEq | B::CaseNe | B::WildEq | B::WildNe) {
+                    // (the case equalities give 0 or 1 only)
+                    Some(bit1(fs && !matches!(op, B::CaseEq | B::CaseNe)))
+                } else if shift || *op == B::Pow {
+                    // the left operand's size and sign
+                    Some(SvType::vector(if four(&ta) || four(&tb) { NetKind::Reg } else { NetKind::Bit }, ta.signed, vec![(sub(ta.width(), num(1)), num(0))]))
+                } else if arith || bitwise {
+                    let (wa, wb) = (ta.width(), tb.width());
+                    let w = match (lit(&wa), lit(&wb)) {
+                        (Some(x), Some(y)) => num(x.max(y)),
+                        _ => ExprKind::Cond(Box::new(ExprKind::Binary(BinOp::Ge, Box::new(wa.clone()), Box::new(wb.clone())).into()), Box::new(wa), Box::new(wb)).into(),
+                    };
+                    Some(SvType::vector(kind, ta.signed && tb.signed, vec![(sub(w, num(1)), num(0))]))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
     }
 
     /// A data type that must resolve.
@@ -909,14 +989,25 @@ impl Lower {
             let ty = Rc::new(t);
             self.decl_type = Some(ty.clone());
             let netk = net.map(net_type).unwrap_or_default();
-            return Ok(Decl { dir, net: netk, explicit_kind: true, real_net: false, strength, delay, range_written, ty, names: vec![], automatic: false, static_: false, line });
+            return Ok(Decl { dir, net: netk, explicit_kind: true, real_net: false, strength, delay, range_written, ty, names: vec![], automatic: false, static_: false, konst: false, single: false, interconnect: false, line });
         }
         let mut kind = NetKind::Wire;
         let mut explicit_kind = false;
         let mut real_net = false;
         let mut signed = false;
         let netk = match net {
-            Some(t::NetTypeKw::Interconnect) => return self.unsupported(loc, "an interconnect net"),
+            Some(t::NetTypeKw::Interconnect) => {
+                // (IEEE 1800-2017 6.6.8: a typeless net, only signing and packed dimensions)
+                if !matches!(ty.kind, t::TypeKind::Implicit) {
+                    return self.err(ty.loc, "an interconnect net takes no data type");
+                }
+                if strength.is_some() || delay.is_some() {
+                    return self.err(loc, "an interconnect net takes no strength or delay");
+                }
+                let mut d = self.decl_head(dir, Some(t::NetTypeKw::Wire), var, ty, None, None, loc)?;
+                d.interconnect = true;
+                return Ok(d);
+            }
             Some(n) => {
                 explicit_kind = true;
                 match &ty.kind {
@@ -981,17 +1072,19 @@ impl Lower {
         }
         let dims = self.packed_dims(&ty.packed, ty.loc)?;
         let range_written = !dims.is_empty();
-        // the type (assignment patterns, $left & co.; none for a real or an event)
+        // the type (assignment patterns, $left & co., type(); none for an event)
         let mut t = Rc::new(SvType::flat(kind, signed, dims));
-        if !matches!(kind, NetKind::Real | NetKind::Event) {
-            self.decl_type = Some(t.clone());
+        match kind {
+            NetKind::Event => {}
+            NetKind::Real => self.decl_type = Some(Rc::new(real_type())),
+            _ => self.decl_type = Some(t.clone()),
         }
         // `var` without a type: a logic variable (not a net, also as a port)
         if var && kind == NetKind::Wire {
             Rc::make_mut(&mut t).kind = NetKind::Reg;
             explicit_kind = true;
         }
-        Ok(Decl { dir, net: netk, explicit_kind, real_net, strength, delay, range_written, ty: t, names: Vec::new(), automatic: false, static_: false, line })
+        Ok(Decl { dir, net: netk, explicit_kind, real_net, strength, delay, range_written, ty: t, names: Vec::new(), automatic: false, static_: false, konst: false, single: false, interconnect: false, line })
     }
 
     /// The declarators of a declaration (after `decl_head`).

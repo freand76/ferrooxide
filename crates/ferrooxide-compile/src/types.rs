@@ -157,6 +157,7 @@ impl<'a> Compiler<'a> {
         let v = Type::vec;
         Ok(match &e.kind {
             ExprKind::Type(_) => return self.err("a data type is not a value"),
+            ExprKind::Binary(_, a, b) if matches!((&a.kind, &b.kind), (ExprKind::Type(_), ExprKind::Type(_))) => v(1, false),
             ExprKind::ClassMember { class, name } => return self.err(format!("'{class}::{name}' is not a value here")),
             ExprKind::Randomize { .. } => Type::vec(32, true),
             ExprKind::Stream { items, .. } => {
@@ -339,7 +340,7 @@ impl<'a> Compiler<'a> {
                 "$__pattern" => return self.err("an assignment pattern needs a known target type here"),
                 "$__str" => self.type_of(&args[0], sid)?.as_vec(),
                 "$fopen" => v(32, false),
-                "$test$plusargs" | "$value$plusargs" => v(32, true),
+                "$test$plusargs" | "$value$plusargs" | "$cast" => v(32, true),
                 "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
                     v(32, true)
                 }
@@ -1063,4 +1064,58 @@ fn same_packed(a: &Packed, b: &Packed) -> bool {
             (Some(x), Some(y)) => Rc::ptr_eq(x, y),
             _ => false,
         }
+}
+
+impl<'a> Compiler<'a> {
+    /// `type(a) == type(b)` & co. (IEEE 1800-2017 6.23): whether the types match (6.22.1);
+    /// None if `e` is no comparison of two types.
+    pub(crate) fn type_cmp(&mut self, e: &Expr, sid: usize) -> R<Option<bool>> {
+        let ExprKind::Binary(op, a, b) = &e.kind else { return Ok(None) };
+        let (ExprKind::Type(x), ExprKind::Type(y)) = (&a.kind, &b.kind) else { return Ok(None) };
+        let eq = match op {
+            BinOp::Eq | BinOp::CaseEq => true,
+            BinOp::Ne | BinOp::CaseNe => false,
+            _ => return self.err("types can only be compared with ==, !=, === and !=="),
+        };
+        Ok(Some(self.types_match(x, y, sid)? == eq))
+    }
+
+    /// Whether two data types match (IEEE 1800-2017 6.22.1): the same built-in type, packed
+    /// and unpacked dimensions and signing, or the same enum, struct or class.
+    pub(crate) fn types_match(&mut self, x: &SvType, y: &SvType, sid: usize) -> R<bool> {
+        // (a type parameter: its type; enums and structs are told apart by their declaration)
+        let base = |c: &Self, t: &SvType| -> Option<Rc<SvType>> {
+            match t.param.as_ref().map(|p| c.lookup(p, sid)) {
+                Some(Some(Sym::Type(b))) => Some(b),
+                _ => None,
+            }
+        };
+        let (bx, by) = (base(self, x), base(self, y));
+        let (ix, iy) = (bx.as_deref().unwrap_or(x), by.as_deref().unwrap_or(y));
+        let same_rc = |a: &Option<Rc<Vec<String>>>, b: &Option<Rc<Vec<String>>>| match (a, b) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        let same_struct = match (&ix.fields, &iy.fields) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_rc(&ix.enum_names, &iy.enum_names) || !same_struct || ix.class != iy.class {
+            return Ok(false);
+        }
+        let (rx, ry) = (self.resolve_type(x, sid)?, self.resolve_type(y, sid)?);
+        let norm = |k: NetKind| if k == NetKind::Wire { NetKind::Reg } else { k };
+        if rx.heap.is_some() || ry.heap.is_some() {
+            return self.err("matching of queue, dynamic or associative array types is not supported");
+        }
+        if norm(rx.kind) != norm(ry.kind) || rx.signed != ry.signed || rx.int_kind != ry.int_kind {
+            return Ok(false);
+        }
+        let dims = |c: &mut Self, t: &SvType| -> R<Vec<(i64, i64)>> {
+            t.dims.iter().chain(&t.unpacked).map(|(a, b)| Ok((c.const_int(a, sid)?, c.const_int(b, sid)?))).collect()
+        };
+        Ok(dims(self, &rx)? == dims(self, &ry)? && rx.dims.len() == ry.dims.len())
+    }
 }

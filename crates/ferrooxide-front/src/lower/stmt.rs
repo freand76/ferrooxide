@@ -173,9 +173,6 @@ impl Lower {
         for it in v {
             let (net, var, ty, dl, strength, delay, loc) = match it {
                 t::Item::Var(v) => {
-                    if v.const_ {
-                        return self.unsupported(v.loc, "a const variable");
-                    }
                     (None, v.var, &v.ty, &v.decls, None, None, v.loc)
                 }
                 t::Item::Net(n) if n.user.is_none() => (n.net, false, &n.ty, &n.decls, n.strength.as_ref(), n.delay.as_ref(), n.loc),
@@ -194,6 +191,7 @@ impl Lower {
             d.names = self.declarators(dl)?;
             d.automatic = matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
             d.static_ = self.in_subroutine && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Static));
+            d.konst = matches!(it, t::Item::Var(v) if v.const_);
             decls.push(d);
         }
         Ok((decls, params))

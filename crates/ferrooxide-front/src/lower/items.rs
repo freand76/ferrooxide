@@ -10,6 +10,20 @@ use crate::syntax::tree as t;
 use crate::Result;
 
 impl Lower {
+    /// A net of user-defined nettype `u` (IEEE 1800-2017 6.6.7): a net of its data type; one
+    /// without a resolution function takes one driver only.
+    fn nettype_net(&mut self, u: &t::Name, strength: Option<&t::Strength>, delay: Option<&t::Delay>, loc: t::Loc) -> Result<Decl> {
+        let Some((ty, resolve)) = self.nettypes.get(&u.name).cloned().filter(|_| u.scopes.is_empty()) else {
+            return self.unsupported(loc, "a net of a nettype from another scope");
+        };
+        if resolve {
+            return self.unsupported(loc, "a net of a nettype with a resolution function");
+        }
+        let mut d = self.decl_head(None, Some(t::NetTypeKw::Wire), false, &ty, strength, delay, loc)?;
+        d.single = true;
+        Ok(d)
+    }
+
     /// A list of items in source order (`rest` of each is what follows it in the scope).
     pub(crate) fn item_list(&mut self, v: &[&t::Item], out: &mut Vec<Item>) -> Result<()> {
         for (k, it) in v.iter().enumerate() {
@@ -234,11 +248,29 @@ impl Lower {
                 }
             }
             t::Item::Specify(v, _) => self.specify(v, items)?,
-            t::Item::Net(n) => {
-                if n.user.is_some() || n.net.is_none() {
-                    return self.unsupported(n.loc, "a net of a user-defined nettype");
+            t::Item::Nettype { ty, name, resolve, loc } => {
+                // (IEEE 1800-2017 6.6.7: the data type of a net is 4-state integral or real,
+                // or an unpacked array or struct of them)
+                if resolve.is_none() {
+                    self.decl_head(None, Some(t::NetTypeKw::Wire), false, ty, None, None, *loc)?;
                 }
-                let mut d = self.decl_head(None, n.net, false, &n.ty, n.strength.as_ref(), n.delay.as_ref(), n.loc)?;
+                self.nettypes.insert(name.clone(), (ty.clone(), resolve.is_some()));
+            }
+            t::Item::Net(n) => {
+                let mut d = match (&n.user, n.net) {
+                    (Some(u), None) => {
+                        if !matches!(n.ty.kind, t::TypeKind::Implicit) || !n.ty.packed.is_empty() {
+                            return self.err(n.loc, "a net of a user-defined nettype takes no data type of its own");
+                        }
+                        self.nettype_net(u, n.strength.as_ref(), n.delay.as_ref(), n.loc)?
+                    }
+                    (None, Some(k)) => {
+                        let mut d = self.decl_head(None, n.net, false, &n.ty, n.strength.as_ref(), n.delay.as_ref(), n.loc)?;
+                        d.single = k == t::NetTypeKw::Uwire;
+                        d
+                    }
+                    _ => return self.unsupported(n.loc, "this net declaration"),
+                };
                 d.names = self.declarators(&n.decls)?;
                 // (IEEE 1800-2017 6.7.1: a net holds a 4-state integral or real value, or an
                 // unpacked array or struct of them)
@@ -248,10 +280,15 @@ impl Lower {
                 items.append(&mut self.pending);
                 items.push(Item::Decl(d));
             }
+            // a net of a user-defined nettype (`my_net x;` reads as a variable of a type name)
+            t::Item::Var(v) if !v.var && !v.const_ && v.lifetime.is_none() && matches!(&v.ty.kind, t::TypeKind::Named(n) if n.scopes.is_empty() && v.ty.packed.is_empty() && self.nettypes.contains_key(&n.name)) => {
+                let t::TypeKind::Named(u) = &v.ty.kind else { unreachable!() };
+                let mut d = self.nettype_net(u, None, None, v.loc)?;
+                d.names = self.declarators(&v.decls)?;
+                items.append(&mut self.pending);
+                items.push(Item::Decl(d));
+            }
             t::Item::Var(v) => {
-                if v.const_ {
-                    return self.unsupported(v.loc, "a const variable");
-                }
                 if v.lifetime == Some(t::Lifetime::Automatic) {
                     return self.unsupported(v.loc, "an automatic variable declaration");
                 }
@@ -259,6 +296,7 @@ impl Lower {
                     return self.unsupported(v.loc, "a declaration without a data type");
                 }
                 let mut d = self.decl_head(None, None, v.var, &v.ty, None, None, v.loc)?;
+                d.konst = v.const_;
                 d.names = self.declarators(&v.decls)?;
                 items.append(&mut self.pending);
                 items.push(Item::Decl(d));
@@ -592,9 +630,6 @@ impl Lower {
             let (dir, net, var, ty, dl, loc) = match it {
                 t::Item::Port(p) => (Some(self.dir(p.dir, p.loc)?), p.net, p.var, &p.ty, &p.decls, p.loc),
                 t::Item::Var(v) => {
-                    if v.const_ {
-                        return self.unsupported(v.loc, "a const variable");
-                    }
                     match v.lifetime {
                         Some(t::Lifetime::Static) if automatic => {
                             return self.unsupported(v.loc, "a static variable in an automatic subroutine")
@@ -627,6 +662,7 @@ impl Lower {
             d.names = self.declarators(dl)?;
             // (`automatic` in a static subroutine: initialized at each call)
             d.automatic = !automatic && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
+            d.konst = matches!(it, t::Item::Var(v) if v.const_);
             decls.push(d);
         }
         let mut stmts = Vec::new();

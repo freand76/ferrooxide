@@ -145,6 +145,13 @@ pub struct Decl {
     /// declared `static` in a block of a subroutine: one variable for all calls, its
     /// initializer applied once
     pub static_: bool,
+    /// a `const` variable: only its initializer writes it
+    pub konst: bool,
+    /// a net that takes one driver only (`uwire`, a user-defined nettype without a resolution
+    /// function)
+    pub single: bool,
+    /// an `interconnect` net: only port connections use it
+    pub interconnect: bool,
     pub line: Line,
 }
 
@@ -163,6 +170,9 @@ impl Decl {
             names,
             automatic,
             static_: false,
+            konst: false,
+            single: false,
+            interconnect: false,
             line,
         }
     }

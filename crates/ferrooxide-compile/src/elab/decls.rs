@@ -30,6 +30,12 @@ struct Merged<'d> {
     scalar_port: bool,
     /// the line of a declaration without a direction that has a range
     vec_line: Option<u32>,
+    /// a `const` variable
+    konst: bool,
+    /// a net that takes one driver only
+    single: bool,
+    /// an interconnect net
+    interconnect: bool,
 }
 
 /// The evaluated shape of a declared signal.
@@ -82,7 +88,19 @@ impl<'a> Compiler<'a> {
             if let Some(d) = mg.dir {
                 port_dirs.insert(name.clone(), d);
             }
-            self.declare(name, mg, sid, module_level, port_conns, parent_scope)?;
+            let (konst, single, ic) = (mg.konst, mg.single, mg.interconnect);
+            self.declare(name.clone(), mg, sid, module_level, port_conns, parent_scope)?;
+            if let Some(&Sym::Sig(s)) = self.scopes[sid].syms.get(&name) {
+                if konst {
+                    self.sigs.konst.insert(s);
+                }
+                if single {
+                    self.nets.single.insert(s);
+                }
+                if ic {
+                    self.nets.interconnect.insert(s);
+                }
+            }
         }
         Ok(port_dirs)
     }
@@ -114,6 +132,8 @@ impl<'a> Compiler<'a> {
                                 mg.net = d.net;
                             }
                             mg.real_net |= d.real_net;
+                            mg.single |= d.single;
+                            mg.interconnect |= d.interconnect;
                             if d.strength.is_some() {
                                 mg.strength = d.strength;
                             }
@@ -163,6 +183,9 @@ impl<'a> Compiler<'a> {
                                     line: dl.line,
                                     scalar_port,
                                     vec_line,
+                                    konst: d.konst,
+                                    single: d.single,
+                                    interconnect: d.interconnect,
                                 },
                             );
                         }
@@ -416,6 +439,15 @@ impl<'a> Compiler<'a> {
     #[allow(clippy::too_many_arguments)]
     fn declare_port(&mut self, name: String, full: String, mg: Merged<'a>, sh: Shape, dir: Dir, conn: &Expr, ps: usize, sid: usize) -> R<()> {
         let Shape { msb, lsb, width, signed, depth, arr_lo, desc, mut pk, md, kind, is_real, is_event: _, layout } = sh;
+        // an interconnect net takes the type of the ports it connects (IEEE 1800-2017 6.6.8);
+        // here it is a net of its own width: the ports must be 4-state vectors of that width
+        if let Some(s) = self.interconnect_of(conn, ps) {
+            let si = self.sig(s);
+            if is_real || depth > 0 || pk.is_some() || md.is_some() || si.width != width || !matches!(mg.kind, NetKind::Wire | NetKind::Reg | NetKind::Integer | NetKind::Time) {
+                let n = si.name.rsplit('.').next().unwrap_or_default().to_string();
+                return self.err(format!("interconnect net '{n}' connected to port '{name}' of another type or width is not supported"));
+            }
+        }
         let mut aliased = None;
         if depth == 0 {
             if let ExprKind::Ident(pn) = &conn.kind {
@@ -686,5 +718,23 @@ impl<'a> Compiler<'a> {
             self.nets.net_types.insert(s, net);
         }
         Ok(s)
+    }
+}
+
+impl<'a> Compiler<'a> {
+    /// The interconnect net `e` names, if any.
+    pub(crate) fn interconnect_of(&self, e: &Expr, sid: usize) -> Option<u32> {
+        if self.nets.interconnect.is_empty() {
+            return None;
+        }
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid),
+            ExprKind::Hier(p) => self.lookup_hier(p, sid),
+            _ => None,
+        };
+        match sym {
+            Some(Sym::Sig(s)) if self.nets.interconnect.contains(&s) => Some(s),
+            _ => None,
+        }
     }
 }

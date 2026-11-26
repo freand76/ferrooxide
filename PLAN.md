@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4763 of 5112 (93.2%); all of chapter 5. Baseline in
+- sv-tests: 4771 of 5112 (93.3%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -96,45 +96,42 @@ first, time-0 processes by scope, `always_comb` after all others at time 0 (9.2.
   requirements in a scratch venv).
 
 ## Next (in priority order)
-UVM must run eventually (item 6): new work keeps it possible. In particular, class
+UVM must run eventually (item 5): new work keeps it possible. In particular, class
 features must work per specialization and for classes declared later, and the event/wait
 machinery must not assume static targets only (A3).
 
-1. **sv-tests chapter 6** (7 tests): `const` variables (6.20.6), `$cast` as a function
-   (6.24.2), the `type()` operator (6.23, 2), user-defined `nettype` with resolution functions
-   (6.6.7, 2), `interconnect` nets (6.6.8).
-2. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 21, 16: ~29,
+1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 21, 16: ~29,
    11: 16, 8: 12, 20: 12): interface classes (21), `$dist_*` (16), randsequence (12), global
    clocking and `_gclk` functions (11), tagged unions (10), assignments in expressions (8),
    arrays assigned from arrays of another shape (6), extern/pure constraints (5), whole
    unpacked array equality (3), real casts (3), streams of dynamic arrays and `with` (3).
    DPI (9) needs a C interface: last.
-3. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
+2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
    patterns also lack); enum methods of a call's result (`p.status().name()`).
-4. **sv-tests invalid code** (16 accepted that must fail): see the ACCEPT lines of the
+3. **sv-tests invalid code** (16 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
-5. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
+4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
    reference, `process::suspend`/`resume`, recursion from fork branches, waits on run-time
    targets (`@(obj.ev)`, `vif.clk`), events as class properties, VPI callbacks and MCP
    conditional breakpoints. The gate for UVM.
-6. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`; after A3). Stops at
+5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`; after A3). Stops at
    `uvm_objection.svh:792` (`->m_events[m_top].all_dropped`): events as class properties;
    `uvm_event` and the phases need them too. Then fix the blockers one at a time, each with
    a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
-7. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
+6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
-8. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
+7. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
    needs it.
-9. **Debug front ends**: report the Surfer bugs upstream; MCP over HTTP, MCP history queries,
+8. **Debug front ends**: report the Surfer bugs upstream; MCP over HTTP, MCP history queries,
    CDSP arrays, port directions and diagnostics; interactive watch/conditional breakpoints.
-10. **Performance** (one instructions check after runtime changes; deeper work when speed
-    matters again): `notify` (largest item), a timing wheel for `Sim::future`, wide ops that
-    leave the JIT, inline resolution of multi-driver nets, the A3 instance checks.
-11. **Outputs and Verilog-2005 rest**: FST, VCD of arrays, `$dumpvars` arguments; VPI (A4),
+9. **Performance** (one instructions check after runtime changes; deeper work when speed
+   matters again): `notify` (largest item), a timing wheel for `Sim::future`, wide ops that
+   leave the JIT, inline resolution of multi-driver nets, the A3 instance checks.
+10. **Outputs and Verilog-2005 rest**: FST, VCD of arrays, `$dumpvars` arguments; VPI (A4),
     configurations and libraries, timing checks, SDF.
-12. **Multi-threading** (A5): last; pays off only on large designs.
+11. **Multi-threading** (A5): last; pays off only on large designs.
 
 ## Architecture changes ahead
 - **A3. Real calls, dynamic waiters.** Process instances are done. Left: subroutines that are
@@ -233,7 +230,9 @@ SystemVerilog data and testbench:
 - assignments to properties of a package's class handle (`P::c.x = 1`); `import` in
   subroutines and in blocks of a package that exports names.
 - `.triggered` only on events declared in a module; `iff` only on a whole event control.
-- nets of 2-state types (`wire int`).
+- nets of 2-state types (`wire int`); nets of a nettype with a resolution function, nettypes
+  from packages; interconnect nets connect only 4-state ports of their own width.
+- `type(e)` of expressions other than variables and operators on them.
 - assertions: inside procedures, local variables of sequences and properties, match items,
   `first_match`, `nexttime`/`always`/`eventually`/`until`/`accept_on` & co., `#-#`/`#=#`,
   `case` properties, strong sequences, several clocks, `.triggered`/`.matched` of sequences,

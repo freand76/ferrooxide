@@ -311,6 +311,11 @@ fn const_lit(c: &Const) -> Expr {
 }
 
 impl<'a> Compiler<'a> {
+    /// The values of enum `id`'s constants.
+    pub(crate) fn enum_values(&self, id: u32) -> Vec<Const> {
+        self.enums.values.get(&id).map(|v| v.iter().map(|x| x.0.clone()).collect()).unwrap_or_default()
+    }
+
     /// The enum of variable `e` (none for anything else).
     pub(crate) fn var_enum(&self, e: &Expr, sid: usize) -> Option<u32> {
         let sym = match &e.kind {

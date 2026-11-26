@@ -407,6 +407,7 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::IndexedRange(a, b, c, _) => self.is_const(a, sid) && self.is_const(b, sid) && self.is_const(c, sid),
             ExprKind::Unary(_, a) => self.is_const(a, sid),
+            ExprKind::Binary(_, a, b) if matches!((&a.kind, &b.kind), (ExprKind::Type(_), ExprKind::Type(_))) => true,
             ExprKind::Binary(_, a, b) => self.is_const(a, sid) && self.is_const(b, sid),
             ExprKind::Concat(v) => v.iter().all(|x| self.is_const(x, sid)),
             ExprKind::Stream { items, .. } => items.iter().all(|x| self.is_const(x, sid)),
@@ -640,6 +641,9 @@ impl<'a> Compiler<'a> {
                 let c = self.read_const(slot, w, s);
                 return Ok(self.const_slot(&c));
             }
+        }
+        if let Some(m) = self.type_cmp(e, sid)? {
+            return Ok(self.const_slot(&Const::from_i64(m as i64, 1, false).resize(w, false)));
         }
         match &e.kind {
             ExprKind::Type(_) => self.err("a data type is not a value"),
@@ -1511,6 +1515,10 @@ impl<'a> Compiler<'a> {
                 self.patch(jz, h);
                 Ok(self.resize(d, 1, w, false))
             }
+            "$cast" => {
+                let ok = self.dyn_cast(args, sid)?;
+                Ok(self.resize(ok, 1, w, false))
+            }
             "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
                 let d = self.file_read(name, args, sid)?;
                 Ok(self.resize(d, 32, w, true))
@@ -1534,6 +1542,73 @@ impl<'a> Compiler<'a> {
             }
             _ => self.err(format!("unsupported system function '{name}'")),
         }
+    }
+
+    /// `$cast(dest, src)` (IEEE 1800-2017 6.24.2, 8.16): assigns src to dest when the value
+    /// fits dest's type — an enum target takes only the values of its constants, a class
+    /// handle only null or an object of its class or a derived one; any other target takes
+    /// src converted as by a cast. The slot of the 1-bit outcome (dest is unchanged on 0).
+    pub(crate) fn dyn_cast(&mut self, args: &[Expr], sid: usize) -> R<u32> {
+        let [dest, src] = args else { return self.err("$cast needs a destination and a source") };
+        let one = self.const_slot(&Const::from_i64(1, 1, false));
+        let ty = self.type_of(dest, sid)?;
+        // the outcome, and the value to store (none: assign src as a whole)
+        let (ok, v) = if let Type::Class(c) = ty {
+            let Type::Class(x) = self.type_of(src, sid)? else {
+                return self.err("$cast of a value that is not an object to a class handle");
+            };
+            if x == NONE || self.derives(x, c) {
+                (one, None)
+            } else {
+                // a downcast: the object's class at run time is c or one derived from it
+                let h = self.handle_value(src, sid)?;
+                let cls = self.tmp(32);
+                self.emit(Instr::Obj { op: rt::ObjOp::Class, d: cls, a: h, b: NONE, off: 0, w: 0 });
+                let mut any = self.tmp(1);
+                let null = self.const_slot(&Const::from_i64(u32::MAX as i64, 32, false));
+                self.emit(Instr::Cmp { op: rt::CmpOp::Eq, d: any, a: cls, b: null, w: 32 });
+                for d in 0..self.classes.list.len() as u32 {
+                    if self.derives(d, c) {
+                        let k = self.const_slot(&Const::from_i64(d as i64, 32, false));
+                        let e = self.tmp(1);
+                        self.emit(Instr::Cmp { op: rt::CmpOp::Eq, d: e, a: cls, b: k, w: 32 });
+                        let o = self.tmp(1);
+                        self.emit(Instr::Bin { op: rt::BinOp::Or, d: o, a: any, b: e, w: 1 });
+                        any = o;
+                    }
+                }
+                (any, Some((h, 64)))
+            }
+        } else if let crate::enums::EnumOf::Id(id) = self.enum_of(dest, sid)? {
+            let vals = self.enum_values(id);
+            let w = ty.width();
+            let v = self.value_for(src, sid, w, ty, None)?;
+            let mut any = self.tmp(1);
+            let zero = self.const_slot(&Const::zero(1));
+            self.emit(Instr::Copy { d: any, s: zero, w: 1 });
+            for k in vals {
+                let k = self.const_slot(&k.resize(w, false));
+                let e = self.tmp(1);
+                self.emit(Instr::Cmp { op: rt::CmpOp::CaseEq, d: e, a: v, b: k, w });
+                let o = self.tmp(1);
+                self.emit(Instr::Bin { op: rt::BinOp::Or, d: o, a: any, b: e, w: 1 });
+                any = o;
+            }
+            (any, Some((v, w)))
+        } else {
+            (one, None)
+        };
+        let skip = self.emit(Instr::Jz { c: ok, w: 1, to: 0 });
+        match v {
+            Some((v, w)) => self.store_value(&stmt::Lhs::Expr(dest, sid), v, w, rt::StoreMode::Blocking)?,
+            None => {
+                let st = Stmt::Assign { lhs: dest.clone(), rhs: src.clone(), nonblocking: false, timing: None, line: self.line };
+                self.stmt(&st, sid)?;
+            }
+        }
+        let h = self.here();
+        self.patch(skip, h);
+        Ok(ok)
     }
 
     // ------------------------------------------------------------------ functions & tasks
@@ -1674,6 +1749,13 @@ impl<'a> Compiler<'a> {
                     // (automatic ones get it on each call, `auto_inits`)
                     let real = d.kind() == NetKind::Real;
                     self.decl_init(init, sg, SigKind::Reg, d.kind(), real, depth, w, None, None, &dl.name, fs)?;
+                }
+            }
+            if d.konst {
+                for dl in &d.names {
+                    if let Some(Sym::Sig(s)) = self.scopes[fs].syms.get(&dl.name) {
+                        self.sigs.konst.insert(*s);
+                    }
                 }
             }
         }
@@ -1990,7 +2072,10 @@ impl<'a> Compiler<'a> {
             for n in &d.names {
                 if let Some(init) = &n.init {
                     let st = Stmt::Assign { lhs: ExprKind::Ident(n.name.clone()).into(), rhs: init.clone(), nonblocking: false, timing: None, line: n.line };
-                    self.stmt(&st, fscope)?;
+                    self.code.init_write = true;
+                    let r = self.stmt(&st, fscope);
+                    self.code.init_write = false;
+                    r?;
                 }
             }
         }
