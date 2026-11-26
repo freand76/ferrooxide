@@ -568,6 +568,47 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// `$sampled(e)` outside a concurrent assertion (an action block, procedural code): `e`
+    /// reading the values of the signals in the Preponed region of the time step (IEEE
+    /// 1800-2017 16.9.3). None for any other expression.
+    pub(crate) fn sampled_call(&mut self, e: &Expr, sid: usize) -> R<Option<Expr>> {
+        let ExprKind::SysCall(f, args) = &e.kind else { return Ok(None) };
+        if f != "$sampled" {
+            return Ok(None);
+        }
+        let [x] = args.as_slice() else { return self.err("$sampled takes one argument") };
+        Ok(Some(self.sampled_plain(x, sid)?))
+    }
+
+    fn sampled_plain(&mut self, e: &Expr, sid: usize) -> R<Expr> {
+        let sym = match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid),
+            ExprKind::Hier(p) => self.lookup_hier(p, sid),
+            ExprKind::SysCall(f, _) if matches!(f.as_str(), "$past" | "$rose" | "$fell" | "$stable" | "$changed" | "$sampled") => {
+                return self.unsupported(&format!("{f} inside $sampled outside a concurrent assertion"));
+            }
+            ExprKind::Call(..) | ExprKind::MethodCall(..) => return self.unsupported("$sampled of a function call outside a concurrent assertion"),
+            _ => None,
+        };
+        if let Some(Sym::Sig(s)) = sym {
+            return Ok(Expr::new(ExprKind::Ident(self.sample_sig(s, sid)?), e.line));
+        }
+        let mut out = e.clone();
+        let mut err = None;
+        out.for_each_child_mut(&mut |c| {
+            if err.is_none() {
+                match self.sampled_plain(c, sid) {
+                    Ok(x) => *c = x,
+                    Err(x) => err = Some(x),
+                }
+            }
+        });
+        match err {
+            Some(x) => Err(x),
+            None => Ok(out),
+        }
+    }
+
     /// The sampled copy of signal `s`, by its name in scope `sid` (`$smp<s>`).
     fn sample_sig(&mut self, s: u32, sid: usize) -> R<String> {
         let name = format!("$smp{s}");

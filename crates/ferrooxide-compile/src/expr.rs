@@ -606,6 +606,9 @@ impl<'a> Compiler<'a> {
         if let Some(x) = self.typename_str(e, sid)? {
             return self.expr(&x, sid, w, s);
         }
+        if let Some(x) = self.sampled_call(e, sid)? {
+            return self.expr(&x, sid, w, s);
+        }
         // a property of an object, a method's result, null
         if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_)) {
             if let Some((v, t)) = self.obj_value(e, sid)? {
@@ -2507,6 +2510,9 @@ impl<'a> Compiler<'a> {
     fn rexpr_here(&mut self, e: &Expr, sid: usize) -> R<u32> {
         if let Some(n) = self.md_norm(e, sid) {
             return self.rexpr(&n, sid);
+        }
+        if let Some(x) = self.sampled_call(e, sid)? {
+            return self.rexpr(&x, sid);
         }
         if let ExprKind::IncDec { prefix, inc, e: t } = &e.kind {
             if self.type_of(t, sid)?.is_real() {
