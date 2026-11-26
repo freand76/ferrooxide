@@ -57,7 +57,20 @@ impl Lower {
             let with = match with_ {
                 None => None,
                 Some(t::With::Constraint(None, items)) => Some(self.constraint_items(items)?),
-                Some(t::With::Constraint(Some(_), _)) => return self.unsupported(loc, "a randomize() with an identifier list"),
+                // `with (a, b) {...}`: only the names listed are the object's, the others the
+                // caller's (IEEE 1800-2017 18.7.1)
+                Some(t::With::Constraint(Some(list), items)) => {
+                    if let Some((o, names)) = self.with_obj.clone() {
+                        if let Some(n) = list.iter().find(|n| !names.props.contains(*n) && !names.methods.contains(*n)) {
+                            return self.err(loc, format!("'{n}' in the identifier list of randomize() is not a member of class '{}'", names.name));
+                        }
+                        let mut only = (*names).clone();
+                        only.props.retain(|n| list.contains(n));
+                        only.methods.retain(|n| list.contains(n));
+                        self.with_obj = Some((o, std::rc::Rc::new(only)));
+                    }
+                    Some(self.constraint_items(items)?)
+                }
                 Some(t::With::Expr(_)) => return self.err(loc, "randomize() takes constraints with `with { ... }`"),
             };
             Ok((vars, with))

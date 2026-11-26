@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4825 of 5112 (94.4%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4827 of 5112 (94.4%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
