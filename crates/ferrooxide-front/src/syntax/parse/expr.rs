@@ -744,7 +744,16 @@ impl Parser {
             _ => return self.err(format!("bad delay value {}", self.describe())),
         };
         self.bump();
-        Ok(Expr::new(k, loc))
+        let mut e = Expr::new(k, loc);
+        // a hierarchical name or a member, `#cfg.delay` (as `#(cfg.delay)`)
+        if matches!(e.kind, ExprKind::Ident(_)) {
+            while self.is_p(".") && self.is_ident_at(1) {
+                self.bump();
+                let m = self.ident()?;
+                e = Expr::new(ExprKind::Member(Box::new(e), m), loc);
+            }
+        }
+        Ok(e)
     }
 
     /// `{...}`: concatenation, replication, streaming, or the empty queue `{}`.

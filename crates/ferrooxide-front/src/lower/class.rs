@@ -130,6 +130,18 @@ impl Lower {
             let spec = self.new_spec(&full, &n.name, names, args, loc)?;
             return Ok(t::Name { scopes: vec![], name: spec, params: None, loc: n.loc });
         }
+        // `P::C #(..)::x`: of a specialization of package P's class C
+        if let [p, s, more @ ..] = n.scopes.as_slice() {
+            if let (None, Some(args), true) = (&p.params, &s.params, more.iter().all(|m| m.params.is_none())) {
+                if let Some(names) = self.packages.get(&p.name).and_then(|k| k.classes.get(&s.name)).cloned() {
+                    self.use_package(&p.name);
+                    let spec = self.new_spec(&format!("{}::{}", p.name, s.name), &s.name, names, args, loc)?;
+                    let mut scopes = vec![t::NamePart { name: spec, params: None }];
+                    scopes.extend(more.iter().cloned());
+                    return Ok(t::Name { scopes, name: n.name.clone(), params: None, loc: n.loc });
+                }
+            }
+        }
         // `C #(..)::x`, `C #(..)::T::x`
         if let Some((s, more)) = n.scopes.split_first() {
             if let (Some(args), true) = (&s.params, more.iter().all(|m| m.params.is_none())) {

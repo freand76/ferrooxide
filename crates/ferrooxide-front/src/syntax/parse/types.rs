@@ -111,6 +111,12 @@ impl Parser {
         self.is_type_start_at(0)
     }
 
+    /// After a class's type `C::T` ending before `k`: `C::T::U v` (a type of T's class, which
+    /// is unknown here) is a type when a declared name follows, `C::T::f(a)` an expression.
+    fn type_tail_at(&self, k: usize) -> bool {
+        !self.is_p_at(k, "::") || (self.is_ident_at(k + 1) && self.is_plain_ident_at(k + 2))
+    }
+
     pub(crate) fn is_type_start_at(&self, k: usize) -> bool {
         match self.peek_at(k) {
             T::Kw(Kw::Virtual) => true,
@@ -122,7 +128,7 @@ impl Parser {
                     // static property)
                     if self.is_p_at(k + 1, "::") {
                         if let (Some(c), T::Ident(t)) = (self.classes.get(n.as_str()), self.peek_at(k + 2)) {
-                            return c.contains(t.as_str());
+                            return c.contains(t.as_str()) && self.type_tail_at(k + 3);
                         }
                         // `T::x` through a typedef or type parameter (its class unknown
                         // here): a type when a declared name follows (`T::U v`), else an
@@ -136,7 +142,7 @@ impl Parser {
                     if self.is_p_at(k + 1, "#") {
                         if let Some(j) = self.after_parens(k + 2).filter(|&j| self.is_p_at(k + 2, "(") && self.is_p_at(j, "::")) {
                             // `C #(...)::T x`: a type only if T is one of class C's types
-                            return matches!((self.classes.get(n.as_str()), self.peek_at(j + 1)), (Some(c), T::Ident(t)) if c.contains(t.as_str()));
+                            return matches!((self.classes.get(n.as_str()), self.peek_at(j + 1)), (Some(c), T::Ident(t)) if c.contains(t.as_str())) && self.type_tail_at(j + 2);
                         }
                         return self.classes.contains_key(n.as_str());
                     }
@@ -146,7 +152,16 @@ impl Parser {
                 if self.is_p_at(k + 1, "::") {
                     if let T::Ident(t) = self.peek_at(k + 2) {
                         if self.is_package(n) {
-                            return self.package_type(n, t) && !self.is_p_at(k + 3, "'");
+                            if !self.package_type(n, t) || self.is_p_at(k + 3, "'") {
+                                return false;
+                            }
+                            // `p::C #(...)::x`, `p::C::x`: a type only if x is one of class
+                            // C's types (`p::C #(...)::f()` is an expression)
+                            let j = if self.is_p_at(k + 3, "#") && self.is_p_at(k + 4, "(") { self.after_parens(k + 4) } else { Some(k + 3) };
+                            if let Some(j) = j.filter(|&j| self.is_p_at(j, "::")) {
+                                return matches!((self.classes.get(t.as_str()), self.peek_at(j + 1)), (Some(c), T::Ident(x)) if c.contains(x.as_str())) && self.type_tail_at(j + 2);
+                            }
+                            return true;
                         }
                     }
                 }

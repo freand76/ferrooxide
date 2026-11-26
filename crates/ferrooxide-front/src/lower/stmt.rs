@@ -544,9 +544,21 @@ impl Lower {
             t::ExprKind::Call { func, .. } => func,
             _ => e,
         };
-        // (also of a class declared later, `typedef class C;`, and through a type parameter)
-        matches!(&f.kind, t::ExprKind::Scoped(n) if n.scopes.len() == 1 && (self.classes.contains_key(&n.scopes[0].name)
-            || (!self.packages.contains_key(&n.scopes[0].name) && self.types.get(&n.scopes[0].name).is_some_and(|t| t.class.is_some() || t.param.is_some()))))
+        // (also of a class declared later, `typedef class C;`, through a type parameter, and
+        // through a typedef of a class in a class, `C::T::m(..)`)
+        let t::ExprKind::Scoped(n) = &f.kind else { return false };
+        match n.scopes.as_slice() {
+            [c] => {
+                self.classes.contains_key(&c.name)
+                    || (!self.packages.contains_key(&c.name) && self.types.get(&c.name).is_some_and(|t| t.class.is_some() || t.param.is_some()))
+            }
+            [c, d] => {
+                (c.params.is_none() && d.params.is_none() && self.classes.get(&c.name).is_some_and(|cn| cn.types.get(&d.name).is_some_and(|t| t.class.is_some())))
+                    // `P::C #(..)::m(..)`: a specialization of package P's class C
+                    || (c.params.is_none() && d.params.is_some() && self.packages.get(&c.name).is_some_and(|k| k.classes.contains_key(&d.name)))
+            }
+            _ => false,
+        }
     }
 
     /// A method call of an element of an array of queues, dynamic or associative arrays

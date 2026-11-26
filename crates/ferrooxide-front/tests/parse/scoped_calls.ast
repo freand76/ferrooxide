@@ -1,0 +1,39 @@
+module m ();
+  // imports P, $unit
+  int(32) signed q;
+  class Cfg cfg;
+  initial begin
+    D#1::set(1);
+    E::reg_t::bump(5);
+    #(cfg.offset)
+      ;
+  end
+  // specialization D#1 = P::D #(type(int(32) signed))
+endmodule
+package P ();
+  class D;
+    // parameter port
+    parameter type T = int(32) signed;
+    // static
+    function automatic int(0) set;
+      input reg type T a;
+      begin
+      end
+    endfunction
+  endclass
+endpackage
+package $unit ();
+  class R;
+    // static
+    function automatic int(0) bump;
+      input int(32) signed a;
+      begin
+      end
+    endfunction
+  endclass
+  class E;
+  endclass
+  class Cfg;
+    int(32) signed offset = 7;
+  endclass
+endpackage
