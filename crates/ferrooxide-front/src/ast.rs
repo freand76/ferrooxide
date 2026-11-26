@@ -498,7 +498,7 @@ pub struct ClassDecl {
     pub abstract_: bool,
     /// properties and methods declared `local` (true) or `protected` (false)
     pub hidden: Vec<(String, bool)>,
-    /// the `rand` properties (`randc`: true)
+    /// the `rand` properties (`randc`: true); a static one by its variable's name (`C$p`)
     pub rand: Vec<(String, bool)>,
     /// constraint blocks (IEEE 1800-2017 18.5); in their expressions the class's properties
     /// are reached through `this`

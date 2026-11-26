@@ -61,12 +61,13 @@ impl Lower {
                 // caller's (IEEE 1800-2017 18.7.1)
                 Some(t::With::Constraint(Some(list), items)) => {
                     if let Some((o, names)) = self.with_obj.clone() {
-                        if let Some(n) = list.iter().find(|n| !names.props.contains(*n) && !names.methods.contains(*n)) {
+                        if let Some(n) = list.iter().find(|n| !names.props.contains(*n) && !names.methods.contains(*n) && !names.statics.contains_key(*n)) {
                             return self.err(loc, format!("'{n}' in the identifier list of randomize() is not a member of class '{}'", names.name));
                         }
                         let mut only = (*names).clone();
                         only.props.retain(|n| list.contains(n));
                         only.methods.retain(|n| list.contains(n));
+                        only.statics.retain(|n, _| list.contains(n));
                         self.with_obj = Some((o, std::rc::Rc::new(only)));
                     }
                     Some(self.constraint_items(items)?)

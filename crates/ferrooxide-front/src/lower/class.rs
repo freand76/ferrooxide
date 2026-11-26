@@ -382,10 +382,12 @@ impl Lower {
                 self.own_name(&mut own, &n.name, n.line, &name)?;
             }
             if let Some(cyclic) = rand {
-                if is_static {
-                    return self.unsupported(v.loc, "a static rand property");
+                if is_static && c.params.is_some() {
+                    return self.unsupported(v.loc, "a static rand property of a parameterized class");
                 }
-                rands.extend(d.names.iter().map(|n| (n.name.clone(), cyclic)));
+                // (a static one by the name of its variable, `C$p`)
+                let var = |n: &str| if is_static { format!("{name}${n}") } else { n.to_string() };
+                rands.extend(d.names.iter().map(|n| (var(&n.name), cyclic)));
             }
             if is_static {
                 if c.params.is_some() {

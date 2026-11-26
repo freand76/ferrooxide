@@ -208,10 +208,14 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::Copy { d: ts, s: h, w: 64 });
         }
         // the random variables: the rand properties, or those `randomize(v)` names
+        // (with the scope of the class that declares each, for a static one)
         let mut names: Vec<(String, bool)> = Vec::new();
+        let mut owner_scope: Vec<usize> = Vec::new();
         if vars.is_empty() {
             for &c in &chain {
-                names.extend(self.classes.list[c as usize].decl.rand.iter().cloned());
+                let ci = &self.classes.list[c as usize];
+                names.extend(ci.decl.rand.iter().cloned());
+                owner_scope.resize(names.len(), ci.init_scope);
             }
         } else {
             for v in vars {
@@ -225,9 +229,22 @@ impl<'a> Compiler<'a> {
         let this_k = |p: &str| key(&Expr::from(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), p.into())));
         let obj_k = |p: &str| obj.map(|o| key(&Expr::from(ExprKind::Member(Box::new(o.clone()), p.into()))));
         let mut rv = Vec::new();
-        for (n, cyclic) in &names {
+        for (k, (n, cyclic)) in names.iter().enumerate() {
             if *cyclic {
                 return self.err(format!("randc property '{n}': randc is not supported"));
+            }
+            // a static rand property (IEEE 1800-2017 18.4): its variable `C$p`, shared by the
+            // objects of the class; constraints name it so
+            if let (Some(&psid), Some((_, p))) = (owner_scope.get(k), n.split_once('$')) {
+                let e = Expr::from(ExprKind::Ident(n.clone()));
+                let (w, signed) = match self.type_of(&e, psid)? {
+                    Type::Vec { w, signed } => (w, signed),
+                    _ => return self.err(format!("rand property '{p}': only integral properties can be random (others are not supported)")),
+                };
+                let mut k = vec![key(&e), this_k(p)];
+                k.extend(obj_k(p));
+                rv.push(RVar { names: k, w, signed, home: Home::Var { e, sid: psid } });
+                continue;
             }
             let Some(p) = props.iter().rev().find(|p| &p.name == n) else {
                 return self.err(format!("'{n}' is not a property of the object"));

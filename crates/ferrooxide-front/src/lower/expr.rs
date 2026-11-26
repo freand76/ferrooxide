@@ -784,6 +784,11 @@ impl Lower {
                 v.extend(ops.iter().cloned());
                 return self.class_chain(o, &v, lvalue);
             }
+            // a static property: its variable
+            if let Some(var) = names.statics.get(n).filter(|_| !self.wild.locals.iter().any(|l| l == n)) {
+                let var: Expr = ExprKind::Ident(var.clone()).into();
+                return if ops.iter().any(|o| matches!(o, Op::Member(..))) { self.members(var, ops) } else { self.selects(var, ops) };
+            }
         }
         // a formal argument of a named sequence or property: the actual one, lowered where
         // the instance is
