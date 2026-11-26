@@ -39,6 +39,11 @@ pub(crate) struct ClassNames {
     /// a parameterized class (not a specialization of one): outside the class, `C::x`
     /// needs parameter values (`C #(..)::x`)
     pub parameterized: bool,
+    /// an interface class
+    pub interface: bool,
+    /// the types, parameters and constants of the class (also inherited ones) -> the class
+    /// declaring them (name conflicts of interface classes, IEEE 1800-2017 8.26.6)
+    pub origins: HashMap<String, String>,
 }
 
 impl Lower {
@@ -189,14 +194,8 @@ impl Lower {
 
     fn class_decl_body(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
         let line = c.loc.line;
-        if c.interface {
-            return self.unsupported(c.loc, "an interface class");
-        }
-        if !c.implements.is_empty() {
-            return self.unsupported(c.loc, "implements");
-        }
         let name = self.name(&c.name, c.loc);
-        let mut names = ClassNames { name: name.clone(), ..Default::default() };
+        let mut names = ClassNames { name: name.clone(), interface: c.interface, ..Default::default() };
         // the class is a type from here on (also inside itself)
         self.types.insert(name.clone(), Self::class_type(&name));
         // (the class's parameters and typedefs, and those of its base class, stay inside)
@@ -216,36 +215,61 @@ impl Lower {
                     Item::TypeParam { name: n, line, .. } => self.own_name(&mut own, n, *line, &name)?,
                     _ => {}
                 }
+                if let Item::Param(ParamDecl { name: n, .. }) | Item::TypeParam { name: n, .. } = p {
+                    names.origins.insert(n.clone(), name.clone());
+                }
             }
         }
+        // the interface classes it implements; those an interface class extends
+        // (IEEE 1800-2017 8.26)
+        let mut iface_refs: Vec<&t::Name> = Vec::new();
+        if c.interface {
+            iface_refs.extend(c.extends.iter().map(|e| &e.0));
+            if c.extends.as_ref().is_some_and(|e| e.1.is_some()) {
+                return self.err(c.loc, "an interface class takes no constructor arguments");
+            }
+        }
+        iface_refs.extend(c.implements.iter());
+        let mut interfaces = Vec::new();
+        // (a type, parameter or constant name -> the class declaring it, from one interface)
+        let mut inherited: HashMap<String, (String, String)> = HashMap::new();
+        let mut conflicts: Vec<(String, String, String)> = Vec::new();
+        for n in iface_refs {
+            let (b, bname) = self.class_ref(n, c.loc, "interface class")?;
+            if !b.interface {
+                let what = if c.interface { "extends" } else { "implements" };
+                return self.err(c.loc, format!("class '{name}' {what} '{}', which is not an interface class", n.name));
+            }
+            if c.interface {
+                names.methods.extend(b.methods.iter().cloned());
+                for (k, o) in &b.origins {
+                    match inherited.get(k) {
+                        Some((o2, from)) if o2 != o => conflicts.push((k.clone(), from.clone(), bname.clone())),
+                        _ => {
+                            inherited.insert(k.clone(), (o.clone(), bname.clone()));
+                        }
+                    }
+                }
+                names.types.extend(b.types.iter().map(|(k, v)| (k.clone(), v.clone())));
+                names.consts.extend(b.consts.iter().cloned());
+            } else {
+                // (an abstract class may leave methods to a derived class)
+                names.methods.extend(b.methods.iter().cloned());
+            }
+            interfaces.push(bname);
+        }
+        for (k, (o, _)) in inherited {
+            names.origins.entry(k).or_insert(o);
+        }
         // (after the parameter ports: `extends B #(T)` may use them)
-        let (base, base_args) = match &c.extends {
+        let (base, base_args) = match c.extends.as_ref().filter(|_| !c.interface) {
             None => (None, None),
             Some((n, args)) => {
-                // `extends B #(..)`: a specialization (in the class's scope)
-                let n = &self.despec(n, c.loc)?;
-                if n.scopes.len() > 1 {
-                    return self.unsupported(c.loc, "this base class");
+                let (b, bname) = self.class_ref(n, c.loc, "base class")?;
+                if b.interface {
+                    return self.err(c.loc, format!("class '{name}' extends interface class '{}' (a class implements it)", n.name));
                 }
-                // `extends P::B`: a class of package P (named `P::B` for the compiler)
-                let (b, bname) = match n.scopes.first() {
-                    Some(s) => {
-                        let Some(b) = self.packages.get(&s.name).and_then(|p| p.classes.get(&n.name)).cloned() else {
-                            return self.err(c.loc, format!("unknown base class '{}::{}'", s.name, n.name));
-                        };
-                        self.use_package(&s.name);
-                        (b, format!("{}::{}", s.name, n.name))
-                    }
-                    None => {
-                        let Some(b) = self.classes.get(&n.name).cloned() else {
-                            if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) {
-                                return self.unsupported(c.loc, "a base class declared after the class");
-                            }
-                            return self.err(c.loc, format!("unknown base class '{}'", n.name));
-                        };
-                        (b, n.name.clone())
-                    }
-                };
+                names.origins.extend(b.origins.iter().map(|(k, v)| (k.clone(), v.clone())));
                 names.props.extend(b.props.iter().cloned());
                 names.methods.extend(b.methods.iter().cloned());
                 names.static_methods.extend(b.static_methods.iter().cloned());
@@ -298,6 +322,7 @@ impl Lower {
                     match x {
                         Item::Param(p) => {
                             self.own_name(&mut own, &p.name, p.line, &name)?;
+                            names.origins.insert(p.name.clone(), name.clone());
                             consts.push(p)
                         }
                         _ => return self.unsupported(super::item_loc(i), &format!("{} in a class", super::item_what(i))),
@@ -305,6 +330,7 @@ impl Lower {
                 }
                 if let t::Item::Typedef(t::Typedef::Type { name: n, loc, .. }) = i {
                     self.own_name(&mut own, n, loc.line, &name)?;
+                    names.origins.insert(n.clone(), name.clone());
                 }
                 for (k, t) in &self.types {
                     if before.get(k).is_none_or(|o| !Rc::ptr_eq(o, t)) {
@@ -314,6 +340,9 @@ impl Lower {
                 continue;
             }
             let t::ClassItem::Property { quals, decl } = it else { continue };
+            if c.interface {
+                return self.err(super::item_loc(decl), format!("interface class '{name}' cannot have properties"));
+            }
             let is_static = quals.contains(&Kw::Static);
             let rand = quals.iter().find(|q| matches!(q, Kw::Rand | Kw::Randc)).map(|q| *q == Kw::Randc);
             let t::Item::Var(v) = decl else {
@@ -365,11 +394,22 @@ impl Lower {
             }
             props.push(d);
         }
+        // a name two interfaces give differently needs a declaration of the class's own
+        if let Some((k, a, b)) = conflicts.iter().find(|x| !own.contains(&x.0)) {
+            return self.err(c.loc, format!("'{k}' of interface classes '{a}' and '{b}' conflict; interface class '{name}' must declare its own '{k}'"));
+        }
         let mut virtuals = Vec::new();
         let mut static_methods = Vec::new();
+        let mut pures = Vec::new();
         for it in &c.items {
             if let t::ClassItem::Method(m) = it {
                 let n = &m.name.name;
+                if c.interface && !(m.quals.contains(&Kw::Pure) && m.quals.contains(&Kw::Virtual)) {
+                    return self.err(m.loc, format!("method '{n}' of interface class '{name}' must be pure virtual"));
+                }
+                if m.quals.contains(&Kw::Pure) {
+                    pures.push(n.clone());
+                }
                 self.own_name(&mut own, n, m.loc.line, &name)?;
                 names.methods.insert(n.clone());
                 if let Some(l) = vis(&m.quals) {
@@ -422,7 +462,7 @@ impl Lower {
                     } else if m.quals.contains(&Kw::Pure) {
                         // a pure virtual method: never called (the class is abstract, a
                         // derived class overrides it); an empty body
-                        if !m.quals.contains(&Kw::Virtual) || !c.virtual_ {
+                        if !m.quals.contains(&Kw::Virtual) || !(c.virtual_ || c.interface) {
                             return self.err(m.loc, format!("pure method '{}' must be virtual, in a virtual class", m.name.name));
                         }
                         let mut s = (**m).clone();
@@ -456,6 +496,9 @@ impl Lower {
                     this_stmt(&mut f.body, &names, &mut locals);
                     methods.push(f);
                 }
+                t::ClassItem::Constraint(k) if c.interface => {
+                    return self.err(k.loc, format!("interface class '{name}' cannot have constraints"));
+                }
                 t::ClassItem::Constraint(k) => {
                     let mut k = self.constraint_decl(k)?;
                     self.own_name(&mut own_c, &k.name, k.line, &name)?;
@@ -481,7 +524,60 @@ impl Lower {
         self.class_statics = statics.into_iter().map(Item::Decl).collect();
         let mut class_types: Vec<_> = names.types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         class_types.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(ClassDecl { name, params, specs: vec![], base, base_args, props, static_props, types: class_types, consts, methods, virtuals, statics: static_methods, abstract_: c.virtual_, hidden, rand: rands, constraints, line })
+        Ok(ClassDecl {
+            name,
+            params,
+            specs: vec![],
+            base,
+            base_args,
+            interface: c.interface,
+            interfaces,
+            props,
+            static_props,
+            types: class_types,
+            consts,
+            methods,
+            virtuals,
+            pures,
+            statics: static_methods,
+            abstract_: c.virtual_ || c.interface,
+            hidden,
+            rand: rands,
+            constraints,
+            line,
+        })
+    }
+
+    /// The class `n` names (`B`, `B #(..)`, `P::B`) as a base or interface class: its names
+    /// and its name for the compiler.
+    fn class_ref(&mut self, n: &t::Name, loc: t::Loc, what: &str) -> Result<(Rc<ClassNames>, String)> {
+        // `B #(..)`: a specialization (in the class's scope)
+        let n = &self.despec(n, loc)?;
+        if n.scopes.len() > 1 {
+            return self.unsupported(loc, &format!("this {what}"));
+        }
+        // `P::B`: a class of package P (named `P::B` for the compiler)
+        match n.scopes.first() {
+            Some(s) => {
+                let Some(b) = self.packages.get(&s.name).and_then(|p| p.classes.get(&n.name)).cloned() else {
+                    return self.err(loc, format!("unknown {what} '{}::{}'", s.name, n.name));
+                };
+                self.use_package(&s.name);
+                Ok((b, format!("{}::{}", s.name, n.name)))
+            }
+            None => {
+                let Some(b) = self.classes.get(&n.name).cloned().filter(|b| !(b.later && what == "interface class")) else {
+                    if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) {
+                        if what == "interface class" {
+                            return self.err(loc, format!("interface class '{}' is used before its declaration", n.name));
+                        }
+                        return self.unsupported(loc, "a base class declared after the class");
+                    }
+                    return self.err(loc, format!("unknown {what} '{}'", n.name));
+                };
+                Ok((b, n.name.clone()))
+            }
+        }
     }
 
     /// An extern method (IEEE 1800-2017 8.24): the prototype `m` with its body from the

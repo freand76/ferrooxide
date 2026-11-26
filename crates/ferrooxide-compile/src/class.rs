@@ -15,6 +15,8 @@ pub(crate) struct ClassInfo<'a> {
     pub name: String,
     pub decl: &'a ClassDecl,
     pub base: Option<u32>,
+    /// the interface classes it implements (of an interface class: extends)
+    pub ifaces: Vec<u32>,
     /// the scope methods are compiled in (its parent is the scope declaring the class)
     pub scope: usize,
     /// properties with those of the base classes first
@@ -88,7 +90,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn reserve_class(&mut self, c: &'a ClassDecl, name: &str, sid: usize) -> u32 {
         let id = self.classes.list.len() as u32;
         self.classes.decl_scope.insert(id, sid);
-        self.classes.list.push(ClassInfo { name: name.to_string(), decl: c, base: None, scope: UNDECLARED, props: vec![], init_scope: 0, init_this: 0 });
+        self.classes.list.push(ClassInfo { name: name.to_string(), decl: c, base: None, ifaces: vec![], scope: UNDECLARED, props: vec![], init_scope: 0, init_this: 0 });
         self.prog.classes.push(rt::ClassDef { name: name.to_string(), width: 0, init: vec![] });
         id
     }
@@ -123,6 +125,16 @@ impl<'a> Compiler<'a> {
             },
             None => None,
         };
+        let mut ifaces = Vec::new();
+        for i in &c.interfaces {
+            match self.find_class(i, scope) {
+                None => return self.err(format!("unknown interface class '{i}'")),
+                Some(x) if self.classes.list[x as usize].scope == UNDECLARED => {
+                    return self.err(format!("interface class '{i}' is used before its declaration"))
+                }
+                Some(x) => ifaces.push(x),
+            }
+        }
         // parameters and enum constants: the base class's (unless the class has its own of
         // that name), then its own (in its scope, where the methods find them first); `C::P`
         // reaches them like a package's
@@ -210,7 +222,8 @@ impl<'a> Compiler<'a> {
         self.prog.names.pop();
         self.sigs.types[init_this as usize] = Type::Class(id);
         self.scopes[init_scope].syms.insert("this".into(), Sym::Sig(init_this));
-        self.classes.list[id as usize] = ClassInfo { name: name.to_string(), decl: c, base, scope, props, init_scope, init_this };
+        self.classes.list[id as usize] = ClassInfo { name: name.to_string(), decl: c, base, ifaces: ifaces.clone(), scope, props, init_scope, init_this };
+        self.check_interfaces(id)?;
         self.classes.by_name.insert((sid, name.to_string()), id);
         self.classes.of_scope.insert(scope, id);
         for (n, _) in self.classes.pending_names.iter().filter(|(_, c)| *c == id) {
@@ -491,14 +504,29 @@ impl<'a> Compiler<'a> {
     }
 
     /// A method of class `c` or of a base class: (method, the class declaring it).
-    pub(crate) fn find_method(&self, mut c: u32, name: &str) -> Option<(&'a SubroutineDecl, u32)> {
-        loop {
-            let ci = &self.classes.list[c as usize];
+    pub(crate) fn find_method(&self, c: u32, name: &str) -> Option<(&'a SubroutineDecl, u32)> {
+        let mut x = Some(c);
+        while let Some(k) = x {
+            let ci = &self.classes.list[k as usize];
             if let Some(f) = ci.decl.methods.iter().find(|f| f.name == name) {
-                return Some((f, c));
+                return Some((f, k));
             }
-            c = ci.base?;
+            x = ci.base;
         }
+        // (a method an abstract class leaves to a derived class: its interface's prototype)
+        let mut x = Some(c);
+        while let Some(k) = x {
+            let ci = &self.classes.list[k as usize];
+            for &i in &ci.ifaces {
+                let mut v = Vec::new();
+                self.iface_methods(i, &mut v);
+                if let Some(&m) = v.iter().find(|(f, _)| f.name == name) {
+                    return Some(m);
+                }
+            }
+            x = ci.base;
+        }
+        None
     }
 
     /// A parameter or enum constant `name` of class `c` (or of a base class).
@@ -805,24 +833,119 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Class `c` is `base` or derives from it.
-    pub(crate) fn derives(&self, mut c: u32, base: u32) -> bool {
-        loop {
-            if c == base {
-                return true;
-            }
-            match self.classes.list[c as usize].base {
-                Some(b) => c = b,
-                None => return false,
+    /// Class `c` is `base` or derives from it, or implements interface class `base`.
+    pub(crate) fn derives(&self, c: u32, base: u32) -> bool {
+        if c == base {
+            return true;
+        }
+        let ci = &self.classes.list[c as usize];
+        ci.base.is_some_and(|b| self.derives(b, base)) || ci.ifaces.iter().any(|&i| self.derives(i, base))
+    }
+
+    /// The methods of interface class `i` and of those it extends: (method, the interface
+    /// class declaring it), the first of each name.
+    fn iface_methods(&self, i: u32, out: &mut Vec<(&'a SubroutineDecl, u32)>) {
+        let ci = &self.classes.list[i as usize];
+        for f in &ci.decl.methods {
+            if !out.iter().any(|(g, _)| g.name == f.name) {
+                out.push((f, i));
             }
         }
+        for &j in &ci.ifaces {
+            self.iface_methods(j, out);
+        }
+    }
+
+    /// The rules of interface classes (IEEE 1800-2017 8.26) for class `c`, just declared:
+    /// an interface class inherits a method name from one interface class only, unless it
+    /// declares its own; a class implements each method of its interface classes (an
+    /// abstract one may leave them to a derived class), with the prototype's signature.
+    fn check_interfaces(&mut self, c: u32) -> R<()> {
+        let ci = &self.classes.list[c as usize];
+        if ci.ifaces.is_empty() {
+            return Ok(());
+        }
+        let (decl, ifaces, cname) = (ci.decl, ci.ifaces.clone(), ci.name.clone());
+        let mut all: Vec<(&'a SubroutineDecl, u32)> = Vec::new();
+        for &i in &ifaces {
+            let mut v = Vec::new();
+            self.iface_methods(i, &mut v);
+            for (f, owner) in v {
+                if decl.interface && !decl.methods.iter().any(|g| g.name == f.name) {
+                    if let Some(&(_, o2)) = all.iter().find(|(g, o)| g.name == f.name && *o != owner) {
+                        let (a, b) = (&self.classes.list[o2 as usize].name, &self.classes.list[owner as usize].name);
+                        return self.err(format!("interface class '{cname}' inherits method '{}' from both '{a}' and '{b}'; it must declare its own", f.name));
+                    }
+                }
+                all.push((f, owner));
+            }
+        }
+        if decl.interface {
+            return Ok(());
+        }
+        for (proto, owner) in all {
+            let iname = self.classes.list[owner as usize].name.clone();
+            // the implementation: in the class or a base class (not a pure one)
+            let mut x = Some(c);
+            let mut found = None;
+            while let Some(k) = x {
+                let ki = &self.classes.list[k as usize];
+                if let Some(f) = ki.decl.methods.iter().find(|f| f.name == proto.name) {
+                    found = Some((f, k, ki.decl.pures.contains(&f.name)));
+                    break;
+                }
+                x = ki.base;
+            }
+            match found {
+                None | Some((_, _, true)) if !decl.abstract_ => {
+                    return self.err(format!("class '{cname}' does not implement method '{}' of interface class '{iname}'", proto.name));
+                }
+                Some((f, k, _)) => {
+                    let ks = self.classes.list[k as usize].scope;
+                    let os = self.classes.list[owner as usize].scope;
+                    if !self.same_signature(f, ks, proto, os)? {
+                        return self.err(format!(
+                            "method '{}' of class '{cname}' does not match its prototype in interface class '{iname}'",
+                            f.name
+                        ));
+                    }
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Two methods have the same kind, return type and arguments (directions and types).
+    fn same_signature(&mut self, f: &SubroutineDecl, fs: usize, g: &SubroutineDecl, gs: usize) -> R<bool> {
+        if f.is_task != g.is_task {
+            return Ok(false);
+        }
+        let void = |h: &SubroutineDecl| h.ret_kind() == NetKind::Int(0);
+        if void(f) != void(g) || (!f.is_task && !void(f) && !self.types_match(&f.ret_ty, fs, &g.ret_ty, gs)?) {
+            return Ok(false);
+        }
+        let ports = |h: &'_ SubroutineDecl| -> Vec<(Dir, std::rc::Rc<ferrooxide_front::lower::SvType>, usize)> {
+            h.decls.iter().filter_map(|d| d.dir.map(|x| (x, d.ty.clone(), d.names.len()))).flat_map(|(x, t, n)| std::iter::repeat_n((x, t, 1), n)).collect()
+        };
+        let (pf, pg) = (ports(f), ports(g));
+        if pf.len() != pg.len() {
+            return Ok(false);
+        }
+        for ((da, ta, _), (db, tb, _)) in pf.iter().zip(&pg) {
+            if da != db || !self.types_match(ta, fs, tb, gs)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// `new(args)` for class `c`: the slot of the new object's handle.
     fn construct(&mut self, c: u32, args: &[Expr], sid: usize) -> R<u32> {
         let ci = &self.classes.list[c as usize];
         if ci.decl.abstract_ {
-            return self.err(format!("cannot create an object of virtual class '{}'", ci.name));
+            let what = if ci.decl.interface { "interface" } else { "virtual" };
+            return self.err(format!("cannot create an object of {what} class '{}'", ci.name));
         }
         let h = self.tmp(64);
         self.emit(Instr::Obj { op: ObjOp::New, d: h, a: NONE, b: NONE, off: 0, w: c });
@@ -982,17 +1105,9 @@ impl<'a> Compiler<'a> {
     }
 
     /// Method `m` of class `c` is virtual: declared so there or in a base class.
-    fn is_virtual(&self, mut c: u32, m: &str) -> bool {
-        loop {
-            let ci = &self.classes.list[c as usize];
-            if ci.decl.virtuals.iter().any(|v| v == m) {
-                return true;
-            }
-            match ci.base {
-                Some(b) => c = b,
-                None => return false,
-            }
-        }
+    fn is_virtual(&self, c: u32, m: &str) -> bool {
+        let ci = &self.classes.list[c as usize];
+        ci.decl.virtuals.iter().any(|v| v == m) || ci.base.is_some_and(|b| self.is_virtual(b, m)) || ci.ifaces.iter().any(|&i| self.is_virtual(i, m))
     }
 
     /// A call of virtual method `m` through a handle of class `c`: the implementation of the
@@ -1009,7 +1124,8 @@ impl<'a> Compiler<'a> {
         // the classes derived from c by the implementation they use
         let mut impls: Vec<(u32, Vec<u32>)> = Vec::new();
         for d in 0..self.classes.list.len() as u32 {
-            if d == c || !self.derives(d, c) {
+            // (no objects of an interface class)
+            if d == c || !self.derives(d, c) || self.classes.list[d as usize].decl.interface {
                 continue;
             }
             let (_, owner) = self.find_method(d, m).unwrap();

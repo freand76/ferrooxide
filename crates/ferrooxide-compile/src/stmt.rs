@@ -861,7 +861,7 @@ impl<'a> Compiler<'a> {
                 for (labels, body) in arms {
                     for l in labels {
                         let ExprKind::Type(lt) = &l.kind else { return self.err("a case item of a case on a type must be a type") };
-                        if self.types_match(t, lt, sid)? {
+                        if self.types_match(t, sid, lt, sid)? {
                             return self.stmt(body, sid);
                         }
                     }

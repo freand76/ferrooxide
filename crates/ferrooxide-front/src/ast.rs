@@ -473,6 +473,10 @@ pub struct ClassDecl {
     /// `extends B` and the arguments of `extends B(args)` (for B's constructor)
     pub base: Option<String>,
     pub base_args: Option<Vec<Expr>>,
+    /// an interface class (IEEE 1800-2017 8.26): pure virtual methods, types and parameters
+    pub interface: bool,
+    /// the interface classes the class implements (an interface class: extends)
+    pub interfaces: Vec<String>,
     /// properties (each object has its own), with their initializers
     pub props: Vec<Decl>,
     /// the static properties of a parameterized class (`Item::Decl`): declared in the scope
@@ -486,6 +490,8 @@ pub struct ClassDecl {
     pub methods: Vec<SubroutineDecl>,
     /// the methods declared `virtual`
     pub virtuals: Vec<String>,
+    /// the methods declared `pure virtual` (their bodies are empty)
+    pub pures: Vec<String>,
     /// the methods declared `static` (no `this`)
     pub statics: Vec<String>,
     /// `virtual class`: no objects of its own

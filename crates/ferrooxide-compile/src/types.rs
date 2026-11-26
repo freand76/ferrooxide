@@ -1077,20 +1077,21 @@ impl<'a> Compiler<'a> {
             BinOp::Ne | BinOp::CaseNe => false,
             _ => return self.err("types can only be compared with ==, !=, === and !=="),
         };
-        Ok(Some(self.types_match(x, y, sid)? == eq))
+        Ok(Some(self.types_match(x, sid, y, sid)? == eq))
     }
 
     /// Whether two data types match (IEEE 1800-2017 6.22.1): the same built-in type, packed
     /// and unpacked dimensions and signing, or the same enum, struct or class.
-    pub(crate) fn types_match(&mut self, x: &SvType, y: &SvType, sid: usize) -> R<bool> {
+    /// (`x` in scope `sx`, `y` in scope `sy`)
+    pub(crate) fn types_match(&mut self, x: &SvType, sx: usize, y: &SvType, sy: usize) -> R<bool> {
         // (a type parameter: its type; enums and structs are told apart by their declaration)
-        let base = |c: &Self, t: &SvType| -> Option<Rc<SvType>> {
+        let base = |c: &Self, t: &SvType, sid: usize| -> Option<Rc<SvType>> {
             match t.param.as_ref().map(|p| c.lookup(p, sid)) {
                 Some(Some(Sym::Type(b))) => Some(b),
                 _ => None,
             }
         };
-        let (bx, by) = (base(self, x), base(self, y));
+        let (bx, by) = (base(self, x, sx), base(self, y, sy));
         let (ix, iy) = (bx.as_deref().unwrap_or(x), by.as_deref().unwrap_or(y));
         let same_rc = |a: &Option<Rc<Vec<String>>>, b: &Option<Rc<Vec<String>>>| match (a, b) {
             (Some(a), Some(b)) => Rc::ptr_eq(a, b),
@@ -1105,7 +1106,7 @@ impl<'a> Compiler<'a> {
         if !same_rc(&ix.enum_names, &iy.enum_names) || !same_struct || ix.class != iy.class {
             return Ok(false);
         }
-        let (rx, ry) = (self.resolve_type(x, sid)?, self.resolve_type(y, sid)?);
+        let (rx, ry) = (self.resolve_type(x, sx)?, self.resolve_type(y, sy)?);
         let norm = |k: NetKind| if k == NetKind::Wire { NetKind::Reg } else { k };
         if rx.heap.is_some() || ry.heap.is_some() {
             return self.err("matching of queue, dynamic or associative array types is not supported");
@@ -1113,9 +1114,9 @@ impl<'a> Compiler<'a> {
         if norm(rx.kind) != norm(ry.kind) || rx.signed != ry.signed || rx.int_kind != ry.int_kind {
             return Ok(false);
         }
-        let dims = |c: &mut Self, t: &SvType| -> R<Vec<(i64, i64)>> {
+        let dims = |c: &mut Self, t: &SvType, sid: usize| -> R<Vec<(i64, i64)>> {
             t.dims.iter().chain(&t.unpacked).map(|(a, b)| Ok((c.const_int(a, sid)?, c.const_int(b, sid)?))).collect()
         };
-        Ok(dims(self, &rx)? == dims(self, &ry)? && rx.dims.len() == ry.dims.len())
+        Ok(dims(self, &rx, sx)? == dims(self, &ry, sy)? && rx.dims.len() == ry.dims.len())
     }
 }

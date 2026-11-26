@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4771 of 5112 (93.3%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4792 of 5112 (93.7%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -101,7 +101,7 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 21, 16: ~29,
-   11: 16, 8: 12, 20: 12): interface classes (21), `$dist_*` (16), randsequence (12), global
+   11: 16, 20: 12): `$dist_*` (16), randsequence (12), global
    clocking and `_gclk` functions (11), tagged unions (10), assignments in expressions (8),
    arrays assigned from arrays of another shape (6), extern/pure constraints (5), whole
    unpacked array equality (3), real casts (3), streams of dynamic arrays and `with` (3).
@@ -218,7 +218,7 @@ SystemVerilog data and testbench:
   (`C::get().v = 1`), body `parameter type` items, an untyped `mailbox`, members of
   `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle
-  ports, NBAs to properties, interface classes, `randc`, `rand_mode`, `constraint_mode`,
+  ports, NBAs to properties, `randc`, `rand_mode`, `constraint_mode`,
   extern/pure constraints, `disable soft`, rand dynamic arrays and real/string/class rand
   properties, `randomize(null)`, `randsequence`, `$dist_*`/`$q_*`.
 - programs run in the Active region; no implicit `$finish` when all program blocks end.
