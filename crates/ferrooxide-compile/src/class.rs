@@ -316,7 +316,12 @@ impl<'a> Compiler<'a> {
         for d in &c.props {
             self.line = d.line;
             let (base_ty, layout) = self.prop_type(d, scope)?;
-            let enum_id = match d.ty.enum_names.clone().filter(|_| d.ty.dims.len() <= 1) {
+            // (of a type parameter: the type it has here)
+            let enum_names = match d.ty.param.is_some() {
+                true => self.resolve_type(&d.ty, scope)?.enum_names.clone(),
+                false => d.ty.enum_names.clone().filter(|_| d.ty.dims.len() <= 1),
+            };
+            let enum_id = match enum_names {
                 Some(n) => self.enum_id(&n, scope),
                 None => NONE,
             };
@@ -774,6 +779,9 @@ impl<'a> Compiler<'a> {
         if let Some(x) = self.enum_method(e, sid)? {
             return Ok(Some((x, sid)));
         }
+        if let Some(x) = self.static_via_handle(e, sid, false) {
+            return Ok(Some(x));
+        }
         let ExprKind::ClassMember { class, name } = &e.kind else { return Ok(None) };
         let cn = match self.lookup(class, sid) {
             Some(Sym::Type(t)) => t.class.clone(),
@@ -799,6 +807,45 @@ impl<'a> Compiler<'a> {
                 Some(b) => c = b,
                 None => return self.err(format!("class '{}' has no static property or constant '{name}'", self.classes.list[c as usize].name)),
             }
+        }
+    }
+
+    /// `h.x`, x a static property of the class of handle h (IEEE 1800-2017 8.9; the
+    /// lowering maps it where it knows the class): its variable and the scope naming it, or
+    /// (`anywhere`) a name of it that any scope resolves.
+    pub(crate) fn static_via_handle(&self, e: &Expr, sid: usize, anywhere: bool) -> Option<(Expr, usize)> {
+        if self.classes.list.is_empty() {
+            return None;
+        }
+        let ExprKind::Member(b, m) = &e.kind else { return None };
+        let sym = match &b.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid)?,
+            ExprKind::Hier(p) => self.lookup_hier(p, sid)?,
+            _ => return None,
+        };
+        let Sym::Sig(s) = sym else { return None };
+        let Type::Class(mut c) = self.sig_type(s) else { return None };
+        if c == NONE {
+            return None;
+        }
+        loop {
+            let ci = &self.classes.list[c as usize];
+            if ci.decl.static_props.iter().any(|d| matches!(d, Item::Decl(d) if d.names.iter().any(|x| x.name == *m))) {
+                let scope = self.class_scope(c);
+                // (of a parameterized class: in its scope; else `C$x` beside the class)
+                if matches!(self.scopes.get(scope).and_then(|sc| sc.syms.get(m)), Some(Sym::Sig(_))) {
+                    let n = if anywhere { format!("{}::{m}", ci.name) } else { m.clone() };
+                    return Some((ExprKind::Ident(n).into(), if anywhere { sid } else { scope }));
+                }
+                let var = format!("{}${m}", ci.decl.name);
+                let parent = self.scopes.get(scope)?.parent?;
+                if self.scopes[parent].syms.contains_key(&var) {
+                    let n = if anywhere { format!("{}::{var}", self.scopes[parent].name) } else { var };
+                    return Some((ExprKind::Ident(n).into(), if anywhere { sid } else { parent }));
+                }
+                return None;
+            }
+            c = ci.base?;
         }
     }
 

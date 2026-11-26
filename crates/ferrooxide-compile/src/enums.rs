@@ -220,17 +220,46 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::SysCall(n, _) if n == "$__cast" => EnumOf::Cast,
             ExprKind::Call(n, _) => match self.lookup_func(n, sid) {
-                Some((f, fs)) => match f.ret_ty.enum_names.clone().filter(|_| f.ret_ty.dims.len() <= 1 && f.ret_ty.unpacked.is_empty()) {
-                    Some(names) => match self.enum_id(&names, fs) {
-                        NONE => EnumOf::No,
-                        id => EnumOf::Id(id),
-                    },
-                    None => EnumOf::No,
-                },
+                Some((f, fs)) => self.ret_enum(f, fs),
+                None => EnumOf::No,
+            },
+            // a method's result (IEEE 1800-2017 8.6)
+            ExprKind::MethodCall(o, m, _) => match self.handle_class(o, sid).ok().flatten().and_then(|c| self.find_method(c, m)) {
+                Some((f, owner)) => {
+                    let fs = self.class_scope(owner);
+                    self.ret_enum(f, fs)
+                }
+                None => EnumOf::No,
+            },
+            ExprKind::StaticCall(cn, m, _) => match self.find_class(cn, sid).and_then(|c| self.find_method(c, m)) {
+                Some((f, owner)) => {
+                    let fs = self.class_scope(owner);
+                    self.ret_enum(f, fs)
+                }
                 None => EnumOf::No,
             },
             _ => EnumOf::No,
         })
+    }
+
+    /// The enum type of the result of `f` (declared in scope `fs`).
+    fn ret_enum(&mut self, f: &SubroutineDecl, fs: usize) -> EnumOf {
+        // (a type given by a type parameter: the type it has there)
+        let resolved = match f.ret_ty.param.is_some() {
+            true => match self.resolve_type(&f.ret_ty, fs) {
+                Ok(t) => Some(t),
+                Err(_) => return EnumOf::No,
+            },
+            false => None,
+        };
+        let t = resolved.as_ref().unwrap_or(&f.ret_ty);
+        match t.enum_names.clone().filter(|_| t.dims.len() <= 1 && t.unpacked.is_empty()) {
+            Some(names) => match self.enum_id(&names, fs) {
+                NONE => EnumOf::No,
+                id => EnumOf::Id(id),
+            },
+            None => EnumOf::No,
+        }
     }
 
     /// The enum type of a class property (or an element of an array property) `e`.
@@ -252,9 +281,19 @@ impl<'a> Compiler<'a> {
                 }
                 None => NONE,
             },
-            ExprKind::Index(..) => match self.prop_elem(e, sid)? {
+            ExprKind::Index(a, _) => match self.prop_elem(e, sid)? {
                 Some((_, p, _)) => p.enum_id,
-                None => NONE,
+                // an element of a queue, dynamic or associative array property
+                None => match &a.kind {
+                    ExprKind::Member(b, m) => match self.handle_class(b, sid)? {
+                        Some(c) => match self.prop(c, m) {
+                            Ok(p) if matches!(p.ty, crate::types::Type::Dyn { elem, .. } if elem.nested == NONE) => p.enum_id,
+                            _ => NONE,
+                        },
+                        None => NONE,
+                    },
+                    _ => NONE,
+                },
             },
             _ => NONE,
         };

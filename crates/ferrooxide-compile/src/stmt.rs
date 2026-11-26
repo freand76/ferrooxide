@@ -782,6 +782,11 @@ impl<'a> Compiler<'a> {
                 if self.sigs.has_dyn && !*nonblocking && timing.is_none() && matches!(&lhs.kind, ExprKind::Index(..)) && self.dyn_elem_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
+                // a static property through a handle (`h.x = v`, of a parameterized class)
+                if let Some((n, _)) = self.static_via_handle(lhs, sid, true) {
+                    let st = Stmt::Assign { lhs: n, rhs: rhs.clone(), nonblocking: *nonblocking, timing: timing.clone(), line: *line };
+                    return self.stmt(&st, sid);
+                }
                 // a property of an object (a member of a struct element of an array property
                 // is stored like one of an array variable's, below)
                 if !self.classes.list.is_empty() && !self.prop_elem_member(lhs, sid) && self.has_prop(lhs, sid)? {
@@ -1781,6 +1786,17 @@ impl<'a> Compiler<'a> {
                 let a = self.expr(id, sid, 64, false)?;
                 let op = if name == "$__process_kill" { rt::ProcOp::Kill } else { rt::ProcOp::Await };
                 self.emit(Instr::Proc { op, d: NONE, a });
+            }
+            // a process's random number generator: seed it, set its state
+            "$__process_srandom" | "$__process_set_randstate" => {
+                let (Some(Some(id)), Some(Some(v))) = (args.first(), args.get(1)) else { return self.err(format!("{name} needs a process and a value")) };
+                let a = self.expr(id, sid, 64, false)?;
+                let (op, d) = if name == "$__process_srandom" {
+                    (rt::ProcOp::Srandom, self.expr(v, sid, 32, true)?)
+                } else {
+                    (rt::ProcOp::SetRandstate, self.str_expr(v, sid)?)
+                };
+                self.emit(Instr::Proc { op, d, a });
             }
             "$finish" | "$stop" => {
                 // $finish(0) prints nothing; otherwise "file:line: $finish called at <time> (<unit>)"

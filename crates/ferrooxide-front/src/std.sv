@@ -27,6 +27,16 @@ package std;
     task await();
       $__process_await(id);
     endtask
+    // the process's random number generator (IEEE 1800-2017 18.13.3-5)
+    function void srandom(int seed);
+      $__process_srandom(id, seed);
+    endfunction
+    function string get_randstate();
+      return $__process_get_randstate(id);
+    endfunction
+    function void set_randstate(string state);
+      $__process_set_randstate(id, state);
+    endfunction
   endclass
 
   class semaphore;

@@ -21,9 +21,6 @@ while matching it (Icarus 12, `iverilog`/`vvp`):
    taken at the statement). Test: `tests/suite/verilog/nba_event_control.v`.
 4. **`logic` is reserved with `-g2005`.** `reg logic;` is a syntax error, but `logic` is not a
    1364-2005 keyword (`bit`, `int`, `byte`, `do`, `priority`, ... are accepted as names).
-5. **`$urandom(seed)` leaks its seed into the unseeded generator.** After `$urandom(s)` the
-   next `$urandom` / `$urandom_range` without a seed continues from the updated `s` (they
-   share one internal seed); `$random(s)` does not do this. Test: `tests/suite/verilog/random.v`.
 7. **A real converted to a 2-state integer keeps x.** `int i = 1.0/0.0;` (or NaN) leaves `i`
    x, although `int` is 2-state (1800-2017 6.11: 2-state types hold only 0 and 1; the
    conversion of inf/NaN is undefined, and a 2-state result should be 0 or 1). Gates fed by

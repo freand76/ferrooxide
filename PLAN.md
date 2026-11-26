@@ -114,9 +114,9 @@ machinery must not assume static targets only (A3).
    breakpoints. The gate for UVM. (Event properties wait through per-object waiter lists,
    `EvOp::Arm`.)
 5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`; after A3). Stops at
-   `uvm_report_message.svh:567` (`process::get_randstate`: per-process random generators,
-   IEEE 1800-2017 18.14, replacing deviation 5 of `DEVIATIONS.md`). Then fix the blockers
-   one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
+   `uvm_pool.svh:65` ("calls nested too deeply"): the static initialization of the
+   package runs a call graph 33 calls deep, all inlined. Needs A3 (real calls) first.
+   Then fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
@@ -203,8 +203,9 @@ SystemVerilog data and testbench:
 - `ref` arguments are copied in and out; calls where that differs from a reference are
   rejected (a task with ref arguments that can wait, a ref argument whose variable the
   subroutine also names) [sv-tests chapter-7/queues/persistence]. Needs A3.
-- `process`: `suspend`/`resume`, `srandom`/`get_randstate`/`set_randstate`;
-  `process::self().kill();` as a statement.
+- `process`: `suspend`/`resume`; `process::self().kill();` as a statement. Objects have
+  no random generators of their own (`randomize()` draws from the process's, IEEE
+  1800-2017 18.14.3), and `obj.srandom()` is missing.
 - unpacked array members of unpacked structs are laid out as packed arrays of their
   elements (`$size` & co. and `%p` see a packed array); real, string and unpacked-struct
   elements; member defaults; type keys in patterns of unpacked arrays.

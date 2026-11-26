@@ -1,5 +1,7 @@
 // expected
-// $random, $urandom and $urandom_range give Icarus's sequences (seeded and unseeded)
+// $random gives the sequence of the standard's algorithm (IEEE 1364-2005 17.9.1); the
+// values of $urandom and $urandom_range (seeded and unseeded) are this simulator's (IEEE
+// 1800-2017 18.13 leaves them open): the same from run to run, a process's own (18.14)
 module top;
   integer s, i;
   initial begin

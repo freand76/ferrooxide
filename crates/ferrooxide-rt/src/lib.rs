@@ -927,6 +927,14 @@ pub enum ProcOp {
     Kill,
     /// suspend until process a has ended
     Await,
+    /// seed the random number generator of process a with the 32-bit value d (IEEE
+    /// 1800-2017 18.13.3)
+    Srandom,
+    /// d (a string) = the state of process a's random number generator (18.13.4)
+    GetRandstate,
+    /// the state of process a's random number generator = the string d, as
+    /// `GetRandstate` gave it (18.13.5)
+    SetRandstate,
 }
 
 /// Operations on event objects in `Instr::Ev` (IEEE 1800-2017 15.5.5). An event variable

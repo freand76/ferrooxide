@@ -253,6 +253,13 @@ impl<'a> Compiler<'a> {
                     return r;
                 }
             }
+            // the state of a process's random number generator (`std::process`, std.sv)
+            ExprKind::SysCall(n, args) if n == "$__process_get_randstate" && args.len() == 1 => {
+                let a = self.expr(&args[0], sid, 64, false)?;
+                let d = self.tmp(64);
+                self.emit(Instr::Proc { op: rt::ProcOp::GetRandstate, d, a });
+                return Ok(d);
+            }
             // string'(e)
             ExprKind::SysCall(n, args) if n == "$__tostring" && args.len() == 1 => {
                 return self.str_expr(&args[0], sid);

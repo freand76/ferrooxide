@@ -330,7 +330,7 @@ impl<'a> Compiler<'a> {
                 self.func_ret_type(f, fs)?
             }
             ExprKind::SysCall(name, args) => match name.as_str() {
-                "$sformatf" | "$psprintf" | "$__tostring" => Type::Str,
+                "$sformatf" | "$psprintf" | "$__tostring" | "$__process_get_randstate" => Type::Str,
                 n if REAL_FUNCS.contains(&n) => Type::Real,
                 "$time" => v(64, false),
                 "$stime" => v(32, false),

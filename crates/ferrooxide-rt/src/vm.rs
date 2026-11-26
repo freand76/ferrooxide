@@ -248,8 +248,11 @@ pub struct Sim {
     monitor: u32,
     monitor_on: bool,
     seed: i32,
-    /// shared seed of $urandom / $urandom_range
-    useed: i32,
+    /// per process: the state of its random number generator ($urandom & co., IEEE
+    /// 1800-2017 18.14: each process has its own, a fork branch's seeded from its parent's)
+    rngs: Vec<i32>,
+    /// the process executing a heap operation (whose generator `shuffle` uses)
+    cur_proc: u32,
     vcd_path: String,
     vcd: Option<Vcd>,
     dumping: bool,
@@ -470,6 +473,10 @@ impl Sim {
             });
         }
         let groups: Vec<Vec<u32>> = groups.into_iter().map(|g| g.0).collect();
+        // the static processes' generators, seeded in turn from one initialization generator
+        // (IEEE 1800-2017 18.14.1); a fork branch's when it starts
+        let mut init_rng: i32 = 1;
+        let rngs: Vec<i32> = (0..prog.procs.len() + ngroups as usize).map(|_| urandom(&mut init_rng, 0, u32::MAX) as i32).collect();
         procs.reserve(MAX_INSTANCES);
         let code = Rc::new(Code {
             ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals, &elem_sig)).collect(),
@@ -567,7 +574,8 @@ impl Sim {
             monitor: NONE,
             monitor_on: true,
             seed: 0,
-            useed: 0,
+            rngs,
+            cur_proc: 0,
             vcd_path: "dump.vcd".into(),
             vcd: None,
             dumping: false,
@@ -1123,6 +1131,7 @@ impl Sim {
                 let mut r = self.procs[d as usize];
                 r.gen = 0;
                 self.procs.push(r);
+                self.rngs.push(0);
                 self.inst_def.push(d);
                 #[cfg(feature = "jit")]
                 if let Some(j) = &self.jit {
@@ -1323,6 +1332,34 @@ impl Sim {
                 self.mem[d] = ((self.procs[p as usize].gen as u64) << 32) | (p as u64 + 1);
                 self.mem[d + 1] = 0;
             }
+            ProcOp::Srandom | ProcOp::GetRandstate | ProcOp::SetRandstate => {
+                // (a process that has ended keeps its state; nothing changes for no process)
+                let q = target.map(|t| t.0 as usize);
+                if let Some(q) = q.filter(|&q| q >= self.rngs.len()) {
+                    self.rngs.resize(q + 1, 0);
+                }
+                match op {
+                    ProcOp::Srandom => {
+                        if let Some(q) = q {
+                            self.rngs[q] = self.mem[d] as u32 as i32;
+                        }
+                    }
+                    ProcOp::GetRandstate => {
+                        let s = q.map(|q| format!("{}", self.rngs[q] as u32)).unwrap_or_default();
+                        self.put_str(d as u32, s.as_bytes());
+                    }
+                    _ => {
+                        let s = self.str_at(d as u32);
+                        match (q, std::str::from_utf8(&s).ok().and_then(|t| t.trim().parse::<u32>().ok())) {
+                            (Some(q), Some(v)) => self.rngs[q] = v as i32,
+                            (Some(_), None) => {
+                                let _ = writeln!(self.out, "WARNING: set_randstate: '{}' is not a state get_randstate gave", String::from_utf8_lossy(&s));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             ProcOp::Status => {
                 let s = match target {
                     None => 0,
@@ -1409,6 +1446,8 @@ impl Sim {
                     self.resident[d as usize] = FRAME_FREE;
                 }
             }
+            // (its generator: seeded from the parent's)
+            self.rngs[c as usize] = urandom(&mut self.rngs[p as usize], 0, u32::MAX) as i32;
             let ch = &mut self.procs[c as usize];
             ch.parent = p;
             ch.pc = 0;
@@ -2562,6 +2601,7 @@ impl Sim {
             return false;
         }
         if let Instr::Heap { op, d, a, b, c, w, t, at } = ins {
+            self.cur_proc = p;
             self.exec_heap(*op, *d, *a, *b, *c, *w, *t, *at);
             return false;
         }
@@ -2813,19 +2853,22 @@ impl Sim {
                             self.mem[d + 1] = 0;
                         }
                         SysFn::Urandom => {
-                            let v = urandom(&mut self.useed, 0, u32::MAX);
+                            let v = urandom(&mut self.rngs[p as usize], 0, u32::MAX);
                             self.mem[d] = v as u64;
                             self.mem[d + 1] = 0;
                         }
                         SysFn::UrandomRange(a, b) => {
                             let (a, b) = (self.mem[*a as usize] as u32, self.mem[*b as usize] as u32);
-                            let v = urandom(&mut self.useed, a.min(b), a.max(b));
+                            let v = urandom(&mut self.rngs[p as usize], a.min(b), a.max(b));
                             self.mem[d] = v as u64;
                             self.mem[d + 1] = 0;
                         }
                         SysFn::RandRange { lo, hi, w, signed } => {
                             let n = nw(*w);
-                            let r64 = |me: &mut Self| ((urandom(&mut me.useed, 0, u32::MAX) as u64) << 32) | urandom(&mut me.useed, 0, u32::MAX) as u64;
+                            let r64 = |me: &mut Self| {
+                                let r = &mut me.rngs[p as usize];
+                                ((urandom(r, 0, u32::MAX) as u64) << 32) | urandom(r, 0, u32::MAX) as u64
+                            };
                             if *w > 64 {
                                 for k in 0..n {
                                     let full = if k == n - 1 { ops::mask(*w - 64 * k as u32) } else { !0 };
@@ -2876,10 +2919,7 @@ impl Sim {
                             let v = if matches!(f, SysFn::RandomSeed(_)) {
                                 rtl_dist_uniform(&mut seed, i32::MIN, i32::MAX) as u32
                             } else {
-                                // (Icarus: the shared $urandom state continues from this seed)
-                                let v = urandom(&mut seed, 0, u32::MAX);
-                                self.useed = seed;
-                                v
+                                urandom(&mut seed, 0, u32::MAX)
                             };
                             self.mem[d] = v as u64;
                             self.mem[d + 1] = 0;
@@ -4260,7 +4300,7 @@ impl Sim {
                     OrderOp::Reverse => items.reverse(),
                     OrderOp::Shuffle => {
                         for i in (1..items.len()).rev() {
-                            let j = urandom(&mut self.useed, 0, i as u32) as usize;
+                            let j = urandom(&mut self.rngs[self.cur_proc as usize], 0, i as u32) as usize;
                             items.swap(i, j);
                         }
                     }
