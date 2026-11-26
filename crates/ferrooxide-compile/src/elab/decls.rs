@@ -483,9 +483,11 @@ impl<'a> Compiler<'a> {
             let same = match self.whole_array(conn, ps)? {
                 Some((a, _)) => {
                     let ai = self.sig(a);
+                    // (elements of a struct type: the same layout)
+                    let same_type = !typed || layout.as_ref().zip(self.layout(a)).is_some_and(|(p, q)| crate::types::same_packed(p, &q));
                     md.is_none()
                         && pk.is_none()
-                        && !typed
+                        && same_type
                         && !is_real
                         && (ai.depth, ai.arr_lo, ai.width, ai.msb, ai.lsb, ai.signed) == (depth, arr_lo, width, msb, lsb, signed)
                         && self.sigs.desc_arrays.contains(&a) == desc
@@ -500,7 +502,8 @@ impl<'a> Compiler<'a> {
         if let Some(s) = aliased {
             let si = self.sig(s);
             let typed = mg.ty.is_some_and(|t| t.has_struct() || t.param.is_some());
-            let view = (si.msb, si.lsb, si.signed) != (msb, lsb, signed) || pk.is_some() || typed;
+            // (an array port of a struct type has the connected array's layout)
+            let view = (si.msb, si.lsb, si.signed) != (msb, lsb, signed) || pk.is_some() || (typed && depth == 0);
             let s = if view {
                 // own range / sign / packed dimensions: a view
                 let v = self.new_view(s, full.clone(), msb, lsb, signed);
@@ -527,7 +530,7 @@ impl<'a> Compiler<'a> {
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
             self.prog.names.push((full, s));
             // (a layout belongs to this name: only on a view of its own)
-            if view {
+            if view || (typed && depth > 0) {
                 self.set_layout(s, &name, layout, sid)?;
             }
             if let Some(init) = mg.init {

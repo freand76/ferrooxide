@@ -397,6 +397,27 @@ impl Lower {
         Ok(ExprKind::Range(Box::new(x), Box::new(lo), Box::new(hi)).into())
     }
 
+    /// The type of `v.m.n`, a chain of members of a struct variable without arrays (None for
+    /// anything else).
+    fn member_chain_type(&self, e: &t::Expr) -> Option<super::SvType> {
+        let plain = |t: &super::SvType| t.unpacked.is_empty() && t.heap.is_none() && t.class.is_none() && t.param.is_none() && !matches!(t.kind, NetKind::String | NetKind::Event | NetKind::Class);
+        match &e.kind {
+            t::ExprKind::Ident(n) => match self.vars.get(n) {
+                Some((t, unpacked)) if unpacked.is_empty() && plain(t) => Some((**t).clone()),
+                _ => None,
+            },
+            t::ExprKind::Member(a, m) => {
+                let t = self.member_chain_type(a)?;
+                if !t.dims.is_empty() {
+                    return None;
+                }
+                let f = t.fields.as_ref()?;
+                f.fields.iter().find(|x| x.0 == *m).map(|x| x.1.clone()).filter(plain)
+            }
+            _ => None,
+        }
+    }
+
     /// An assignment target.
     pub(crate) fn lvalue(&mut self, e: &t::Expr) -> Result<Expr> {
         let mut x = self.lvalue_at(e)?;
@@ -621,6 +642,13 @@ impl Lower {
         if name == "$bits" {
             if let Some(t::Arg::Pos(Some(t::Expr { kind: t::ExprKind::Type(dt), .. }))) = args.first() {
                 return Ok(self.data_type_req(dt)?.bits());
+            }
+            // a member of a struct variable: its type's width, a constant (also where the
+            // variable is not declared yet for the compiler: a port in a parameter value)
+            if let [t::Arg::Pos(Some(a @ t::Expr { kind: t::ExprKind::Member(..), .. }))] = args {
+                if let Some(mt) = self.member_chain_type(a) {
+                    return Ok(mt.bits());
+                }
             }
         }
         if ARRAY_QUERIES.contains(&name) && (1..=2).contains(&args.len()) {

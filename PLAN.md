@@ -101,7 +101,9 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
-   11: 2, 20: 5): a function returning an unpacked array in a parameter value (1).
+   11: 2, 20: 5): class properties of struct types (also given by a type parameter: the
+   four cva6 cores stop there, `instr_trace_item.svh`), a function returning an unpacked
+   array in a parameter value (1).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of

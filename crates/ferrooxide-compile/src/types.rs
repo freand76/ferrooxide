@@ -1202,7 +1202,7 @@ impl<'a> Compiler<'a> {
 
 /// Two layouts are the same type (for type keys of assignment patterns): shape, sign, kind,
 /// and the same struct or enum.
-fn same_packed(a: &Packed, b: &Packed) -> bool {
+pub(crate) fn same_packed(a: &Packed, b: &Packed) -> bool {
     let ws = |p: &Packed| p.dims.iter().map(|&(l, r)| (l - r).abs()).collect::<Vec<_>>();
     ws(a) == ws(b)
         && a.signed == b.signed
