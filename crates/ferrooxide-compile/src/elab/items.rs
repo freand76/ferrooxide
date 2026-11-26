@@ -158,6 +158,9 @@ impl<'a> Compiler<'a> {
             }
         }
         // 3b'. specify path delays on output ports
+        if module_level {
+            self.check_paths(items, sid)?;
+        }
         if module_level && self.dialect.specify {
             self.path_delays(items, sid, &port_dirs)?;
         }

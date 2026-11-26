@@ -3,16 +3,13 @@
 use crate::*;
 
 impl<'a> Compiler<'a> {
-    /// Module path delays (`specify`): an output port with paths is driven, through an inertial
-    /// delay, from an internal copy that the module's logic drives; the delay is that of the path
-    /// whose source changed last (each source records the time of its last change).
-    pub(crate) fn path_delays(&mut self, items: &'a [Item], sid: usize, dirs: &HashMap<String, Dir>) -> R<()> {
-        // destination -> (source, delay) pairs
-        let mut by_dst: Vec<(String, Vec<(String, Expr)>)> = Vec::new();
+    /// The module paths are valid (whether or not their delays apply): a parallel path
+    /// (`=>`) connects a source and a destination of the same width (IEEE 1800-2017 30.4.5).
+    pub(crate) fn check_paths(&mut self, items: &'a [Item], sid: usize) -> R<()> {
         for it in items {
-            let Item::SpecPath { srcs, dsts, delay, parallel, line } = it else { continue };
+            let Item::SpecPath { srcs, dsts, parallel: true, line, .. } = it else { continue };
             self.line = *line;
-            if let (true, [s], [d]) = (*parallel, &srcs[..], &dsts[..]) {
+            if let ([s], [d]) = (&srcs[..], &dsts[..]) {
                 if let (Some(Sym::Sig(a)), Some(Sym::Sig(b))) = (self.lookup(s, sid), self.lookup(d, sid)) {
                     let (wa, wb) = (self.sig(a).width, self.sig(b).width);
                     if wa != wb {
@@ -20,6 +17,19 @@ impl<'a> Compiler<'a> {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Module path delays (`specify`): an output port with paths is driven, through an inertial
+    /// delay, from an internal copy that the module's logic drives; the delay is that of the path
+    /// whose source changed last (each source records the time of its last change).
+    pub(crate) fn path_delays(&mut self, items: &'a [Item], sid: usize, dirs: &HashMap<String, Dir>) -> R<()> {
+        // destination -> (source, delay) pairs
+        let mut by_dst: Vec<(String, Vec<(String, Expr)>)> = Vec::new();
+        for it in items {
+            let Item::SpecPath { srcs, dsts, delay, line, .. } = it else { continue };
+            self.line = *line;
             for d in dsts {
                 if dirs.get(d) != Some(&Dir::Output) {
                     continue; // only output ports (inout paths are not modelled)
