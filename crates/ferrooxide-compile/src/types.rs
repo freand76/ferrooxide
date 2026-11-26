@@ -442,7 +442,8 @@ impl<'a> Compiler<'a> {
             let Some(Sym::Type(t)) = self.lookup(&tp, sid) else {
                 return self.err(format!("'{tp}' is not a type"));
             };
-            d.ty = t.clone();
+            // (with the declaration's own packed dimensions: `input T [3:0] v`)
+            d.ty = if d.ty.dims.is_empty() { t } else { Rc::new(self.resolve_type(&d.ty, sid)?) };
         }
         Ok(Box::leak(Box::new(g)))
     }
@@ -1054,7 +1055,27 @@ impl<'a> Compiler<'a> {
         if ops.len() == nun && ops.iter().all(|o| matches!(o, Sel::Index(_))) {
             return self.layout(s).map(|l| (*l).clone());
         }
-        self.struct_walk(e, sid, true)?.ok()?.ty
+        if let Some(Ok(w)) = self.struct_walk(e, sid, true) {
+            return w.ty;
+        }
+        // an element of a packed array (`v[i]` of `logic [3:0][7:0] v`)
+        if ops.len() > nun && ops.iter().all(|o| matches!(o, Sel::Index(_))) {
+            let mut l = (*self.layout(s)?).clone();
+            let k = ops.len() - nun;
+            if l.dims.len() <= k {
+                return None;
+            }
+            l.dims.drain(..k);
+            l.int_kind = false;
+            return Some(l);
+        }
+        // a part select of a vector: a vector of its width (`'{default: b}`)
+        let w = match ops.last()? {
+            Sel::Range(m, l) => (self.const_value(m, sid)? - self.const_value(l, sid)?).abs() + 1,
+            Sel::Part(_, w, _) => self.const_value(w, sid)?,
+            _ => return None,
+        };
+        Some(Packed { dims: vec![(w - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None })
     }
 
     /// `e` with the assignment patterns at its top (or in a conditional's branches) resolved

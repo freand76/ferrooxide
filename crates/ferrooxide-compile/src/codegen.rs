@@ -252,6 +252,21 @@ impl<'a> Compiler<'a> {
         Ok(Some((s, dims.iter().map(|d| d.1).collect(), elems)))
     }
 
+    /// `array_elems` also of a whole fixed-size array property (no signal): (the signal,
+    /// the element width, the shape, the elements).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn any_array_elems(&mut self, e: &Expr, sid: usize) -> R<Option<(Option<u32>, u32, Vec<u32>, Vec<Expr>)>> {
+        if let Some((s, shape, elems)) = self.array_elems(e, sid)? {
+            return Ok(Some((Some(s), self.sig(s).width, shape, elems)));
+        }
+        let Some((w, dims)) = self.prop_array_dims(e, sid)? else { return Ok(None) };
+        let mut elems = vec![e.clone()];
+        for &d in &dims {
+            elems = elems.into_iter().flat_map(|x| dim_indexes(d).map(move |v| index_expr(&x, v))).collect();
+        }
+        Ok(Some((None, w, dims.iter().map(|d| d.1).collect(), elems)))
+    }
+
     /// The unpacked array, subarray or slice named by `e`: its signal, the expression its
     /// elements index (`e` itself, or the array a slice selects from) and the dimensions it
     /// spans, each (lowest index, size, descending).
@@ -405,9 +420,12 @@ impl<'a> Compiler<'a> {
     /// `lhs = rhs` of two unpacked arrays (or subarrays) as one assignment per element pair
     /// (None if `lhs` is not an array).
     pub(crate) fn array_pairs(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<Option<Vec<(Expr, Expr)>>> {
-        let Some((ls, lshape, li)) = self.array_elems(lhs, sid)? else { return Ok(None) };
+        let Some((ls, lw, lshape, li)) = self.any_array_elems(lhs, sid)? else { return Ok(None) };
         if let ExprKind::Pattern(None, items) = &rhs.kind {
-            let (_, base, dims) = self.array_dims(lhs, sid)?.unwrap();
+            let (base, dims) = match self.array_dims(lhs, sid)? {
+                Some((_, base, dims)) => (base, dims),
+                None => (lhs.clone(), self.prop_array_dims(lhs, sid)?.unwrap().1),
+            };
             let mut out = Vec::new();
             self.pattern_pairs(&base, &dims, items, sid, &mut out)?;
             return Ok(Some(out));
@@ -428,20 +446,28 @@ impl<'a> Compiler<'a> {
             }
             return Ok(Some(out));
         }
-        let Some((rs, rshape, ri)) = self.array_elems(rhs, sid)? else {
-            return self.err(format!("array '{}' assigned from something that is not an array of the same shape", self.sig(ls).name));
+        let name = |c: &Self, s: Option<u32>, e: &Expr| match s {
+            Some(s) => c.sig(s).name.clone(),
+            None => match &e.kind {
+                ExprKind::Member(_, m) => format!("property {m}"),
+                _ => "?".into(),
+            },
         };
-        let (lw, rw) = (self.sig(ls).width, self.sig(rs).width);
+        let Some((rs, rw, rshape, ri)) = self.any_array_elems(rhs, sid)? else {
+            return self.err(format!("array '{}' assigned from something that is not an array of the same shape", name(self, ls, lhs)));
+        };
         if lshape != rshape || lw != rw {
             return self.err(format!(
                 "array '{}' ({}) assigned from '{}' ({})",
-                self.sig(ls).name,
+                name(self, ls, lhs),
                 Self::shape_str(&lshape, lw),
-                self.sig(rs).name,
+                name(self, rs, rhs),
                 Self::shape_str(&rshape, rw)
             ));
         }
-        self.check_array_equiv(ls, rs)?;
+        if let (Some(ls), Some(rs)) = (ls, rs) {
+            self.check_array_equiv(ls, rs)?;
+        }
         Ok(Some(li.into_iter().zip(ri).collect()))
     }
 

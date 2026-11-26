@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4877 of 5112 (95.4%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4895 of 5112 (95.8%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -101,9 +101,7 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
-   11: 2, 20: 5): class properties of struct types (also given by a type parameter: the
-   four cva6 cores stop there, `instr_trace_item.svh`), a function returning an unpacked
-   array in a parameter value (1).
+   11: 2, 20: 5): a function returning an unpacked array in a parameter value (1).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
@@ -207,9 +205,10 @@ SystemVerilog data and testbench:
   `process::self().kill();` as a statement.
 - unpacked array members of unpacked structs are laid out as packed arrays of their
   elements (`$size` & co. and `%p` see a packed array); real, string and unpacked-struct
-  elements; member defaults; members through hierarchical names (`inst.v.f`); type keys in
-  patterns of unpacked arrays.
-- queues of structs as class properties, fixed-size arrays of queues, arrays of queues as
+  elements; member defaults; type keys in patterns of unpacked arrays.
+- arrays (fixed, queues, dynamic) of structs as class properties; writes to a member of a
+  struct property at a run-time index (`obj.s.a[i] = v`) or to a tagged union property's
+  member; fixed-size arrays of queues, arrays of queues as
   class properties or ports, `%p` of an element array (`$display("%p", a[k])`), queue ports, `%p` of unpacked
   structs, associative arrays and class handles, array methods of associative,
   multi-dimensional and struct arrays, class or wider

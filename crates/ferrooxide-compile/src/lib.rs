@@ -1034,6 +1034,28 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::Unary(UnOp::Neg, a) => Some(-self.const_value(a, sid)?),
+            // a member of a struct parameter (`P.m`, at most 64 bits)
+            ExprKind::Member(..) if self.sigs.has_structs => {
+                let Some(Ok(w)) = self.struct_walk(e, sid, false) else { return None };
+                let (x, signed) = match w.expr.kind {
+                    ExprKind::SysCall(f, mut a) if f == "$signed" && a.len() == 1 => (a.pop().unwrap(), true),
+                    k => (Expr::from(k), false),
+                };
+                let ExprKind::IndexedRange(b, off, width, true) = &x.kind else { return None };
+                let ExprKind::Ident(n) = &b.kind else { return None };
+                let Some(Sym::Const(c)) = self.lookup(n, sid) else { return None };
+                let (off, width) = (self.const_value(off, sid)?, self.const_value(width, sid)?);
+                if !(1..=64).contains(&width) || off < 0 || off + width > c.w as i64 {
+                    return None;
+                }
+                let mut v = Const::zero(width as u32);
+                for k in 0..width as u32 {
+                    let (a, b) = c.bit(off as u32 + k);
+                    v.a[0] |= a << k;
+                    v.b[0] |= b << k;
+                }
+                v.with_sign(signed).to_i64()
+            }
             _ => None,
         }
     }

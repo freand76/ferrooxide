@@ -664,6 +664,22 @@ impl<'a> Compiler<'a> {
         Ok(Some((&**b, p, idx)))
     }
 
+    /// A whole fixed-size array property (`obj.a`): its element width and dimensions, each
+    /// (lowest index, size, descending); None for any other expression.
+    pub(crate) fn prop_array_dims(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Vec<(i64, u32, bool)>)>> {
+        let ExprKind::Member(b, m) = &e.kind else { return Ok(None) };
+        if self.classes.list.is_empty() {
+            return Ok(None);
+        }
+        let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
+        let Some(p) = self.classes.list[c as usize].props.iter().rev().find(|p| p.name == *m).cloned() else { return Ok(None) };
+        if p.dims.is_empty() || self.class_const(c, m).is_some() {
+            return Ok(None);
+        }
+        self.check_access(c, m, sid)?;
+        Ok(Some((p.ty.width(), p.dims.iter().zip(&p.desc).map(|(&(lo, n), &d)| (lo, n, d)).collect())))
+    }
+
     /// The flat element index (32-bit signed) of indices `idx` of array property `p`.
     fn prop_index(&mut self, p: &Prop, idx: &[&Expr], sid: usize) -> R<u32> {
         let b = |x: Expr| Box::new(x);

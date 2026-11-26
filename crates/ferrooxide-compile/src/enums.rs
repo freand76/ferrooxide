@@ -240,7 +240,11 @@ impl<'a> Compiler<'a> {
         }
         let id = match &e.kind {
             ExprKind::Member(b, m) => match self.handle_class(b, sid)? {
-                Some(c) if self.classes.list[c as usize].props.iter().any(|p| p.name == *m) => self.scalar_prop(c, m)?.enum_id,
+                // (a whole array property: its elements are checked one by one)
+                Some(c) if self.classes.list[c as usize].props.iter().any(|p| p.name == *m) => match self.prop(c, m)? {
+                    p if p.dims.is_empty() => p.enum_id,
+                    _ => NONE,
+                },
                 // a constant of the class (`obj.A`)
                 Some(c) => {
                     let scope = self.classes.list[c as usize].scope;

@@ -2301,10 +2301,10 @@ impl<'a> Compiler<'a> {
         let Some((_, lshape, li)) = self.array_elems(&port, fscope)? else {
             return self.err(format!("argument '{pname}': an array of this kind is not supported as an argument"));
         };
-        let Some((rs, rshape, ri)) = self.array_elems(a, sid)? else {
+        let Some((_, rw, rshape, ri)) = self.any_array_elems(a, sid)? else {
             return self.err(format!("argument '{pname}' is an array: it needs an array of the same shape"));
         };
-        let (w, rw) = (self.sig(ps).width, self.sig(rs).width);
+        let w = self.sig(ps).width;
         if lshape != rshape || w != rw {
             return self.err(format!(
                 "argument '{pname}' ({}) given an array {}",

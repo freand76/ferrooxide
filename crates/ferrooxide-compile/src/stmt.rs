@@ -774,6 +774,13 @@ impl<'a> Compiler<'a> {
                     if *nonblocking || timing.is_some() {
                         return self.err("a nonblocking or delayed assignment to a class property is not supported");
                     }
+                    // a whole fixed-size array property: element by element
+                    if let Some(pairs) = self.array_pairs(lhs, rhs, sid)? {
+                        for (l, r) in pairs {
+                            self.stmt(&Stmt::Assign { lhs: l, rhs: r, nonblocking: false, timing: None, line: *line }, sid)?;
+                        }
+                        return Ok(());
+                    }
                     if !self.prop_assign(lhs, rhs, sid)? {
                         return self.err("an assignment to a part of a class property is not supported");
                     }
