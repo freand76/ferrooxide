@@ -109,7 +109,7 @@ pub(crate) const STR_METHODS: &[&str] = &["substr", "toupper", "tolower"];
 
 /// System functions that give a real.
 const REAL_FUNCS: &[&str] = &[
-    "$realtime", "$itor", "$bitstoreal", "$sqrt", "$ln", "$log10", "$exp", "$floor", "$ceil", "$sin", "$cos", "$tan",
+    "$realtime", "$itor", "$__toreal", "$bitstoreal", "$sqrt", "$ln", "$log10", "$exp", "$floor", "$ceil", "$sin", "$cos", "$tan",
     "$asin", "$acos", "$atan", "$sinh", "$cosh", "$tanh", "$asinh", "$acosh", "$atanh", "$atan2", "$hypot", "$pow",
 ];
 

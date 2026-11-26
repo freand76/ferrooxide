@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4811 of 5112 (94.1%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4814 of 5112 (94.2%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -103,7 +103,7 @@ machinery must not assume static targets only (A3).
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 9, 16: ~29,
    11: 16, 20: 5): global clocking and `_gclk` functions (11), tagged unions (10),
    assignments in expressions (8), arrays assigned from arrays of another shape (6),
-   extern/pure constraints (5), whole unpacked array equality (3), real casts (3), streams
+   extern/pure constraints (5), whole unpacked array equality (3), streams
    of dynamic arrays and `with` (3).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
@@ -241,8 +241,7 @@ SystemVerilog data and testbench:
   `case` properties, strong sequences, several clocks, `.triggered`/`.matched` of sequences,
   `expect`, global clocking, clocking blocks with clocking signals; a deferred assertion run
   several times in one activation reports only the last outcome.
-- tagged unions, `matches`, assignments in expressions, `edge` event controls, casts to real
-  (`real'(x)`), DPI, `x[i++] += 2`.
+- tagged unions, `matches`, assignments in expressions, `edge` event controls, DPI, `x[i++] += 2`.
 - strings are never reclaimed; non-UTF-8 bytes of a `string` print as U+FFFD; `%v` in
   `$sformatf`.
 

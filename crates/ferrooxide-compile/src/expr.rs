@@ -2589,7 +2589,9 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::RBin { op, d, a, b });
                     Ok(d)
                 }
-                "$itor" => {
+                // (a cast to real: a real stays as it is)
+                "$__toreal" if self.type_of(&args[0], sid)?.is_real() => self.rexpr(&args[0], sid),
+                "$itor" | "$__toreal" => {
                     let a = args.first().ok_or_else(|| self.mkerr("$itor needs an argument".into()))?;
                     let (s, w, signed) = self.self_expr(a, sid)?;
                     let d = self.tmp(64);

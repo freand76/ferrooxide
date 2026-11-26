@@ -279,10 +279,11 @@ impl Lower {
                     if string {
                         return Ok(ExprKind::SysCall("$__tostring".into(), vec![self.expr(x)?]).into());
                     }
-                    if matches!(dt.kind, t::TypeKind::Real(_)) {
-                        return self.unsupported(loc, "a cast to a real type");
-                    }
                     let t = Rc::new(self.data_type_req(dt)?);
+                    // (IEEE 1800-2017 6.24.1: an integral value converted as by an assignment)
+                    if t.kind == NetKind::Real && t.unpacked.is_empty() {
+                        return Ok(ExprKind::SysCall("$__toreal".into(), vec![self.expr(x)?]).into());
+                    }
                     let x = typed_patterns(self.expr(x)?, &t);
                     cast(t.width(), x, if t.signed { 1 } else { 0 })
                 }
