@@ -204,7 +204,14 @@ impl Parser {
             }
             Some(Kw::Soft) => {
                 self.bump();
-                let e = self.expr()?;
+                let loc = self.loc();
+                let mut e = self.expr()?;
+                // `soft a -> b;`: the implication operator (IEEE 1800-2017 18.5.13.1), not
+                // an implication constraint with a constraint set
+                if self.eat_p("->") {
+                    let r = self.expr()?;
+                    e = Expr::new(ExprKind::Binary(BinOp::LImpl, Box::new(e), Box::new(r)), loc);
+                }
                 self.expect_p(";")?;
                 return Ok(ConstraintItem::Expr { soft: true, expr: e });
             }

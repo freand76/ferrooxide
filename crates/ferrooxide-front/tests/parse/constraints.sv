@@ -8,6 +8,7 @@ class B;
   constraint c2 { x inside {1, [3:5]}; x dist {1 := 2, [3:5] :/ 1}; }
   constraint c3 { lim > 2 -> x == 1; if (lim == 0) x != 2; else { x != 3; } }
   constraint c4 { foreach (arr[i]) arr[i] == i; unique {x, lim}; solve x before lim; }
+  constraint c5 { soft lim > 2 -> x == 1; }
   function int f(int y);
     return randomize() with { x < y; };
   endfunction
