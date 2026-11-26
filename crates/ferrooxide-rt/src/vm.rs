@@ -274,6 +274,8 @@ pub struct Sim {
     next_fd: u32,
     /// the OS error code of the last file operation that failed (0: none since), for $ferror
     file_err: i32,
+    /// the stochastic queues by id ($q_initialize & co.)
+    stoch: HashMap<i32, StochQueue>,
     scratch: Vec<u64>,
     plusargs: Vec<String>,
     /// FX_GENSTATS: count generic-path instructions by kind, printed at the end (debugging)
@@ -580,6 +582,7 @@ impl Sim {
             files: HashMap::new(),
             next_fd: 3,
             file_err: 0,
+            stoch: HashMap::new(),
             scratch: Vec::new(),
             plusargs: Vec::new(),
             genstats: std::env::var_os("FX_GENSTATS").map(|_| HashMap::new()),
@@ -3160,6 +3163,7 @@ impl Sim {
                     }
                 }
             }
+            SysTask::StochQ { op, ins, outs, texp } => self.stoch_q(*op, ins, outs, *texp),
             SysTask::FileRead { kind, d, src, scope, loc } => {
                 let r = self.file_read(kind, *src, scope, loc);
                 let d = *d as usize;
@@ -3319,6 +3323,108 @@ impl Sim {
                 }
                 r
             }
+        }
+    }
+
+    /// A stochastic queue task (IEEE 1364-2005 17.6). Status: 0 done, 1 the queue is full,
+    /// 2 no queue has that id, 3 the queue is empty, 4 an unknown queue type, 5 a length
+    /// below 1, 6 the id is taken.
+    fn stoch_q(&mut self, op: StochOp, ins: &[u32], outs: &[u32], texp: u8) {
+        // (an input with x or z bits is no valid value)
+        let arg = |m: &[u64], k: usize| ins.get(k).and_then(|&s| ops::read_u64(m, s as usize, 32)).map(|v| v as u32 as i32);
+        let div = 10u64.pow(texp as u32);
+        let now = self.time;
+        let units = |t: u64| ((t + div / 2) / div) as i64;
+        let id = arg(&self.mem, 0);
+        let mut vals: Vec<i64> = Vec::new();
+        let status = match op {
+            StochOp::Init => match (id, arg(&self.mem, 1), arg(&self.mem, 2)) {
+                (Some(id), _, _) if self.stoch.contains_key(&id) => 6,
+                (Some(_), Some(t), _) if t != 1 && t != 2 => 4,
+                (Some(_), _, Some(n)) if n < 1 => 5,
+                (Some(id), Some(t), Some(n)) => {
+                    self.stoch.insert(id, StochQueue { lifo: t == 2, max: n as usize, ..Default::default() });
+                    0
+                }
+                _ => 2,
+            },
+            _ => match id.and_then(|id| self.stoch.get_mut(&id)) {
+                None => {
+                    // ($q_full's value: 0)
+                    if op == StochOp::Full {
+                        vals = vec![0];
+                    }
+                    2
+                }
+                Some(q) => match op {
+                    StochOp::Init => unreachable!(),
+                    StochOp::Add => {
+                        if q.jobs.len() >= q.max {
+                            1
+                        } else {
+                            let (job, inform) = (arg(&self.mem, 1).unwrap_or(0), arg(&self.mem, 2).unwrap_or(0));
+                            if let Some(t) = q.last_add {
+                                q.arrival_sum += now - t;
+                                q.arrivals += 1;
+                            }
+                            q.last_add = Some(now);
+                            q.jobs.push_back((job, inform, now));
+                            q.max_seen = q.max_seen.max(q.jobs.len());
+                            0
+                        }
+                    }
+                    StochOp::Remove => {
+                        let j = if q.lifo { q.jobs.pop_back() } else { q.jobs.pop_front() };
+                        match j {
+                            Some((job, inform, at)) => {
+                                let wait = now - at;
+                                q.min_wait = Some(q.min_wait.map_or(wait, |w| w.min(wait)));
+                                q.wait_sum += wait;
+                                q.removed += 1;
+                                vals = vec![job as i64, inform as i64];
+                                0
+                            }
+                            None => 3,
+                        }
+                    }
+                    StochOp::Full => {
+                        vals = vec![(q.jobs.len() >= q.max) as i64];
+                        0
+                    }
+                    StochOp::Exam => {
+                        let mean = |sum: u64, n: u64| if n == 0 { 0 } else { units(sum / n) };
+                        let v = match arg(&self.mem, 1) {
+                            // the current length, the mean interarrival time, the maximum length
+                            // reached, the shortest wait of a removed job, the longest wait of a
+                            // job still queued, the mean wait of the removed jobs
+                            Some(1) => Some(q.jobs.len() as i64),
+                            Some(2) => Some(mean(q.arrival_sum, q.arrivals)),
+                            Some(3) => Some(q.max_seen as i64),
+                            Some(4) => Some(units(q.min_wait.unwrap_or(0))),
+                            Some(5) => Some(q.jobs.iter().map(|j| units(now - j.2)).max().unwrap_or(0)),
+                            Some(6) => Some(mean(q.wait_sum, q.removed)),
+                            _ => None,
+                        };
+                        match v {
+                            Some(v) => {
+                                vals = vec![v];
+                                0
+                            }
+                            None => {
+                                let _ = writeln!(self.out, "WARNING: $q_exam: q_stat_code must be 1 to 6");
+                                0
+                            }
+                        }
+                    }
+                },
+            },
+        };
+        // (outputs without a value keep theirs: only the status is set)
+        for (&s, v) in outs.iter().zip(&vals) {
+            self.put_int(s, 32, *v);
+        }
+        if let Some(&s) = outs.last() {
+            self.put_int(s, 32, status);
         }
     }
 
@@ -5620,6 +5726,22 @@ struct HObj {
     dflt: Option<Vec<u64>>,
     /// a class object: its class (`Program::classes`)
     class: u32,
+}
+
+/// A stochastic queue (IEEE 1364-2005 17.6) and its statistics, times in ticks.
+#[derive(Default)]
+struct StochQueue {
+    lifo: bool,
+    max: usize,
+    /// (job_id, inform_id, time added)
+    jobs: VecDeque<(i32, i32, u64)>,
+    max_seen: usize,
+    last_add: Option<u64>,
+    arrival_sum: u64,
+    arrivals: u64,
+    min_wait: Option<u64>,
+    wait_sum: u64,
+    removed: u64,
 }
 
 /// A key of an associative array (integer keys in numeric order, strings lexicographic).

@@ -1311,6 +1311,44 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The stochastic queue tasks and $q_full (IEEE 1364-2005 17.6): the inputs, then the
+    /// variables that get the outputs; returns the slot of $q_full's 32-bit value.
+    pub(crate) fn stoch_q(&mut self, name: &str, args: &[Expr], sid: usize) -> R<u32> {
+        use rt::StochOp as Q;
+        let (op, nin, nout) = match name {
+            "$q_initialize" => (Q::Init, 3, 1),
+            "$q_add" => (Q::Add, 3, 1),
+            "$q_remove" => (Q::Remove, 1, 3),
+            "$q_full" => (Q::Full, 1, 1),
+            _ => (Q::Exam, 2, 2),
+        };
+        if args.len() != nin + nout {
+            return self.err(format!("{name} needs {} arguments", nin + nout));
+        }
+        let mut ins = Vec::new();
+        for a in &args[..nin] {
+            let v = self.expr(a, sid, 32, true)?;
+            // (copies: the outputs are written after all inputs are read)
+            let d = self.tmp(32);
+            self.emit(Instr::Copy { d, s: v, w: 32 });
+            ins.push(d);
+        }
+        // ($q_full: its value, then the status)
+        let nvals = nout + (op == Q::Full) as usize;
+        let outs: Vec<u32> = (0..nvals).map(|_| self.tmp(32)).collect();
+        // outputs that the task leaves alone keep their variable's value
+        for (a, &o) in args[nin..].iter().zip(&outs[(op == Q::Full) as usize..]) {
+            let v = self.expr(a, sid, 32, true)?;
+            self.emit(Instr::Copy { d: o, s: v, w: 32 });
+        }
+        let texp = self.texp(sid);
+        self.emit(Instr::Sys(Box::new(rt::SysTask::StochQ { op, ins, outs: outs.clone(), texp })));
+        for (a, &o) in args[nin..].iter().zip(&outs[(op == Q::Full) as usize..]) {
+            self.store_value(&stmt::Lhs::Expr(a, sid), o, 32, rt::StoreMode::Blocking)?;
+        }
+        Ok(if op == Q::Full { outs[0] } else { NONE })
+    }
+
     /// File input functions; returns the slot of the 32-bit result.
     pub(crate) fn file_read(&mut self, name: &str, args: &[Expr], sid: usize) -> R<u32> {
         use rt::FileRead as F;
@@ -1626,6 +1664,10 @@ impl<'a> Compiler<'a> {
                 let d = self.tmp(32);
                 self.emit(Instr::CountBits { d, s: v, w: vw, ctl: ctl.into_boxed_slice() });
                 Ok(self.resize(d, 32, w, false))
+            }
+            "$q_full" => {
+                let d = self.stoch_q(name, args, sid)?;
+                Ok(self.resize(d, 32, w, true))
             }
             "$isunbounded" => {
                 let [a] = args else { return self.err("$isunbounded needs one argument") };

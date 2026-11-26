@@ -341,6 +341,7 @@ impl<'a> Compiler<'a> {
                 }
                 "$clog2" | "$bits" => v(32, false),
                 "$isunbounded" => v(1, false),
+                "$q_full" => v(32, true),
                 // SV cast T'(e) / N'(e): (width, sign: 0, 1, 2 = the expression's, e)
                 "$__cast" => {
                     let w = self.const_int(&args[0], sid)?;

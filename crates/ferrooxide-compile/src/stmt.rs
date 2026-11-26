@@ -1809,6 +1809,16 @@ impl<'a> Compiler<'a> {
                 let a: Vec<Expr> = args.iter().map(|a| a.clone().unwrap_or(ExprKind::Str(String::new()).into())).collect();
                 self.file_read(name, &a, sid)?;
             }
+            "$q_initialize" | "$q_add" | "$q_remove" | "$q_full" | "$q_exam" => {
+                let mut a = Vec::new();
+                for x in args {
+                    match x {
+                        Some(e) => a.push(e.clone()),
+                        None => return self.err(format!("{name}: an argument is missing")),
+                    }
+                }
+                self.stoch_q(name, &a, sid)?;
+            }
             "$fflush" => {
                 // (arguments that are calls still run)
                 for e in args.iter().flatten() {

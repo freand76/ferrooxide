@@ -358,6 +358,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                     v
                 }
                 SysTask::FClose { s, .. } => vec![*s],
+                SysTask::StochQ { ins, outs, .. } => ins.iter().chain(outs).copied().collect(),
                 SysTask::FileRead { kind, d, src, .. } => {
                     let mut v = vec![*d, src.0];
                     match kind {
@@ -613,6 +614,24 @@ pub enum SysTask {
     /// the string) as (slot, width)
     /// `loc`: file:line of the call (for warnings)
     FileRead { kind: FileRead, d: u32, src: (u32, u32), scope: String, loc: String },
+    /// the stochastic queue tasks (IEEE 1364-2005 17.6): 32-bit inputs `ins` and outputs
+    /// `outs` (the status last); times in units of 10^texp ticks
+    StochQ { op: StochOp, ins: Vec<u32>, outs: Vec<u32>, texp: u8 },
+}
+
+/// A stochastic queue task: its inputs -> outputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StochOp {
+    /// $q_initialize: q_id, q_type, max_length -> status
+    Init,
+    /// $q_add: q_id, job_id, inform_id -> status
+    Add,
+    /// $q_remove: q_id -> job_id, inform_id, status
+    Remove,
+    /// $q_full: q_id -> full (the function's value), status
+    Full,
+    /// $q_exam: q_id, q_stat_code -> q_stat_value, status
+    Exam,
 }
 
 #[derive(Clone, Debug)]
