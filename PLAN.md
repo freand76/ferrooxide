@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4814 of 5112 (94.2%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4816 of 5112 (94.2%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -103,8 +103,8 @@ machinery must not assume static targets only (A3).
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 9, 16: ~29,
    11: 16, 20: 5): global clocking and `_gclk` functions (11), tagged unions (10),
    assignments in expressions (8), arrays assigned from arrays of another shape (6),
-   extern/pure constraints (5), whole unpacked array equality (3), streams
-   of dynamic arrays and `with` (3).
+   extern/pure constraints (5), streams of dynamic arrays and `with` (3), a function
+   returning an unpacked array in a parameter value (1).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
@@ -227,7 +227,7 @@ SystemVerilog data and testbench:
 - programs run in the Active region; no implicit `$finish` when all program blocks end.
 - `static` variables at the top level of an automatic subroutine; multi-dimensional arrays as
   subroutine arguments; array arguments of recursive calls.
-- whole unpacked array comparisons (`a == b`), slices with run-time bounds, `$is_signed`.
+- slices with run-time bounds, `$is_signed`.
 - nested modules with ports instantiated from outside; multi-dimensional interface port
   arrays; modport directions are not enforced.
 - assignments to properties of a package's class handle (`P::c.x = 1`); `import` in

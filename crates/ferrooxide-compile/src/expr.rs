@@ -554,6 +554,43 @@ impl<'a> Compiler<'a> {
         d
     }
 
+    /// `a == b`, `!=`, `===`, `!==` of two fixed-size unpacked arrays (or slices, or
+    /// subarrays) of the same shape (IEEE 1800-2017 7.4.3, 11.4.5): the comparisons of the
+    /// elements paired left to right, joined with `&&` (0 if a pair differs, x if one is
+    /// unknown); the inequalities are its negation. None for any other expression.
+    pub(crate) fn array_equality(&mut self, e: &Expr, sid: usize) -> R<Option<Expr>> {
+        let ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne | BinOp::CaseEq | BinOp::CaseNe), a, b) = &e.kind else { return Ok(None) };
+        let arrayish = |x: &Expr| matches!(x.kind, ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..));
+        if !self.sigs.has_dyn || !arrayish(a) || !arrayish(b) {
+            return Ok(None);
+        }
+        // (an operand that is no fixed-size array is left to the other paths, also to report
+        // it)
+        let (Ok(Some((sa, da, ea))), Ok(Some((sb, db, eb)))) = (self.array_elems(a, sid), self.array_elems(b, sid)) else {
+            return Ok(None);
+        };
+        // (IEEE 1800-2017 7.6: arrays of equivalent types, the same number of elements in
+        // each dimension)
+        let (ia, ib) = (self.sig(sa), self.sig(sb));
+        if da != db || ia.width != ib.width || ia.real != ib.real || ia.string != ib.string {
+            return self.err(format!("arrays '{}' and '{}' of different shapes or element types are compared", ia.name, ib.name));
+        }
+        if ea.len() > 4096 {
+            return self.err("a comparison of arrays of more than 4096 elements is not supported");
+        }
+        let eq = if matches!(op, BinOp::Eq | BinOp::Ne) { BinOp::Eq } else { BinOp::CaseEq };
+        let all = ea
+            .into_iter()
+            .zip(eb)
+            .map(|(x, y)| Expr::new(ExprKind::Binary(eq, Box::new(x), Box::new(y)), e.line))
+            .reduce(|acc, c| Expr::new(ExprKind::Binary(BinOp::LAnd, Box::new(acc), Box::new(c)), e.line))
+            .unwrap();
+        Ok(Some(match op {
+            BinOp::Ne | BinOp::CaseNe => Expr::new(ExprKind::Unary(UnOp::LNot, Box::new(all)), e.line),
+            _ => all,
+        }))
+    }
+
     /// Compile `e` to a value of width `w`, with expression signedness `s` (IEEE context propagation).
     pub(crate) fn expr(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
         self.at(e.line, |c| c.expr_here(e, sid, w, s))
@@ -562,6 +599,9 @@ impl<'a> Compiler<'a> {
     fn expr_here(&mut self, e: &Expr, sid: usize, w: u32, s: bool) -> R<u32> {
         if let Some((n, sc)) = self.class_member(e, sid)? {
             return self.expr(&n, sc, w, s);
+        }
+        if let Some(x) = self.array_equality(e, sid)? {
+            return self.expr(&x, sid, w, s);
         }
         // a property of an object, a method's result, null
         if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_)) {

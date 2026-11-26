@@ -138,6 +138,9 @@ impl<'a> Compiler<'a> {
         if let Some((n, s)) = self.class_member(e, sid)? {
             return self.type_of(&n, s);
         }
+        if let Some(x) = self.array_equality(e, sid)? {
+            return self.type_of(&x, sid);
+        }
         if !self.classes.list.is_empty() || matches!(&e.kind, ExprKind::Null | ExprKind::New(_) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..)) {
             if let Some(t) = self.obj_type_of(e, sid)? {
                 return Ok(t);
