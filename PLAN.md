@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4874 of 5112 (95.3%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4877 of 5112 (95.4%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -101,8 +101,7 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
-   11: 5, 20: 5): streams of dynamic arrays and `with` (3), a function returning an
-   unpacked array in a parameter value (1).
+   11: 2, 20: 5): a function returning an unpacked array in a parameter value (1).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
@@ -246,6 +245,9 @@ SystemVerilog data and testbench:
   next tick).
 - DPI; a compound assignment in an expression to a target with
   side effects (`(x[i++] += 1)`).
+- streaming concatenations: fixed-size unpacked arrays, associative arrays, and queues or
+  dynamic arrays of reals, strings or class handles as items; `with` after the first
+  queue or dynamic array of a target.
 - tagged unions: `unique case matches` and `unique`/`priority if` with a pattern, a
   pattern in a case item's guard, patterns of arrays, a cast of a `tagged` expression
   (`T'(tagged m v)`); pattern matching only of variables; a real or string member of an

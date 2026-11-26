@@ -3882,6 +3882,94 @@ impl Sim {
                     self.hmut(a).extend_from_slice(&v);
                 }
             }
+            HeapOp::ToBits { from } => {
+                let (nf, nv) = (2 * nw(from), nw(from));
+                let src = self.harr(a);
+                let mut data = Vec::with_capacity(src.len() / nf * from as usize * 2);
+                for el in src.chunks_exact(nf) {
+                    for j in (0..from as usize).rev() {
+                        data.push((el[j / 64] >> (j % 64)) & 1);
+                        data.push((el[nv + j / 64] >> (j % 64)) & 1);
+                    }
+                }
+                let h = self.halloc(data);
+                self.put_handle(d, h);
+            }
+            HeapOp::FromBits | HeapOp::TakeElems => {
+                let nbits = self.harr(a).len() / 2;
+                let cnt = if op == HeapOp::FromBits {
+                    nbits.div_ceil(w as usize)
+                } else {
+                    int(&self.mem, c).unwrap_or(0).max(0) as usize
+                };
+                let take = (cnt * w as usize).min(nbits);
+                let nv = nw(w);
+                let src = &self.harr(a)[..2 * take];
+                let mut data = vec![0u64; cnt * n];
+                for (i, bit) in src.chunks_exact(2).enumerate() {
+                    let (k, j) = (i / w as usize, w as usize - 1 - i % w as usize);
+                    let (mut v, u) = (bit[0], bit[1]);
+                    if !x {
+                        // (a 2-state element: x and z are 0)
+                        v &= !u;
+                    }
+                    data[k * n + j / 64] |= v << (j % 64);
+                    if x {
+                        data[k * n + nv + j / 64] |= u << (j % 64);
+                    }
+                }
+                if op == HeapOp::TakeElems && take > 0 {
+                    self.hmut(a).drain(..2 * take);
+                }
+                let h = self.halloc(data);
+                self.put_handle(d, h);
+            }
+            HeapOp::PushBits { vw } => {
+                let nv = nw(vw);
+                let v = self.mem[c as usize..c as usize + 2 * nv].to_vec();
+                let arr = self.hmut(a);
+                for j in (0..vw as usize).rev() {
+                    arr.push((v[j / 64] >> (j % 64)) & 1);
+                    arr.push((v[nv + j / 64] >> (j % 64)) & 1);
+                }
+            }
+            HeapOp::TakeBits { vw } => {
+                let nv = nw(vw);
+                let take = (vw as usize).min(self.harr(a).len() / 2);
+                let mut v = vec![0u64; 2 * nv];
+                for (i, bit) in self.harr(a)[..2 * take].chunks_exact(2).enumerate() {
+                    let j = vw as usize - 1 - i;
+                    v[j / 64] |= bit[0] << (j % 64);
+                    v[nv + j / 64] |= bit[1] << (j % 64);
+                }
+                if take > 0 {
+                    self.hmut(a).drain(..2 * take);
+                }
+                self.mem[d as usize..d as usize + 2 * nv].copy_from_slice(&v);
+            }
+            HeapOp::Blocks { k, from_left } => {
+                let bits: Vec<[u64; 2]> = self.harr(a).chunks_exact(2).map(|b| [b[0], b[1]]).collect();
+                let k = k.max(1) as usize;
+                let mut blocks: Vec<&[[u64; 2]]> = if from_left { bits.chunks(k).collect() } else { bits.rchunks(k).collect() };
+                if from_left {
+                    blocks.reverse();
+                }
+                let data: Vec<u64> = blocks.into_iter().flatten().flatten().copied().collect();
+                if !data.is_empty() {
+                    *self.hmut(a) = data;
+                }
+            }
+            HeapOp::Place => {
+                let lo = int(&self.mem, b).unwrap_or(0).max(0) as usize;
+                let src = self.harr(c).to_vec();
+                let fill = dflt(w);
+                let arr = self.hmut(a);
+                let need = (lo * n + src.len()).max(arr.len());
+                while arr.len() < need {
+                    arr.extend_from_slice(&fill);
+                }
+                arr[lo * n..lo * n + src.len()].copy_from_slice(&src);
+            }
             HeapOp::Eq => {
                 let eq = self.harr(a) == self.harr(b);
                 self.put_int(d, 1, eq as i64);

@@ -323,10 +323,8 @@ impl Lower {
                 };
                 let mut v = Vec::new();
                 for (x, with) in items {
-                    if with.is_some() {
-                        return self.unsupported(loc, "`with` in a streaming concatenation");
-                    }
-                    v.push(self.expr(x)?);
+                    let x = self.expr(x)?;
+                    v.push(self.stream_with(x, with.as_deref())?);
                 }
                 ExprKind::Stream { left: *left, slice, items: v }.into()
             }
@@ -376,6 +374,29 @@ impl Lower {
         })
     }
 
+    /// A streaming concatenation item `x with [r]` (IEEE 1800-2017 11.4.14.4): the elements of
+    /// array `x` that `r` names, as a slice `x[lo:hi]` (lo..=hi).
+    fn stream_with(&mut self, x: Expr, with: Option<&t::Expr>) -> Result<Expr> {
+        let Some(r) = with else { return Ok(x) };
+        let bin = |op, a: Expr, b: Expr| -> Expr { ExprKind::Binary(op, Box::new(a), Box::new(b)).into() };
+        let one = || -> Expr { ExprKind::Num(dec(1)).into() };
+        let (lo, hi) = match &r.kind {
+            t::ExprKind::Range(_, kind, a, b) => {
+                let (a, b) = (self.expr(a)?, self.expr(b)?);
+                match kind {
+                    t::RangeKind::Colon => (a, b),
+                    t::RangeKind::Plus => (a.clone(), bin(BinOp::Sub, bin(BinOp::Add, a, b), one())),
+                    t::RangeKind::Minus => (bin(BinOp::Add, bin(BinOp::Sub, a.clone(), b), one()), a),
+                }
+            }
+            _ => {
+                let a = self.expr(r)?;
+                (a.clone(), a)
+            }
+        };
+        Ok(ExprKind::Range(Box::new(x), Box::new(lo), Box::new(hi)).into())
+    }
+
     /// An assignment target.
     pub(crate) fn lvalue(&mut self, e: &t::Expr) -> Result<Expr> {
         let mut x = self.lvalue_at(e)?;
@@ -395,10 +416,8 @@ impl Lower {
             };
             let mut v = Vec::new();
             for (x, with) in items {
-                if with.is_some() {
-                    return self.unsupported(e.loc, "`with` in a streaming concatenation");
-                }
-                v.push(self.lvalue(x)?);
+                let x = self.lvalue(x)?;
+                v.push(self.stream_with(x, with.as_deref())?);
             }
             return Ok(ExprKind::Stream { left: *left, slice, items: v }.into());
         }

@@ -172,7 +172,11 @@ impl<'a> Compiler<'a> {
             ExprKind::Stream { items, .. } => {
                 let mut w = 0;
                 for x in items {
-                    w += self.type_of(x, sid)?.width();
+                    // (a queue or dynamic array: its size is known at run time only)
+                    match self.type_of(x, sid)? {
+                        Type::Dyn { .. } => {}
+                        t => w += t.width(),
+                    }
                 }
                 Type::vec(w, false)
             }

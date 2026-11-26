@@ -1021,6 +1021,11 @@ impl<'a> Compiler<'a> {
     /// one stream; `<<` cuts it into blocks of the slice size from its right end and reverses
     /// their order. A wider target gets the stream left-justified (11.4.14.2).
     fn stream(&mut self, left: bool, slice: Option<&Expr>, items: &[Expr], sid: usize, w: u32) -> R<u32> {
+        if self.sigs.has_dyn {
+            if let Some(v) = self.stream_dyn(left, slice, items, sid, w)? {
+                return Ok(v);
+            }
+        }
         for x in items {
             if !matches!(self.type_of(x, sid)?, Type::Vec { .. }) {
                 return self.err("a streaming concatenation of this type (only integral items) is not supported");
@@ -1061,6 +1066,9 @@ impl<'a> Compiler<'a> {
     /// value's leftmost bits as a stream; `<<` undoes the reordering, the blocks taken from
     /// the stream's left end.
     pub(crate) fn stream_assign(&mut self, left: bool, slice: Option<&Expr>, items: &[Expr], rhs: &Expr, mode: rt::StoreMode, sid: usize) -> R<()> {
+        if self.sigs.has_dyn && self.stream_unpack_dyn(left, slice, items, rhs, mode, sid)? {
+            return Ok(());
+        }
         let cat: Expr = ExprKind::Concat(items.to_vec()).into();
         let w = self.type_of(&cat, sid)?.width();
         let (v, rw, _) = self.self_expr(rhs, sid)?;
@@ -1093,7 +1101,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// The block size of a `<<` streaming concatenation (default 1).
-    fn stream_slice(&mut self, slice: Option<&Expr>, sid: usize) -> R<i64> {
+    pub(crate) fn stream_slice(&mut self, slice: Option<&Expr>, sid: usize) -> R<i64> {
         let k = match slice {
             None => 1,
             Some(Expr { kind: ExprKind::Type(t), .. }) => {

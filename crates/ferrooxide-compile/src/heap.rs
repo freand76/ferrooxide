@@ -637,6 +637,16 @@ impl<'a> Compiler<'a> {
                 }
                 Ok((d, true))
             }
+            // a streaming concatenation (IEEE 1800-2017 11.4.14): its bits as the elements
+            ExprKind::Stream { left, slice, items } => {
+                if elem.leaf != Leaf::Bits {
+                    return self.err("a streaming concatenation assigned to a queue or dynamic array of reals or strings is not supported");
+                }
+                let st = self.stream_bits(*left, slice.as_deref(), items, sid)?;
+                let d = self.tmp(64);
+                self.heap_op(HeapOp::FromBits, d, st, NONE, NONE, elem);
+                Ok((d, true))
+            }
             ExprKind::Range(a, lo, hi) if self.dyn_arr_type(a, sid)?.is_some() => {
                 let (lo, hi) = (self.dyn_index(a, lo, sid)?, self.dyn_index(a, hi, sid)?);
                 let arr = self.dyn_arr(a, sid)?.unwrap();
@@ -949,5 +959,209 @@ impl<'a> Compiler<'a> {
             Type::Dyn { .. } => return self.err("a queue or dynamic array is not a vector"),
             Type::Class(_) => self.resize(v, 64, w, false),
         })
+    }
+}
+
+/// Streaming concatenations with queues and dynamic arrays (IEEE 1800-2017 11.4.14): the
+/// stream is made at run time as an array of 1-bit elements (`HeapOp::ToBits` & co.).
+impl<'a> Compiler<'a> {
+    /// The element of a bit stream.
+    fn bit_elem() -> Elem {
+        Self::elem_of(NetKind::Reg, 1, false)
+    }
+
+    /// The element type of a streaming concatenation item that is a queue or dynamic array
+    /// (or `a with [r]`, a slice of one); None for another item.
+    fn stream_dyn_item(&mut self, x: &Expr, sid: usize) -> R<Option<Elem>> {
+        let base = match &x.kind {
+            ExprKind::Range(a, ..) if self.dyn_arr_type(a, sid)?.is_some() => a,
+            _ => x,
+        };
+        match self.dyn_arr_type(base, sid)? {
+            None => Ok(None),
+            Some((DynKind::Assoc(_), _)) => self.err("an associative array in a streaming concatenation"),
+            Some((_, el)) if el.leaf != Leaf::Bits || el.class != NONE => self.err("a queue or dynamic array of reals, strings or class handles in a streaming concatenation is not supported"),
+            Some((_, el)) => Ok(Some(el)),
+        }
+    }
+
+    /// The bit stream of the items, reordered for `<<`: the slot of its handle.
+    fn stream_bits(&mut self, left: bool, slice: Option<&Expr>, items: &[Expr], sid: usize) -> R<u32> {
+        let bit = Self::bit_elem();
+        let st = self.tmp(64);
+        let z = self.const_slot(&Const::zero(64));
+        self.emit(Instr::Copy { d: st, s: z, w: 64 });
+        for x in items {
+            if let Some(el) = self.stream_dyn_item(x, sid)? {
+                let (h, _) = self.dyn_rhs(x, el, sid)?;
+                let t = self.tmp(64);
+                self.heap_op(HeapOp::ToBits { from: el.w }, t, h, NONE, NONE, bit);
+                self.heap_op(HeapOp::Append, NONE, st, NONE, t, bit);
+            } else {
+                if !matches!(self.type_of(x, sid)?, Type::Vec { .. }) {
+                    return self.err("a streaming concatenation of this type (only integral items, queues and dynamic arrays) is not supported");
+                }
+                let (v, w, _) = self.self_expr(x, sid)?;
+                self.heap_op(HeapOp::PushBits { vw: w }, NONE, st, NONE, v, bit);
+            }
+        }
+        if left {
+            let k = self.stream_slice(slice, sid)? as u32;
+            self.heap_op(HeapOp::Blocks { k, from_left: false }, NONE, st, NONE, NONE, bit);
+        }
+        Ok(st)
+    }
+
+    /// A run-time error message (not fatal) when the 32-bit value in `bad` is nonzero.
+    fn stream_error(&mut self, bad: u32, msg: &str, sid: usize) -> R<()> {
+        let skip = self.emit(Instr::Jz { c: bad, w: 32, to: 0 });
+        let scope = self.scopes[sid].name.clone();
+        let msg = format!("ERROR: {}: {msg}\n       Time: %0d  Scope: %m", self.loc().replace('%', "%%"));
+        let a = [Some(ExprKind::Str(msg).into()), Some(ExprKind::SysCall("$__ticks".into(), Vec::new()).into())];
+        let args = self.fmt_args(&a, sid)?;
+        let texp = self.texp(sid);
+        self.emit(Instr::Sys(Box::new(rt::SysTask::Display { nl: true, args, scope, fd: None, prefix: "", texp, radix: 'd' })));
+        let h = self.here();
+        self.patch(skip, h);
+        Ok(())
+    }
+
+    /// The 32-bit value `a op b` of two slots.
+    fn int_op(&mut self, op: rt::BinOp, a: u32, b: u32) -> u32 {
+        let d = self.tmp(32);
+        self.emit(Instr::Bin { op, d, a, b, w: 32 });
+        d
+    }
+
+    /// A streaming concatenation with a queue or dynamic array as a `w`-bit value (11.4.14.2:
+    /// left-justified, an error when the stream is wider); None if it has none.
+    pub(crate) fn stream_dyn(&mut self, left: bool, slice: Option<&Expr>, items: &[Expr], sid: usize, w: u32) -> R<Option<u32>> {
+        let mut any = false;
+        for x in items {
+            any |= self.stream_dyn_item(x, sid)?.is_some();
+        }
+        if !any {
+            return Ok(None);
+        }
+        let bit = Self::bit_elem();
+        let st = self.stream_bits(left, slice, items, sid)?;
+        let d = self.tmp(w);
+        self.heap_op(HeapOp::TakeBits { vw: w }, d, st, NONE, NONE, bit);
+        let rest = self.tmp(32);
+        self.heap_op(HeapOp::Size, rest, st, NONE, NONE, bit);
+        self.stream_error(rest, &format!("a streaming concatenation is wider than its {w}-bit target"), sid)?;
+        Ok(Some(d))
+    }
+
+    /// `{>> {items}} = rhs` (11.4.14.3) with a queue or dynamic array among the items or as
+    /// `rhs`: the items take the stream's bits left to right; the first queue or dynamic array
+    /// takes all the bits the fixed-size items after it leave (whole elements), any other one
+    /// none, `a with [r]` the elements r names (a grows to hold them). False if there is no
+    /// queue or dynamic array.
+    pub(crate) fn stream_unpack_dyn(&mut self, left: bool, slice: Option<&Expr>, items: &[Expr], rhs: &Expr, mode: rt::StoreMode, sid: usize) -> R<bool> {
+        let mut kinds = Vec::new();
+        for x in items {
+            kinds.push(self.stream_dyn_item(x, sid)?);
+        }
+        let src = self.dyn_arr_type(rhs, sid)?;
+        if src.is_none() && kinds.iter().all(|k| k.is_none()) {
+            return Ok(false);
+        }
+        let bit = Self::bit_elem();
+        let mut widths = Vec::new();
+        for (x, k) in items.iter().zip(&kinds) {
+            widths.push(match k {
+                None => self.type_of(x, sid)?.width(),
+                Some(_) => 0,
+            });
+        }
+        let fixed: u32 = widths.iter().sum();
+        // the source as a stream
+        let mut st = self.tmp(64);
+        match src {
+            Some((DynKind::Assoc(_), _)) => return self.err("an associative array as the source of a streaming concatenation"),
+            Some((_, el)) => {
+                if el.leaf != Leaf::Bits {
+                    return self.err("a queue or dynamic array of reals or strings as the source of a streaming concatenation is not supported");
+                }
+                let (h, _) = self.dyn_rhs(rhs, el, sid)?;
+                self.heap_op(HeapOp::ToBits { from: el.w }, st, h, NONE, NONE, bit);
+            }
+            None => {
+                let z = self.const_slot(&Const::zero(64));
+                self.emit(Instr::Copy { d: st, s: z, w: 64 });
+                let (v, rw, _) = self.self_expr(rhs, sid)?;
+                self.heap_op(HeapOp::PushBits { vw: rw }, NONE, st, NONE, v, bit);
+            }
+        }
+        // too few bits for the fixed-size items: an error
+        let size = self.tmp(32);
+        self.heap_op(HeapOp::Size, size, st, NONE, NONE, bit);
+        let need = self.const_slot(&Const::from_i64(fixed as i64, 32, false));
+        let short = self.tmp(1);
+        self.emit(Instr::Cmp { op: rt::CmpOp::Lt, d: short, a: size, b: need, w: 32 });
+        let short32 = self.tmp(32);
+        self.emit(Instr::Resize { d: short32, s: short, sw: 1, dw: 32, sign: false });
+        self.stream_error(short32, &format!("a streaming concatenation of {fixed} bits or more is assigned fewer bits"), sid)?;
+        // without a queue or dynamic array among the items: the stream's first bits
+        if kinds.iter().all(|k| k.is_none()) {
+            let t = self.tmp(64);
+            self.heap_op(HeapOp::TakeElems, t, st, NONE, need, bit);
+            st = t;
+        }
+        if left {
+            let k = self.stream_slice(slice, sid)? as u32;
+            self.heap_op(HeapOp::Blocks { k, from_left: true }, NONE, st, NONE, NONE, bit);
+        }
+        let mut greedy = true;
+        for (i, (x, k)) in items.iter().zip(&kinds).enumerate() {
+            let Some(el) = *k else {
+                let w = widths[i];
+                let d = self.tmp(w);
+                self.heap_op(HeapOp::TakeBits { vw: w }, d, st, NONE, NONE, bit);
+                self.store_value(&crate::stmt::Lhs::Expr(x, sid), d, w, mode)?;
+                continue;
+            };
+            let arr = self.tmp(64);
+            if let ExprKind::Range(a, lo, hi) = &x.kind {
+                // `a with [lo:hi]`: hi - lo + 1 elements, placed from lo
+                let n: Expr = ExprKind::Binary(BinOp::Add, Box::new(ExprKind::Binary(BinOp::Sub, hi.clone(), lo.clone()).into()), Box::new(ExprKind::Num(ferrooxide_front::ast::dec(1)).into())).into();
+                let n = self.expr(&n, sid, 32, true)?;
+                self.heap_op(HeapOp::TakeElems, arr, st, NONE, n, el);
+                let lo = self.expr(lo, sid, 32, true)?;
+                let target = self.dyn_arr(a, sid)?.unwrap();
+                self.arr_op(&target, HeapOp::Place, NONE, lo, arr);
+                self.dyn_done(&target);
+                continue;
+            }
+            let n = if greedy {
+                if items[i + 1..].iter().zip(&kinds[i + 1..]).any(|(y, k)| k.is_some() && matches!(y.kind, ExprKind::Range(..))) {
+                    return self.err("`with` after the first queue or dynamic array of a streaming concatenation target is not supported");
+                }
+                // the bits the fixed-size items after it leave, in whole elements
+                let after: u32 = widths[i + 1..].iter().sum();
+                let size = self.tmp(32);
+                self.heap_op(HeapOp::Size, size, st, NONE, NONE, bit);
+                let after = self.const_slot(&Const::from_i64(after as i64, 32, false));
+                let left_bits = self.int_op(rt::BinOp::Sub, size, after);
+                let ew = self.const_slot(&Const::from_i64(el.w as i64, 32, false));
+                self.int_op(rt::BinOp::DivS, left_bits, ew)
+            } else {
+                self.const_slot(&Const::zero(32))
+            };
+            greedy = false;
+            self.heap_op(HeapOp::TakeElems, arr, st, NONE, n, el);
+            let lt = self.type_of(x, sid)?;
+            if let Type::Dyn { kind: kind @ DynKind::Queue(b), .. } = lt {
+                if b > 0 {
+                    self.heap_op_t(HeapOp::Truncate, NONE, arr, NONE, NONE, el, kind);
+                }
+            }
+            if mode == rt::StoreMode::Blocking {
+                self.dyn_free_target(x, sid);
+            }
+            self.store_value(&crate::stmt::Lhs::Expr(x, sid), arr, lt.width(), mode)?;
+        }
+        Ok(true)
     }
 }

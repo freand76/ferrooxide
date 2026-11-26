@@ -696,6 +696,28 @@ pub enum HeapOp {
     /// d (1 bit) = array a has as many elements as the 32-bit value in c (else an error
     /// message: a fixed-size array of that many elements cannot take it)
     SizeIs,
+    // bit streams (streaming concatenations of queues and dynamic arrays, IEEE 1800-2017
+    // 11.4.14) are arrays of 1-bit elements, the stream's first bit first
+    /// d = the stream of the bits of array a, whose elements are `from` bits wide (each
+    /// element's msb first)
+    ToBits { from: u32 },
+    /// d = an array of `w`-bit elements made from stream a: its bits in order, each
+    /// element's msb first; the last element is filled up with 0 bits
+    FromBits,
+    /// append the bits of the `vw`-bit vector at c to stream a (msb first)
+    PushBits { vw: u32 },
+    /// d (`vw` bits) = the first `vw` bits of stream a, removed (the msb first; bits the
+    /// stream does not have are 0)
+    TakeBits { vw: u32 },
+    /// d = an array of the 32-bit value in c `w`-bit elements made from the first bits of
+    /// stream a, removed (as `FromBits`)
+    TakeElems,
+    /// reorder stream a in place for `<< k`: cut into blocks of `k` bits from its right end
+    /// (`from_left`: from its left end, which undoes it), the blocks in reverse order
+    Blocks { k: u32, from_left: bool },
+    /// a[b + i] = c[i] for each element of array c; a grows as needed (new elements are
+    /// default values)
+    Place,
 }
 
 /// The ordering methods of `HeapOp::Order` (IEEE 1800-2017 7.12.2).
