@@ -29,6 +29,14 @@ impl<'a> Compiler<'a> {
 
     /// Store targets of an lvalue, msb-first, with widths.
     fn targets(&mut self, e: &Expr, sid: usize, out: &mut Vec<(Option<Target>, u32)>) -> R<()> {
+        if self.sigs.has_structs && matches!(&e.kind, ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..) | ExprKind::Member(..)) {
+            if let Some(Ok(w)) = self.struct_walk(e, sid, true) {
+                // (IEEE 1800-2017 7.3.2)
+                if w.tag_write {
+                    return self.err("a member of a tagged union is set only by a tagged union expression");
+                }
+            }
+        }
         if let Some(n) = self.lv_norm(e, sid) {
             return self.targets(&n, sid, out);
         }

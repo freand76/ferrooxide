@@ -58,10 +58,19 @@ pub struct Package {
 #[derive(Debug, Clone)]
 pub struct Struct {
     pub union: bool,
+    /// `union tagged` (IEEE 1800-2017 7.3.2): the tag (the member's position, in the fewest
+    /// bits that hold it) above the widest member; each member is right-justified below it
+    pub tagged: bool,
     /// `struct packed`: integral members only, the whole is a vector; an unpacked struct is
     /// stored flat as well, but its members may be real or string
     pub packed: bool,
     pub fields: Vec<(String, SvType)>,
+}
+
+/// The width of the tag of a tagged union with `n` members: the fewest bits that hold
+/// 0..n-1.
+pub fn tag_bits(n: usize) -> u32 {
+    usize::BITS - n.saturating_sub(1).leading_zeros()
 }
 
 /// The value of a plain literal (no x/z), possibly negated.
@@ -155,6 +164,13 @@ impl SvType {
         }
         match &self.fields {
             None => num(1),
+            Some(s) if s.tagged => {
+                let widest = s.fields.iter().map(|f| f.1.width()).reduce(|a, b| match (lit(&a), lit(&b)) {
+                    (Some(x), Some(y)) => num(x.max(y)),
+                    _ => ExprKind::Cond(Box::new(ExprKind::Binary(BinOp::Ge, Box::new(a.clone()), Box::new(b.clone())).into()), Box::new(a), Box::new(b)).into(),
+                });
+                add(num(tag_bits(s.fields.len()) as i64), widest.unwrap_or(num(0)))
+            }
             Some(s) if s.union => s.fields.first().map_or(num(0), |f| f.1.width()),
             Some(s) => s.fields.iter().fold(num(0), |acc, f| add(acc, f.1.width())),
         }
@@ -429,9 +445,6 @@ impl Lower {
     pub(crate) fn data_type(&mut self, ty: &t::DataType) -> Result<Option<SvType>> {
         match &ty.kind {
             t::TypeKind::Struct(st) => {
-                if st.tagged {
-                    return self.unsupported(ty.loc, "a tagged union");
-                }
                 let signed = ty.signed.unwrap_or(false);
                 let mut fields = Vec::new();
                 for m in &st.members {
@@ -440,6 +453,11 @@ impl Lower {
                     }
                     let ft = match self.data_type(&m.ty)? {
                         Some(ft) => ft,
+                        // a void member of a tagged union: no value (0 bits)
+                        None if st.tagged && matches!(m.ty.kind, t::TypeKind::Void) && m.ty.packed.is_empty() => SvType {
+                            fields: Some(Rc::new(Struct { union: false, tagged: false, packed: true, fields: vec![] })),
+                            ..SvType::vector(NetKind::Bit, false, vec![])
+                        },
                         // a string member: a 64-bit handle
                         None if matches!(m.ty.kind, t::TypeKind::String) && m.ty.packed.is_empty() => {
                             SvType { int_kind: true, ..SvType::vector(NetKind::String, false, vec![(num(63), num(0))]) }
@@ -488,7 +506,7 @@ impl Lower {
                 }
                 let dims = self.packed_dims(&ty.packed, ty.loc)?;
                 let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, inner_heap: None, param: None, class: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, tagged: st.tagged, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, inner_heap: None, param: None, class: None }))
             }
             t::TypeKind::Enum(et) => {
                 let int32 = |signed: bool| SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, inner_heap: None, param: None, class: None };

@@ -709,7 +709,12 @@ impl Expr {
                 f(b);
                 f(c);
             }
-            K::Unary(_, a) | K::Member(a, _) | K::NamedArg(_, a) | K::NewCopy(a) | K::IncDec { e: a, .. } => f(a),
+            K::Unary(_, a) | K::Member(a, _) | K::NamedArg(_, a) | K::NewCopy(a) | K::IncDec { e: a, .. } | K::TagIs(a, _) | K::Unchecked(a) => f(a),
+            K::Tagged(_, a) => {
+                if let Some(a) = a {
+                    f(a);
+                }
+            }
             K::AssignExpr { lhs, rhs } => {
                 f(lhs);
                 f(rhs);
@@ -889,6 +894,15 @@ pub enum ExprKind {
     /// stream), `{<< slice {items}}` (blocks of `slice` bits, a constant or a type, from the
     /// right end in reverse order; default 1)
     Stream { left: bool, slice: Option<Box<Expr>>, items: Vec<Expr> },
+    /// `tagged M e` / `tagged M` (IEEE 1800-2017 11.9): a value of the tagged union type of
+    /// the target it is assigned to, with tag M and member value `e` (None: a void member)
+    Tagged(String, Option<Box<Expr>>),
+    /// the tag of a tagged union value is member M (1 or 0, 0 for an unknown tag): the test of
+    /// a `tagged M` pattern (IEEE 1800-2017 12.6)
+    TagIs(Box<Expr>, String),
+    /// a member chain read without the tag checks of the tagged unions in it: in the tests
+    /// and variables of a pattern, after the tests of those tags
+    Unchecked(Box<Expr>),
 }
 
 /// An item of an assignment pattern.

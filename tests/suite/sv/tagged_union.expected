@@ -1,0 +1,20 @@
+16 33
+0000010001000011 add 1 2 3
+nested other
+add to r0
+1001100000001001 jmp if 2 to 9
+nested jmpc 2 9
+jmp never 7
+1000001010111100 jmp 700
+nested jmp 700
+700
+if 9
+else
+not add
+11
+-1
+invalid
+valid -5
+-4
+casez hit
+case miss

@@ -148,6 +148,10 @@ pub fn expr(e: &Expr) -> String {
         ExprKind::SysCall(n, args) => format!("{n}({})", list(args)),
         ExprKind::Type(t) => format!("type({})", sv_type(t)),
         ExprKind::Member(a, m) => format!("{}.{m}", expr(a)),
+        ExprKind::Tagged(m, None) => format!("tagged {m}"),
+        ExprKind::Tagged(m, Some(v)) => format!("tagged {m} ({})", expr(v)),
+        ExprKind::TagIs(a, m) => format!("$tag_is({}, {m})", expr(a)),
+        ExprKind::Unchecked(a) => format!("$unchecked({})", expr(a)),
         ExprKind::NewArray(n, init) => match init {
             Some(i) => format!("new[{}]({})", expr(n), expr(i)),
             None => format!("new[{}]", expr(n)),
@@ -219,7 +223,7 @@ pub fn sv_type(t: &SvType) -> String {
         if !f.packed {
             s.push_str(" unpacked");
         }
-        s.push_str(if f.union { " union {" } else { " struct {" });
+        s.push_str(if f.tagged { " union tagged {" } else if f.union { " union {" } else { " struct {" });
         for (n, ft) in &f.fields {
             let _ = write!(s, " {} {n};", sv_type(ft));
         }

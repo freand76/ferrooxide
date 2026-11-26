@@ -218,6 +218,7 @@ impl Lower {
                 let b = self.expr(b)?;
                 ExprKind::Binary(bop, Box::new(a), Box::new(b)).into()
             }
+            t::ExprKind::Cond(c, a, b) if matches!(c.kind, t::ExprKind::Matches(..) | t::ExprKind::TripleAnd(..)) => self.cond_matches(c, a, b, loc)?,
             t::ExprKind::Cond(c, a, b) => {
                 let c = self.expr(c)?;
                 let a = self.expr(a)?;
@@ -329,7 +330,11 @@ impl Lower {
                 }
                 ExprKind::Stream { left: *left, slice, items: v }.into()
             }
-            t::ExprKind::Tagged(..) => return self.unsupported(loc, "a tagged union expression"),
+            t::ExprKind::Tagged(m, v) => ExprKind::Tagged(m.clone(), match v {
+                Some(v) => Some(Box::new(self.expr(v)?)),
+                None => None,
+            })
+            .into(),
             // Verilog code may name a variable `new`
             t::ExprKind::New { size: None, args: None, copy: None } if self.vars.contains_key("new") => ExprKind::Ident(self.name("new", loc)).into(),
             t::ExprKind::New { size: Some(n), args, copy: None } => {

@@ -41,7 +41,7 @@ pub(crate) fn side_effects(e: &Expr) -> bool {
 }
 
 /// A syntax-tree expression that changes a variable (`i++`, `(a = b)`).
-fn syn_side_effects(e: &t::Expr) -> bool {
+pub(crate) fn syn_side_effects(e: &t::Expr) -> bool {
     use t::ExprKind as K;
     match &e.kind {
         K::IncDec { .. } | K::Assign(..) => true,
@@ -180,7 +180,7 @@ impl Lower {
     }
 
     /// The declarations of a block (no directions).
-    fn block_decls(&mut self, v: &[t::Item]) -> Result<(Vec<Decl>, Vec<ParamDecl>)> {
+    pub(crate) fn block_decls(&mut self, v: &[t::Item]) -> Result<(Vec<Decl>, Vec<ParamDecl>)> {
         let mut decls = Vec::new();
         let mut params = Vec::new();
         for it in v {
@@ -295,7 +295,10 @@ impl Lower {
             t::StmtKind::Trigger { .. } => return self.unsupported(s.loc, "a nonblocking event trigger with a delay or event control"),
             t::StmtKind::If { qual, cond, then_, else_ } => {
                 if matches!(cond.kind, t::ExprKind::Matches(..) | t::ExprKind::TripleAnd(..)) {
-                    return self.unsupported(cond.loc, "a pattern-matching condition");
+                    if qual.is_some() {
+                        return self.unsupported(cond.loc, "a pattern-matching condition in a unique or priority if");
+                    }
+                    return self.if_matches(cond, then_, else_.as_deref(), s.loc);
                 }
                 let cond = self.expr(cond)?;
                 let then_s = Box::new(self.stmt(then_)?);
@@ -333,7 +336,12 @@ impl Lower {
                         Some(std::mem::replace(&mut e, one.into()))
                     }
                     t::CaseMode::Inside => return self.unsupported(s.loc, "casez/casex inside"),
-                    t::CaseMode::Matches => return self.unsupported(s.loc, "case matches"),
+                    t::CaseMode::Matches => {
+                        if *qual == Some(Kw::Unique) || *qual == Some(Kw::Unique0) {
+                            return self.unsupported(s.loc, "unique case matches");
+                        }
+                        return self.case_matches(kind, *qual, expr, items, s.loc);
+                    }
                 };
                 let mut arms = Vec::new();
                 let mut default = None;

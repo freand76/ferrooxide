@@ -186,6 +186,9 @@ impl<'a> Compiler<'a> {
             ExprKind::NamedArg(..) => return self.err("a named argument is allowed only in a call of a function or task"),
             ExprKind::Last => return self.err("`$` outside an index of a queue"),
             ExprKind::IncDec { e, .. } | ExprKind::AssignExpr { lhs: e, .. } => return self.type_of(e, sid),
+            ExprKind::Tagged(m, _) => return self.err(format!("`tagged {m}` needs a tagged union target here")),
+            ExprKind::TagIs(..) => v(1, false),
+            ExprKind::Unchecked(x) => return self.type_of(x, sid),
             ExprKind::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
                 return self.type_of(&r, sid);
@@ -355,6 +358,7 @@ impl<'a> Compiler<'a> {
                 }
                 "$rtoi" => v(32, true),
                 "$realtobits" | "$__ticks" | "$__strbits" => v(64, false),
+                "$__tag_check" => self.type_of(&args[1], sid)?,
                 "$shortrealtobits" => v(32, false),
                 "$countones" | "$countbits" => v(32, false),
                 "$left" | "$right" | "$low" | "$high" | "$size" | "$increment" | "$dimensions" | "$unpacked_dimensions" => v(32, true),
@@ -471,7 +475,21 @@ pub(crate) enum Leaf {
 #[derive(Clone, Debug)]
 pub(crate) struct Fields {
     pub(crate) union: bool,
+    /// a tagged union: the tag (`tag_bits` wide) above the widest member
+    pub(crate) tagged: bool,
     pub(crate) fields: Vec<(String, Packed)>,
+}
+
+impl Fields {
+    /// The width of a tagged union's tag.
+    pub(crate) fn tag_bits(&self) -> i64 {
+        ferrooxide_front::lower::tag_bits(self.fields.len()) as i64
+    }
+
+    /// The width of the widest member (of a tagged union: where its tag starts).
+    pub(crate) fn widest(&self) -> i64 {
+        self.fields.iter().map(|x| x.1.width()).max().unwrap_or(0)
+    }
 }
 
 fn dim_size(d: (i64, i64)) -> i64 {
@@ -483,6 +501,7 @@ impl Packed {
     fn leaf_width(&self) -> i64 {
         match &self.fields {
             None => 1,
+            Some(f) if f.tagged => f.tag_bits() + f.widest(),
             Some(f) if f.union => f.fields.first().map_or(0, |x| x.1.width()),
             Some(f) => f.fields.iter().map(|x| x.1.width()).sum(),
         }
@@ -502,7 +521,7 @@ impl Packed {
 pub(crate) fn packed_of(t: &SvType) -> Packed {
     let dims = t.dims.iter().map(|(a, b)| (lit(a).unwrap_or(0), lit(b).unwrap_or(0))).collect();
     let fields = t.fields.as_ref().map(|f| {
-        Rc::new(Fields { union: f.union, fields: f.fields.iter().map(|(n, ft)| (n.clone(), packed_of(ft))).collect() })
+        Rc::new(Fields { union: f.union, tagged: f.tagged, fields: f.fields.iter().map(|(n, ft)| (n.clone(), packed_of(ft))).collect() })
     });
     let leaf = match t.kind {
         NetKind::Real => Leaf::Real,
@@ -620,6 +639,17 @@ fn dim_pos(d: (i64, i64), k: Expr) -> Expr {
     }
 }
 
+/// A member chain's flat form without its tag checks (`$__tag_check`).
+pub(crate) fn strip_tag_checks(mut e: Expr) -> Expr {
+    if let ExprKind::SysCall(n, a) = &mut e.kind {
+        if n == "$__tag_check" {
+            return strip_tag_checks(a.swap_remove(1));
+        }
+    }
+    e.for_each_child_mut(&mut |c| *c = strip_tag_checks(std::mem::replace(c, ExprKind::Null.into())));
+    e
+}
+
 /// `$__cast(width, unsigned, v)`: `v` as a value of `w` bits.
 fn cast(w: i64, v: Expr) -> Expr {
     ExprKind::SysCall("$__cast".into(), vec![num(w), num(0), v]).into()
@@ -633,6 +663,8 @@ pub(crate) struct Walk {
     pub(crate) ty: Option<Packed>,
     /// a whole real or string member
     pub(crate) leaf: Leaf,
+    /// an lvalue that sets a member of a tagged union
+    pub(crate) tag_write: bool,
 }
 
 impl<'a> Compiler<'a> {
@@ -766,6 +798,9 @@ impl<'a> Compiler<'a> {
         let mut width = num(cur.width());
         let mut touched = false;
         let mut whole = true;
+        // (tagged union members read: their tag, the member's position, its name)
+        let mut tag_checks: Vec<(Expr, usize, String)> = Vec::new();
+        let mut tag_write = false;
         loop {
             match ops.get(k) {
                 Some(&op @ (Sel::Index(_) | Sel::Range(..) | Sel::Part(..))) if di < cur.dims.len() => {
@@ -813,10 +848,34 @@ impl<'a> Compiler<'a> {
                 }
                 Some(Sel::Member(m)) if di == cur.dims.len() && cur.fields.is_some() => {
                     let st = cur.fields.clone().unwrap();
+                    // (internal) `$tag`: the tag of a tagged union
+                    if *m == "$tag" && st.tagged {
+                        k += 1;
+                        off = arith(B::Add, off, num(st.widest()));
+                        let w = st.tag_bits();
+                        cur = Packed { dims: vec![(w - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None };
+                        di = 0;
+                        width = num(w);
+                        touched = true;
+                        continue;
+                    }
                     let Some(fk) = st.fields.iter().position(|f| f.0 == *m) else {
                         return Some(Err(format!("no member '{m}' in the struct")));
                     };
                     k += 1;
+                    if st.tagged {
+                        if st.fields[fk].1.fields.as_ref().is_some_and(|f| f.fields.is_empty() && !f.union) {
+                            return Some(Err(format!("'{m}' is a void member of a tagged union: it has no value")));
+                        }
+                        // a member of a tagged union is read only while the tag names it
+                        // (IEEE 1800-2017 7.3.2); it is set only by a tagged union expression
+                        if lvalue {
+                            tag_write = true;
+                        } else if st.tag_bits() > 0 {
+                            let tag: Expr = ExprKind::IndexedRange(Box::new(elem.clone()), Box::new(arith(B::Add, off.clone(), num(st.widest()))), Box::new(num(st.tag_bits())), true).into();
+                            tag_checks.push((tag, fk, m.to_string()));
+                        }
+                    }
                     if !st.union {
                         let after: i64 = st.fields[fk + 1..].iter().map(|f| f.1.width()).sum();
                         off = arith(B::Add, off, num(after));
@@ -857,8 +916,14 @@ impl<'a> Compiler<'a> {
         for &op in &ops[k..] {
             out = apply(out, op);
         }
+        // a member read while the tag names another member: a run-time error (an unknown tag
+        // is not checked)
+        for (tag, fk, m) in tag_checks.into_iter().rev().filter(|_| leaf == Leaf::Bits) {
+            let other = ExprKind::Binary(B::CaseEq, Box::new(ExprKind::Binary(B::Ne, Box::new(tag), Box::new(num(fk as i64))).into()), Box::new(num(1))).into();
+            out = ExprKind::SysCall("$__tag_check".into(), vec![other, out, ExprKind::Str(m).into()]).into();
+        }
         let whole_chain = k == ops.len();
-        Some(Ok(Walk { expr: out, ty: if whole_chain { ty } else { None }, leaf: if whole_chain { leaf } else { Leaf::Bits } }))
+        Some(Ok(Walk { expr: out, ty: if whole_chain { ty } else { None }, leaf: if whole_chain { leaf } else { Leaf::Bits }, tag_write }))
     }
 
     /// The type of a member chain that selects a whole real or string member of an unpacked
@@ -922,6 +987,11 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Pattern(None, items) => match t {
                 Some(t) => Ok(Some(self.build_pattern(items, t, sid)?)),
+                None => Ok(None),
+            },
+            ExprKind::Tagged(m, v) => match t {
+                Some(t) if t.dims.is_empty() && t.fields.as_ref().is_some_and(|f| f.tagged) => Ok(Some(self.build_tagged(m, v.as_deref(), t, sid)?)),
+                Some(_) => self.err(format!("`tagged {m}` is assigned to a value that is not a tagged union")),
                 None => Ok(None),
             },
             ExprKind::Cond(c, a, b) => {
@@ -1014,6 +1084,61 @@ impl<'a> Compiler<'a> {
             });
         }
         Ok(ExprKind::Concat(out).into())
+    }
+
+    /// `tagged m v` for tagged union type `t` (IEEE 1800-2017 11.9): the tag, zeros, the member
+    /// value right-justified.
+    fn build_tagged(&mut self, m: &str, v: Option<&Expr>, t: &Packed, sid: usize) -> R<Expr> {
+        let f = t.fields.as_ref().unwrap();
+        let Some(k) = f.fields.iter().position(|x| x.0 == m) else {
+            return self.err(format!("the tagged union has no member '{m}'"));
+        };
+        let mt = &f.fields[k].1;
+        let void = mt.fields.as_ref().is_some_and(|x| x.fields.is_empty() && !x.union);
+        let mut out = Vec::new();
+        if f.tag_bits() > 0 {
+            out.push(cast(f.tag_bits(), num(k as i64)));
+        }
+        let pad = f.widest() - mt.width();
+        if pad > 0 {
+            out.push(cast(pad, num(0)));
+        }
+        match (v, void) {
+            (Some(_), true) => return self.err(format!("`tagged {m}` of a void member takes no value")),
+            (None, false) => return self.err(format!("`tagged {m}` needs a value for the member")),
+            (None, true) => {}
+            (Some(v), false) => {
+                let v = self.with_target(v, Some(mt), sid)?.unwrap_or_else(|| v.clone());
+                out.push(match (mt.leaf, v) {
+                    (Leaf::Real, v) => ExprKind::SysCall("$realtobits".into(), vec![v]).into(),
+                    (Leaf::Str, v) => ExprKind::SysCall("$__strbits".into(), vec![v]).into(),
+                    (_, v) => cast(mt.width(), v),
+                });
+            }
+        }
+        if out.is_empty() {
+            return self.err("a tagged union without bits");
+        }
+        Ok(ExprKind::Concat(out).into())
+    }
+
+    /// `TagIs(e, m)`: the test that the tag of tagged union `e` is member `m`.
+    pub(crate) fn tag_is(&self, e: &Expr, m: &str, sid: usize) -> R<Expr> {
+        let Some(t) = self.target_layout(e, sid) else {
+            return self.err("a `tagged` pattern matches a value that is not a tagged union");
+        };
+        let Some(f) = t.fields.as_ref().filter(|f| f.tagged && t.dims.is_empty()) else {
+            return self.err("a `tagged` pattern matches a value that is not a tagged union");
+        };
+        let Some(k) = f.fields.iter().position(|x| x.0 == m) else {
+            return self.err(format!("the tagged union has no member '{m}'"));
+        };
+        if f.tag_bits() == 0 {
+            return Ok(num(1));
+        }
+        // (the members on the way were tested before)
+        let tag = ExprKind::Unchecked(Box::new(ExprKind::Member(Box::new(e.clone()), "$tag".into()).into())).into();
+        Ok(ExprKind::Binary(B::CaseEq, Box::new(tag), Box::new(cast(f.tag_bits(), num(k as i64)))).into())
     }
 
     /// The items of a pattern with replications (`n{a, b}`, 10.10.1) written out as

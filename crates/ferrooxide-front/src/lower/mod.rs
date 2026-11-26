@@ -11,12 +11,13 @@ mod class;
 mod constraint;
 mod expr;
 mod items;
+mod matches;
 mod randseq;
 mod stmt;
 mod types;
 
 use crate::ast::*;
-pub use types::{minus_one, Package, SvType};
+pub use types::{minus_one, tag_bits, Package, SvType};
 use crate::syntax::kw::Kw;
 use crate::syntax::tree as t;
 use crate::{Error, Options, Result};

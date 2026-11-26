@@ -95,6 +95,12 @@ impl<'a> Compiler<'a> {
         if let Some(m) = self.hier_member(e, sid) {
             return Some(m);
         }
+        if let ExprKind::Unchecked(x) = &e.kind {
+            return Some(match self.struct_walk(x, sid, false) {
+                Some(Ok(w)) => crate::types::strip_tag_checks(w.expr),
+                _ => (**x).clone(),
+            });
+        }
         if structs && self.sigs.has_structs && matches!(&e.kind, ExprKind::Index(..) | ExprKind::Range(..) | ExprKind::IndexedRange(..) | ExprKind::Member(..)) {
             if let Some(Ok(w)) = self.struct_walk(e, sid, lvalue) {
                 return Some(w.expr);
@@ -394,6 +400,7 @@ impl<'a> Compiler<'a> {
         }
         match &e.kind {
             ExprKind::Type(_) | ExprKind::Pattern(..) | ExprKind::NewArray(..) | ExprKind::Last | ExprKind::IncDec { .. } | ExprKind::AssignExpr { .. } => false,
+            ExprKind::Tagged(..) | ExprKind::TagIs(..) | ExprKind::Unchecked(_) => false,
             ExprKind::Null | ExprKind::New(_) | ExprKind::NewTyped(..) | ExprKind::NewCopy(_) | ExprKind::MethodCall(..) | ExprKind::StaticCall(..) | ExprKind::EmptyArg | ExprKind::NamedArg(..) => false,
             ExprKind::ArrayWith { .. } | ExprKind::Randomize { .. } | ExprKind::ClassMember { .. } => false,
             // a member of a struct parameter
@@ -708,6 +715,12 @@ impl<'a> Compiler<'a> {
             ExprKind::Member(..) => self.member_error(e, sid),
             ExprKind::Pattern(..) => {
                 let r = self.typed_pattern(e, sid)?;
+                self.expr(&r, sid, w, s)
+            }
+            ExprKind::Tagged(m, _) => self.err(format!("`tagged {m}` needs a tagged union target here")),
+            ExprKind::Unchecked(x) => self.expr(x, sid, w, s),
+            ExprKind::TagIs(a, m) => {
+                let r = self.tag_is(a, m, sid)?;
                 self.expr(&r, sid, w, s)
             }
             ExprKind::NewArray(..) | ExprKind::Last => self.type_of(e, sid).map(|_| NONE),
@@ -1635,6 +1648,23 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Copy { d, s: v, w: 64 });
                 Ok(self.resize(d, 64, w, false))
             }
+            // (internal) `$__tag_check(other, v, m)`: `v`, a member `m` of a tagged union; when
+            // `other` (the tag names another member) a run-time error first
+            "$__tag_check" => {
+                let [c, v, Expr { kind: ExprKind::Str(m), .. }] = args else { unreachable!() };
+                let (cv, cw) = self.truth(c, sid)?;
+                let ok = self.emit(Instr::Jz { c: cv, w: cw, to: 0 });
+                let scope = self.scopes[sid].name.clone();
+                let msg = format!("ERROR: {}: member '{m}' of a tagged union is read while the tag is another member\n       Time: %0d  Scope: %m", self.loc().replace('%', "%%"));
+                let a = [Some(ExprKind::Str(msg).into()), Some(ExprKind::SysCall("$__ticks".into(), Vec::new()).into())];
+                let fa = self.fmt_args(&a, sid)?;
+                let texp = self.texp(sid);
+                self.emit(Instr::Sys(Box::new(rt::SysTask::Display { nl: true, args: fa, scope, fd: None, prefix: "", texp, radix: 'd' })));
+                self.emit(Instr::Sys(Box::new(rt::SysTask::Finish { loc: String::new(), stop: false, fatal: true })));
+                let h = self.here();
+                self.patch(ok, h);
+                self.expr(v, sid, w, s)
+            }
             // (internal: a string's handle, for a string member in an assignment pattern)
             "$__strbits" => {
                 let h = self.str_expr(&args[0], sid)?;
@@ -2383,7 +2413,8 @@ impl<'a> Compiler<'a> {
                     self.reads_expr(i, sid, out);
                 }
             }
-            ExprKind::Member(a, _) => self.reads_expr(a, sid, out),
+            ExprKind::Member(a, _) | ExprKind::TagIs(a, _) | ExprKind::Tagged(_, Some(a)) | ExprKind::Unchecked(a) => self.reads_expr(a, sid, out),
+            ExprKind::Tagged(_, None) => {}
             ExprKind::Pattern(_, items) => {
                 for it in items {
                     if let PatItem::Index(k, _) = it {
