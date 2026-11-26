@@ -11,6 +11,7 @@ mod class;
 mod constraint;
 mod expr;
 mod items;
+mod randseq;
 mod stmt;
 mod types;
 

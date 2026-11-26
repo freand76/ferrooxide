@@ -450,7 +450,7 @@ impl Lower {
             t::StmtKind::WaitFork => Stmt::WaitFork { line },
             t::StmtKind::WaitOrder { .. } => return self.unsupported(s.loc, "wait_order"),
             t::StmtKind::RandCase(arms) => self.randcase(arms, line)?,
-            t::StmtKind::RandSequence { .. } => return self.unsupported(s.loc, "randsequence"),
+            t::StmtKind::RandSequence { start, prods } => self.randsequence(start.as_ref(), prods, s.loc)?,
             t::StmtKind::Assertion(a) => self.immediate_assertion(a, s.label.as_ref().or(a.label.as_ref()))?,
             // `expect(e);` in Verilog code: a call of a task named `expect`
             t::StmtKind::Expect { prop: t::Prop::Expr(e), action } if action.pass.is_none() && action.fail.is_none() => {

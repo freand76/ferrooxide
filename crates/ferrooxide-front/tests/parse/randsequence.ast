@@ -1,0 +1,171 @@
+module m ();
+  // imports $unit
+  int(32) signed x;
+  initial begin : rs$1
+    begin : rs$2$main
+      begin
+        automatic reg [63:0] $randcase19;
+        if ((((2 + 1) + 1) != 0)) begin
+          $randcase19 = $urandom_range((((2 + 1) + 1) - 1), 0);
+          begin
+            if (($randcase19 < 2)) begin
+              begin : rs$3$first
+                begin
+                  if ((x > 1)) begin : rs$4$a
+                    begin
+                      begin : rs$5$add
+                        int(32) signed y = 2;
+                        begin
+                          begin
+                            x = (x + y);
+                            if ((x > 9))
+                              disable rs$1;
+                            else
+                              disable rs$5$add;
+                          end
+                        end
+                      end
+                    end
+                  end
+                  else begin : rs$6$b
+                    begin
+                      begin : rs$7$add
+                        int(32) signed y = 1;
+                        begin
+                          begin
+                            x = (x + y);
+                            if ((x > 9))
+                              disable rs$1;
+                            else
+                              disable rs$7$add;
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+              begin : rs$8$second
+                begin
+                  case (x)
+                    0, 1: begin : rs$9$a
+                      begin
+                        begin : rs$10$add
+                          int(32) signed y = 2;
+                          begin
+                            begin
+                              x = (x + y);
+                              if ((x > 9))
+                                disable rs$1;
+                              else
+                                disable rs$10$add;
+                            end
+                          end
+                        end
+                      end
+                    end
+                    default: begin : rs$11$b
+                      begin
+                        begin : rs$12$add
+                          int(32) signed y = 1;
+                          begin
+                            begin
+                              x = (x + y);
+                              if ((x > 9))
+                                disable rs$1;
+                              else
+                                disable rs$12$add;
+                            end
+                          end
+                        end
+                      end
+                    end
+                  endcase
+                end
+              end
+            end
+            else
+              if (($randcase19 < (2 + 1))) begin
+                begin
+                  int(32) signed rs$15$left = 2;
+                  int(32) signed rs$15$pick;
+                  real rs$15$weight = 0.5;
+                  int(32) signed rs$15$rem0 = 1;
+                  int(32) signed rs$15$pos0 = 0;
+                  int(32) signed rs$15$rem1 = 1;
+                  int(32) signed rs$15$pos1 = 0;
+                  while ((rs$15$left > 0)) begin
+                    rs$15$pick = $urandom_range((rs$15$left - 1), 0);
+                    if ((rs$15$pick < rs$15$rem0)) begin
+                      case (rs$15$pos0)
+                        0: begin : rs$13$add
+                          int(32) signed y = 2;
+                          begin
+                            begin
+                              x = (x + y);
+                              if ((x > 9))
+                                disable rs$1;
+                              else
+                                disable rs$13$add;
+                            end
+                          end
+                        end
+                      endcase
+                      rs$15$pos0 = (rs$15$pos0 + 1);
+                      rs$15$rem0 = (rs$15$rem0 - 1);
+                    end
+                    else
+                      if ((rs$15$pick < (rs$15$rem0 + rs$15$rem1))) begin
+                        case (rs$15$pos1)
+                          0: begin : rs$14$add
+                            int(32) signed y = 1;
+                            begin
+                              begin
+                                x = (x + y);
+                                if ((x > 9))
+                                  disable rs$1;
+                                else
+                                  disable rs$14$add;
+                              end
+                            end
+                          end
+                        endcase
+                        rs$15$pos1 = (rs$15$pos1 + 1);
+                        rs$15$rem1 = (rs$15$rem1 - 1);
+                      end
+                    rs$15$left = (rs$15$left - 1);
+                  end
+                end
+              end
+              else
+                if (($randcase19 < ((2 + 1) + 1))) begin
+                  begin : rs$16$third
+                    begin
+                      repeat (3) begin : rs$17$a
+                        begin
+                          begin : rs$18$add
+                            int(32) signed y = 2;
+                            begin
+                              begin
+                                x = (x + y);
+                                if ((x > 9))
+                                  disable rs$1;
+                                else
+                                  disable rs$18$add;
+                              end
+                            end
+                          end
+                        end
+                      end
+                      begin
+                        x = (x + 1);
+                      end
+                    end
+                  end
+                end
+          end
+        end
+      end
+    end
+  end
+endmodule
