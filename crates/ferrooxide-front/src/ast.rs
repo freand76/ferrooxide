@@ -265,12 +265,9 @@ pub struct SubroutineDecl {
     pub name: String,
     pub is_task: bool,
     pub automatic: bool,
-    /// return type (functions only)
-    pub signed: bool,
-    pub range: Option<Range>,
-    pub ret_kind: NetKind,
-    /// the declared return type, where there is one (as `Decl::ty`)
-    pub ret_ty: Option<std::rc::Rc<crate::lower::SvType>>,
+    /// the return type (`void`: kind `Int(0)`; a task: `void`); `ret_kind()` & co. are its
+    /// flat form
+    pub ret_ty: std::rc::Rc<crate::lower::SvType>,
     /// ports in order + local declarations
     pub decls: Vec<Decl>,
     /// the `ref` ports (declared `Inout`: copied in and out, IEEE 1800-2017 13.5.2; the
@@ -286,6 +283,36 @@ pub struct SubroutineDecl {
     pub params: Vec<ParamDecl>,
     pub body: Stmt,
     pub line: Line,
+}
+
+impl SubroutineDecl {
+    /// The kind of the result: `Int(0)` (none), `Integer` (32-bit signed), `Real`, `String`,
+    /// `Class` or else `Reg` (a vector of `range()`).
+    pub fn ret_kind(&self) -> NetKind {
+        let t = &self.ret_ty;
+        match t.kind {
+            NetKind::Int(0) | NetKind::Real | NetKind::String | NetKind::Class if !t.has_struct() => t.kind,
+            NetKind::Integer | NetKind::Int(32) if t.int_kind && t.dims.len() <= 1 && !t.has_struct() => NetKind::Integer,
+            _ => NetKind::Reg,
+        }
+    }
+
+    pub fn signed(&self) -> bool {
+        self.ret_ty.signed
+    }
+
+    /// The range of a `Reg` result: none for one bit; a struct or several packed dimensions:
+    /// the whole width.
+    pub fn range(&self) -> Option<Range> {
+        if self.ret_kind() != NetKind::Reg {
+            return None;
+        }
+        let t = &self.ret_ty;
+        if t.has_struct() || t.dims.len() > 1 {
+            return Some((crate::lower::minus_one(t.width()), ExprKind::Num(dec(0)).into()));
+        }
+        t.dims.first().cloned()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

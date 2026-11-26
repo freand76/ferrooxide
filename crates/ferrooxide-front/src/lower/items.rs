@@ -2,6 +2,7 @@
 //! instances and gates, generate constructs, specify blocks.
 
 use super::{item_loc, item_what, Lower};
+use super::SvType;
 use crate::ast::*;
 
 use crate::syntax::kw::Kw;
@@ -473,69 +474,42 @@ impl Lower {
             Some(l) => l == t::Lifetime::Automatic,
             None => self.default_automatic,
         };
-        let mut signed = false;
-        let mut range = None;
-        let mut ret_kind = NetKind::Reg;
+        // the return type, and the type the lowering knows the result variable by (none for a
+        // builtin type with at most one range)
+        let mut ret_ty = SvType::vector(if is_task { NetKind::Int(0) } else { NetKind::Reg }, false, vec![]);
         let mut ret_type = None;
         if let Some(rt) = &s.ret {
             let sv = matches!(rt.kind, t::TypeKind::Struct(_) | t::TypeKind::Enum(_) | t::TypeKind::Named(_));
             if sv {
-                let t = self.data_type_req(rt)?;
-                let (k, sg, r, packed) = t.decl_parts();
-                range = if !packed.is_empty() { Some((super::types::minus_one(t.width()), ExprKind::Num(dec(0)).into())) } else { r };
-                signed = sg;
-                ret_kind = match k {
-                    NetKind::Class => NetKind::Class,
-                    NetKind::Int(_) | NetKind::Integer if range.is_none() => NetKind::Integer,
-                    _ => NetKind::Reg,
-                };
-                if ret_kind == NetKind::Integer {
-                    range = None;
-                }
-                ret_type = Some(std::rc::Rc::new(t));
+                ret_ty = self.data_type_req(rt)?;
+                ret_type = Some(std::rc::Rc::new(ret_ty.clone()));
             } else {
-                signed = rt.signed == Some(true);
-                let width = |w: u64| Some((Expr::from(ExprKind::Num(dec(w - 1))), Expr::from(ExprKind::Num(dec(0)))));
-                match &rt.kind {
-                    t::TypeKind::Void => ret_kind = NetKind::Int(0),
-                    t::TypeKind::Implicit | t::TypeKind::Int(t::IntKw::Logic | t::IntKw::Reg | t::IntKw::Bit) => {}
-                    t::TypeKind::Int(t::IntKw::Integer | t::IntKw::Int) => {
-                        ret_kind = NetKind::Integer;
-                        signed = rt.signed != Some(false);
-                    }
-                    t::TypeKind::Int(t::IntKw::Byte) => {
-                        range = width(8);
-                        signed = rt.signed != Some(false);
-                    }
-                    t::TypeKind::Int(t::IntKw::Shortint) => {
-                        range = width(16);
-                        signed = rt.signed != Some(false);
-                    }
-                    t::TypeKind::Int(t::IntKw::Longint) => {
-                        range = width(64);
-                        signed = rt.signed != Some(false);
-                    }
-                    t::TypeKind::Int(t::IntKw::Time) => range = width(64),
-                    t::TypeKind::Real(_) => ret_kind = NetKind::Real,
-                    t::TypeKind::String => ret_kind = NetKind::String,
+                let signed = rt.signed == Some(true);
+                let int = |k: NetKind| SvType::flat(k, rt.signed != Some(false), vec![]);
+                ret_ty = match &rt.kind {
+                    t::TypeKind::Void => SvType::vector(NetKind::Int(0), false, vec![]),
+                    t::TypeKind::Implicit | t::TypeKind::Int(t::IntKw::Logic | t::IntKw::Reg) => SvType::vector(NetKind::Reg, signed, vec![]),
+                    t::TypeKind::Int(t::IntKw::Bit) => SvType::vector(NetKind::Bit, signed, vec![]),
+                    t::TypeKind::Int(t::IntKw::Integer) => int(NetKind::Integer),
+                    t::TypeKind::Int(t::IntKw::Int) => int(NetKind::Int(32)),
+                    t::TypeKind::Int(t::IntKw::Byte) => int(NetKind::Int(8)),
+                    t::TypeKind::Int(t::IntKw::Shortint) => int(NetKind::Int(16)),
+                    t::TypeKind::Int(t::IntKw::Longint) => int(NetKind::Int(64)),
+                    t::TypeKind::Int(t::IntKw::Time) => SvType::flat(NetKind::Time, signed, vec![]),
+                    t::TypeKind::Real(_) => SvType::vector(NetKind::Real, signed, vec![]),
+                    t::TypeKind::String => SvType::vector(NetKind::String, signed, vec![]),
                     // a chandle: a 64-bit 2-state value (see `decl_head`)
-                    t::TypeKind::Chandle => {
-                        range = width(64);
-                        ret_kind = NetKind::Bit;
-                    }
+                    t::TypeKind::Chandle => SvType::vector(NetKind::Bit, signed, vec![(super::types::num(63), super::types::num(0))]),
                     _ => return self.unsupported(rt.loc, "this return type"),
-                }
-                match rt.packed.as_slice() {
-                    [] => {}
-                    [d] if range.is_none() => range = Some(self.dim(d, rt.loc)?),
-                    ds if range.is_none() && ret_kind == NetKind::Reg => {
-                        // several packed dimensions: the whole width, the type keeps them
-                        let kind = if matches!(rt.kind, t::TypeKind::Int(t::IntKw::Bit)) { NetKind::Bit } else { NetKind::Reg };
-                        let t = super::types::SvType::vector(kind, signed, self.dims(ds, rt.loc)?);
-                        range = Some((super::types::minus_one(t.width()), ExprKind::Num(dec(0)).into()));
-                        ret_type = Some(std::rc::Rc::new(t));
+                };
+                if !rt.packed.is_empty() {
+                    if !ret_ty.dims.is_empty() || !matches!(ret_ty.kind, NetKind::Reg | NetKind::Bit) {
+                        return self.err(rt.loc, "packed dimensions after a return type that has a width");
                     }
-                    _ => return self.err(rt.loc, "packed dimensions after a return type that has a width"),
+                    ret_ty.dims = self.dims(&rt.packed, rt.loc)?;
+                    if rt.packed.len() > 1 {
+                        ret_type = Some(std::rc::Rc::new(ret_ty.clone()));
+                    }
                 }
             }
         }
@@ -639,7 +613,7 @@ impl Lower {
         let written = decls.clone();
         let (decls, scalar_vec_ports) = super::merge_port_types(decls);
         let decls_written = if decls.len() != written.len() || decls.iter().zip(&written).any(|(a, b)| a.names.len() != b.names.len()) { written } else { Vec::new() };
-        Ok(SubroutineDecl { name, is_task, automatic, signed, range, ret_kind, ret_ty: ret_type, decls, refs, scalar_vec_ports, decls_written, params, body, line })
+        Ok(SubroutineDecl { name, is_task, automatic, ret_ty: std::rc::Rc::new(ret_ty), decls, refs, scalar_vec_ports, decls_written, params, body, line })
     }
 }
 

@@ -1561,19 +1561,19 @@ impl<'a> Compiler<'a> {
             }
             None => None,
         };
-        let ret = if f.is_task || f.ret_kind == NetKind::Int(0) {
+        let ret = if f.is_task || f.ret_kind() == NetKind::Int(0) {
             None
         } else if let Type::Dyn { kind, elem } = self.func_ret_type(f, def_scope)? {
             // a function returning a queue, dynamic or associative array
             Some(self.new_dyn_kind(path.clone(), &f.name, elem, kind, fs))
         } else {
             let (w, s) = self.func_ret_type(f, def_scope)?.ws();
-            let (m, l) = match f.ret_kind {
+            let (m, l) = match f.ret_kind() {
                 NetKind::Integer => (31, 0),
                 NetKind::Real | NetKind::String | NetKind::Class => (63, 0),
-                _ => self.range_vals(&f.range, def_scope)?,
+                _ => self.range_vals(&f.range(), def_scope)?,
             };
-            let layout = self.layout_for(f.ret_ty.as_ref(), fs)?;
+            let layout = self.layout_for(Some(&f.ret_ty), fs)?;
             let sg = self.new_signal(path.clone(), w, s, 0, m, l, 0, SigKind::Reg);
             // several packed dimensions: kept for selects of the result variable
             if let Some(p) = layout.as_ref().filter(|p| p.fields.is_none() && p.dims.len() > 1) {
@@ -1583,10 +1583,10 @@ impl<'a> Compiler<'a> {
             if let t @ Type::Class(_) = self.func_ret_type(f, def_scope)? {
                 self.sigs.types[sg as usize] = t;
             }
-            if f.ret_kind == NetKind::Real {
+            if f.ret_kind() == NetKind::Real {
                 self.mark_real(sg);
             }
-            if f.ret_kind == NetKind::String {
+            if f.ret_kind() == NetKind::String {
                 self.mark_string(sg);
             }
             self.scopes[fs].syms.insert(f.name.clone(), Sym::Sig(sg));

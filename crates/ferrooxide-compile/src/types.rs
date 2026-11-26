@@ -353,27 +353,27 @@ impl<'a> Compiler<'a> {
     /// The type a function returns.
     pub(crate) fn func_ret_type(&mut self, f: &SubroutineDecl, fs: usize) -> R<Type> {
         // a type parameter
-        if let Some(t) = f.ret_ty.as_ref().filter(|t| t.param.is_some()) {
+        if let Some(t) = Some(&f.ret_ty).filter(|t| t.param.is_some()) {
             let r = self.resolve_type(t, fs)?;
             return self.resolved_type(&r, fs);
         }
-        if let Some(t) = f.ret_ty.as_ref().filter(|t| t.heap.is_some()) {
+        if let Some(t) = Some(&f.ret_ty).filter(|t| t.heap.is_some()) {
             let w = self.const_int(&t.width(), fs)? as u32;
             let elem = self.elem_for(t.kind, w, t.signed, Some(t), fs)?;
             let kind = self.dyn_kind(t.heap.as_ref().unwrap(), fs)?;
             return Ok(Type::Dyn { kind, elem });
         }
-        Ok(match f.ret_kind {
-            NetKind::Class => match f.ret_ty.as_ref().and_then(|t| t.class.as_ref()) {
+        Ok(match f.ret_kind() {
+            NetKind::Class => match f.ret_ty.class.as_ref() {
                 Some(n) => Type::Class(self.find_class(n, fs).ok_or_else(|| self.mkerr(format!("unknown class '{n}'")))?),
                 None => return self.err("a function returning a class handle without its class"),
             },
-            NetKind::Integer => Type::vec(32, true),
+            NetKind::Integer => Type::vec(32, f.signed()),
             NetKind::Real => Type::Real,
             NetKind::String => Type::Str,
             _ => {
-                let (m, l) = self.range_vals(&f.range, fs)?;
-                Type::vec(((m - l).abs() + 1) as u32, f.signed)
+                let (m, l) = self.range_vals(&f.range(), fs)?;
+                Type::vec(((m - l).abs() + 1) as u32, f.signed())
             }
         })
     }
@@ -401,28 +401,20 @@ impl<'a> Compiler<'a> {
     /// scope `sid` (kind, sign and ranges of the type, as declarations of a module); `f`
     /// itself where it uses none.
     pub(crate) fn subr_resolved(&mut self, f: &'a SubroutineDecl, sid: usize) -> R<&'a SubroutineDecl> {
-        let ret_param = f.ret_ty.as_ref().is_some_and(|t| t.param.is_some());
+        let ret_param = f.ret_ty.param.is_some();
         if !ret_param && !f.decls.iter().any(|d| d.type_param().is_some()) {
             return Ok(f);
         }
         let mut g = f.clone();
         if ret_param {
-            let r = self.resolve_type(f.ret_ty.as_ref().unwrap(), sid)?;
+            let r = self.resolve_type(&f.ret_ty, sid)?;
             if r.has_struct() {
                 return self.err("a function returning a struct type given by a type parameter is not supported");
             }
-            // (as the lowering gives a return type: a vector with its range, or a real, string
-            // or class handle)
-            (g.ret_kind, g.range) = match r.kind {
-                k @ (NetKind::Real | NetKind::String | NetKind::Class) => (k, None),
-                NetKind::Event => return self.err("a function returning an event is not supported"),
-                _ => {
-                    let w = packed_of(&r).width();
-                    (NetKind::Reg, Some((ExprKind::Num(ferrooxide_front::ast::dec(w as u64 - 1)).into(), ExprKind::Num(ferrooxide_front::ast::dec(0)).into())))
-                }
-            };
-            g.signed = r.signed;
-            g.ret_ty = Some(Rc::new(r));
+            if r.kind == NetKind::Event {
+                return self.err("a function returning an event is not supported");
+            }
+            g.ret_ty = Rc::new(r);
         }
         for d in &mut g.decls {
             let Some(tp) = d.type_param().map(str::to_string) else { continue };

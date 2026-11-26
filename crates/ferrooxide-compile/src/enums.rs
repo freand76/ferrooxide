@@ -188,7 +188,7 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::SysCall(n, _) if n == "$__cast" => EnumOf::Cast,
             ExprKind::Call(n, _) => match self.lookup_func(n, sid) {
-                Some((f, fs)) => match f.ret_ty.as_ref().and_then(|t| t.enum_names.clone().filter(|_| t.dims.len() <= 1 && t.unpacked.is_empty())) {
+                Some((f, fs)) => match f.ret_ty.enum_names.clone().filter(|_| f.ret_ty.dims.len() <= 1 && f.ret_ty.unpacked.is_empty()) {
                     Some(names) => match self.enum_id(&names, fs) {
                         NONE => EnumOf::No,
                         id => EnumOf::Id(id),

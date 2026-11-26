@@ -619,7 +619,7 @@ impl<'a> Compiler<'a> {
             ExprKind::NewTyped(c, _) => Ok(Some(Type::Class(self.named_class(c, sid)?))),
             ExprKind::StaticCall(cn, m, _) => {
                 let (f, owner) = self.static_method(cn, m, sid)?;
-                if f.is_task || f.ret_kind == NetKind::Int(0) {
+                if f.is_task || f.ret_kind() == NetKind::Int(0) {
                     return self.err(format!("'{m}' gives no value"));
                 }
                 let scope = self.classes.list[owner as usize].scope;
@@ -654,7 +654,7 @@ impl<'a> Compiler<'a> {
                 let Some((f, owner)) = self.find_method(c, m) else {
                     return self.err(format!("class '{}' has no method '{m}'", self.classes.list[c as usize].name));
                 };
-                if f.is_task || f.ret_kind == NetKind::Int(0) {
+                if f.is_task || f.ret_kind() == NetKind::Int(0) {
                     return self.err(format!("'{m}' gives no value"));
                 }
                 let scope = self.classes.list[owner as usize].scope;
@@ -978,7 +978,7 @@ impl<'a> Compiler<'a> {
         }
         let cls = self.tmp(32);
         self.emit(Instr::Obj { op: ObjOp::Class, d: cls, a: h, b: NONE, off: 0, w: 0 });
-        let ret_t = if dflt.0.is_task || dflt.0.ret_kind == NetKind::Int(0) {
+        let ret_t = if dflt.0.is_task || dflt.0.ret_kind() == NetKind::Int(0) {
             None
         } else {
             Some(self.func_ret_type(dflt.0, self.classes.list[dflt.1 as usize].scope)?)

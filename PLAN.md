@@ -84,47 +84,42 @@ first, time-0 processes by scope, `always_comb` after all others at time 0 (9.2.
   (`--cdsp`) with value history, `--vcd`/`--trace`, `--lint`.
 - Restructuring (R0-R6): a complete IEEE 1800 parser with a syntax tree and a separate
   lowering; the compiler split into elaboration, types and codegen; `Type`/`type_of` in the
-  compiler; spans on expressions; one declared type per parameter (R4 slice 5).
+  compiler; spans on expressions; one declared type per parameter (R4 slice 5); declarations
+  and function returns keep only their type, kind, sign and ranges derived from it.
 - Process: own test suite in three modes (no other simulator needed), parser snapshots,
   sv-tests runner with baseline, regenerated sv-tests (`make generate-tests`, Python
   requirements in a scratch venv).
 
 ## Next (in priority order)
-1. **R4, flat-field slice** (decided 2026-11-25). `Decl` keeps only `ty` (always set) and
-   derives `kind`/`signed`/`range`/`packed`/`type_param` from it, as `ParamDecl` does; the
-   same for `SubroutineDecl`'s return (`ret_kind`/`range`/`signed` beside `ret_ty`). The
-   lowering builds both forms in `lower/types.rs` `decl_head` (from `SvType::decl_parts`);
-   the compiler reads the flat fields at about 90 places
-   (`grep -rnE "\.(range|packed|kind|signed|type_param)\b" crates/ferrooxide-compile/src`),
-   mostly in `elab/decls.rs` (non-ANSI port merging) and `stmt.rs` (block variables).
-   No change in behaviour; check with the suite and sv-tests.
-2. **UVM** (about 130 sv-tests, run with `-DUVM_NO_DPI`). Stops at `uvm_coreservice.svh:379`
+1. **UVM** (about 130 sv-tests, run with `-DUVM_NO_DPI`). Stops at `uvm_coreservice.svh:379`
    ("this scoped name is not supported"). Fix the blockers one at a time, each with a test.
-3. **sv-tests features, by tests won**: interface classes (21), `$dist_*` (16), randsequence
+2. **sv-tests features, by tests won**: interface classes (21), `$dist_*` (16), randsequence
    (12), global clocking and `_gclk` functions (11), tagged unions (10), assignments in
    expressions (8), arrays assigned from arrays of another shape (6), `type()` operator (4),
    extern/pure constraints (5), whole unpacked array equality (3), real casts (3), streams of
    dynamic arrays and `with` (3). DPI (9) needs a C interface: last.
-4. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
+3. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
-   patterns also lack); enum methods of a call's result (`p.status().name()`).
-5. **sv-tests invalid code** (16 accepted that must fail): see the ACCEPT lines of the
+   patterns also lack); enum methods of a call's result (`p.status().name()`); two
+   specializations of one class called in one expression (`C#(byte)::f(x)` and
+   `C#(int unsigned)::f(y)`): the first takes the result type of the other.
+4. **sv-tests invalid code** (16 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
-6. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
+5. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
    reference, `process::suspend`/`resume`, recursion from fork branches, waits on run-time
    targets (`@(obj.ev)`, `vif.clk`), VPI callbacks and MCP conditional breakpoints.
-7. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
+6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
-8. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
+7. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
    needs it.
-9. **Debug front ends**: report the Surfer bugs upstream; MCP over HTTP, MCP history queries,
+8. **Debug front ends**: report the Surfer bugs upstream; MCP over HTTP, MCP history queries,
    CDSP arrays, port directions and diagnostics; interactive watch/conditional breakpoints.
-10. **Performance** (one instructions check after runtime changes; deeper work when speed
-    matters again): `notify` (largest item), a timing wheel for `Sim::future`, wide ops that
-    leave the JIT, inline resolution of multi-driver nets, the A3 instance checks.
-11. **Outputs and Verilog-2005 rest**: FST, VCD of arrays, `$dumpvars` arguments; VPI (A4),
+9. **Performance** (one instructions check after runtime changes; deeper work when speed
+   matters again): `notify` (largest item), a timing wheel for `Sim::future`, wide ops that
+   leave the JIT, inline resolution of multi-driver nets, the A3 instance checks.
+10. **Outputs and Verilog-2005 rest**: FST, VCD of arrays, `$dumpvars` arguments; VPI (A4),
     configurations and libraries, timing checks, SDF.
-12. **Multi-threading** (A5): last; pays off only on large designs.
+11. **Multi-threading** (A5): last; pays off only on large designs.
 
 ## Architecture changes ahead
 - **A3. Real calls, dynamic waiters.** Process instances are done. Left: subroutines that are

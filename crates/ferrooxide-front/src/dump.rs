@@ -673,14 +673,14 @@ impl Printer {
         if f.is_task {
             self.line(format!("task{auto} {};", f.name));
         } else {
-            let mut ret = format!("{:?}", f.ret_kind).to_lowercase();
-            if f.signed {
+            let mut ret = format!("{:?}", f.ret_kind()).to_lowercase();
+            if f.signed() {
                 ret.push_str(" signed");
             }
-            if let Some(r) = &f.range {
+            if let Some(r) = &f.range() {
                 let _ = write!(ret, " {}", range(r));
             }
-            let heap = match f.ret_ty.as_ref().and_then(|t| t.heap.as_ref()) {
+            let heap = match f.ret_ty.heap.as_ref() {
                 None => String::new(),
                 Some(HeapKind::Dynamic) => "[]".into(),
                 Some(HeapKind::Queue(None)) => "[$]".into(),
