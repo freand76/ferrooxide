@@ -42,6 +42,16 @@ pub(crate) enum EnumOf {
 impl<'a> Compiler<'a> {
     /// Enum constant `p` declared in scope `sid`.
     pub(crate) fn enum_const(&mut self, p: &ParamDecl, sid: usize) {
+        // a parameter of an enum type: a value of that enum
+        if let (None, Some(t)) = (&p.enum_type, &p.ty) {
+            if let Some(names) = t.enum_names.as_ref().filter(|_| t.dims.len() <= 1 && t.fields.is_none() && p.unpacked.is_empty()) {
+                let id = self.enum_id(&names.clone(), sid);
+                if id != NONE {
+                    self.enums.consts.insert((sid, p.name.clone()), id);
+                }
+            }
+            return;
+        }
         let Some(names) = &p.enum_type else { return };
         let key = (Rc::as_ptr(names) as usize, sid);
         let next = self.enums.ids.len() as u32;
@@ -167,6 +177,16 @@ impl<'a> Compiler<'a> {
                     let nun = if i.depth > 0 { self.sigs.md_dims.get(&s).map_or(1, |d| d.len()) } else { 0 };
                     if nidx == nun {
                         return Ok(self.enums.sigs.get(&s).map_or(EnumOf::No, |&id| EnumOf::Id(id)));
+                    }
+                    // an element of a packed array of an enum (with a vector base type: its
+                    // own dimension is the last)
+                    if let Some(l) = self.layout(s).filter(|l| l.fields.is_none() && nidx > nun && l.dims.len() == nidx - nun + 1) {
+                        let mut el = (*l).clone();
+                        el.dims.drain(..nidx - nun);
+                        let id = self.packed_enum(&el, sid);
+                        if id != NONE {
+                            return Ok(EnumOf::Id(id));
+                        }
                     }
                     return Ok(EnumOf::No);
                 }

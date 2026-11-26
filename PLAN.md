@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4868 of 5112 (95.2%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4874 of 5112 (95.3%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -101,12 +101,13 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
-   11: 5, 20: 5): arrays assigned from arrays of another shape (6), streams of dynamic
-   arrays and `with` (3), a function returning an unpacked array in a parameter value (1).
+   11: 5, 20: 5): streams of dynamic arrays and `with` (3), a function returning an
+   unpacked array in a parameter value (1).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
-   patterns also lack); enum methods of a call's result (`p.status().name()`).
+   patterns also lack); enum methods of a call's result (`p.status().name()`) and of a
+   struct member (`r.size.name()`).
 3. **sv-tests invalid code** (12 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
 4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real

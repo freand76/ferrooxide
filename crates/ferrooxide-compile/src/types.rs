@@ -773,6 +773,16 @@ impl<'a> Compiler<'a> {
         if layout.fields.is_none() && !(is_param && layout.dims.len() > 1) {
             return None;
         }
+        // (a port joined with the signal connected to it has that signal's layout: only a name
+        // declared with a struct type has members)
+        if matches!(sym, Sym::Sig(_)) && !dyn_elem {
+            let declared = match renamed("$flat:").kind {
+                ExprKind::Ident(n) => self.lookup(&n, sid),
+                ExprKind::Hier(p) => self.lookup_hier(&p, sid),
+                _ => unreachable!(),
+            };
+            declared?;
+        }
         let flat_base = if dyn_elem { base.clone() } else { renamed("$flat:") };
         let mut k = 0;
         let mut elem = base.clone();
@@ -803,7 +813,12 @@ impl<'a> Compiler<'a> {
         let mut tag_write = false;
         loop {
             match ops.get(k) {
-                Some(&op @ (Sel::Index(_) | Sel::Range(..) | Sel::Part(..))) if di < cur.dims.len() => {
+                // (a select of a struct member that is a packed struct: its bits `[w-1:0]`)
+                Some(&op @ (Sel::Index(_) | Sel::Range(..) | Sel::Part(..))) if di < cur.dims.len() || (touched && di == cur.dims.len() && cur.fields.as_ref().is_some_and(|f| !f.fields.is_empty())) => {
+                    if di == cur.dims.len() {
+                        cur = Packed { dims: vec![(cur.width() - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None };
+                        di = 0;
+                    }
                     let r = cur.dims[di];
                     let el = cur.width_from(di + 1);
                     k += 1;

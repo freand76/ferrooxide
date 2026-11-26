@@ -161,6 +161,9 @@ impl<'a> Compiler<'a> {
             }
             _ => return None,
         };
+        if !self.flat_declared(&flat, sid) {
+            return None;
+        }
         if let Some(e) = self.packed_norm(cur, &flat, &idx, sid) {
             return Some(e);
         }
@@ -291,6 +294,9 @@ impl<'a> Compiler<'a> {
             },
             _ => return None,
         };
+        if !self.flat_declared(&flat.clone().into(), sid) {
+            return None;
+        }
         let dims = self.sigs.packed_dims.get(&s)?;
         let ew: i64 = dims[1..].iter().map(|d| (d.0 - d.1).abs() + 1).product();
         let (l0, r0) = dims[0];
@@ -327,6 +333,17 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Whether `$flat:` name `flat` is declared: a port joined with the signal connected to it
+    /// shares that signal's flat storage, but not the selects of its type.
+    fn flat_declared(&self, flat: &Expr, sid: usize) -> bool {
+        match &flat.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid).is_some(),
+            ExprKind::Hier(p) => self.lookup_hier(p, sid).is_some(),
+            ExprKind::Index(a, _) => self.flat_declared(a, sid),
+            _ => true,
+        }
+    }
+
     /// `x[i][m:l]` / `x[i][b +: w]` where `x[i]` is an element of the last packed dimension.
     fn packed_elem_part(&self, e: &Expr, inner: &Expr, sid: usize) -> Option<Expr> {
         let mut idx = Vec::new();
@@ -337,7 +354,7 @@ impl<'a> Compiler<'a> {
         }
         idx.reverse();
         let ExprKind::Ident(n) = &cur.kind else { return None };
-        if n.starts_with("$flat:") {
+        if n.starts_with("$flat:") || self.lookup(&format!("$flat:{n}"), sid).is_none() {
             return None;
         }
         let Sym::Sig(s) = self.lookup(n, sid)? else { return None };

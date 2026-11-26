@@ -412,6 +412,22 @@ impl<'a> Compiler<'a> {
             self.pattern_pairs(&base, &dims, items, sid, &mut out)?;
             return Ok(Some(out));
         }
+        // `c ? a : b` of two arrays: element by element (IEEE 1800-2017 11.4.11; an unknown
+        // `c` combines the elements as for integral values)
+        if let ExprKind::Cond(c, a, b) = &rhs.kind {
+            if crate::expr::has_call(c) {
+                return self.err("a conditional with side effects in its condition that selects an unpacked array is not supported");
+            }
+            let pa = self.array_pairs(lhs, a, sid)?.unwrap();
+            let pb = self.array_pairs(lhs, b, sid)?.unwrap();
+            let mut out = Vec::new();
+            for (l, va) in pa {
+                let key = format!("{l:?}");
+                let Some((_, vb)) = pb.iter().find(|(x, _)| format!("{x:?}") == key) else { unreachable!("the same elements") };
+                out.push((l, ExprKind::Cond(c.clone(), Box::new(va), Box::new(vb.clone())).into()));
+            }
+            return Ok(Some(out));
+        }
         let Some((rs, rshape, ri)) = self.array_elems(rhs, sid)? else {
             return self.err(format!("array '{}' assigned from something that is not an array of the same shape", self.sig(ls).name));
         };
