@@ -822,6 +822,12 @@ impl Lower {
                     if ops.is_empty() {
                         return self.expr(e);
                     }
+                    // a select of a concatenation (IEEE 1800-2017 11.4.12) or of another
+                    // primary in parentheses: `{a, b}[9:6]`
+                    if !lvalue && ops.iter().all(|o| matches!(o, Op::Index(_) | Op::Range(..))) {
+                        let base = self.expr(e)?;
+                        return self.selects(base, ops);
+                    }
                     return self.unsupported(e.loc, "a select of this expression");
                 };
                 // `C #(..)::x`: of a specialization
