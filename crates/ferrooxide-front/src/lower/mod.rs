@@ -572,6 +572,31 @@ impl Lower {
                 }
             }
         }
+        // (IEEE 1800-2017 23.2.2.1: a port declaration names a port of the list, or a name of
+        // a port expression)
+        if matches!(m.ports, t::Ports::NonAnsi(_) | t::Ports::None) {
+            fn names(e: &t::Expr, out: &mut Vec<String>) {
+                match &e.kind {
+                    t::ExprKind::Ident(n) => out.push(n.clone()),
+                    t::ExprKind::Index(a, _) | t::ExprKind::Range(a, ..) => names(a, out),
+                    t::ExprKind::Concat(v) => v.iter().for_each(|x| names(x, out)),
+                    _ => {}
+                }
+            }
+            let mut ok: Vec<String> = ports.clone();
+            for (_, e) in &port_exprs {
+                names(e, &mut ok);
+            }
+            for it in &items {
+                if let Item::Decl(d) = it {
+                    if d.dir.is_some() {
+                        if let Some(x) = d.names.iter().find(|x| !ok.contains(&x.name)) {
+                            return Err(Error { msg: format!("'{}' is declared as a port but is not in the port list of '{mname}'", x.name), file: self.file.clone(), line: x.line });
+                        }
+                    }
+                }
+            }
+        }
         if !port_exprs.is_empty() {
             self.port_exprs(port_exprs, &mut items)?;
         }

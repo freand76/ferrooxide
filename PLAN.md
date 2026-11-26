@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4835 of 5112 (94.6%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4839 of 5112 (94.7%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -109,7 +109,7 @@ machinery must not assume static targets only (A3).
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
    patterns also lack); enum methods of a call's result (`p.status().name()`).
-3. **sv-tests invalid code** (16 accepted that must fail): see the ACCEPT lines of the
+3. **sv-tests invalid code** (12 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
 4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
    reference, `process::suspend`/`resume`, recursion from fork branches, waits on run-time

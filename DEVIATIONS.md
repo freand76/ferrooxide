@@ -77,8 +77,9 @@ while matching it (Icarus 12, `iverilog`/`vvp`):
 
 18. **A packed dimension `[n]`.** 1800-2017 7.4.1 allows only ranges as packed
    dimensions; the reference takes `T [2] x` as `T [0:1] x` and rejects only `[0]`.
-   ivtest `display_bug` (accepted), `br_ml20181012a` (rejected). Test:
-   `tests/suite/sv/packed_size_dim_fail.v`.
+   ivtest `display_bug` (accepted), `br_ml20181012a` (rejected). Removed 2026-11-26:
+   `[n]` is an error. Tests: `tests/suite/sv/packed_size_dim_fail.v`,
+   `tests/suite/sv/packed_size_dim2_fail.v`.
 19. **`reg real x`.** Two data types in one declaration are not in the grammar; the
    reference takes the second (ivtest `real8`) but rejects packed dimensions on `real`
    (`pr3112073a`). Test: `tests/suite/sv/real_packed_fail.v`.

@@ -404,18 +404,12 @@ impl Lower {
         Ok(out)
     }
 
-    /// Packed dimensions. `[n]` is an unpacked dimension only (IEEE 1800-2017 7.4.1); the
-    /// reference takes it as `[0:n-1]` here too, and rejects `[0]`.
+    /// Packed dimensions: ranges only, `[n]` is an unpacked dimension (IEEE 1800-2017 7.4.1).
     pub(crate) fn packed_dims(&mut self, v: &[t::Dim], loc: t::Loc) -> Result<Vec<Range>> {
-        let out = self.dims(v, loc)?;
-        for (d, r) in v.iter().zip(&out) {
-            if let (t::Dim::Size(_), ExprKind::Binary(BinOp::Sub, n, _)) = (d, &r.1.kind) {
-                if let Some(n) = lit(n).filter(|n| *n <= 0) {
-                    return self.err(loc, format!("a packed dimension of size {n}"));
-                }
-            }
+        if v.iter().any(|d| matches!(d, t::Dim::Size(_))) {
+            return self.err(loc, "a packed dimension needs a range `[msb:lsb]` (`[n]` is an unpacked dimension)");
         }
-        Ok(out)
+        self.dims(v, loc)
     }
 
     /// The type is resolved through the type tables (struct, enum, a type name).
@@ -797,6 +791,9 @@ impl Lower {
                     } else if find_class(rest, name) {
                         // a class declared later: its name is a class type from here on
                         self.types.insert(name.clone(), Self::class_type(name));
+                    } else {
+                        // (IEEE 1800-2017 6.18: defined in the same scope)
+                        return self.err(*loc, format!("'{name}' is declared by a forward typedef but not defined in its scope"));
                     }
                 }
                 if let Some(t) = self.types.get(name) {
