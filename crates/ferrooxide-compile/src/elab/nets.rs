@@ -13,8 +13,15 @@ impl<'a> Compiler<'a> {
                             let n = ((l - r).abs() + 1) as u32;
                             for k in 0..n {
                                 let mut ts = Vec::new();
-                                for t in terms {
+                                for (j, t) in terms.iter().enumerate() {
                                     let tw = self.type_of(t, sid)?.width();
+                                    // (IEEE 1364-2005 7.1.6: one bit per instance, or one bit
+                                    // for all of them)
+                                    if tw != 1 && tw != n {
+                                        self.line = line;
+                                        let need = if n == 1 { "1".to_string() } else { format!("1 or {n}") };
+                                        return self.err(format!("terminal {} of an array of {n} {kind} gates has {tw} bits (it needs {need})", j + 1));
+                                    }
                                     ts.push(if tw == n && n > 1 { self.array_slice(t, k, n, 1, sid)? } else { t.clone() });
                                 }
                                 self.gate(kind, &ts, sid, line)?;
