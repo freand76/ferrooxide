@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4895 of 5112 (95.8%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4896 of 5112 (95.8%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -101,8 +101,7 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
-   11: 2, 20: 5): a function returning an unpacked array in a parameter value (1).
-   DPI (9) needs a C interface: last.
+   11: 2, 20: 5). DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
    patterns also lack); enum methods of a call's result (`p.status().name()`) and of a
@@ -198,6 +197,8 @@ compare instructions too.
 Kept up to date as features stop short.
 
 SystemVerilog data and testbench:
+- Function results of several unpacked dimensions (as local variables of subroutines);
+  an unpacked array result in a continuous assignment or a method call.
 - `ref` arguments are copied in and out; calls where that differs from a reference are
   rejected (a task with ref arguments that can wait, a ref argument whose variable the
   subroutine also names) [sv-tests chapter-7/queues/persistence]. Needs A3.

@@ -419,6 +419,25 @@ impl<'a> Compiler<'a> {
 
     /// `lhs = rhs` of two unpacked arrays (or subarrays) as one assignment per element pair
     /// (None if `lhs` is not an array).
+    /// A call of a function with an unpacked array result: the call is made now and its
+    /// result variable is named by the returned expression (in scope `sid`).
+    pub(crate) fn array_call(&mut self, e: &Expr, sid: usize) -> R<Option<Expr>> {
+        let ExprKind::Call(name, args) = &e.kind else { return Ok(None) };
+        let Some((f, _)) = self.lookup_func(name, sid) else { return Ok(None) };
+        if f.ret_ty.unpacked.is_empty() || f.ret_ty.heap.is_some() {
+            return Ok(None);
+        }
+        self.subr.want_array = true;
+        let r = self.call(name, args, sid, false);
+        self.subr.want_array = false;
+        r?;
+        let Some(ret) = self.subr.last_ret else { return Ok(None) };
+        self.subr.auto_count += 1;
+        let n = format!("$call{}", self.subr.auto_count);
+        self.scopes[sid].syms.insert(n.clone(), Sym::Sig(ret));
+        Ok(Some(ExprKind::Ident(n).into()))
+    }
+
     pub(crate) fn array_pairs(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<Option<Vec<(Expr, Expr)>>> {
         let Some((ls, lw, lshape, li)) = self.any_array_elems(lhs, sid)? else { return Ok(None) };
         if let ExprKind::Pattern(None, items) = &rhs.kind {

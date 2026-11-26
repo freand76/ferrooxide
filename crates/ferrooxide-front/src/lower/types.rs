@@ -316,6 +316,7 @@ pub(crate) fn qualify_expr(e: &mut Expr, names: &std::collections::HashMap<Strin
 }
 
 /// The type of a value parameter.
+#[derive(Clone)]
 pub(crate) struct PType {
     pub signed: bool,
     /// the declared type (None: the value's)
@@ -949,7 +950,14 @@ impl Lower {
     /// One `name = value` of a value parameter; `port`: in a parameter port list.
     pub(crate) fn param_assign(&mut self, local: bool, port: bool, pt: &PType, d: &t::Declarator) -> Result<ParamDecl> {
         let name = self.name(&d.name, d.loc);
-        let unpacked = if d.dims.is_empty() {
+        // a typedef's unpacked dimensions come after the declarator's
+        let mut pt = pt.clone();
+        let tdims = match pt.ty.as_mut() {
+            Some(t) if !t.unpacked.is_empty() && t.heap.is_none() => std::mem::take(&mut t.unpacked),
+            _ => Vec::new(),
+        };
+        let pt = &pt;
+        let mut unpacked = if d.dims.is_empty() {
             Vec::new()
         } else {
             if pt.ty.as_ref().is_none_or(|t| matches!(t.kind, NetKind::Real | NetKind::String)) {
@@ -960,6 +968,7 @@ impl Lower {
                 (_, Some(_)) => return self.unsupported(d.loc, "a queue or dynamic array parameter"),
             }
         };
+        unpacked.extend(tdims);
         // a parameter port may leave out its default (IEEE 1800 6.20.1); its instances must
         // override it
         let value = match &d.init {

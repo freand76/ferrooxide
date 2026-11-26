@@ -283,6 +283,10 @@ pub(crate) struct Subr<'a> {
     pub(crate) func_reads: std::cell::Cell<bool>,
     /// functions being followed by `func_reads` (recursion guard)
     pub(crate) func_reads_seen: std::cell::RefCell<Vec<(usize, String)>>,
+    /// the result variable of the last call (an unpacked array result is read from it)
+    pub(crate) last_ret: Option<u32>,
+    /// a call whose unpacked array result is used as an array
+    pub(crate) want_array: bool,
 }
 
 /// Nets: aliases and views, several drivers, pulls, bidirectional links, strengths.

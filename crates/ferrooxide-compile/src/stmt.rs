@@ -775,6 +775,10 @@ impl<'a> Compiler<'a> {
                         return self.err("a nonblocking or delayed assignment to a class property is not supported");
                     }
                     // a whole fixed-size array property: element by element
+                    if let Some(r) = self.array_call(rhs, sid)? {
+                        let st = Stmt::Assign { lhs: lhs.clone(), rhs: r, nonblocking: false, timing: None, line: *line };
+                        return self.stmt(&st, sid);
+                    }
                     if let Some(pairs) = self.array_pairs(lhs, rhs, sid)? {
                         for (l, r) in pairs {
                             self.stmt(&Stmt::Assign { lhs: l, rhs: r, nonblocking: false, timing: None, line: *line }, sid)?;
@@ -794,7 +798,11 @@ impl<'a> Compiler<'a> {
                 if self.sigs.has_dyn && timing.is_none() && self.fixed_from_dyn(lhs, rhs, *nonblocking, sid)? {
                     return Ok(());
                 }
-                // a whole unpacked array: element by element
+                // a whole unpacked array: element by element (from a call: its result)
+                if let Some(r) = self.array_call(rhs, sid)? {
+                    let st = Stmt::Assign { lhs: lhs.clone(), rhs: r, nonblocking: *nonblocking, timing: timing.clone(), line: *line };
+                    return self.stmt(&st, sid);
+                }
                 if let Some(pairs) = self.array_pairs(lhs, rhs, sid)? {
                     if timing.is_some() {
                         return self.err("a timing control in an assignment of a whole array is not supported");
@@ -1257,7 +1265,13 @@ impl<'a> Compiler<'a> {
                 if value.is_some() && ret.is_none() {
                     return self.err("a task or void function cannot return a value");
                 }
-                if let (Some(v), Some(r)) = (value, ret) {
+                let arr = ret.is_some_and(|r| self.sig(r).depth > 0);
+                if let (Some(v), Some(r), true) = (value, ret, arr) {
+                    // an unpacked array result: assigned element by element
+                    self.scopes[sid].syms.insert("$ret".into(), Sym::Sig(r));
+                    let st = Stmt::Assign { lhs: ExprKind::Ident("$ret".into()).into(), rhs: v.clone(), nonblocking: false, timing: None, line: *line };
+                    self.stmt(&st, sid)?;
+                } else if let (Some(v), Some(r)) = (value, ret) {
                     if let Some(&id) = self.enums.sigs.get(&r) {
                         self.check_enum(id, v, sid)?;
                     }

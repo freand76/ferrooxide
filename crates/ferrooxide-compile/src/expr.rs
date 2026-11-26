@@ -1885,6 +1885,21 @@ impl<'a> Compiler<'a> {
         };
         let ret = if f.is_task || f.ret_kind() == NetKind::Int(0) {
             None
+        } else if !f.ret_ty.unpacked.is_empty() && f.ret_ty.heap.is_none() {
+            // an unpacked array result: an array variable named by the function
+            let mut ty = (*f.ret_ty).clone();
+            let dims = std::mem::take(&mut ty.unpacked);
+            if dims.len() > 1 {
+                return self.err(format!("function '{}': a multi-dimensional array result is not supported", f.name));
+            }
+            let names = vec![Declarator { name: f.name.clone(), dims, heap: None, inner: vec![], init: None, line: self.line }];
+            // (the declaration lives as long as the elaboration)
+            let items: &'a [Item] = Box::leak(vec![Item::Decl(Decl::var(ty, names, false, self.line))].into_boxed_slice());
+            self.declarations(items, fs, false, &HashMap::new(), None)?;
+            let Some(Sym::Sig(sg)) = self.scopes[fs].syms.get(&f.name).cloned() else {
+                return self.err(format!("function '{}': this array result type is not supported", f.name));
+            };
+            Some(sg)
         } else if let Type::Dyn { kind, elem } = self.func_ret_type(f, def_scope)? {
             // a function returning a queue, dynamic or associative array
             Some(self.new_dyn_kind(path.clone(), &f.name, elem, kind, fs))
@@ -2051,6 +2066,7 @@ impl<'a> Compiler<'a> {
         args: &[Expr],
         sid: usize,
     ) -> R<(Option<u32>, u32, bool)> {
+        let want_array = std::mem::take(&mut self.subr.want_array);
         self.subr.compiled.insert((fs_def, f.name.clone()));
         // named arguments (IEEE 1800 13.5.4): in the order of the ports, after the
         // positional ones
@@ -2240,9 +2256,13 @@ impl<'a> Compiler<'a> {
                 self.store_value(&stmt::Lhs::Expr(a, sid), info.slot, info.width, rt::StoreMode::Blocking)?;
             }
         }
+        self.subr.last_ret = ret;
         Ok(match ret {
             Some(r) => {
                 let i = self.sig(r);
+                if i.depth > 0 && !want_array {
+                    return self.err(format!("the result of '{name}' is an unpacked array: it can only be assigned to an array"));
+                }
                 (Some(i.slot), i.width, i.signed)
             }
             None => (None, 0, false),
@@ -2301,6 +2321,14 @@ impl<'a> Compiler<'a> {
         let Some((_, lshape, li)) = self.array_elems(&port, fscope)? else {
             return self.err(format!("argument '{pname}': an array of this kind is not supported as an argument"));
         };
+        if into && matches!(a.kind, ExprKind::Pattern(..) | ExprKind::Call(..) | ExprKind::Cond(..)) {
+            // a pattern, a call's result or a choice of arrays: assigned to the port
+            self.subr.auto_count += 1;
+            let n = format!("$arg{}", self.subr.auto_count);
+            self.scopes[sid].syms.insert(n.clone(), Sym::Sig(ps));
+            let st = Stmt::Assign { lhs: ExprKind::Ident(n).into(), rhs: a.clone(), nonblocking: false, timing: None, line: self.line };
+            return self.stmt(&st, sid);
+        }
         let Some((_, rw, rshape, ri)) = self.any_array_elems(a, sid)? else {
             return self.err(format!("argument '{pname}' is an array: it needs an array of the same shape"));
         };
