@@ -262,7 +262,7 @@ SystemVerilog data and testbench:
 Verilog / scheduling:
 - nets with several drivers, `wand`/`tri1`, strength drivers and `assign z = m[i]` update in
   the combinational settle.
-- strength values on nets (`%v`, `trireg`), `$countdrivers`, the stochastic queue tasks (`$q_*`), `$fread`, `$ferror`, specify
+- strength values on nets (`%v`, `trireg`), `$countdrivers`, the stochastic queue tasks (`$q_*`), specify
   paths on inout ports and conditional paths, timing checks, SDF, force on array elements.
 - `$sscanf` details (x/z digits, `%t`, reals, partial failures); `$value$plusargs` warnings.
 - hierarchical names of variables in a named block of a later process.

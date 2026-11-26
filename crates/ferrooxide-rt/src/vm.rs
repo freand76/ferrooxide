@@ -272,6 +272,8 @@ pub struct Sim {
     /// open files
     files: HashMap<u32, FileH>,
     next_fd: u32,
+    /// the OS error code of the last file operation that failed (0: none since), for $ferror
+    file_err: i32,
     scratch: Vec<u64>,
     plusargs: Vec<String>,
     /// FX_GENSTATS: count generic-path instructions by kind, printed at the end (debugging)
@@ -577,6 +579,7 @@ impl Sim {
             fileline: false,
             files: HashMap::new(),
             next_fd: 3,
+            file_err: 0,
             scratch: Vec::new(),
             plusargs: Vec::new(),
             genstats: std::env::var_os("FX_GENSTATS").map(|_| HashMap::new()),
@@ -3109,8 +3112,8 @@ impl Sim {
             }
             SysTask::FOpen { d, dw, file, mode } => {
                 let file = self.file_name(file);
-                let opened: Option<FileH> = if mode.starts_with('r') {
-                    std::fs::read(&file).ok().map(|data| FileH::R { data, pos: 0, eof: false })
+                let opened = if mode.starts_with('r') {
+                    std::fs::read(&file).map(|data| FileH::R { data, pos: 0, eof: false })
                 } else {
                     let mut o = std::fs::OpenOptions::new();
                     if mode.starts_with('a') {
@@ -3118,8 +3121,10 @@ impl Sim {
                     } else {
                         o.write(true).create(true).truncate(true);
                     }
-                    o.open(&file).ok().map(|f| FileH::W(BufWriter::new(f)))
+                    o.open(&file).map(|f| FileH::W(BufWriter::new(f)))
                 };
+                self.file_err = opened.as_ref().err().map_or(0, |e| e.raw_os_error().unwrap_or(-1));
+                let opened = opened.ok();
                 let fd = match opened {
                     // multichannel: the lowest free channel bit (1..30), 0 when all are used
                     Some(h) if mode.is_empty() => match (1..31).map(|k| 1u32 << k).find(|b| !self.files.contains_key(b)) {
@@ -3175,6 +3180,24 @@ impl Sim {
             _ => String::new(),
         };
         let fmt = fmt_text.as_str();
+        if let FileRead::Error { val, w } = kind {
+            // (the error stays: $ferror is no file operation)
+            let code = self.file_err;
+            let text = if code == 0 {
+                String::new()
+            } else {
+                let t = std::io::Error::from_raw_os_error(code).to_string();
+                t.find(" (os error").map_or(t.clone(), |k| t[..k].to_string())
+            };
+            if *w == 0 {
+                let h = self.intern(text.as_bytes());
+                self.mem[*val as usize] = h;
+                self.mem[*val as usize + 1] = 0;
+            } else {
+                string_to_bits(&mut self.mem, *val as usize, *w, text.as_bytes());
+            }
+            return code;
+        }
         if let FileRead::Scan { string: true, outs, .. } = kind {
             let s = fmt::value_bytes(&self.mem, src.0 as usize, src.1);
             let mut pos = 0;
@@ -3202,7 +3225,14 @@ impl Sim {
             };
             return if r.is_ok() { 0 } else { -1 };
         }
-        let Some(FileH::R { data, pos, eof }) = self.files.get_mut(&fd) else { return -1 };
+        if let FileRead::FreadMem { sig, start, count } = kind {
+            return self.fread_mem(fd, *sig, *start, *count, loc);
+        }
+        let Some(FileH::R { data, pos, eof }) = self.files.get_mut(&fd) else {
+            self.file_err = 9; // EBADF
+            return if matches!(kind, FileRead::Fread { .. }) { 0 } else { -1 };
+        };
+        self.file_err = 0;
         match kind {
             FileRead::Getc => match data.get(*pos) {
                 Some(&c) => {
@@ -3245,6 +3275,16 @@ impl Sim {
                 string_to_bits(&mut self.mem, *val as usize, *w, &line);
                 (*pos - start) as i32
             }
+            FileRead::Fread { val, w } => {
+                let (n, eof) = (data.len(), &mut *eof);
+                let got = fread_bits(&mut self.mem, *val as usize, *w, &data[(*pos).min(n)..]);
+                *pos += got;
+                if got == 0 {
+                    *eof = true;
+                }
+                got as i32
+            }
+            FileRead::FreadMem { .. } | FileRead::Error { .. } => unreachable!(),
             FileRead::Eof => *eof as i32,
             FileRead::Tell => *pos as i32,
             FileRead::Seek { off, op } => {
@@ -3280,6 +3320,54 @@ impl Sim {
                 r
             }
         }
+    }
+
+    /// $fread into the elements of an array: the number of bytes read.
+    fn fread_mem(&mut self, fd: u32, sig: u32, start: Option<(u32, u32)>, count: Option<(u32, u32)>, loc: &str) -> i32 {
+        let num = |m: &[u64], x: Option<(u32, u32)>| x.map(|(s, w)| ops::read_u64(m, s as usize, w).map(|v| if w < 64 && v >> (w - 1) & 1 != 0 { (v | !ops::mask(w)) as i64 } else { v as i64 }));
+        let (start, count) = (num(&self.mem, start), num(&self.mem, count));
+        let r = self.sigs[sig as usize];
+        let lo = self.prog.signals[sig as usize].arr_lo;
+        let hi = lo + r.depth as i64 - 1;
+        let Some(FileH::R { .. }) = self.files.get(&fd) else {
+            self.file_err = 9; // EBADF
+            return 0;
+        };
+        self.file_err = 0;
+        // an x/z start or count, or a start outside the array: nothing is read
+        let first = match start {
+            None => lo,
+            Some(Some(s)) if (lo..=hi).contains(&s) => s,
+            _ => {
+                let _ = writeln!(self.out, "WARNING: {loc}: $fread start address is outside the array.");
+                return 0;
+            }
+        };
+        let mut last = match count {
+            None => hi,
+            Some(Some(c)) if c > 0 => first + c - 1,
+            _ => return 0,
+        };
+        if last > hi {
+            let _ = writeln!(self.out, "WARNING: {loc}: $fread count is larger than the array; it reads up to the last address.");
+            last = hi;
+        }
+        let n = nw(r.width);
+        let mut total = 0usize;
+        for a in first..=last {
+            let base = r.slot as usize + (a - lo) as usize * 2 * n;
+            let mut v = self.mem[base..base + 2 * n].to_vec();
+            let Some(FileH::R { data, pos, eof }) = self.files.get_mut(&fd) else { break };
+            let got = fread_bits(&mut v, 0, r.width, &data[(*pos).min(data.len())..]);
+            *pos += got;
+            if got == 0 {
+                *eof = true;
+                break;
+            }
+            total += got;
+            self.apply(sig, Res::Elem((a - lo) as u32), &v, r.width);
+        }
+        total as i32
     }
 
     /// The handle of a string (interned).
@@ -5380,6 +5468,29 @@ fn int_text_bits(m: &mut [u64], d: usize, w: u32, radix: u32, text: &str) {
     b[n - 1] &= top;
     m[d..d + n].copy_from_slice(&a);
     m[d + n..d + 2 * n].copy_from_slice(&b);
+}
+
+/// $fread of one w-bit value at `d`: up to ceil(w/8) bytes of `src`, the first one the most
+/// significant (of a whole number of bytes, truncated to w bits); bits no byte reaches keep
+/// their value. Returns the number of bytes used.
+fn fread_bits(m: &mut [u64], d: usize, w: u32, src: &[u8]) -> usize {
+    let n = nw(w);
+    let bytes = w.div_ceil(8) as usize;
+    let got = bytes.min(src.len());
+    for (k, &byte) in src[..got].iter().enumerate() {
+        // the bits of byte k: [top - 8, top) of the byte-aligned value
+        let top = 8 * (bytes - k) as u32;
+        for j in 0..8 {
+            let bit = top - 8 + j;
+            if bit >= w {
+                continue;
+            }
+            let (i, s) = ((bit / 64) as usize, bit % 64);
+            m[d + i] = (m[d + i] & !(1 << s)) | (((byte as u64 >> j) & 1) << s);
+            m[d + n + i] &= !(1 << s);
+        }
+    }
+    got
 }
 
 /// Store a string as Verilog characters (last character in the low byte) in a w-bit value.

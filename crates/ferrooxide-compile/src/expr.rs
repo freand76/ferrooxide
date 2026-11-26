@@ -1349,6 +1349,48 @@ impl<'a> Compiler<'a> {
                 let op = self.expr(&args[2], sid, 32, false)?;
                 self.emit(sys(F::Seek { off, op }, src));
             }
+            "$fread" => {
+                let src = fd_at(self, 1)?;
+                if let Some(sig) = self.array_of(&args[0], sid) {
+                    // (an empty argument, `$fread(mem, fd, , n)`, is left out)
+                    let mut opt = |i: usize| -> R<Option<(u32, u32)>> {
+                        match args.get(i) {
+                            None => Ok(None),
+                            Some(Expr { kind: ExprKind::Str(s), .. }) if s.is_empty() => Ok(None),
+                            Some(e) => Ok(Some((self.expr(e, sid, 32, true)?, 32))),
+                        }
+                    };
+                    let (start, count) = (opt(2)?, opt(3)?);
+                    self.emit(sys(F::FreadMem { sig, start, count }, src));
+                } else {
+                    if args.len() > 2 {
+                        return self.err("$fread: a start or count needs an array");
+                    }
+                    let t = self.type_of(&args[0], sid)?;
+                    if t.is_real() || t.is_str() {
+                        return self.err("$fread needs an integral variable or an array");
+                    }
+                    let vw = t.width();
+                    let val = self.expr(&args[0], sid, vw, false)?;
+                    // (a copy: the bytes read go in place of the variable's bits)
+                    let v = self.tmp(vw);
+                    self.emit(Instr::Copy { d: v, s: val, w: vw });
+                    let val = v;
+                    self.emit(sys(F::Fread { val, w: vw }, src));
+                    let jz = self.emit(Instr::Jz { c: d, w: 32, to: 0 });
+                    self.store_value(&stmt::Lhs::Expr(&args[0], sid), val, vw, rt::StoreMode::Blocking)?;
+                    let h = self.here();
+                    self.patch(jz, h);
+                }
+            }
+            "$ferror" => {
+                let src = fd_at(self, 0)?;
+                let t = self.type_of(&args[1], sid)?;
+                let vw = t.width();
+                let val = self.tmp(vw.max(64));
+                self.emit(sys(F::Error { val, w: if t.is_str() { 0 } else { vw } }, src));
+                self.store_value(&stmt::Lhs::Expr(&args[1], sid), val, vw, rt::StoreMode::Blocking)?;
+            }
             "$fgets" => {
                 let vw = self.type_of(&args[0], sid)?.width();
                 let val = self.tmp(vw);
@@ -1650,7 +1692,7 @@ impl<'a> Compiler<'a> {
                 let ok = self.dyn_cast(args, sid)?;
                 Ok(self.resize(ok, 1, w, false))
             }
-            "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
+            "$fgetc" | "$ungetc" | "$fgets" | "$fread" | "$ferror" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
                 let d = self.file_read(name, args, sid)?;
                 Ok(self.resize(d, 32, w, true))
             }

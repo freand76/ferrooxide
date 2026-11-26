@@ -357,7 +357,7 @@ impl<'a> Compiler<'a> {
                 "$__str" => self.type_of(&args[0], sid)?.as_vec(),
                 "$fopen" => v(32, false),
                 "$test$plusargs" | "$value$plusargs" | "$cast" => v(32, true),
-                "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
+                "$fgetc" | "$ungetc" | "$fgets" | "$fread" | "$ferror" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
                     v(32, true)
                 }
                 "$rtoi" => v(32, true),

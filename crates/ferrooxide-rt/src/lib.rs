@@ -233,6 +233,7 @@ pub fn instr_sigs_mut(ins: &mut Instr, f: &mut impl FnMut(&mut u32)) {
         Instr::SysF { f: SysFn::RandomSeed(sig) | SysFn::UrandomSeed(sig) | SysFn::Dist { seed: sig, .. }, .. } => f(sig),
         Instr::Sys(t) => match &mut **t {
             SysTask::ReadMem { sig, .. } | SysTask::WriteMem { sig, .. } => f(sig),
+            SysTask::FileRead { kind: FileRead::FreadMem { sig, .. }, .. } => f(sig),
             _ => {}
         },
         _ => {}
@@ -361,7 +362,8 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
                     let mut v = vec![*d, src.0];
                     match kind {
                         FileRead::Ungetc { c } => v.push(*c),
-                        FileRead::Gets { val, .. } => v.push(*val),
+                        FileRead::Gets { val, .. } | FileRead::Fread { val, .. } | FileRead::Error { val, .. } => v.push(*val),
+                        FileRead::FreadMem { start, count, .. } => v.extend(start.iter().chain(count).map(|x| x.0)),
                         FileRead::Seek { off, op } => v.extend([*off, *op]),
                         FileRead::Scan { outs, fmt, .. } => {
                             for o in outs {
@@ -625,6 +627,14 @@ pub enum FileRead {
     Rewind,
     /// $fscanf / $sscanf (`string`): conversions go to `outs`
     Scan { string: bool, fmt: FileName, outs: Vec<ScanOut> },
+    /// $fread into the `w`-bit value at `val` (holding the variable's value): the bytes
+    /// read replace its bits from the most significant end
+    Fread { val: u32, w: u32 },
+    /// $fread into the elements of array `sig` from address `start` (default: the lowest),
+    /// at most `count` of them
+    FreadMem { sig: u32, start: Option<(u32, u32)>, count: Option<(u32, u32)> },
+    /// $ferror: the description of the last file error into `val` (`w` 0: a string handle)
+    Error { val: u32, w: u32 },
 }
 
 /// One $scanf output: the converted value (`w` bits, or f64 if `real`) and a 1-bit flag set

@@ -1804,7 +1804,7 @@ impl<'a> Compiler<'a> {
                     self.emit(sys(SysTask::ReadMem { hex, file, sig, start, end, loc }));
                 }
             }
-            "$fgetc" | "$ungetc" | "$fgets" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
+            "$fgetc" | "$ungetc" | "$fgets" | "$fread" | "$ferror" | "$feof" | "$ftell" | "$fseek" | "$rewind" | "$fscanf" | "$sscanf" => {
                 // called as a task: the result is dropped
                 let a: Vec<Expr> = args.iter().map(|a| a.clone().unwrap_or(ExprKind::Str(String::new()).into())).collect();
                 self.file_read(name, &a, sid)?;
