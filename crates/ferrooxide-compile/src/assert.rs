@@ -692,7 +692,7 @@ impl<'a> Compiler<'a> {
             }
         };
         self.scopes[sid].syms.insert(name.clone(), Sym::Sig(c));
-        if self.sigs.md_dims.contains_key(&c) || self.sigs.packed_dims.contains_key(&c) {
+        if self.sigs.md_dims.contains_key(&c) || self.sigs.packed_dims.contains_key(&c) || self.layout(c).is_some_and(|l| l.fields.is_some()) {
             self.scopes[sid].syms.insert(format!("$flat:{name}"), Sym::Sig(c));
         }
         Ok(name)

@@ -205,6 +205,11 @@ impl<'a> Compiler<'a> {
             let Some(Sym::Type(t)) = self.lookup(tp, sid) else {
                 return self.err(format!("'{tp}' is not a type"));
             };
+            // (with the declaration's own packed dimensions: `T [1:0] x`)
+            let t = match mg.ty {
+                Some(dt) if !dt.dims.is_empty() => Rc::new(self.resolve_type(dt, sid)?),
+                _ => t,
+            };
             let (k, sg, r, p) = t.decl_parts();
             // (an input port of a logic type is a net)
             mg.kind = if k == NetKind::Reg && matches!(mg.dir, Some(Dir::Input | Dir::Inout)) { NetKind::Wire } else { k };

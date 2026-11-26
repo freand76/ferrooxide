@@ -39,6 +39,8 @@ pub(crate) struct Prop {
     pub desc: Vec<bool>,
     /// the enum of the property (of an element; NONE: not an enum)
     pub enum_id: u32,
+    /// the layout of a struct property (member chains: `Compiler::struct_walk`)
+    pub layout: Option<Rc<crate::types::Packed>>,
 }
 
 impl Prop {
@@ -163,9 +165,11 @@ impl<'a> Compiler<'a> {
         let mut width = props.last().map(|p| p.off + p.size()).unwrap_or(0);
         // (4-state properties start as x)
         let mut xs: Vec<(u32, u32)> = Vec::new();
+        // (64 bits at each of these offsets start as 0: real and string struct members)
+        let mut zeros: Vec<u32> = Vec::new();
         for d in &c.props {
             self.line = d.line;
-            let base_ty = self.prop_type(d, scope)?;
+            let (base_ty, layout) = self.prop_type(d, scope)?;
             let enum_id = match d.ty.enum_names.clone().filter(|_| d.ty.dims.len() <= 1) {
                 Some(n) => self.enum_id(&n, scope),
                 None => NONE,
@@ -188,9 +192,22 @@ impl<'a> Compiler<'a> {
                     dims.push((a.min(b), ((a - b).abs() + 1) as u32));
                     desc.push(a > b);
                 }
-                let p = Prop { name: n.name.clone(), off: width, ty, dims, desc, enum_id };
+                if layout.is_some() && (n.heap.is_some() || !n.dims.is_empty()) {
+                    return self.err("an array of structs as a class property is not supported");
+                }
+                let p = Prop { name: n.name.clone(), off: width, ty, dims, desc, enum_id, layout: layout.clone() };
                 if four && n.heap.is_none() {
                     xs.push((width, p.size()));
+                }
+                // (real and string members of a struct start as 0.0 and the empty string)
+                if let Some(l) = &layout {
+                    let mut zero = Vec::new();
+                    crate::types::value_members(l, 0, &mut zero);
+                    if !zero.is_empty() {
+                        self.sigs.has_struct_values = true;
+                        self.intern(b"");
+                    }
+                    zeros.extend(zero.into_iter().map(|z| width + z as u32));
                 }
                 width += p.size();
                 props.push(p);
@@ -215,6 +232,10 @@ impl<'a> Compiler<'a> {
                 init[(b / 64) as usize] |= 1 << (b % 64);
                 init[n + (b / 64) as usize] |= 1 << (b % 64);
             }
+        }
+        for b in zeros.into_iter().flat_map(|z| z..z + 64) {
+            init[(b / 64) as usize] &= !(1 << (b % 64));
+            init[n + (b / 64) as usize] &= !(1 << (b % 64));
         }
         self.prog.classes[id as usize] = rt::ClassDef { name: name.to_string(), width, init };
         let init_scope = self.new_scope(format!("{path}.$init"), Some(scope), file);
@@ -337,19 +358,28 @@ impl<'a> Compiler<'a> {
         k
     }
 
-    /// The type of a class property.
-    fn prop_type(&mut self, d: &Decl, sid: usize) -> R<Type> {
-        // a type parameter (of a parameterized class)
-        if let Some(t) = Some(&d.ty).filter(|t| t.param.is_some() && !t.has_struct()) {
-            let r = self.resolve_type(t, sid)?;
-            if r.has_struct() {
-                return self.err("a class property of a struct type given by a type parameter is not supported");
-            }
-            return self.resolved_type(&r, sid);
-        }
+    /// The type of a class property, and its layout for a struct.
+    fn prop_type(&mut self, d: &Decl, sid: usize) -> R<(Type, Option<Rc<crate::types::Packed>>)> {
+        // a struct type (also given by a type parameter): stored flat
         if d.ty.has_struct() || d.ty.param.is_some() {
-            return self.err("a class property of a struct type or a type parameter is not supported");
+            let r = self.resolve_type(&d.ty, sid)?;
+            if r.has_struct() {
+                if r.heap.is_some() || !r.unpacked.is_empty() {
+                    return self.err("an array of structs as a class property is not supported");
+                }
+                let l = crate::types::packed_of(&r);
+                self.sigs.has_structs = true;
+                return Ok((Type::vec(l.width() as u32, l.signed), Some(Rc::new(l))));
+            }
+            if d.ty.param.is_some() {
+                return Ok((self.resolved_type(&r, sid)?, None));
+            }
         }
+        Ok((self.prop_type_plain(d, sid)?, None))
+    }
+
+    /// The type of a class property of no struct type.
+    fn prop_type_plain(&mut self, d: &Decl, sid: usize) -> R<Type> {
         Ok(match d.kind() {
             NetKind::Real => Type::Real,
             NetKind::String => Type::Str,
@@ -1074,14 +1104,49 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// `inst.obj.p` (a hierarchical name that resolves to nothing else) as a member access.
+    /// `inst.obj.p`, `inst.s.f.g` (a hierarchical name that resolves to nothing else) as
+    /// member selects of its longest prefix that is a class handle or a struct variable.
     pub(crate) fn hier_member(&self, e: &Expr, sid: usize) -> Option<Expr> {
         let ExprKind::Hier(p) = &e.kind else { return None };
         if self.lookup_hier(p, sid).is_some() {
             return None;
         }
-        let (obj, m) = self.hier_handle(&p.join("."), sid)?;
-        Some(ExprKind::Member(Box::new(obj), m).into())
+        for k in (2..p.len()).rev() {
+            // (an element of an array variable: `inst.v[i].m`, the index in the segment)
+            let mut prefix = p[..k].to_vec();
+            let mut index = None;
+            let sym = match self.lookup_hier(&prefix, sid) {
+                None => {
+                    let last = prefix.last_mut().unwrap();
+                    let Some(i) = last.find('[').filter(|_| last.ends_with(']')) else { continue };
+                    let ix = &last[i + 1..last.len() - 1];
+                    index = Some(match ix.strip_prefix('@') {
+                        Some(n) => ferrooxide_front::lower::hier_index_expr(n.parse().ok()?)?,
+                        None => ExprKind::Num(ferrooxide_front::ast::dec(ix.parse().ok()?)).into(),
+                    });
+                    last.truncate(i);
+                    match self.lookup_hier(&prefix, sid) {
+                        Some(s) => s,
+                        None => continue,
+                    }
+                }
+                Some(s) => s,
+            };
+            match sym {
+                Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) || self.layout(s).is_some_and(|l| l.fields.is_some()) => {
+                    let mut x: Expr = ExprKind::Hier(prefix).into();
+                    if let Some(i) = index {
+                        x = ExprKind::Index(Box::new(x), Box::new(i)).into();
+                    }
+                    for m in &p[k..] {
+                        x = ExprKind::Member(Box::new(x), m.clone()).into();
+                    }
+                    return Some(x);
+                }
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Static method `m` of the class named `cn` (or of a base class): (method, the class
@@ -1208,13 +1273,31 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::Obj { op: ObjOp::SetAt(p.count()), d: ix, a: h, b: v, off: p.off, w: p.ty.width() });
             return Ok(true);
         }
+        // a member (or a part of one) of a struct property
+        if self.sigs.has_structs {
+            if let Some((prop, off, w, walk)) = self.prop_part(lhs, sid)? {
+                let ExprKind::Member(b, m) = &prop.kind else { unreachable!() };
+                let c = self.handle_class(b, sid)?.unwrap();
+                self.check_access(c, m, sid)?;
+                let p = self.scalar_prop(c, m)?;
+                let t = match walk.leaf {
+                    crate::types::Leaf::Real => Type::Real,
+                    crate::types::Leaf::Str => Type::Str,
+                    crate::types::Leaf::Bits => Type::vec(w as u32, walk.ty.as_ref().is_some_and(|t| t.signed)),
+                };
+                let v = self.value_for(rhs, sid, w as u32, t, walk.ty.as_ref())?;
+                let h = self.handle_value(b, sid)?;
+                self.emit(Instr::Obj { op: ObjOp::Set, d: NONE, a: h, b: v, off: p.off + off as u32, w: w as u32 });
+                return Ok(true);
+            }
+        }
         let ExprKind::Member(b, m) = &lhs.kind else { return Ok(false) };
         let Some(c) = self.handle_class(b, sid)? else { return Ok(false) };
         self.check_access(c, m, sid)?;
         let p = self.scalar_prop(c, m)?;
         let v = match p.ty {
             Type::Class(pc) => self.handle_for(rhs, pc, sid)?,
-            t => self.value_for(rhs, sid, t.width(), t, None)?,
+            t => self.value_for(rhs, sid, t.width(), t, p.layout.as_deref())?,
         };
         let h = self.handle_value(b, sid)?;
         self.emit(Instr::Obj { op: ObjOp::Set, d: NONE, a: h, b: v, off: p.off, w: p.ty.width() });

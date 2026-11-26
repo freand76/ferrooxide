@@ -345,8 +345,13 @@ impl<'a> Compiler<'a> {
         if p.spec {
             self.scopes[sid].specparams.insert(p.name.clone());
         }
-        if let Some(t) = p.ty.as_ref().filter(|t| t.has_struct() || t.dims.len() > 1) {
-            let t = self.resolve_type(t, sid)?;
+        // (also a struct given by a type parameter)
+        let t = match p.ty.as_ref() {
+            Some(t) if t.param.is_some() => Some(Rc::new(self.resolve_type(t, sid)?)),
+            t => t.cloned(),
+        };
+        if let Some(t) = t.filter(|t| t.has_struct() || t.dims.len() > 1) {
+            let t = self.resolve_type(&t, sid)?;
             self.scopes[sid].syms.insert(format!("$type:{}", p.name), Sym::Type(Rc::new(t)));
             self.scopes[sid].syms.insert(format!("$flat:{}", p.name), v.clone());
             self.sigs.has_structs = true;

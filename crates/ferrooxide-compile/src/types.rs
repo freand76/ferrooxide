@@ -432,9 +432,6 @@ impl<'a> Compiler<'a> {
         let mut g = f.clone();
         if ret_param {
             let r = self.resolve_type(&f.ret_ty, sid)?;
-            if r.has_struct() {
-                return self.err("a function returning a struct type given by a type parameter is not supported");
-            }
             if r.kind == NetKind::Event {
                 return self.err("a function returning an event is not supported");
             }
@@ -445,9 +442,6 @@ impl<'a> Compiler<'a> {
             let Some(Sym::Type(t)) = self.lookup(&tp, sid) else {
                 return self.err(format!("'{tp}' is not a type"));
             };
-            if t.has_struct() {
-                return self.err("an argument of a struct type given by a type parameter is not supported");
-            }
             d.ty = t.clone();
         }
         Ok(Box::leak(Box::new(g)))
@@ -538,7 +532,7 @@ pub(crate) fn packed_of(t: &SvType) -> Packed {
 }
 
 /// The bit offsets of the real and string members in a value of type `t` at `off`.
-fn value_members(t: &Packed, off: i64, out: &mut Vec<i64>) {
+pub(crate) fn value_members(t: &Packed, off: i64, out: &mut Vec<i64>) {
     if t.leaf != Leaf::Bits {
         out.push(off);
         return;
@@ -734,6 +728,10 @@ impl<'a> Compiler<'a> {
     /// is no such chain, an error message where it is a wrong one.
     pub(crate) fn struct_walk(&self, e: &Expr, sid: usize, lvalue: bool) -> Option<Result<Walk, String>> {
         let (base, ops) = chain(e);
+        // a struct property of an object (`obj.p.f`): selects of the property's value
+        if let Some((layout, elem, k)) = self.prop_root(base, &ops, sid) {
+            return self.walk_members(layout, elem, &ops, k, lvalue);
+        }
         // `base` with its last name prefixed (`$flat:v`, `$type:p`)
         let renamed = |pre: &str| -> Expr {
             match &base.kind {
@@ -808,6 +806,67 @@ impl<'a> Compiler<'a> {
             },
             _ => self.md_norm_elem(&elem, sid)?,
         };
+        self.walk_members(layout, elem, &ops, k, lvalue)
+    }
+
+    /// An assignment target that is a part of a struct property (`obj.p.f`, `obj.p.f[3:0]`):
+    /// the property (`obj.p`), the bit offset and width of the part in it, the walk; None
+    /// for other targets.
+    pub(crate) fn prop_part(&self, e: &Expr, sid: usize) -> R<Option<(Expr, i64, i64, Walk)>> {
+        let (base, ops) = chain(e);
+        if self.prop_root(base, &ops, sid).is_none() {
+            return Ok(None);
+        }
+        let w = match self.struct_walk(e, sid, true) {
+            None => return Ok(None),
+            Some(Err(m)) => return self.err(m),
+            Some(Ok(w)) => w,
+        };
+        if w.tag_write {
+            return self.err("an assignment to a member of a tagged union property is not supported");
+        }
+        let ExprKind::IndexedRange(p, off, width, true) = &w.expr.kind else {
+            return self.err("this assignment to a part of a struct property is not supported");
+        };
+        match (lit(off), lit(width)) {
+            (Some(off), Some(width)) => Ok(Some(((**p).clone(), off, width, w))),
+            _ => self.err("an assignment to a part of a struct property at a run-time index is not supported"),
+        }
+    }
+
+    /// The struct property a select chain (`base` with `ops`) starts with (`obj.p`, also
+    /// through handle properties `a.b.p`): its layout, the property as an expression and
+    /// the number of selects it takes.
+    fn prop_root(&self, base: &Expr, ops: &[Sel], sid: usize) -> Option<(Packed, Expr, usize)> {
+        if self.classes.list.is_empty() {
+            return None;
+        }
+        let sym = match &base.kind {
+            ExprKind::Ident(n) => self.lookup(n, sid)?,
+            ExprKind::Hier(p) => self.lookup_hier(p, sid)?,
+            _ => return None,
+        };
+        let Sym::Sig(s) = sym else { return None };
+        let Type::Class(mut c) = self.sig_type(s) else { return None };
+        let mut cur = base.clone();
+        for (k, &op) in ops.iter().enumerate() {
+            let Sel::Member(m) = op else { return None };
+            let p = self.classes.list.get(c as usize)?.props.iter().rev().find(|p| p.name == m)?;
+            if !p.dims.is_empty() {
+                return None;
+            }
+            cur = apply(cur, op);
+            match (&p.layout, p.ty) {
+                (Some(l), _) => return Some(((**l).clone(), cur, k + 1)),
+                (None, Type::Class(x)) if x != NONE => c = x,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The selects `ops[k..]` of a value of type `layout` (`elem`) as one part select of it.
+    fn walk_members(&self, layout: Packed, elem: Expr, ops: &[Sel], mut k: usize, lvalue: bool) -> Option<Result<Walk, String>> {
         let mut cur: Packed = layout;
         let mut di = 0;
         let mut off = num(0);

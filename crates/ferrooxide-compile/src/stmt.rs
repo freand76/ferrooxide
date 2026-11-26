@@ -739,6 +739,11 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Assign { lhs, rhs, nonblocking, timing, line } => {
                 self.line = *line;
+                // `inst.s.m = v`: members of a variable (or object) in another scope
+                if let Some(m) = self.hier_member(lhs, sid) {
+                    let st = Stmt::Assign { lhs: m, rhs: rhs.clone(), nonblocking: *nonblocking, timing: timing.clone(), line: *line };
+                    return self.stmt(&st, sid);
+                }
                 self.check_enum_assign(lhs, rhs, sid)?;
                 self.check_proc_target(lhs, sid)?;
                 if *nonblocking && !self.sigs.automatic.is_empty() {
