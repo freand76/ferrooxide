@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4857 of 5112 (95.0%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4868 of 5112 (95.2%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -101,9 +101,8 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
-   11: 5, 20: 5): global clocking and `_gclk` functions (11), arrays assigned from arrays
-   of another shape (6), streams of dynamic arrays and `with` (3), a function returning an
-   unpacked array in a parameter value (1).
+   11: 5, 20: 5): arrays assigned from arrays of another shape (6), streams of dynamic
+   arrays and `with` (3), a function returning an unpacked array in a parameter value (1).
    DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
@@ -238,8 +237,12 @@ SystemVerilog data and testbench:
 - assertions: inside procedures, local variables of sequences and properties, match items,
   `first_match`, `nexttime`/`always`/`eventually`/`until`/`accept_on` & co., `#-#`/`#=#`,
   `case` properties, strong sequences, several clocks, `.triggered`/`.matched` of sequences,
-  `expect`, global clocking, clocking blocks with clocking signals; a deferred assertion run
-  several times in one activation reports only the last outcome.
+  `expect`, clocking blocks with clocking signals; a deferred assertion run several times
+  in one activation reports only the last outcome. Global clocking: only the module's own
+  block (not one of an enclosing module), the `_gclk` functions only in assertions clocked
+  by it; an assertion with future values (`$future_gclk`, `$rising_gclk`, ...) decides an
+  attempt at the next tick (its action blocks run then, and `disable iff` is that of the
+  next tick).
 - DPI; a compound assignment in an expression to a target with
   side effects (`(x[i++] += 1)`).
 - tagged unions: `unique case matches` and `unique`/`priority if` with a pattern, a

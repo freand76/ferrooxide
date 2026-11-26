@@ -263,7 +263,7 @@ fn conn(c: &Conn) -> String {
     }
 }
 
-fn event_ctl(ec: &EventCtl) -> String {
+pub(crate) fn event_ctl(ec: &EventCtl) -> String {
     match ec {
         EventCtl::Star => "@*".into(),
         EventCtl::List(l) => {

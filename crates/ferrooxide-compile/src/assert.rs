@@ -211,13 +211,18 @@ struct Build {
     /// `$past` registers shifted at each tick: (value, registers newest first)
     pasts: Vec<(Expr, Vec<String>)>,
     def: AssertDef,
+    /// the assertion reads `$future` values: each tick evaluates the attempt of the tick
+    /// before, signals reading their values of one tick ago (1) and `$future` the current
+    /// ones (0)
+    shift: u32,
 }
 
 impl<'a> Compiler<'a> {
     /// A concurrent assertion in scope `sid`: its definition and processes.
     pub(crate) fn assertion(&mut self, a: &ConcAssert, sid: usize) -> R<()> {
         self.line = a.line;
-        let mut b = Build::default();
+        let mut b = Build { shift: u32::from(format!("{:?}", a.prop).contains("\"$future\"")), ..Build::default() };
+        let future = b.shift > 0;
         let top = self.prop_def(&a.prop, &mut b, sid)?;
         debug_assert_eq!(top as usize, b.def.props.len() - 1);
         b.def.cover = a.kind == AssertKind::Cover;
@@ -239,6 +244,13 @@ impl<'a> Compiler<'a> {
         self.begin_proc(name.clone(), ProcClass::Normal);
         let top_pc = self.here();
         self.stmt(&Stmt::Timed { timing: Timing::Event(a.clock.clone()), body: Box::new(Stmt::Null), line: a.line }, sid)?;
+        // (with `$future` values: no attempt at the first tick, it ends at the second)
+        let mut first = None;
+        if future {
+            let (started, _) = counter(self, "started")?;
+            let (c, cw) = self.truth(&ExprKind::Ident(started.clone()).into(), sid)?;
+            first = Some((self.emit(Instr::Jz { c, w: cw, to: 0 }), started));
+        }
         // `disable iff` true at the tick: no attempt starts, the running ones end (no
         // passes or failures; the sampled value functions go on)
         let mut skip = None;
@@ -262,12 +274,22 @@ impl<'a> Compiler<'a> {
             self.expr(&v, sid, n, false)?
         };
         self.emit(Instr::Assert(rt::AssertOp::Tick { id, leaves, n, pass: pass_slot, fail: fail_slot }));
+        if let Some((j, started)) = first {
+            let over = self.emit(Instr::Jmp { to: 0 });
+            let here = self.here();
+            self.patch(j, here);
+            let one = ExprKind::Num(Number { size: None, signed: false, base: 10, based: false, digits: "1".into(), fill: false });
+            self.stmt(&Stmt::Assign { lhs: ExprKind::Ident(started).into(), rhs: one.into(), nonblocking: false, timing: None, line: a.line }, sid)?;
+            let here = self.here();
+            self.patch(over, here);
+        }
         if let Some(j) = skip {
             let here = self.here();
             self.patch(j, here);
         }
-        // `$past` registers: oldest first
-        for (v, regs) in &b.pasts {
+        // `$past` registers: oldest first, those of later entries (which may read the
+        // registers of earlier ones) first
+        for (v, regs) in b.pasts.iter().rev() {
             for k in (0..regs.len()).rev() {
                 let rhs = if k == 0 { v.clone() } else { ExprKind::Ident(regs[k - 1].clone()).into() };
                 let st = Stmt::Assign { lhs: ExprKind::Ident(regs[k].clone()).into(), rhs, nonblocking: false, timing: None, line: a.line };
@@ -501,17 +523,31 @@ impl<'a> Compiler<'a> {
         let line = e.line;
         let at = |k: ExprKind| Expr::new(k, line);
         match &e.kind {
-            ExprKind::Ident(n) => {
-                if let Some(Sym::Sig(s)) = self.lookup(n, sid) {
-                    return Ok(at(ExprKind::Ident(self.sample_sig(s, sid)?)));
+            ExprKind::Ident(_) | ExprKind::Hier(_) => {
+                let sym = match &e.kind {
+                    ExprKind::Ident(n) => self.lookup(n, sid),
+                    ExprKind::Hier(p) => self.lookup_hier(p, sid),
+                    _ => unreachable!(),
+                };
+                let Some(Sym::Sig(s)) = sym else { return Ok(e.clone()) };
+                let v = at(ExprKind::Ident(self.sample_sig(s, sid)?));
+                if b.shift == 0 {
+                    return Ok(v);
                 }
-                Ok(e.clone())
+                let n = b.shift;
+                Ok(at(self.past_regs(&v, n, b, sid)?.kind))
             }
-            ExprKind::Hier(p) => {
-                if let Some(Sym::Sig(s)) = self.lookup_hier(p, sid) {
-                    return Ok(at(ExprKind::Ident(self.sample_sig(s, sid)?)));
+            // the sampled value at the next tick (16.9.4): the current one, the attempt being
+            // that of the tick before
+            ExprKind::SysCall(f, args) if f == "$future" => {
+                let [x] = args.as_slice() else { return self.err("$future_gclk takes one argument") };
+                if b.shift == 0 {
+                    return self.err("$future_gclk inside $future_gclk");
                 }
-                Ok(e.clone())
+                let saved = std::mem::replace(&mut b.shift, 0);
+                let r = self.sampled(x, b, sid);
+                b.shift = saved;
+                r
             }
             ExprKind::SysCall(f, args) if matches!(f.as_str(), "$past" | "$rose" | "$fell" | "$stable" | "$changed" | "$sampled") => {
                 let Some(x) = args.first() else { return self.err(format!("{f} needs an argument")) };

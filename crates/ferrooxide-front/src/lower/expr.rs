@@ -573,6 +573,32 @@ impl Lower {
             };
             return Ok(ExprKind::SysCall("$typename".into(), vec![ExprKind::Type(Rc::new(ty)).into()]).into());
         }
+        // the global clocking sampled value functions (IEEE 1800-2017 16.9.4): the past ones
+        // as `$past` & co. (of the global clock, which must be the assertion's), the future
+        // ones from `$future`, the sampled value at the next tick
+        if let Some(base) = name.strip_suffix("_gclk").filter(|b| GCLK.contains(b)) {
+            let [t::Arg::Pos(Some(a))] = args else { return self.err(loc, format!("{name} takes one argument")) };
+            if self.sva.global_clock.is_none() {
+                return self.unsupported(loc, &format!("{name} without a global clocking block in the module"));
+            }
+            self.sva.gclk_used = true;
+            let x = self.expr(a)?;
+            let call = |n: &str, v: Expr| -> Expr { ExprKind::SysCall(n.into(), vec![v]).into() };
+            let bin = |op, a: Expr, b: Expr| -> Expr { ExprKind::Binary(op, Box::new(a), Box::new(b)).into() };
+            let bit = |d: &str| -> Expr { ExprKind::Num(Number { size: Some(1), signed: false, base: 2, based: true, digits: d.into(), fill: false }).into() };
+            return Ok(match base {
+                "$past" | "$rose" | "$fell" | "$stable" | "$changed" | "$future" => call(base, x),
+                // (the least significant bit: from not 1 to 1, from not 0 to 0)
+                "$rising" | "$falling" => {
+                    let d = if base == "$rising" { "1" } else { "0" };
+                    let now = bin(BinOp::CaseNe, bin(BinOp::And, call("$sampled", x.clone()), bit("1")), bit(d));
+                    let next = bin(BinOp::CaseEq, bin(BinOp::And, call("$future", x), bit("1")), bit(d));
+                    bin(BinOp::LAnd, now, next)
+                }
+                "$steady" => bin(BinOp::CaseEq, call("$sampled", x.clone()), call("$future", x)),
+                _ => bin(BinOp::CaseNe, call("$sampled", x.clone()), call("$future", x)),
+            });
+        }
         if name == "$bits" {
             if let Some(t::Arg::Pos(Some(t::Expr { kind: t::ExprKind::Type(dt), .. }))) = args.first() {
                 return Ok(self.data_type_req(dt)?.bits());
@@ -1043,3 +1069,6 @@ fn typed_patterns(e: Expr, t: &Rc<super::SvType>) -> Expr {
     };
     Expr::new(kind, e.line)
 }
+
+/// The global clocking sampled value functions, without their `_gclk`.
+const GCLK: [&str; 10] = ["$past", "$rose", "$fell", "$stable", "$changed", "$future", "$rising", "$falling", "$steady", "$changing"];

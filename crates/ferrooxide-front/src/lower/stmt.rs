@@ -764,6 +764,13 @@ impl Lower {
         match ec {
             t::EventCtl::Star => Ok((EventCtl::Star, None)),
             t::EventCtl::Expr(_) => self.unsupported(loc, "this event control"),
+            // `@($global_clock)`: the event of the global clocking block (IEEE 1800-2017 14.14)
+            t::EventCtl::List(items) if matches!(items.as_slice(), [it] if it.edge.is_none() && it.iff.is_none() && matches!(&it.expr.kind, t::ExprKind::SysCall { name, args, .. } if name == "$global_clock" && args.is_empty())) => {
+                match self.sva.global_clock.clone() {
+                    Some(g) => self.event_ctl_iff(&g, loc),
+                    None => self.unsupported(loc, "$global_clock without a global clocking block in the module"),
+                }
+            }
             t::EventCtl::List(items) => {
                 let mut v = Vec::new();
                 let mut guards = Vec::new();

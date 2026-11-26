@@ -1,0 +1,9 @@
+global_clocking.v:26: $finish called at 80 (1s)
+future 7 0
+rising 2 5
+falling 3 4
+steady 2 5
+changing 5 2
+rose 3 5
+stable 2 6
+past 7 1

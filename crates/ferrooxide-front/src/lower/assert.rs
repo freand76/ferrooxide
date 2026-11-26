@@ -26,6 +26,10 @@ pub(crate) struct Sva {
     /// clocking blocks by name, for `default clocking name;`
     clockings: HashMap<String, t::EventCtl>,
     default_clock: Option<t::EventCtl>,
+    /// the event of the module's global clocking block (IEEE 1800-2017 14.14)
+    pub(crate) global_clock: Option<t::EventCtl>,
+    /// a global clocking sampled value function was lowered (`$past_gclk`, ...)
+    pub(crate) gclk_used: bool,
     default_disable: Option<t::Expr>,
     /// the named sequences and properties being expanded, innermost last: their formal
     /// arguments and the actual ones
@@ -69,7 +73,7 @@ impl Lower {
                     return self.unsupported(c.loc, "a clocking block with clocking signals or items");
                 }
                 match c.kind {
-                    Some(crate::syntax::kw::Kw::Global) => return self.unsupported(c.loc, "a global clocking block"),
+                    Some(crate::syntax::kw::Kw::Global) => self.sva.global_clock = Some(c.event.clone()),
                     Some(_) => self.sva.default_clock = Some(c.event.clone()),
                     None => {}
                 }
@@ -108,7 +112,9 @@ impl Lower {
             (_, t::AssertBody::Immediate { .. }) => unreachable!("a deferred assertion"),
         };
         let mut head = Head::default();
+        self.sva.gclk_used = false;
         let prop = self.sva_top(body, &mut head, a.loc)?;
+        let gclk = std::mem::take(&mut self.sva.gclk_used);
         if kind == AssertKind::CoverSeq && !matches!(prop, Property::Seq(_)) {
             return self.err(a.loc, "`cover sequence` takes a sequence");
         }
@@ -119,6 +125,15 @@ impl Lower {
                 None => return self.unsupported(a.loc, "a concurrent assertion without a clock"),
             },
         };
+        // the global clocking sampled value functions: of the assertion's clock only (the
+        // registers of their past values shift at its ticks)
+        if gclk {
+            let g = self.sva.global_clock.clone().unwrap();
+            let g = self.event_ctl(&g, a.loc)?;
+            if crate::dump::event_ctl(&g) != crate::dump::event_ctl(&clock) {
+                return self.unsupported(a.loc, "a global clocking sampled value function in an assertion whose clock is not the global clock");
+            }
+        }
         let disable = match head.disable {
             Some(d) => Some(d),
             None => match self.sva.default_disable.clone() {
