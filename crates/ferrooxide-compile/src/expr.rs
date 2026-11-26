@@ -2916,6 +2916,7 @@ impl<'a> Compiler<'a> {
             Type::Str => self.str_expr(rhs, sid),
             Type::Dyn { kind, elem } => self.dyn_owned(rhs, kind, elem, sid),
             Type::Class(c) => self.handle_for(rhs, c, sid),
+            Type::Event => self.event_value(rhs, sid),
             Type::Vec { .. } => self.rhs_value(rhs, sid, lw),
         }
     }

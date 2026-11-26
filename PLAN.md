@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4896 of 5112 (95.8%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4900 of 5112 (95.9%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -110,11 +110,11 @@ machinery must not assume static targets only (A3).
    baseline; errors in class methods that are never called.
 4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
    reference, `process::suspend`/`resume`, recursion from fork branches, waits on run-time
-   targets (`@(obj.ev)`, `vif.clk`), events as class properties, VPI callbacks and MCP
-   conditional breakpoints. The gate for UVM.
+   targets other than event properties (`vif.clk`), VPI callbacks and MCP conditional
+   breakpoints. The gate for UVM. (Event properties wait through per-object waiter lists,
+   `EvOp::Arm`.)
 5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`; after A3). Stops at
-   `uvm_objection.svh:792` (`->m_events[m_top].all_dropped`): events as class properties;
-   `uvm_event` and the phases need them too. Then fix the blockers one at a time, each with
+   `uvm_traversal.svh:266` (a type parameter of the base class used in a derived class). Then fix the blockers one at a time, each with
    a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
@@ -214,7 +214,8 @@ SystemVerilog data and testbench:
   structs, associative arrays and class handles, array methods of associative,
   multi-dimensional and struct arrays, class or wider
   keys, queue element writes with `<=` (done at once).
-- classes: events as properties (A3), assignments through a call's result
+- classes: `->>` of an event property, events of a subroutine or module assigned to an
+  event property, queues and dynamic arrays of events; assignments through a call's result
   (`C::get().v = 1`), an untyped `mailbox`, members of
   `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle

@@ -281,16 +281,16 @@ impl Lower {
                 t::Timing::Repeat(..) => return self.unsupported(s.loc, "repeat as a statement's timing control"),
             },
             t::StmtKind::Trigger { nonblocking, timing: None, target } => {
-                let p = match self.dotted(target)? {
-                    Some(p) => p,
-                    // `-> P::e`: an event of a package; `-> a.g[1].e`: through an indexed scope
-                    None => match self.expr(target)?.kind {
-                        ExprKind::Hier(parts) => parts.join("."),
-                        ExprKind::Ident(n) if n.contains("::") => n,
-                        _ => return self.unsupported(s.loc, "this event trigger"),
-                    },
+                let target = match self.dotted(target)? {
+                    // `-> obj.e`: an event property of a handle
+                    Some(p) if p.contains('.') && self.is_class_var(p.split('.').next().unwrap()) => self.expr(target)?,
+                    Some(p) if p.contains('.') => Expr::new(ExprKind::Hier(p.split('.').map(String::from).collect()), line),
+                    Some(p) => Expr::new(ExprKind::Ident(p), line),
+                    // `-> P::e`: an event of a package; `-> a.g[1].e`: through an indexed
+                    // scope; `-> obj.e`: an event property
+                    None => self.expr(target)?,
                 };
-                Stmt::Trigger { name: p, nonblocking: *nonblocking, line }
+                Stmt::Trigger { target, nonblocking: *nonblocking, line }
             }
             t::StmtKind::Trigger { .. } => return self.unsupported(s.loc, "a nonblocking event trigger with a delay or event control"),
             t::StmtKind::If { qual, cond, then_, else_ } => {

@@ -93,7 +93,7 @@ impl<'a> Compiler<'a> {
         let id = self.classes.list.len() as u32;
         self.classes.decl_scope.insert(id, sid);
         self.classes.list.push(ClassInfo { name: name.to_string(), decl: c, base: None, ifaces: vec![], scope: UNDECLARED, props: vec![], init_scope: 0, init_this: 0 });
-        self.prog.classes.push(rt::ClassDef { name: name.to_string(), width: 0, init: vec![] });
+        self.prog.classes.push(rt::ClassDef { name: name.to_string(), width: 0, init: vec![], events: vec![] });
         id
     }
 
@@ -167,6 +167,8 @@ impl<'a> Compiler<'a> {
         let mut xs: Vec<(u32, u32)> = Vec::new();
         // (64 bits at each of these offsets start as 0: real and string struct members)
         let mut zeros: Vec<u32> = Vec::new();
+        // (the offsets of event properties, each a handle of an event object of its own)
+        let mut events = base.map(|b| self.prog.classes[b as usize].events.clone()).unwrap_or_default();
         for d in &c.props {
             self.line = d.line;
             let (base_ty, layout) = self.prop_type(d, scope)?;
@@ -174,7 +176,7 @@ impl<'a> Compiler<'a> {
                 Some(n) => self.enum_id(&n, scope),
                 None => NONE,
             };
-            let four = !matches!(d.kind(), NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class);
+            let four = !matches!(d.kind(), NetKind::Bit | NetKind::Int(_) | NetKind::Real | NetKind::String | NetKind::Class | NetKind::Event);
             for n in &d.names {
                 // a queue, dynamic or associative array: a handle (0: empty)
                 let ty = match &n.heap {
@@ -209,6 +211,12 @@ impl<'a> Compiler<'a> {
                     }
                     zeros.extend(zero.into_iter().map(|z| width + z as u32));
                 }
+                if ty == Type::Event {
+                    if n.heap.is_some() {
+                        return self.err("a queue or dynamic array of events as a class property is not supported");
+                    }
+                    events.extend((0..p.count()).map(|k| width + 64 * k));
+                }
                 width += p.size();
                 props.push(p);
             }
@@ -237,7 +245,7 @@ impl<'a> Compiler<'a> {
             init[(b / 64) as usize] &= !(1 << (b % 64));
             init[n + (b / 64) as usize] &= !(1 << (b % 64));
         }
-        self.prog.classes[id as usize] = rt::ClassDef { name: name.to_string(), width, init };
+        self.prog.classes[id as usize] = rt::ClassDef { name: name.to_string(), width, init, events };
         let init_scope = self.new_scope(format!("{path}.$init"), Some(scope), file);
         let init_this = self.new_signal(format!("{path}.$init.this"), 64, false, 0, 63, 0, 0, SigKind::Reg);
         self.prog.names.pop();
@@ -384,7 +392,7 @@ impl<'a> Compiler<'a> {
             NetKind::Real => Type::Real,
             NetKind::String => Type::Str,
             NetKind::Class => Type::Class(self.class_of_decl(d, sid)?),
-            NetKind::Event => return self.err("an event as a class property is not supported"),
+            NetKind::Event => Type::Event,
             NetKind::Integer => Type::vec(32, true),
             NetKind::Int(n) if d.range().is_none() => Type::vec(n, d.signed()),
             NetKind::Time if d.range().is_none() => Type::vec(64, false),
@@ -754,6 +762,8 @@ impl<'a> Compiler<'a> {
                     Some(Sym::Real(_)) => Type::Real,
                     _ => self.scalar_prop(c, m)?.ty,
                 })),
+                // `obj.e.triggered` (IEEE 1800-2017 15.5.3)
+                None if m == "triggered" && matches!(self.type_of(b, sid), Ok(Type::Event)) => Ok(Some(Type::vec(1, false))),
                 None => Ok(None),
             },
             // (a character of a string property: a byte)
@@ -822,7 +832,16 @@ impl<'a> Compiler<'a> {
                 Ok(Some((d, Type::Class(c))))
             }
             ExprKind::Member(b, m) => {
-                let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
+                let Some(c) = self.handle_class(b, sid)? else {
+                    // `obj.e.triggered` (IEEE 1800-2017 15.5.3)
+                    if m == "triggered" && matches!(self.type_of(b, sid), Ok(Type::Event)) {
+                        let h = self.expr(b, sid, 64, false)?;
+                        let d = self.tmp(1);
+                        self.emit(Instr::Ev { op: rt::EvOp::Triggered, d, a: h });
+                        return Ok(Some((d, Type::vec(1, false))));
+                    }
+                    return Ok(None);
+                };
                 // a parameter or enum constant of the class
                 match self.class_const(c, m) {
                     Some(Sym::Const(k)) => return Ok(Some((self.const_slot(&k), Type::vec(k.w, k.signed)))),
@@ -853,6 +872,35 @@ impl<'a> Compiler<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// The handle of an event object for an event target (IEEE 1800-2017 15.5.5): another
+    /// such event, or `null`.
+    pub(crate) fn event_value(&mut self, e: &Expr, sid: usize) -> R<u32> {
+        match &e.kind {
+            ExprKind::Null => Ok(self.const_slot(&Const::zero(64))),
+            _ => match self.type_of(e, sid)? {
+                Type::Event => self.expr(e, sid, 64, false),
+                _ => self.err("only an event (of a class) or null can be assigned to an event property"),
+            },
+        }
+    }
+
+    /// The event-object handle `e` gives (an event property), None for other expressions
+    /// (a module's event).
+    pub(crate) fn event_handle(&mut self, e: &Expr, sid: usize) -> R<Option<u32>> {
+        if !matches!(&e.kind, ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Member(..) | ExprKind::Index(..)) || self.classes.list.is_empty() {
+            return Ok(None);
+        }
+        if let ExprKind::Ident(_) | ExprKind::Hier(_) = &e.kind {
+            if let Some(expr::Base::Sig(_)) = self.resolve_base(e, sid).ok().flatten() {
+                return Ok(None);
+            }
+        }
+        Ok(match self.type_of(e, sid) {
+            Ok(Type::Event) => Some(self.expr(e, sid, 64, false)?),
+            _ => None,
+        })
     }
 
     /// A handle value for a target of class `c` (`new(args)` makes an object of class `c`).

@@ -173,6 +173,8 @@ pub struct ClassDef {
     pub width: u32,
     /// the words of a new object
     pub init: Vec<u64>,
+    /// bit offsets of its event properties: each gets a new event object (`EvOp`)
+    pub events: Vec<u32>,
 }
 
 /// Value masks of UDP table symbols: bit 0 = 0, bit 1 = 1, bit 2 = x (z reads as x).
@@ -302,6 +304,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
             [*d, *a, *b, *c].into_iter().filter(|&x| x != NONE).collect()
         }
         Instr::Obj { d, a, b, .. } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
+        Instr::Ev { d, a, .. } => [*d, *a].into_iter().filter(|&x| x != NONE).collect(),
         Instr::Proc { d, a, .. } => [*d, *a].into_iter().filter(|&x| x != NONE).collect(),
         Instr::Assert(AssertOp::Tick { leaves, pass, fail, .. }) => vec![*leaves, *pass, *fail],
         Instr::Assert(_) => vec![],
@@ -891,6 +894,8 @@ pub enum Instr {
     Assoc { op: AssocOp, d: u32, a: u32, b: u32, c: u32, w: u32, key: KeyKind, x: bool },
     /// an operation on class objects; unused operands are NONE
     Obj { op: ObjOp, d: u32, a: u32, b: u32, off: u32, w: u32 },
+    /// an operation on event objects; unused operands are NONE
+    Ev { op: EvOp, d: u32, a: u32 },
     /// concurrent assertions
     Assert(AssertOp),
 }
@@ -922,6 +927,21 @@ pub enum ProcOp {
     Kill,
     /// suspend until process a has ended
     Await,
+}
+
+/// Operations on event objects in `Instr::Ev` (IEEE 1800-2017 15.5.5). An event variable
+/// that is no module's (a class property) holds a 64-bit handle of one, 0 being `null`;
+/// assigning it makes both names refer to the same event. Event objects are never freed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvOp {
+    /// d (64 bits) = a new event object
+    New,
+    /// trigger event a (null: nothing): the processes waiting for it wake
+    Trigger,
+    /// d (1 bit) = event a was triggered in this time step (`.triggered`)
+    Triggered,
+    /// the `Wait` that follows also ends when event a (null: never) is triggered
+    Arm,
 }
 
 /// Operations on class objects in `Instr::Obj`. An object is on the simulator's heap; a

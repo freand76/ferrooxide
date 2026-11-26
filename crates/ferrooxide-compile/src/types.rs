@@ -17,6 +17,9 @@ pub(crate) enum Type {
     Dyn { kind: DynKind, elem: Elem },
     /// a handle of an object of this class (`classes.list`; NONE: `null`, `new`)
     Class(u32),
+    /// an event that is no module's (a class property): a 64-bit handle of an event object
+    /// (`rt::EvOp`)
+    Event,
 }
 
 /// The kind of a `Type::Dyn`.
@@ -72,7 +75,7 @@ impl Type {
     pub(crate) fn width(self) -> u32 {
         match self {
             Type::Vec { w, .. } => w,
-            Type::Real | Type::Str | Type::Dyn { .. } | Type::Class(_) => 64,
+            Type::Real | Type::Str | Type::Dyn { .. } | Type::Class(_) | Type::Event => 64,
         }
     }
 
@@ -81,7 +84,7 @@ impl Type {
         match self {
             Type::Vec { signed, .. } => signed,
             Type::Real => true,
-            Type::Str | Type::Dyn { .. } | Type::Class(_) => false,
+            Type::Str | Type::Dyn { .. } | Type::Class(_) | Type::Event => false,
         }
     }
 

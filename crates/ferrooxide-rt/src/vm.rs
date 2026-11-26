@@ -266,6 +266,8 @@ pub struct Sim {
     str_ids: HashMap<Rc<[u8]>, u64>,
     /// queues and dynamic arrays (`Instr::Heap`): handle h is `heap[h - 1]`
     heap: Vec<Option<HObj>>,
+    /// event objects (`Instr::Ev`): handle h is `events[h - 1]`
+    events: Vec<EvObj>,
     heap_free: Vec<usize>,
     /// run-time warnings start with "file:line: "
     fileline: bool,
@@ -577,6 +579,7 @@ impl Sim {
             strs: Vec::new(),
             str_ids: HashMap::new(),
             heap: Vec::new(),
+            events: Vec::new(),
             heap_free: Vec::new(),
             fileline: false,
             files: HashMap::new(),
@@ -2570,6 +2573,10 @@ impl Sim {
             self.exec_obj(*op, *d, *a, *b, *off, *w);
             return false;
         }
+        if let Instr::Ev { op, d, a } = ins {
+            self.exec_ev(p, *op, *d, *a);
+            return false;
+        }
         if let Instr::Assert(op) = ins {
             return self.exec_assert(p, *op, *pc);
         }
@@ -2892,7 +2899,7 @@ impl Sim {
                 | Instr::RToTicks { .. } => {
                     ops::exec_real(ins, m);
                 }
-                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } | Instr::Assert(_) | Instr::Proc { .. } => unreachable!("handled before"),
+                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } | Instr::Ev { .. } | Instr::Assert(_) | Instr::Proc { .. } => unreachable!("handled before"),
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -3669,7 +3676,13 @@ impl Sim {
         match op {
             ObjOp::New => {
                 let c = &self.prog.classes[w as usize];
-                let o = HObj { data: c.init.clone(), class: w, ..Default::default() };
+                let mut o = HObj { data: c.init.clone(), class: w, ..Default::default() };
+                // (each event property refers to an event of its own)
+                for k in 0..c.events.len() {
+                    let off = self.prog.classes[w as usize].events[k];
+                    self.events.push(EvObj::default());
+                    ops::set_bits(&mut o.data, 0, off, 64, self.events.len() as u64);
+                }
                 let h = self.alloc_obj(o);
                 self.mem[d] = h;
                 self.mem[d + 1] = 0;
@@ -3753,6 +3766,55 @@ impl Sim {
     }
 
     /// A handle of a new heap object.
+    /// Execute an operation on event objects for process `p`.
+    fn exec_ev(&mut self, p: u32, op: EvOp, d: u32, a: u32) {
+        let (d, a) = (d as usize, a as usize);
+        // the event of the handle at slot a
+        let ev = |s: &Self| -> Option<usize> {
+            let h = s.mem[a];
+            (h != 0 && s.mem[a + 1] == 0 && h as usize <= s.events.len()).then(|| h as usize - 1)
+        };
+        match op {
+            EvOp::New => {
+                self.events.push(EvObj::default());
+                self.mem[d] = self.events.len() as u64;
+                self.mem[d + 1] = 0;
+            }
+            EvOp::Triggered => {
+                let t = ev(self).is_some_and(|i| self.events[i].trig == Some(self.time));
+                self.mem[d] = t as u64;
+                self.mem[d + 1] = 0;
+            }
+            EvOp::Arm => {
+                let Some(i) = ev(self) else { return };
+                let procs = &self.procs;
+                let w = &mut self.events[i].waiters;
+                // (waiters that have woken otherwise go)
+                w.retain(|&(q, ws)| procs[q as usize].wait != NONE && procs[q as usize].wseq == ws);
+                w.push((p, self.hot.wseq));
+            }
+            EvOp::Trigger => {
+                let Some(i) = ev(self) else { return };
+                self.events[i].trig = Some(self.time);
+                // (`wait (obj.e.triggered)` is evaluated again, as after a property write)
+                if let Some(s) = self.prog.obj_sig {
+                    let r = self.sigs[s as usize];
+                    let cur = lsb_code(&self.mem, r.slot, r.width);
+                    self.notify(s, cur);
+                }
+                let ws = std::mem::take(&mut self.events[i].waiters);
+                // newest waiter first, as for module events
+                for &(q, s) in ws.iter().rev() {
+                    let pr = &mut self.procs[q as usize];
+                    if pr.wait != NONE && pr.wseq == s {
+                        pr.wait = NONE;
+                        self.push_active(q);
+                    }
+                }
+            }
+        }
+    }
+
     fn alloc_obj(&mut self, o: HObj) -> u64 {
         let o = Some(o);
         match self.heap_free.pop() {
@@ -5007,7 +5069,7 @@ pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>)
         for ins in &p.code {
             match ins {
                 Instr::Wait { .. } => waits += 1,
-                Instr::Delay { .. } | Instr::Halt | Instr::Proc { .. } | Instr::WaitFork => ok = false,
+                Instr::Delay { .. } | Instr::Halt | Instr::Proc { .. } | Instr::Ev { .. } | Instr::WaitFork => ok = false,
                 Instr::Sys(t) if matches!(**t, SysTask::Finish { .. } | SysTask::Monitor { .. } | SysTask::Strobe { .. }) => {
                     ok = false
                 }
@@ -5726,6 +5788,16 @@ struct HObj {
     dflt: Option<Vec<u64>>,
     /// a class object: its class (`Program::classes`)
     class: u32,
+}
+
+/// An event object (`Instr::Ev`).
+#[derive(Default)]
+struct EvObj {
+    /// the time of the last trigger (`.triggered`)
+    trig: Option<u64>,
+    /// the processes waiting for it: (process, its `ProcRt::wseq` when it started waiting);
+    /// one woken otherwise (or waiting again since) has another `wseq`
+    waiters: Vec<(u32, u64)>,
 }
 
 /// A stochastic queue (IEEE 1364-2005 17.6) and its statistics, times in ticks.

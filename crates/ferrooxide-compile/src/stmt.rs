@@ -367,11 +367,12 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    /// The control of an event control, and its expressions that hidden signals follow (with
-    /// those signals).
-    fn event_ctl<'e>(&mut self, ec: &'e EventCtl, body: &Stmt, sid: usize) -> R<(u32, Vec<(u32, &'e Expr)>)> {
+    /// The control of an event control, its expressions that hidden signals follow (with
+    /// those signals), and the slots of the event-object handles of its event properties.
+    fn event_ctl<'e>(&mut self, ec: &'e EventCtl, body: &Stmt, sid: usize) -> R<(u32, Vec<(u32, &'e Expr)>, Vec<u32>)> {
         let mut trig = Vec::new();
         let mut followed = Vec::new();
+        let mut dynamic = Vec::new();
         match ec {
             EventCtl::Star => {
                 let mut reads = Vec::new();
@@ -389,6 +390,14 @@ impl<'a> Compiler<'a> {
                     if re != REdge::Any && self.type_of(e, sid)?.is_real() {
                         return self.err("an edge of a real value");
                     }
+                    // an event property: its event object (taken now, IEEE 1800-2017 15.5.5)
+                    if let Some(h) = self.event_handle(e, sid)? {
+                        if re != REdge::Any {
+                            return self.err("an edge of an event");
+                        }
+                        dynamic.push(h);
+                        continue;
+                    }
                     match &e.kind {
                         ExprKind::Ident(_) | ExprKind::Hier(_) => match self.resolve_base(e, sid)? {
                             Some(expr::Base::Sig(s)) => trig.push((s, re, NONE)),
@@ -405,7 +414,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        Ok((self.make_ctl(trig), followed))
+        Ok((self.make_ctl(trig), followed, dynamic))
     }
 
     /// A hidden signal that follows the value of an event expression (e.g. `posedge a[3]`).
@@ -437,7 +446,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Delay { s: ds });
             }
             Timing::Event(ec) => {
-                let (ctl, followed) = self.event_ctl(ec, body, sid)?;
+                let (ctl, followed, dynamic) = self.event_ctl(ec, body, sid)?;
                 // the hidden signals start from the expressions' values now: their processes
                 // may not yet have seen a change this process made (`j = 1; @(a[j])`), which
                 // would then look like an event
@@ -445,6 +454,10 @@ impl<'a> Compiler<'a> {
                     let w = self.sig(h).width;
                     let v = self.expr(e, sid, w, false)?;
                     self.emit(Instr::Store { t: Target::Whole { sig: h }, s: v, mode: StoreMode::Blocking });
+                }
+                // (right before the wait: it records the wait's sequence number)
+                for h in dynamic {
+                    self.emit(Instr::Ev { op: rt::EvOp::Arm, d: NONE, a: h });
                 }
                 self.emit(Instr::Wait { ctl });
                 if matches!(ec, EventCtl::Star) {
@@ -1194,15 +1207,22 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Disable { target });
                 }
             }
-            Stmt::Trigger { name, nonblocking, line } => {
+            Stmt::Trigger { target: e, nonblocking, line } => {
                 self.line = *line;
-                let e: Expr = if name.contains('.') {
-                    ExprKind::Hier(name.split('.').map(String::from).collect())
-                } else {
-                    ExprKind::Ident(name.clone())
+                let name = ferrooxide_front::dump::expr(e);
+                // an event property (IEEE 1800-2017 15.5.5): its event object
+                if let Some(h) = self.event_handle(e, sid)? {
+                    if *nonblocking {
+                        return self.err(format!("a nonblocking trigger of event '{name}' (not declared in a module) is not supported"));
+                    }
+                    self.emit(Instr::Ev { op: rt::EvOp::Trigger, d: NONE, a: h });
+                    return Ok(());
                 }
-                .into();
-                let Some(expr::Base::Sig(s)) = self.resolve_base(&e, sid)? else {
+                let sig = match &e.kind {
+                    ExprKind::Ident(_) | ExprKind::Hier(_) => self.resolve_base(e, sid)?,
+                    _ => None,
+                };
+                let Some(expr::Base::Sig(s)) = sig else {
                     return self.err(format!("'{name}' is not an event"));
                 };
                 // a hidden companion of a module-level event (`e$trig`, `e$nba`)
@@ -1231,7 +1251,7 @@ impl<'a> Compiler<'a> {
                     };
                     if self.sigs.nba_events.insert(s) {
                         self.begin_proc(format!("{}$nba", self.sig(s).name), ProcClass::Normal);
-                        let trig = Stmt::Trigger { name: name.clone(), nonblocking: false, line: *line };
+                        let trig = Stmt::Trigger { target: e.clone(), nonblocking: false, line: *line };
                         let wait = Stmt::Timed { timing: Timing::Event(EventCtl::List(vec![(Edge::Any, ne)])), body: Box::new(trig), line: *line };
                         let r = self.stmt(&Stmt::Forever { body: Box::new(wait), line: *line }, sid);
                         self.end_proc();

@@ -610,7 +610,8 @@ pub enum Stmt {
     /// `force lhs = rhs` (`rhs` None: `release lhs`)
     Force { lhs: Expr, rhs: Option<Expr>, line: Line },
     /// `-> e`, `->> e` (nonblocking: in the NBA region)
-    Trigger { name: String, nonblocking: bool, line: Line },
+    /// `-> e` / `->> e`: a module's event (a name) or an event property
+    Trigger { target: Expr, nonblocking: bool, line: Line },
     Return { value: Option<Expr>, line: Line },
     Break { line: Line },
     Continue { line: Line },

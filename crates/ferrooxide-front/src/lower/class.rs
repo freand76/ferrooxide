@@ -1004,7 +1004,7 @@ fn this_stmt(s: &mut Stmt, c: &ClassNames, locals: &mut Vec<String>) {
                 ex(r, locals);
             }
         }
-        Stmt::Return { value: Some(v), .. } | Stmt::Discard { e: v, .. } => ex(v, locals),
+        Stmt::Return { value: Some(v), .. } | Stmt::Discard { e: v, .. } | Stmt::Trigger { target: v, .. } => ex(v, locals),
         _ => {}
     }
 }
