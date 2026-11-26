@@ -2158,6 +2158,16 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Store { t: Target::Whole { sig: r }, s: z, mode: rt::StoreMode::Blocking });
             }
         }
+        // a queue or dynamic array goes only with a port of such a type (IEEE 1800-2017
+        // 13.3, assignment compatible types)
+        for (i, a) in args.iter().enumerate() {
+            let ps = ports[i].1;
+            let port_dyn = matches!(self.sig_type(ps), Type::Dyn { .. });
+            if !port_dyn && self.sig(ps).depth == 0 && matches!(self.type_of(a, sid), Ok(Type::Dyn { .. })) {
+                let pname = self.sig(ps).name.rsplit('.').next().unwrap_or_default().to_string();
+                return self.err(format!("argument '{pname}' of '{}' is not a queue or dynamic array; it cannot be given one", f.name));
+            }
+        }
         // inputs: all arguments are evaluated before the first is assigned (a call of the same
         // function in a later one, `add(1, add(4, 2))`, uses the same port variables)
         let mut vals = Vec::new();
