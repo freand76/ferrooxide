@@ -33,6 +33,8 @@ pub(crate) struct ClassNames {
     pub types: HashMap<String, Rc<SvType>>,
     /// parameters and enum constants declared in the class (`C::P`, `obj.P`)
     pub consts: HashSet<String>,
+    /// type parameters of the class and its base classes (types in a derived class too)
+    pub type_params: HashMap<String, Rc<SvType>>,
     /// a class declared later (`typedef class C;`) or a specialization of one: its names
     /// are not known yet
     pub later: bool,
@@ -84,6 +86,8 @@ impl Lower {
         let saved_cbodies = std::mem::replace(&mut self.extern_cbodies, cbodies);
         // (the bodies are lowered here: classes declared before the last of them are known)
         let is_body = |it: &&t::Item| matches!(it, t::Item::Subroutine(s) if matches!(s.name.scopes.as_slice(), [sc] if sc.name == c.name && sc.params.is_none()));
+        // (and the typedefs before it, when a body names them)
+        let mut later = HashMap::new();
         if let Some(last) = rest.iter().rposition(is_body) {
             for it in &rest[..last] {
                 if let t::Item::Class(x) = it {
@@ -91,11 +95,18 @@ impl Lower {
                         self.types.insert(x.name.clone(), Self::class_type(&x.name));
                     }
                 }
+                if let t::Item::Typedef(td @ t::Typedef::Type { name, .. }) = it {
+                    if !self.types.contains_key(name) {
+                        later.entry(name.clone()).or_insert_with(|| td.clone());
+                    }
+                }
             }
         }
+        let saved_later = std::mem::replace(&mut self.later_typedefs, later);
         let saved_bodies = std::mem::replace(&mut self.extern_bodies, bodies);
         let r = self.class_decl_inner(c);
         self.extern_bodies = saved_bodies;
+        self.later_typedefs = saved_later;
         self.extern_cbodies = saved_cbodies;
         let specs = std::mem::replace(&mut self.specs, saved_specs);
         r.map(|mut d| {
@@ -238,7 +249,12 @@ impl Lower {
                         self.own_name(&mut own, &p.name, p.line, &name)?;
                         names.consts.insert(p.name.clone());
                     }
-                    Item::TypeParam { name: n, line, .. } => self.own_name(&mut own, n, *line, &name)?,
+                    Item::TypeParam { name: n, line, .. } => {
+                        self.own_name(&mut own, n, *line, &name)?;
+                        if let Some(t) = self.types.get(n) {
+                            names.type_params.insert(n.clone(), t.clone());
+                        }
+                    }
                     _ => {}
                 }
                 if let Item::Param(ParamDecl { name: n, .. }) | Item::TypeParam { name: n, .. } = p {
@@ -304,6 +320,13 @@ impl Lower {
                 names.spec_statics.extend(b.spec_statics.iter().cloned());
                 names.types.extend(b.types.iter().map(|(k, v)| (k.clone(), v.clone())));
                 names.consts.extend(b.consts.iter().cloned());
+                // (the base's type parameters, unless the class has its own of that name)
+                for (k, v) in &b.type_params {
+                    if !names.type_params.contains_key(k) {
+                        names.type_params.insert(k.clone(), v.clone());
+                        self.types.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
                 let args = match args {
                     Some(a) => Some(self.call_args(a)?),
                     None => None,
@@ -668,6 +691,12 @@ impl Lower {
             }
             None => {
                 let Some(b) = self.classes.get(&n.name).cloned().filter(|b| !(b.later && what == "interface class")) else {
+                    // `extends T`, T a type parameter (IEEE 1800-2017 8.25): the class it
+                    // names is known per specialization (in the compiler); names of its
+                    // members need `this.` or `super.` here
+                    if what == "base class" && n.params.is_none() && self.types.get(&n.name).is_some_and(|t| t.param.is_some()) {
+                        return Ok((Rc::new(ClassNames { later: true, ..Default::default() }), n.name.clone()));
+                    }
                     if self.types.get(&n.name).is_some_and(|t| t.class.is_some()) {
                         if what == "interface class" {
                             return self.err(loc, format!("interface class '{}' is used before its declaration", n.name));

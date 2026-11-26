@@ -818,7 +818,8 @@ impl<'a> Compiler<'a> {
     /// for other targets.
     pub(crate) fn prop_part(&self, e: &Expr, sid: usize) -> R<Option<(Expr, i64, i64, Walk)>> {
         let (base, ops) = chain(e);
-        if self.prop_root(base, &ops, sid).is_none() {
+        // (a member of an element of an array property: the array's element store)
+        if self.prop_root(base, &ops, sid).is_none_or(|r| matches!(r.1.kind, ExprKind::Index(..))) {
             return Ok(None);
         }
         let w = match self.struct_walk(e, sid, true) {
@@ -836,6 +837,13 @@ impl<'a> Compiler<'a> {
             (Some(off), Some(width)) => Ok(Some(((**p).clone(), off, width, w))),
             _ => self.err("an assignment to a part of a struct property at a run-time index is not supported"),
         }
+    }
+
+    /// `e` is a member (or a part of one) of a struct element of an array property
+    /// (`obj.q[i].f`).
+    pub(crate) fn prop_elem_member(&self, e: &Expr, sid: usize) -> bool {
+        let (base, ops) = chain(e);
+        self.prop_root(base, &ops, sid).is_some_and(|r| matches!(r.1.kind, ExprKind::Index(..)) && r.2 < ops.len())
     }
 
     /// The struct property a select chain (`base` with `ops`) starts with (`obj.p`, also
@@ -861,6 +869,11 @@ impl<'a> Compiler<'a> {
             }
             cur = apply(cur, op);
             match (&p.layout, p.ty) {
+                // an element of an array of structs (`obj.q[i].f`)
+                (Some(l), Type::Dyn { .. }) => {
+                    let Some(&ix @ Sel::Index(_)) = ops.get(k + 1) else { return None };
+                    return Some(((**l).clone(), apply(cur, ix), k + 2));
+                }
                 (Some(l), _) => return Some(((**l).clone(), cur, k + 1)),
                 (None, Type::Class(x)) if x != NONE => c = x,
                 _ => return None,

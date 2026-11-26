@@ -844,12 +844,13 @@ impl Lower {
                     n
                 };
                 // `C::T::f(args)`, T a typedef of class C naming a class (also of a class C
-                // declared later, `typedef class C;`): a static method of that class, which the
-                // compiler finds in C's scope
+                // declared later, `typedef class C;`, or given by a type parameter): a static
+                // method of that class, which the compiler finds in C's scope
                 if let ([c, td], Some((Op::Call(a, _), rest))) = (n.scopes.as_slice(), ops.split_first()) {
                     let class = match self.classes.get(&c.name) {
                         Some(cn) => (cn.later || cn.types.get(&td.name).is_some_and(|t| t.class.is_some())).then(|| c.name.clone()),
-                        None => self.types.get(&c.name).and_then(|t| t.class.clone()),
+                        // (C a type parameter: its class per specialization)
+                        None => self.types.get(&c.name).and_then(|t| t.class.clone().or_else(|| t.param.as_ref().map(|_| c.name.clone()))),
                     };
                     if let Some(class) = class.filter(|_| c.params.is_none() && td.params.is_none() && n.params.is_none()) {
                         let args = self.call_args(a)?;

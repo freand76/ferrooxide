@@ -195,6 +195,15 @@ impl Lower {
                 }
                 // (handled by the block)
                 t::Item::Import(..) => continue,
+                // a typedef: a type name in the rest of the block (enum constants would be
+                // the block's names)
+                t::Item::Typedef(td @ t::Typedef::Type { ty, loc, .. }) => {
+                    if matches!(ty.kind, t::TypeKind::Enum(_)) {
+                        return self.unsupported(*loc, "an enum typedef in a block");
+                    }
+                    self.typedef(td, &[])?;
+                    continue;
+                }
                 other => return self.unsupported(item_loc(other), &format!("{} in a block", item_what(other))),
             };
             let mut d = self.decl_head(None, net, var, ty, strength, delay, loc)?;
@@ -228,7 +237,8 @@ impl Lower {
                     _ => None,
                 };
                 // `import` in the block: the package's types and variables are visible in it
-                let saved = decls.iter().any(|d| matches!(d, t::Item::Import(..))).then(|| (self.types.clone(), self.vars.clone()));
+                // (and its typedefs only in it)
+                let saved = decls.iter().any(|d| matches!(d, t::Item::Import(..) | t::Item::Typedef(_))).then(|| (self.types.clone(), self.vars.clone()));
                 let mut imports = Vec::new();
                 for d in decls {
                     if let t::Item::Import(v, _) = d {
@@ -631,6 +641,12 @@ impl Lower {
                     path.extend(members.into_iter().rev());
                     return Ok(path.join("."));
                 }
+                // `C::v.m(..)`: a method of class C's static property v (its variable)
+                if let Some(v) = self.classes.get(&p.name).filter(|_| p.params.is_none()).and_then(|c| c.statics.get(&n.name)).cloned() {
+                    let mut path = vec![v];
+                    path.extend(members.into_iter().rev());
+                    return Ok(path.join("."));
+                }
             }
         }
         match self.hier_path(f)? {
@@ -878,6 +894,7 @@ impl Lower {
         // the loop variable: of the key type (`[*]`: 64-bit)
         let kd = match key {
             Some(k) if k.kind == NetKind::String => decl(NetKind::String, false, None, v),
+            Some(k) if k.has_struct() => Decl::var(k.clone(), vec![Declarator { name: v.to_string(), dims: vec![], heap: None, inner: vec![], init: None, line }], true, line),
             Some(k) => {
                 let (kind, signed, range, _) = k.decl_parts();
                 let range = range.or_else(|| Some((super::types::minus_one(k.width()), ExprKind::Num(dec(0)).into())));
@@ -891,13 +908,32 @@ impl Lower {
     /// `foreach (q[i])` of a queue or dynamic array: `i` from 0 to `q.size() - 1`.
     fn foreach_heap(&mut self, name: &str, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
         let line = loc.line;
-        let body = self.stmt(body)?;
+        let heap = self.vars[name].0.heap.clone();
+        // (a struct key: the loop variable's members are named in the body)
+        let key_struct = match &heap {
+            Some(HeapKind::Assoc(Some(k))) if k.has_struct() => Some(k.clone()),
+            _ => None,
+        };
+        let saved = match (vars, &key_struct) {
+            ([Some(v)], Some(k)) => {
+                let v = self.name(v, loc);
+                Some((v.clone(), self.vars.insert(v, (k.clone(), vec![]))))
+            }
+            _ => None,
+        };
+        let body = self.stmt(body);
+        if let Some((v, old)) = saved {
+            match old {
+                Some(o) => self.vars.insert(v, o),
+                None => self.vars.remove(&v),
+            };
+        }
+        let body = body?;
         let v = match vars {
             [Some(v)] => self.name(v, loc),
             [None] | [] => return Ok(Stmt::Null),
             _ => return self.err(loc, format!("foreach: '{name}' has only 1 dimension")),
         };
-        let heap = self.vars[name].0.heap.clone();
         if let Some(HeapKind::Assoc(key)) = heap {
             return Ok(self.foreach_assoc(name, &v, key.as_deref(), body, line));
         }

@@ -114,8 +114,9 @@ machinery must not assume static targets only (A3).
    breakpoints. The gate for UVM. (Event properties wait through per-object waiter lists,
    `EvOp::Arm`.)
 5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`; after A3). Stops at
-   `uvm_traversal.svh:266` (a type parameter of the base class used in a derived class). Then fix the blockers one at a time, each with
-   a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
+   `uvm_comparer.svh:116` (an associative array of associative arrays with class handle
+   keys, of structs, as a property). Then fix the blockers one at a time, each with a
+   test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
@@ -207,12 +208,12 @@ SystemVerilog data and testbench:
 - unpacked array members of unpacked structs are laid out as packed arrays of their
   elements (`$size` & co. and `%p` see a packed array); real, string and unpacked-struct
   elements; member defaults; type keys in patterns of unpacked arrays.
-- arrays (fixed, queues, dynamic) of structs as class properties; writes to a member of a
+- fixed-size arrays of structs as class properties; writes to a member of a
   struct property at a run-time index (`obj.s.a[i] = v`) or to a tagged union property's
   member; fixed-size arrays of queues, arrays of queues as
   class properties or ports, `%p` of an element array (`$display("%p", a[k])`), queue ports, `%p` of unpacked
   structs, associative arrays and class handles, array methods of associative,
-  multi-dimensional and struct arrays, class or wider
+  multi-dimensional and struct arrays, class handle
   keys, queue element writes with `<=` (done at once).
 - classes: `->>` of an event property, events of a subroutine or module assigned to an
   event property, queues and dynamic arrays of events; assignments through a call's result

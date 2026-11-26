@@ -54,6 +54,9 @@ pub(crate) struct Lower {
     pub(crate) with_obj: Option<(Expr, std::rc::Rc<class::ClassNames>)>,
     /// typedefs lowered ahead of their place for a forward declaration (node addresses)
     early: HashSet<usize>,
+    /// while a class with extern methods is lowered: the typedefs between it and the last
+    /// method body, by name, lowered where a body names them
+    later_typedefs: HashMap<String, crate::syntax::tree::Typedef>,
     /// items at file scope ($unit): added to every module that follows
     unit_items: Vec<Item>,
     /// variables, functions and tasks at file scope (in the `$unit` module) and the types
@@ -212,6 +215,7 @@ impl Lower {
             spec_of: Vec::new(),
             with_obj: None,
             early: HashSet::new(),
+            later_typedefs: HashMap::new(),
             unit_items: Vec::new(),
             unit_vars: Vec::new(),
             unit_var_types: HashMap::new(),

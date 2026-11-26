@@ -106,6 +106,10 @@ impl<'a> Compiler<'a> {
                 let ok = format!("{v}$ok");
                 let call = |m: &str| -> Expr { ExprKind::MethodCall(Box::new(sub.clone()), m.into(), vec![ExprKind::Ident(v.clone()).into()]).into() };
                 let kd = match key {
+                    _ if self.struct_key(probe, sid).is_some() => {
+                        let names = vec![Declarator { name: v.to_string(), dims: vec![], heap: None, inner: vec![], init: None, line }];
+                        Decl::var((*self.struct_key(probe, sid).unwrap()).clone(), names, true, line)
+                    }
                     rt::KeyKind::Str => var_decl(NetKind::String, false, None, v, line),
                     rt::KeyKind::Int { w, signed } => var_decl(NetKind::Reg, signed, Some((num(w as i64 - 1), num(0))), v, line),
                 };
@@ -120,6 +124,24 @@ impl<'a> Compiler<'a> {
             }
         };
         Ok(Stmt::Block { name: None, decls, imports: vec![], params: vec![], stmts: vec![lp], fork: None })
+    }
+
+    /// The struct key type of the associative array property `e` (`obj.p`), if it has one.
+    fn struct_key(&mut self, e: &Expr, sid: usize) -> Option<Rc<SvType>> {
+        let ExprKind::Member(b, m) = &e.kind else { return None };
+        let mut c = self.handle_class(b, sid).ok()??;
+        loop {
+            let ci = &self.classes.list[c as usize];
+            for d in &ci.decl.props {
+                if let Some(n) = d.names.iter().find(|n| n.name == *m) {
+                    return match &n.heap {
+                        Some(HeapKind::Assoc(Some(k))) if k.has_struct() => Some(k.clone()),
+                        _ => None,
+                    };
+                }
+            }
+            c = ci.base?;
+        }
     }
 
     /// The outermost unpacked dimension of the array `e`.

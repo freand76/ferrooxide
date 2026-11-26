@@ -405,7 +405,8 @@ impl Lower {
                     SvType { int_kind: true, ..SvType::vector(NetKind::String, false, vec![(num(63), num(0))]) }
                 } else {
                     let kt = self.data_type_req(k)?;
-                    if kt.has_struct() || kt.kind == NetKind::Real || kt.heap.is_some() {
+                    // (a packed struct key is a vector)
+                    if kt.fields.as_ref().is_some_and(|f| !f.packed) || !kt.unpacked.is_empty() || kt.kind == NetKind::Real || kt.heap.is_some() {
                         return self.unsupported(loc, "this associative array key type");
                     }
                     kt
@@ -671,6 +672,15 @@ impl Lower {
                         }
                         return Ok(Some(t));
                     }
+                    // `C::T` in class C (an out-of-body method): a type parameter of C
+                    if self.in_class.as_deref() == Some(s.name.as_str()) {
+                        if let Some(t) = self.classes.get(&s.name).and_then(|c| c.type_params.get(&n.name)) {
+                            if !ty.packed.is_empty() {
+                                return self.unsupported(ty.loc, "packed dimensions after a type parameter of a class");
+                            }
+                            return Ok(Some((**t).clone()));
+                        }
+                    }
                     // `pkg::T`: the package's type becomes visible here (inside `pkg` itself, its
                     // own type, found below)
                     if !self.pkg_ctx.as_ref().is_some_and(|c| c.name == s.name) {
@@ -691,6 +701,13 @@ impl Lower {
                 self.note_ref(&n.name);
                 if n.scopes.is_empty() {
                     self.wild_ref(&n.name, ty.loc)?;
+                }
+                // a typedef after the class whose method body this is: lowered here too
+                // (again at its place)
+                if n.scopes.is_empty() && !self.types.contains_key(&n.name) {
+                    if let Some(td) = self.later_typedefs.get(&n.name).cloned() {
+                        self.typedef(&td, &[])?;
+                    }
                 }
                 let Some(t) = self.types.get(&n.name).cloned() else { return Ok(None) };
                 let mut t = (*t).clone();

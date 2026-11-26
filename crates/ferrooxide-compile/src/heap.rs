@@ -142,8 +142,8 @@ impl<'a> Compiler<'a> {
             HeapKind::Assoc(Some(k)) if k.kind == NetKind::String => DynKind::Assoc(KeyKind::Str),
             HeapKind::Assoc(Some(k)) => {
                 let w = self.const_int(&k.width(), sid)?;
-                if !(1..=64).contains(&w) {
-                    return self.err("associative array keys wider than 64 bits are not supported");
+                if w < 1 {
+                    return self.err("an associative array key type without bits");
                 }
                 DynKind::Assoc(KeyKind::Int { w: w as u32, signed: k.signed })
             }

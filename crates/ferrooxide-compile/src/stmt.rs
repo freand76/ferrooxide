@@ -782,8 +782,9 @@ impl<'a> Compiler<'a> {
                 if self.sigs.has_dyn && !*nonblocking && timing.is_none() && matches!(&lhs.kind, ExprKind::Index(..)) && self.dyn_elem_assign(lhs, rhs, sid)? {
                     return Ok(());
                 }
-                // a property of an object
-                if !self.classes.list.is_empty() && self.has_prop(lhs, sid)? {
+                // a property of an object (a member of a struct element of an array property
+                // is stored like one of an array variable's, below)
+                if !self.classes.list.is_empty() && !self.prop_elem_member(lhs, sid) && self.has_prop(lhs, sid)? {
                     if *nonblocking || timing.is_some() {
                         return self.err("a nonblocking or delayed assignment to a class property is not supported");
                     }

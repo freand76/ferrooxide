@@ -71,10 +71,15 @@ pub(crate) struct Classes<'a> {
     /// names of specializations of classes still being declared (`C #(T)` inside C): their
     /// scopes (`Hier::pkg_scopes`) once the classes are declared
     pub pending_names: Vec<(String, u32)>,
+    /// the classes being declared (`declare_class` of a base class on demand)
+    pub declaring: Vec<u32>,
+    /// specializations whose declaration waits until no class is being declared: (class,
+    /// declaration, declaring scope, name, scope with the parameters)
+    pub pending_bodies: Vec<(u32, &'a ClassDecl, usize, String, usize)>,
 }
 
 /// The scope of a class that is reserved but not yet declared (`ClassInfo::scope`).
-const UNDECLARED: usize = usize::MAX;
+pub(crate) const UNDECLARED: usize = usize::MAX;
 
 impl<'a> Compiler<'a> {
     /// The signal that object property writes touch (`Program::obj_sig`), made on first use.
@@ -101,15 +106,62 @@ impl<'a> Compiler<'a> {
     /// parameters (with `overrides` for a specialization), its properties' layout and start
     /// values.
     pub(crate) fn declare_class(&mut self, c: &'a ClassDecl, sid: usize, name: &str, overrides: &[(Option<String>, PVal)], id: u32) -> R<()> {
+        let scope = self.class_params(c, sid, name, overrides, id)?;
+        self.declare_class_body(c, sid, name, id, scope)
+    }
+
+    /// The scope of class `c` (declared as `name` in scope `sid` into class `id`) with its
+    /// parameter ports.
+    fn class_params(&mut self, c: &'a ClassDecl, sid: usize, name: &str, overrides: &[(Option<String>, PVal)], id: u32) -> R<usize> {
         self.line = c.line;
         let path = format!("{}.{name}", self.scopes[sid].name);
         let file = self.file.clone();
-        let scope = self.new_scope(path.clone(), Some(sid), file.clone());
+        let scope = self.new_scope(path, Some(sid), file);
         // (names of the class in its declarations are this class: `class_of_scope`)
         self.classes.of_scope.insert(scope, id);
-        // the parameter ports, then the specializations the class uses (their values may
-        // use the parameters)
         self.eval_param_items(&c.params, overrides, scope)?;
+        Ok(scope)
+    }
+
+    /// The rest of `declare_class`, its parameters being in `scope`. The specializations
+    /// made meanwhile are declared once the outermost class is (unless one is needed as a
+    /// base class before): a class may use a specialization of a class derived from it.
+    fn declare_class_body(&mut self, c: &'a ClassDecl, sid: usize, name: &str, id: u32, scope: usize) -> R<()> {
+        self.classes.declaring.push(id);
+        let r = self.declare_class_here(c, sid, name, id, scope);
+        self.classes.declaring.pop();
+        r?;
+        while self.classes.declaring.is_empty() && !self.classes.pending_bodies.is_empty() {
+            let (x, xd, xs, xn, xscope) = self.classes.pending_bodies.remove(0);
+            self.at(0, |me| me.declare_class_body(xd, xs, &xn, x, xscope))?;
+        }
+        Ok(())
+    }
+
+    /// Declare class `x` now (a base class): a class reserved in a scope whose classes are
+    /// being declared, or a specialization whose declaration waits. False if it cannot be.
+    fn declare_now(&mut self, x: u32) -> R<bool> {
+        if self.classes.declaring.contains(&x) {
+            return Ok(false);
+        }
+        if let Some(k) = self.classes.pending_bodies.iter().position(|p| p.0 == x) {
+            let (x, xd, xs, xn, xscope) = self.classes.pending_bodies.remove(k);
+            self.at(0, |me| me.declare_class_body(xd, xs, &xn, x, xscope))?;
+            return Ok(true);
+        }
+        let (xd, xs, xn) = (self.classes.list[x as usize].decl, self.classes.decl_scope[&x], self.classes.list[x as usize].name.clone());
+        if xn != xd.name || Self::needs_params(xd) {
+            return Ok(false);
+        }
+        self.at(0, |me| me.declare_class(xd, xs, &xn, &[], x))?;
+        Ok(true)
+    }
+
+    fn declare_class_here(&mut self, c: &'a ClassDecl, sid: usize, name: &str, id: u32, scope: usize) -> R<()> {
+        self.line = c.line;
+        let path = format!("{}.{name}", self.scopes[sid].name);
+        let file = self.file.clone();
+        // the specializations the class uses (their values may use the parameters)
         for s in &c.specs {
             if let Item::ClassSpec { name, class, args, line } = s {
                 self.line = *line;
@@ -121,7 +173,13 @@ impl<'a> Compiler<'a> {
             Some(b) => match self.find_class(b, scope) {
                 None => return self.err(format!("unknown base class '{b}'")),
                 Some(x) if self.classes.list[x as usize].scope == UNDECLARED => {
-                    return self.err(format!("base class '{b}' declared after class '{}' is not supported", c.name))
+                    // a class of a scope whose classes are being declared (a specialization
+                    // made in an earlier one extends it), a specialization: declared now
+                    if !self.declare_now(x)? {
+                        return self.err(format!("base class '{b}' declared after class '{}' is not supported", c.name));
+                    }
+                    self.line = c.line;
+                    Some(x)
                 }
                 x => x,
             },
@@ -131,14 +189,20 @@ impl<'a> Compiler<'a> {
         for i in &c.interfaces {
             match self.find_class(i, scope) {
                 None => return self.err(format!("unknown interface class '{i}'")),
+                // (a specialization whose declaration waits: declared now)
+                Some(x) if self.classes.list[x as usize].scope == UNDECLARED && self.classes.pending_bodies.iter().any(|p| p.0 == x) => {
+                    self.declare_now(x)?;
+                    self.line = c.line;
+                    ifaces.push(x)
+                }
                 Some(x) if self.classes.list[x as usize].scope == UNDECLARED => {
                     return self.err(format!("interface class '{i}' is used before its declaration"))
                 }
                 Some(x) => ifaces.push(x),
             }
         }
-        // parameters and enum constants: the base class's (unless the class has its own of
-        // that name), then its own (in its scope, where the methods find them first); `C::P`
+        // parameters (also type parameters) and enum constants: the base class's (unless
+        // the class has its own of that name), then its own (in its scope, where the methods find them first); `C::P`
         // reaches them like a package's
         if let Some(b) = base {
             let bs = self.classes.list[b as usize].scope;
@@ -147,7 +211,7 @@ impl<'a> Compiler<'a> {
             let inherited: Vec<(String, Sym)> = self.scopes[bs]
                 .syms
                 .iter()
-                .filter(|(k, s)| matches!(s, Sym::Const(_) | Sym::Real(_)) || statics.contains(k.as_str()))
+                .filter(|(k, s)| matches!(s, Sym::Const(_) | Sym::Real(_) | Sym::Type(_)) || statics.contains(k.as_str()))
                 .map(|(k, s)| (k.clone(), s.clone()))
                 .collect();
             for (k, s) in inherited {
@@ -194,7 +258,9 @@ impl<'a> Compiler<'a> {
                     dims.push((a.min(b), ((a - b).abs() + 1) as u32));
                     desc.push(a > b);
                 }
-                if layout.is_some() && (n.heap.is_some() || !n.dims.is_empty()) {
+                // (a queue, dynamic or associative array of structs: `layout` is that of
+                // its elements)
+                if layout.is_some() && (!n.dims.is_empty() || !n.inner.is_empty()) {
                     return self.err("an array of structs as a class property is not supported");
                 }
                 let p = Prop { name: n.name.clone(), off: width, ty, dims, desc, enum_id, layout: layout.clone() };
@@ -202,7 +268,7 @@ impl<'a> Compiler<'a> {
                     xs.push((width, p.size()));
                 }
                 // (real and string members of a struct start as 0.0 and the empty string)
-                if let Some(l) = &layout {
+                if let Some(l) = layout.as_ref().filter(|_| n.heap.is_none()) {
                     let mut zero = Vec::new();
                     crate::types::value_members(l, 0, &mut zero);
                     if !zero.is_empty() {
@@ -308,15 +374,22 @@ impl<'a> Compiler<'a> {
                 let id = self.reserve_class(decl, &own, dscope);
                 // (the class may use this specialization itself: `typedef C #(T) this_type;`)
                 self.classes.specs.insert(written.clone(), id);
-                self.at(0, |c| c.declare_class(decl, dscope, &own, &ovs, id))?;
+                let scope = self.at(0, |c| c.class_params(decl, dscope, &own, &ovs, id))?;
                 // the same parameter values as the class itself or another specialization:
                 // that class (the new one goes unused)
-                let key = self.spec_key(g, id);
+                let key = self.spec_key(g, scope);
                 let generic = self.classes.list[g as usize].scope != UNDECLARED;
                 let id = match self.classes.specs.get(&key) {
                     Some(&other) => other,
-                    None if generic && key == self.spec_key(g, g) => g,
-                    None => id,
+                    None if generic && key == self.spec_key(g, self.classes.list[g as usize].scope) => g,
+                    None => {
+                        if self.classes.declaring.is_empty() {
+                            self.at(0, |c| c.declare_class_body(decl, dscope, &own, id, scope))?;
+                        } else {
+                            self.classes.pending_bodies.push((id, decl, dscope, own, scope));
+                        }
+                        id
+                    }
                 };
                 self.classes.specs.insert(key, id);
                 self.classes.specs.insert(written, id);
@@ -344,18 +417,18 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// The key of class `id` (a specialization of `g`, or `g` itself) by the values its
-    /// parameter ports have.
-    fn spec_key(&self, g: u32, id: u32) -> String {
-        let c = &self.classes.list[id as usize];
+    /// The key of a specialization of class `g` (or `g` itself) by the values its parameter
+    /// ports have in `scope`.
+    fn spec_key(&self, g: u32, scope: usize) -> String {
+        let decl = self.classes.list[g as usize].decl;
         let mut k = format!("{g}=");
-        for p in &c.decl.params {
+        for p in &decl.params {
             let n = match p {
                 Item::Param(p) => &p.name,
                 Item::TypeParam { name, .. } => name,
                 _ => continue,
             };
-            let v = match self.scopes[c.scope].syms.get(n) {
+            let v = match self.scopes[scope].syms.get(n) {
                 Some(Sym::Const(c)) => format!("{c:?}"),
                 Some(Sym::Real(r)) => format!("{}", r.to_bits()),
                 Some(Sym::Type(t)) => format!("{t:?}"),
@@ -371,6 +444,19 @@ impl<'a> Compiler<'a> {
         // a struct type (also given by a type parameter): stored flat
         if d.ty.has_struct() || d.ty.param.is_some() {
             let r = self.resolve_type(&d.ty, sid)?;
+            // a queue, dynamic or associative array type given by a type parameter
+            if let (Some(h), true, true) = (r.heap.clone(), r.unpacked.is_empty(), d.names.iter().all(|n| n.heap.is_none())) {
+                let mut er = r.clone();
+                er.heap = None;
+                let (base, layout) = if er.has_struct() {
+                    let l = crate::types::packed_of(&er);
+                    self.sigs.has_structs = true;
+                    (Type::vec(l.width() as u32, l.signed), Some(Rc::new(l)))
+                } else {
+                    (self.resolved_type(&er, sid)?, None)
+                };
+                return Ok((self.dyn_prop_type(d, base, &h, sid)?, layout));
+            }
             if r.has_struct() {
                 if r.heap.is_some() || !r.unpacked.is_empty() {
                     return self.err("an array of structs as a class property is not supported");
@@ -479,7 +565,15 @@ impl<'a> Compiler<'a> {
                     return Some(c);
                 }
             }
-            sid = self.scopes[sid].parent?;
+            match self.scopes[sid].parent {
+                Some(p) => sid = p,
+                // a specialization the lowering made in another class (`C#N`, its names
+                // are unique), named here through a typedef of that class
+                None if name.contains('#') => {
+                    return self.classes.by_name.iter().filter(|((_, n), _)| n == name).map(|(_, &c)| c).min();
+                }
+                None => return None,
+            }
         }
     }
 
@@ -1151,11 +1245,35 @@ impl<'a> Compiler<'a> {
         self.virtual_call(c, (f, owner), m, h, args, sid)
     }
 
+    /// The class of the method (or property initializer) compiled in scope `sid`, when
+    /// `name` is a name of nothing else there and the class has a property (`prop`) or a
+    /// method of that name: a member of a base class given by a type parameter, which the
+    /// lowering could not know (IEEE 1800-2017 8.25).
+    fn this_class_member(&self, name: &str, prop: bool, sid: usize) -> Option<u32> {
+        if self.classes.list.is_empty() || name.contains('.') || self.lookup(name, sid).is_some() || self.lookup("this", sid).is_none() {
+            return None;
+        }
+        let c = self.class_of_scope(sid)?;
+        let found = if prop { self.prop(c, name).is_ok() } else { self.find_method(c, name).is_some() };
+        found.then_some(c)
+    }
+
+    /// `p` as `this.p` (`this_class_member`).
+    pub(crate) fn this_member(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        let ExprKind::Ident(n) = &e.kind else { return None };
+        self.this_class_member(n, true, sid)?;
+        Some(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), n.clone()).into())
+    }
+
     /// A dotted name `a.b.c.m` whose prefix `a.b.c` is a class handle in another scope (the
-    /// front end knows only its own scope's handles): (the handle, `m`).
+    /// front end knows only its own scope's handles): (the handle, `m`). Also `m` a method
+    /// of the class through `this` (`this_class_member`).
     pub(crate) fn hier_handle(&self, name: &str, sid: usize) -> Option<(Expr, String)> {
         if self.classes.list.is_empty() {
             return None;
+        }
+        if self.lookup_func(name, sid).is_none() && self.this_class_member(name, false, sid).is_some() {
+            return Some((ExprKind::Ident("this".into()).into(), name.to_string()));
         }
         let (base, m) = name.rsplit_once('.')?;
         let parts: Vec<String> = base.split('.').map(String::from).collect();
@@ -1175,11 +1293,14 @@ impl<'a> Compiler<'a> {
         if self.lookup_hier(p, sid).is_some() {
             return None;
         }
-        for k in (2..p.len()).rev() {
+        // (k = 1: a name of this scope that the lowering did not know, e.g. a foreach
+        // variable of a struct key type)
+        let look = |prefix: &[String]| if prefix.len() == 1 { self.lookup(&prefix[0], sid) } else { self.lookup_hier(prefix, sid) };
+        for k in (1..p.len()).rev() {
             // (an element of an array variable: `inst.v[i].m`, the index in the segment)
             let mut prefix = p[..k].to_vec();
             let mut index = None;
-            let sym = match self.lookup_hier(&prefix, sid) {
+            let sym = match look(&prefix) {
                 None => {
                     let last = prefix.last_mut().unwrap();
                     let Some(i) = last.find('[').filter(|_| last.ends_with(']')) else { continue };
@@ -1189,7 +1310,7 @@ impl<'a> Compiler<'a> {
                         None => ExprKind::Num(ferrooxide_front::ast::dec(ix.parse().ok()?)).into(),
                     });
                     last.truncate(i);
-                    match self.lookup_hier(&prefix, sid) {
+                    match look(&prefix) {
                         Some(s) => s,
                         None => continue,
                     }
@@ -1198,7 +1319,7 @@ impl<'a> Compiler<'a> {
             };
             match sym {
                 Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) || self.layout(s).is_some_and(|l| l.fields.is_some()) => {
-                    let mut x: Expr = ExprKind::Hier(prefix).into();
+                    let mut x: Expr = if k == 1 { ExprKind::Ident(prefix.remove(0)) } else { ExprKind::Hier(prefix) }.into();
                     if let Some(i) = index {
                         x = ExprKind::Index(Box::new(x), Box::new(i)).into();
                     }

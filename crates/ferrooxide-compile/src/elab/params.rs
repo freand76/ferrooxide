@@ -420,11 +420,15 @@ impl<'a> Compiler<'a> {
             ExprKind::Hier(p) => self.lookup_hier(p, sid),
             _ => None,
         };
-        if let Some(Sym::Sig(s)) = sym.filter(|x| matches!(x, Sym::Sig(s) if self.sigs.const_arrays.contains(s))) {
+        if let Some(Sym::Sig(s)) = sym.clone().filter(|x| matches!(x, Sym::Sig(s) if self.sigs.const_arrays.contains(s))) {
             let i = self.sig(s);
             let words = 2 * rt::nw(i.width) as usize * i.depth.max(1) as usize;
             let at = i.slot as usize;
             return Ok(PVal::Array(Rc::new(self.prog.mem[at..at + words].to_vec())));
+        }
+        // another parameter: its value (a string one as a string)
+        if let Some(Sym::Const(c)) = &sym {
+            return Ok(if self.is_str_valued(e, sid) { PVal::Str(c.clone()) } else { PVal::Int(c.clone()) });
         }
         if self.type_of(e, sid)?.is_real() {
             Ok(PVal::Real(self.const_real(e, sid)?))

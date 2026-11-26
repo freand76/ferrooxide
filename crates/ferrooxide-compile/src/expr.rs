@@ -95,6 +95,10 @@ impl<'a> Compiler<'a> {
         if let Some(m) = self.hier_member(e, sid) {
             return Some(m);
         }
+        // `p`: a property of a base class given by a type parameter (`this.p`)
+        if let Some(m) = self.this_member(e, sid) {
+            return Some(m);
+        }
         if let ExprKind::Unchecked(x) = &e.kind {
             return Some(match self.struct_walk(x, sid, false) {
                 Some(Ok(w)) => crate::types::strip_tag_checks(w.expr),

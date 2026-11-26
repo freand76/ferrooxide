@@ -222,8 +222,9 @@ impl<'a> Compiler<'a> {
         let mut k = 0;
         for it in items {
             if let Item::Class(c) = it {
-                // (a class with a parameter without a default exists only as specializations)
-                if !Self::needs_params(c) {
+                // (a class with a parameter without a default exists only as specializations;
+                // one may be declared already, as the base of an earlier specialization)
+                if !Self::needs_params(c) && self.classes.list[ids[k] as usize].scope == crate::class::UNDECLARED {
                     self.declare_class(c, sid, &c.name, &[], ids[k])?;
                 }
                 k += 1;

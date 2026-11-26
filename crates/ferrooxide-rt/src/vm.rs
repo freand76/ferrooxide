@@ -4318,8 +4318,21 @@ impl Sim {
     fn akey(&mut self, b: u32, key: KeyKind) -> Option<AKey> {
         match key {
             KeyKind::Str => Some(AKey::Str(self.str_at(b))),
+            KeyKind::Int { w, signed } if w > 64 => {
+                // most significant word first; a signed key with its sign bit flipped (numeric
+                // order); None with x/z bits
+                let (s, n) = (b as usize, nw(w));
+                if self.mem[s + n..s + 2 * n].iter().any(|&x| x != 0) {
+                    return None;
+                }
+                let mut v: Vec<u64> = self.mem[s..s + n].iter().rev().copied().collect();
+                if signed {
+                    v[0] ^= 1 << ((w - 1) % 64);
+                }
+                Some(AKey::Wide(v.into()))
+            }
             KeyKind::Int { w, signed } => ops::read_index(&self.mem, b as usize, w, signed).map(|v| {
-                if signed || w >= 64 { AKey::Int(v as i128) } else { AKey::Int((v as u64 & tmask(w)) as i128) }
+                if signed { AKey::Int(v as i128) } else { AKey::Int((v as u64 & tmask(w)) as i128) }
             }),
         }
     }
@@ -4331,7 +4344,14 @@ impl Sim {
                 self.put_str(d, &t);
             }
             (AKey::Int(v), KeyKind::Int { w, .. }) => self.put_int(d, w, *v as i64),
-            (AKey::Int(_), KeyKind::Str) => {}
+            (AKey::Wide(v), KeyKind::Int { w, signed }) => {
+                let (d, n) = (d as usize, nw(w));
+                for (k, &x) in v.iter().rev().enumerate() {
+                    self.mem[d + k] = if signed && k == n - 1 { x ^ (1 << ((w - 1) % 64)) } else { x };
+                    self.mem[d + n + k] = 0;
+                }
+            }
+            (AKey::Int(_) | AKey::Wide(_), KeyKind::Str) => {}
         }
     }
 
@@ -5821,4 +5841,6 @@ struct StochQueue {
 enum AKey {
     Int(i128),
     Str(Rc<[u8]>),
+    /// an integer key wider than 64 bits (`akey`)
+    Wide(Rc<[u64]>),
 }
