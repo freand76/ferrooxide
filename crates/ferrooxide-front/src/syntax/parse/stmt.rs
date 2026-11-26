@@ -515,6 +515,10 @@ impl Parser {
             loop {
                 let loc = self.loc();
                 let var = self.eat_kw(Kw::Var);
+                // (IEEE 1800-2017 A.6.8: `[var] data_type name = e`, the type not implicit)
+                if var && !self.is_type_start() {
+                    return self.err("a for loop variable declared with `var` needs a data type");
+                }
                 let typed = var || (!self.soft_name_here() && self.is_type_start() && !self.is_p_at(1, "="));
                 if typed || decl_seen {
                     let ty = if typed { Some(self.data_type_or_implicit()?) } else { None };
