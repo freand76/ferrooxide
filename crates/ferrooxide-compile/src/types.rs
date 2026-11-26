@@ -315,7 +315,7 @@ impl<'a> Compiler<'a> {
                 n if REAL_FUNCS.contains(&n) => Type::Real,
                 "$time" => v(64, false),
                 "$stime" => v(32, false),
-                "$random" => v(32, true),
+                "$random" | "$dist_uniform" | "$dist_normal" | "$dist_exponential" | "$dist_poisson" | "$dist_chi_square" | "$dist_t" | "$dist_erlang" => v(32, true),
                 "$urandom" | "$urandom_range" => v(32, false),
                 "$__process_self" => v(64, false),
                 "$__process_status" => v(32, false),

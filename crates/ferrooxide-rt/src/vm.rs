@@ -2843,6 +2843,20 @@ impl Sim {
                                 self.mem[d + 1] = 0;
                             }
                         }
+                        SysFn::Dist { kind, seed: sig, a, b } => {
+                            let r = self.sigs[*sig as usize];
+                            let mut seed = self.mem[r.slot as usize] as u32 as i32;
+                            let arg = |me: &Self, s: u32| if s == NONE { 0 } else { me.mem[s as usize] as u32 as i32 };
+                            let (a, b) = (arg(self, *a), arg(self, *b));
+                            let (v, warn) = dist(*kind, &mut seed, a, b);
+                            if let Some(w) = warn {
+                                eprintln!("WARNING: {w}");
+                            }
+                            self.mem[d] = v as u32 as u64;
+                            self.mem[d + 1] = 0;
+                            let tmp = [seed as u32 as u64 & ops::mask(r.width.min(64)), 0];
+                            self.apply(*sig, Res::Whole, &tmp[..2.min(2 * nw(r.width))], r.width.min(64));
+                        }
                         SysFn::RandomSeed(sig) | SysFn::UrandomSeed(sig) => {
                             let r = self.sigs[*sig as usize];
                             let mut seed = self.mem[r.slot as usize] as u32 as i32;
@@ -4419,6 +4433,80 @@ fn rtl_dist_uniform(seed: &mut i32, start: i32, end: i32) -> i32 {
         let r = r * 4294967296.0 - 2147483648.0;
         floor(r) as i32
     }
+}
+
+/// `rtl_dist_*` of the standard (IEEE 1800-2017 annex N): the value and a warning for
+/// arguments out of range.
+fn dist(kind: crate::Dist, seed: &mut i32, a: i32, b: i32) -> (i32, Option<&'static str>) {
+    use crate::Dist as D;
+    // (a real result rounded to the nearest integer, halves away from zero)
+    let round = |r: f64| if r >= 0.0 { (r + 0.5) as i32 } else { -((-r + 0.5) as i32) };
+    match kind {
+        D::Uniform => (rtl_dist_uniform(seed, a, b), None),
+        D::Normal => (round(normal(seed, a, b)), None),
+        D::Exponential if a > 0 => (round(exponential(seed, a)), None),
+        D::Exponential => (0, Some("Exponential distribution must have a positive mean")),
+        D::Poisson if a > 0 => (poisson(seed, a), None),
+        D::Poisson => (0, Some("Poisson distribution must have a positive mean")),
+        D::ChiSquare if a > 0 => (round(chi_square(seed, a)), None),
+        D::ChiSquare => (0, Some("Chi_square distribution must have positive degree of freedom")),
+        D::T if a > 0 => {
+            let chi2 = chi_square(seed, a);
+            let root = (chi2 / a as f64).sqrt();
+            (round(normal(seed, 0, 1) / root), None)
+        }
+        D::T => (0, Some("t distribution must have positive degree of freedom")),
+        D::Erlang if a > 0 => {
+            let mut x = 1.0;
+            for _ in 0..a {
+                x *= uniform(seed, 0.0, 1.0);
+            }
+            (round(-(b as f64) * x.ln() / a as f64), None)
+        }
+        D::Erlang => (0, Some("k-stage erlangian distribution must have positive k")),
+    }
+}
+
+fn normal(seed: &mut i32, mean: i32, deviation: i32) -> f64 {
+    let (mut v1, mut s) = (0.0, 1.0);
+    while s >= 1.0 || s == 0.0 {
+        v1 = uniform(seed, -1.0, 1.0);
+        let v2 = uniform(seed, -1.0, 1.0);
+        s = v1 * v1 + v2 * v2;
+    }
+    let s = v1 * (-2.0 * s.ln() / s).sqrt();
+    s * deviation as f64 + mean as f64
+}
+
+fn exponential(seed: &mut i32, mean: i32) -> f64 {
+    let n = uniform(seed, 0.0, 1.0);
+    if n != 0.0 { -n.ln() * mean as f64 } else { n }
+}
+
+fn poisson(seed: &mut i32, mean: i32) -> i32 {
+    let mut n = 0;
+    let p = (-(mean as f64)).exp();
+    let mut q = uniform(seed, 0.0, 1.0);
+    while p < q {
+        n += 1;
+        q *= uniform(seed, 0.0, 1.0);
+    }
+    n
+}
+
+fn chi_square(seed: &mut i32, deg_of_free: i32) -> f64 {
+    let mut x = if deg_of_free % 2 != 0 {
+        let x = normal(seed, 0, 1);
+        x * x
+    } else {
+        0.0
+    };
+    let mut k = 2;
+    while k <= deg_of_free {
+        x += 2.0 * exponential(seed, 1);
+        k += 2;
+    }
+    x
 }
 
 /// The value an array element is sorted by (`HeapOp::Order`).

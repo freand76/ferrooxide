@@ -1057,7 +1057,7 @@ impl<'a> Compiler<'a> {
             {
                 true
             }
-            ExprKind::SysCall(n, _) if matches!(n.as_str(), "$time" | "$stime" | "$realtime" | "$random" | "$urandom" | "$urandom_range" | "$__process_self" | "$__process_status") => false,
+            ExprKind::SysCall(n, _) if matches!(n.as_str(), "$time" | "$stime" | "$realtime" | "$random" | "$urandom" | "$urandom_range" | "$dist_uniform" | "$dist_normal" | "$dist_exponential" | "$dist_poisson" | "$dist_chi_square" | "$dist_t" | "$dist_erlang" | "$__process_self" | "$__process_status") => false,
             ExprKind::SysCall(_, args) => all(self, args),
             _ => true,
         }

@@ -1338,6 +1338,39 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::SysF { f, d });
                 Ok(self.resize(d, 32, w, s))
             }
+            "$dist_uniform" | "$dist_normal" | "$dist_exponential" | "$dist_poisson" | "$dist_chi_square" | "$dist_t" | "$dist_erlang" => {
+                let (kind, n) = match name {
+                    "$dist_uniform" => (rt::Dist::Uniform, 3),
+                    "$dist_normal" => (rt::Dist::Normal, 3),
+                    "$dist_exponential" => (rt::Dist::Exponential, 2),
+                    "$dist_poisson" => (rt::Dist::Poisson, 2),
+                    "$dist_chi_square" => (rt::Dist::ChiSquare, 2),
+                    "$dist_t" => (rt::Dist::T, 2),
+                    _ => (rt::Dist::Erlang, 3),
+                };
+                if args.len() != n {
+                    return self.err(format!("{name} takes {n} arguments"));
+                }
+                // (IEEE 1800-2017 20.15: the seed is an inout argument, an integer variable)
+                let seed = match &args[0].kind {
+                    ExprKind::Ident(v) => match self.lookup(v, sid) {
+                        Some(Sym::Sig(sg)) if self.sig(sg).depth == 0 && !self.sig_type(sg).is_real() && !matches!(self.sig_type(sg), Type::Str | Type::Class(_) | Type::Dyn { .. }) => sg,
+                        _ => return self.err(format!("the seed of {name} must be an integral variable")),
+                    },
+                    _ => return self.err(format!("the seed of {name} must be an integral variable")),
+                };
+                let a = self.expr(&args[1], sid, 32, true)?;
+                let a = {
+                    // keep it: the second argument's evaluation may reuse scratch slots
+                    let k = self.ptmp(32);
+                    self.emit(Instr::Copy { d: k, s: a, w: 32 });
+                    k
+                };
+                let b = if n == 3 { self.expr(&args[2], sid, 32, true)? } else { NONE };
+                let d = self.tmp(32);
+                self.emit(Instr::SysF { f: SysFn::Dist { kind, seed, a, b }, d });
+                Ok(self.resize(d, 32, w, s))
+            }
             "$urandom_range" => {
                 let Some(max) = args.first() else { return self.err("$urandom_range needs a maximum") };
                 let a = self.expr(max, sid, 32, false)?;

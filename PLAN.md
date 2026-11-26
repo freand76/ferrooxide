@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4792 of 5112 (93.7%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4799 of 5112 (93.9%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -101,7 +101,7 @@ features must work per specialization and for classes declared later, and the ev
 machinery must not assume static targets only (A3).
 
 1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 21, 16: ~29,
-   11: 16, 20: 12): `$dist_*` (16), randsequence (12), global
+   11: 16, 20: 5): randsequence (12), global
    clocking and `_gclk` functions (11), tagged unions (10), assignments in expressions (8),
    arrays assigned from arrays of another shape (6), extern/pure constraints (5), whole
    unpacked array equality (3), real casts (3), streams of dynamic arrays and `with` (3).
@@ -220,7 +220,7 @@ SystemVerilog data and testbench:
   methods on an enum property from outside the class, whole array properties, class handle
   ports, NBAs to properties, `randc`, `rand_mode`, `constraint_mode`,
   extern/pure constraints, `disable soft`, rand dynamic arrays and real/string/class rand
-  properties, `randomize(null)`, `randsequence`, `$dist_*`/`$q_*`.
+  properties, `randomize(null)`, `randsequence`.
 - programs run in the Active region; no implicit `$finish` when all program blocks end.
 - `static` variables at the top level of an automatic subroutine; multi-dimensional arrays as
   subroutine arguments; array arguments of recursive calls.
@@ -246,7 +246,7 @@ SystemVerilog data and testbench:
 Verilog / scheduling:
 - nets with several drivers, `wand`/`tri1`, strength drivers and `assign z = m[i]` update in
   the combinational settle.
-- strength values on nets (`%v`, `trireg`), `$countdrivers`, `$fread`, `$ferror`, specify
+- strength values on nets (`%v`, `trireg`), `$countdrivers`, the stochastic queue tasks (`$q_*`), `$fread`, `$ferror`, specify
   paths on inout ports and conditional paths, timing checks, SDF, force on array elements.
 - `$sscanf` details (x/z digits, `%t`, reals, partial failures); `$value$plusargs` warnings.
 - hierarchical names of variables in a named block of a later process.

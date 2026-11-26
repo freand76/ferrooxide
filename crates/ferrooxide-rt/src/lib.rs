@@ -230,7 +230,7 @@ pub fn instr_sigs_mut(ins: &mut Instr, f: &mut impl FnMut(&mut u32)) {
     match ins {
         Instr::Store { t, .. } | Instr::Unforce { t } => target(t, f),
         Instr::ArrRead { sig, .. } | Instr::Kick { sig } | Instr::Touch { sig } => f(sig),
-        Instr::SysF { f: SysFn::RandomSeed(sig) | SysFn::UrandomSeed(sig), .. } => f(sig),
+        Instr::SysF { f: SysFn::RandomSeed(sig) | SysFn::UrandomSeed(sig) | SysFn::Dist { seed: sig, .. }, .. } => f(sig),
         Instr::Sys(t) => match &mut **t {
             SysTask::ReadMem { sig, .. } | SysTask::WriteMem { sig, .. } => f(sig),
             _ => {}
@@ -281,6 +281,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, f: SysFn::UrandomRange(a, b) } => vec![*d, *a, *b],
         Instr::SysF { d, f: SysFn::RandRange { lo, hi, .. } } => vec![*d, *lo, *hi],
+        Instr::SysF { d, f: SysFn::Dist { a, b, .. } } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
         Instr::CallSub { dsts, .. } => dsts.to_vec(),
         Instr::RetSub { srcs } => srcs.iter().map(|x| x.0).collect(),
         Instr::SaveFrame { .. } => vec![],
@@ -512,6 +513,21 @@ pub enum SysFn {
     /// a random `w`-bit value between the 64-bit bounds in slots lo and hi (`signed`
     /// bounds; lo > hi gives lo; more than 64 bits: all bits random) for `randomize`
     RandRange { lo: u32, hi: u32, w: u32, signed: bool },
+    /// `$dist_*(seed, a[, b])` (IEEE 1800-2017 20.15): the seed variable is a signal, `a` and
+    /// `b` slots of 32-bit signed arguments (`b` NONE when the function has one)
+    Dist { kind: Dist, seed: u32, a: u32, b: u32 },
+}
+
+/// The distribution of a `SysFn::Dist`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dist {
+    Uniform,
+    Normal,
+    Exponential,
+    Poisson,
+    ChiSquare,
+    T,
+    Erlang,
 }
 
 #[derive(Clone, Debug)]
