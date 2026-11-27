@@ -310,7 +310,9 @@ pub(crate) struct Subr<'a> {
     /// per open process: the length of `inline_stack` when it began
     pub(crate) proc_base: Vec<usize>,
     /// `static` variables of blocks in subroutines, by declaration: shared by all calls
-    pub(crate) static_vars: HashMap<*const Declarator, u32>,
+    /// (by the scope the subroutine is declared in: a class's specializations share
+    /// their declarations, not their variables)
+    pub(crate) static_vars: HashMap<(usize, *const Declarator), u32>,
     /// subroutines whose body was compiled (a call inlines it): (declaring scope, name)
     pub(crate) compiled: HashSet<(usize, String)>,
     /// recursive functions compiled as subroutines (of the process at `level`)

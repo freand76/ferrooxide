@@ -479,6 +479,9 @@ impl<'a> Compiler<'a> {
                     Some(&other) => other,
                     None if generic && key == self.spec_key(g, self.classes.list[g as usize].scope) => g,
                     None => {
+                        // (before the body: the body may name the class with its values
+                        // written otherwise, `typedef C #(T, Tname) this_type;` in `C #(T)`)
+                        self.classes.specs.insert(key.clone(), id);
                         if self.base_in_progress(decl, scope) {
                             self.classes.pending_bodies.push((id, decl, dscope, own, scope));
                         } else {

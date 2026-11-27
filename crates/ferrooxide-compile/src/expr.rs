@@ -1871,6 +1871,116 @@ impl<'a> Compiler<'a> {
         Ok(ok)
     }
 
+    /// The variable or port `d` of subroutine `f`'s instance (scope `fs`, key `key`); ports
+    /// are added to `ports`.
+    fn func_decl(&mut self, f: &'a SubroutineDecl, d: &'a Decl, fs: usize, path: &str, key: &(usize, String), ports: &mut Vec<(Dir, u32)>) -> R<()> {
+        // (a `static` variable of an automatic subroutine: the one variable, once made)
+        let shared = d.static_ && d.dir.is_none() && f.automatic && !key.1.ends_with("$const");
+        if shared && d.names.iter().all(|dl| self.subr.static_vars.contains_key(&(key.0, dl as *const Declarator))) {
+            for dl in &d.names {
+                let s = self.subr.static_vars[&(key.0, dl as *const Declarator)];
+                self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(s));
+            }
+            return Ok(());
+        }
+        let (mut m, mut l) = self.range_vals(&d.range(), fs)?;
+        let mut signed = d.signed();
+        match d.kind() {
+            NetKind::Integer => {
+                (m, l) = (31, 0);
+                signed = true;
+            }
+            NetKind::Int(n) if d.range().is_none() => {
+                (m, l) = (n as i64 - 1, 0);
+            }
+            NetKind::Time | NetKind::Real | NetKind::String | NetKind::Class => (m, l) = (63, 0),
+            _ => {}
+        }
+        // packed dimensions: one flat vector [W-1:0], the dimensions kept for selects
+        let mut pk: Option<Vec<(i64, i64)>> = None;
+        if !d.packed().is_empty() {
+            let mut dims = vec![(m, l)];
+            for (a, b) in d.packed() {
+                dims.push((self.const_int(a, fs)?, self.const_int(b, fs)?));
+            }
+            let w: i64 = dims.iter().map(|(a, b)| (a - b).abs() + 1).product();
+            (m, l) = (w - 1, 0);
+            pk = Some(dims);
+        }
+        let w = ((m - l).abs() + 1) as u32;
+        let layout = self.layout_for(Some(&d.ty), fs)?;
+        for dl in &d.names {
+            if let Some(h) = &dl.heap {
+                // a queue or dynamic array argument or variable
+                let elem = self.elem_for(d.kind(), w, signed, Some(&*d.ty), fs)?;
+                let elem = self.nest_elem(elem, &dl.inner, fs)?;
+                let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, fs)?;
+                self.dyn_layout(sg, layout.as_ref());
+                if let Some(dir) = d.dir {
+                    ports.push((dir, sg));
+                }
+                continue;
+            }
+            if dl.dims.len() > 1 {
+                return self.err(format!("'{}': a multi-dimensional array in a subroutine is not supported", dl.name));
+            }
+            let (depth, lo, desc) = if let Some((a, b)) = dl.dims.first() {
+                let (a, b) = (self.const_int(a, fs)?, self.const_int(b, fs)?);
+                (((a - b).abs() + 1) as u32, a.min(b), a > b)
+            } else {
+                (0, 0, false)
+            };
+            let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
+            if desc {
+                self.sigs.desc_arrays.insert(sg);
+            }
+            if let Some(d) = &pk {
+                self.sigs.packed_dims.insert(sg, d.clone());
+                self.scopes[fs].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(sg));
+            }
+            if d.kind() == NetKind::Real {
+                self.mark_real(sg);
+            }
+            if d.kind() == NetKind::String {
+                self.mark_string(sg);
+            }
+            if d.kind() == NetKind::Event {
+                self.zero_init(sg);
+            }
+            if d.kind() == NetKind::Class {
+                let c = self.class_of_decl(d, fs)?;
+                self.sigs.types[sg as usize] = Type::Class(c);
+                self.zero_init(sg);
+            }
+            self.mark_two_state(sg, d.kind());
+            self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
+            self.set_layout(sg, &dl.name, layout.clone(), fs)?;
+            if let Some(dir) = d.dir {
+                ports.push((dir, sg));
+            } else if let (Some(init), false) = (&dl.init, (f.automatic && !shared) || key.1.ends_with("$const")) {
+                // a static variable: its initial value once, as for a module variable
+                // (automatic ones get it on each call, `auto_inits`)
+                let real = d.kind() == NetKind::Real;
+                self.decl_init(init, sg, SigKind::Reg, d.kind(), real, depth, w, None, None, &dl.name, fs)?;
+            }
+        }
+        if d.konst {
+            for dl in &d.names {
+                if let Some(Sym::Sig(s)) = self.scopes[fs].syms.get(&dl.name) {
+                    self.sigs.konst.insert(*s);
+                }
+            }
+        }
+        if shared {
+            for dl in &d.names {
+                if let Some(Sym::Sig(s)) = self.scopes[fs].syms.get(&dl.name) {
+                    self.subr.static_vars.insert((key.0, dl as *const Declarator), *s);
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------------ functions & tasks
     /// Storage for a function/task: shared (static), or per call site for `automatic` ones
     /// (`key` distinguishes the instances).
@@ -1880,12 +1990,19 @@ impl<'a> Compiler<'a> {
             return Ok(());
         }
         let f = self.subr_resolved(f, def_scope)?;
-        let mem_lo = self.prog.mem.len() as u32;
-        let sig_lo = self.prog.signals.len() as u32;
         let path = format!("{}.{}", self.scopes[def_scope].name, f.name);
         let file = self.file.clone();
         let fs = self.new_scope(path.clone(), Some(def_scope), file);
         self.local_params(&f.params, fs)?;
+        // `static` variables of an automatic subroutine: one for all its instances
+        // (IEEE 1800-2017 6.21), outside the instance's memory
+        let shared = |d: &Decl| d.static_ && d.dir.is_none() && f.automatic && !key.1.ends_with("$const");
+        let mut no_ports = Vec::new();
+        for d in f.decls.iter().filter(|d| shared(d)) {
+            self.func_decl(f, d, fs, &path, &key, &mut no_ports)?;
+        }
+        let mem_lo = self.prog.mem.len() as u32;
+        let sig_lo = self.prog.signals.len() as u32;
         // a method: `this`, the object's handle
         let this = match self.classes.of_scope.get(&def_scope) {
             Some(&c) => {
@@ -1944,95 +2061,8 @@ impl<'a> Compiler<'a> {
             Some(sg)
         };
         let mut ports = Vec::new();
-        for d in &f.decls {
-            let (mut m, mut l) = self.range_vals(&d.range(), fs)?;
-            let mut signed = d.signed();
-            match d.kind() {
-                NetKind::Integer => {
-                    (m, l) = (31, 0);
-                    signed = true;
-                }
-                NetKind::Int(n) if d.range().is_none() => {
-                    (m, l) = (n as i64 - 1, 0);
-                }
-                NetKind::Time | NetKind::Real | NetKind::String | NetKind::Class => (m, l) = (63, 0),
-                _ => {}
-            }
-            // packed dimensions: one flat vector [W-1:0], the dimensions kept for selects
-            let mut pk: Option<Vec<(i64, i64)>> = None;
-            if !d.packed().is_empty() {
-                let mut dims = vec![(m, l)];
-                for (a, b) in d.packed() {
-                    dims.push((self.const_int(a, fs)?, self.const_int(b, fs)?));
-                }
-                let w: i64 = dims.iter().map(|(a, b)| (a - b).abs() + 1).product();
-                (m, l) = (w - 1, 0);
-                pk = Some(dims);
-            }
-            let w = ((m - l).abs() + 1) as u32;
-            let layout = self.layout_for(Some(&d.ty), fs)?;
-            for dl in &d.names {
-                if let Some(h) = &dl.heap {
-                    // a queue or dynamic array argument or variable
-                    let elem = self.elem_for(d.kind(), w, signed, Some(&*d.ty), fs)?;
-                    let elem = self.nest_elem(elem, &dl.inner, fs)?;
-                    let sg = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, fs)?;
-                    self.dyn_layout(sg, layout.as_ref());
-                    if let Some(dir) = d.dir {
-                        ports.push((dir, sg));
-                    }
-                    continue;
-                }
-                if dl.dims.len() > 1 {
-                    return self.err(format!("'{}': a multi-dimensional array in a subroutine is not supported", dl.name));
-                }
-                let (depth, lo, desc) = if let Some((a, b)) = dl.dims.first() {
-                    let (a, b) = (self.const_int(a, fs)?, self.const_int(b, fs)?);
-                    (((a - b).abs() + 1) as u32, a.min(b), a > b)
-                } else {
-                    (0, 0, false)
-                };
-                let sg = self.new_signal(format!("{path}.{}", dl.name), w, signed, depth, m, l, lo, SigKind::Reg);
-                if desc {
-                    self.sigs.desc_arrays.insert(sg);
-                }
-                if let Some(d) = &pk {
-                    self.sigs.packed_dims.insert(sg, d.clone());
-                    self.scopes[fs].syms.insert(format!("$flat:{}", dl.name), Sym::Sig(sg));
-                }
-                if d.kind() == NetKind::Real {
-                    self.mark_real(sg);
-                }
-                if d.kind() == NetKind::String {
-                    self.mark_string(sg);
-                }
-                if d.kind() == NetKind::Event {
-                    self.zero_init(sg);
-                }
-                if d.kind() == NetKind::Class {
-                    let c = self.class_of_decl(d, fs)?;
-                    self.sigs.types[sg as usize] = Type::Class(c);
-                    self.zero_init(sg);
-                }
-                self.mark_two_state(sg, d.kind());
-                self.scopes[fs].syms.insert(dl.name.clone(), Sym::Sig(sg));
-                self.set_layout(sg, &dl.name, layout.clone(), fs)?;
-                if let Some(dir) = d.dir {
-                    ports.push((dir, sg));
-                } else if let (Some(init), false) = (&dl.init, f.automatic || key.1.ends_with("$const")) {
-                    // a static variable: its initial value once, as for a module variable
-                    // (automatic ones get it on each call, `auto_inits`)
-                    let real = d.kind() == NetKind::Real;
-                    self.decl_init(init, sg, SigKind::Reg, d.kind(), real, depth, w, None, None, &dl.name, fs)?;
-                }
-            }
-            if d.konst {
-                for dl in &d.names {
-                    if let Some(Sym::Sig(s)) = self.scopes[fs].syms.get(&dl.name) {
-                        self.sigs.konst.insert(*s);
-                    }
-                }
-            }
+        for d in f.decls.iter().filter(|d| !shared(d)) {
+            self.func_decl(f, d, fs, &path, &key, &mut ports)?;
         }
         if key.1 == f.name {
             // the static instance: reachable by hierarchical names (task.var)
@@ -2467,6 +2497,11 @@ impl<'a> Compiler<'a> {
     /// automatic; else those declared `automatic` in a static one).
     fn auto_inits(&mut self, f: &'a SubroutineDecl, fscope: usize, fresh: bool) -> R<()> {
         for d in f.decls.iter().filter(|d| d.dir.is_none() && (fresh || d.automatic)) {
+            // (a `static` variable of an automatic subroutine: initialized once, `func_decl`)
+            let def = self.scopes[fscope].parent.unwrap_or(fscope);
+            if d.names.iter().any(|n| self.subr.static_vars.contains_key(&(def, n as *const Declarator))) {
+                continue;
+            }
             for n in &d.names {
                 if let Some(init) = &n.init {
                     let st = Stmt::Assign { lhs: ExprKind::Ident(n.name.clone()).into(), rhs: init.clone(), nonblocking: false, timing: None, line: n.line };

@@ -633,15 +633,7 @@ impl Lower {
         for it in body_items {
             let (dir, net, var, ty, dl, loc) = match it {
                 t::Item::Port(p) => (Some(self.dir(p.dir, p.loc)?), p.net, p.var, &p.ty, &p.decls, p.loc),
-                t::Item::Var(v) => {
-                    match v.lifetime {
-                        Some(t::Lifetime::Static) if automatic => {
-                            return self.unsupported(v.loc, "a static variable in an automatic subroutine")
-                        }
-                        _ => {}
-                    }
-                    (None, None, v.var, &v.ty, &v.decls, v.loc)
-                }
+                t::Item::Var(v) => (None, None, v.var, &v.ty, &v.decls, v.loc),
                 t::Item::Param(_) => {
                     params.extend(self.local_params(it)?);
                     continue;
@@ -666,6 +658,9 @@ impl Lower {
             d.names = self.declarators(dl)?;
             // (`automatic` in a static subroutine: initialized at each call)
             d.automatic = !automatic && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
+            // (declared `static`: in an automatic subroutine, one variable for all calls; a
+            // method is made automatic later)
+            d.static_ = matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Static));
             d.konst = matches!(it, t::Item::Var(v) if v.const_);
             decls.push(d);
         }

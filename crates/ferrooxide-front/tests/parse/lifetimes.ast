@@ -7,7 +7,7 @@ module m ();
   endfunction
   function integer signed g;
     input integer signed v;
-    integer signed acc = 1;
+    static integer signed acc = 1;
     begin
       acc = (acc + v);
       return acc;

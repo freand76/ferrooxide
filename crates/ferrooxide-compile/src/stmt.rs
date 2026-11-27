@@ -574,7 +574,7 @@ impl<'a> Compiler<'a> {
                         // (in an automatic subroutine, block variables are automatic too)
                         let in_auto = !d.static_ && self.subr.inline_stack.last().is_some_and(|f| f.2 .1.contains('#'));
                         for dl in &orig.names {
-                            let key = dl as *const Declarator;
+                            let key = (self.subr.inline_stack.last().map_or(0, |f| f.2 .0), dl as *const Declarator);
                             if shared {
                                 if let Some(&s) = self.subr.static_vars.get(&key) {
                                     self.scopes[b].syms.insert(dl.name.clone(), Sym::Sig(s));

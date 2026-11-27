@@ -123,8 +123,7 @@ machinery must not assume static targets only (A3).
    bound to the inner call's variables (`Instr::Bind`). Virtual interfaces work
    (`vif.rs`). A `ref` argument of a task that waits works when it is a variable of the
    calling automatic subroutine (copy in and out is then the same as a reference). Tests
-   stop at: two specializations of `uvm_abstract_object_registry` taken as different
-   types (40), a parameterized class first used after a virtual call that could
+   stop at: a constraint on the size of a rand queue (40), a parameterized class first used after a virtual call that could
    reach it was compiled (6: virtual calls through a table would remove this). Some
    compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
    crash): the large processes need less memory. Error lines

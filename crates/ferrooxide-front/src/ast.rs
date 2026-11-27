@@ -142,7 +142,7 @@ pub struct Decl {
     /// declared `automatic` in a block: each activation (each instance of a fork branch) has
     /// its own copy
     pub automatic: bool,
-    /// declared `static` in a block of a subroutine: one variable for all calls, its
+    /// declared `static` in a subroutine or a block of one: one variable for all calls, its
     /// initializer applied once
     pub static_: bool,
     /// a `const` variable: only its initializer writes it
