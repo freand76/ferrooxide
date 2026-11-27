@@ -144,9 +144,18 @@ impl<'a> Compiler<'a> {
         if ret.is_some_and(|r| self.sig(r).depth > 0) || ports.iter().any(|&(d, s)| d != Dir::Input && self.sig(s).depth > 0) {
             return Ok(false);
         }
+        // an output array goes back as its handle: a static subroutine's would be the same
+        // array on each call (inlined); an automatic one's starts empty on each call
+        let heap_out: Vec<u32> = ports.iter().filter(|&&(d, s)| d == Dir::Output && matches!(self.sig_type(s), Type::Dyn { .. })).map(|p| p.1).collect();
+        if !heap_out.is_empty() && !f.automatic {
+            return Ok(false);
+        }
         self.subr.inline_stack.push((key.0, f.name.clone(), key.clone()));
         self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
         let level = self.code.pb.len();
+        for &s in &heap_out {
+            self.reset_auto(s);
+        }
         let r = self.unit_stmts(f, key.0, fscope, ret, this_sig);
         // (an error can leave code buffers of nested processes open)
         while self.code.pb.len() > level {

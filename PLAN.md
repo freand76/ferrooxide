@@ -132,9 +132,7 @@ machinery must not assume static targets only (A3).
    compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
    crash): the large processes need less memory. Error lines
    in the test file are reported far past its end (line numbers after the library's
-   includes). In chapter-16/16.2--assert0-uvm.sv the run phase ends at time 0 and drops
-   its objection, but the phase never ends (PH_TIMEOUT at 9200); its deferred assertion
-   fails as the standard says (a and b are still x). Fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
+   includes). Fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
