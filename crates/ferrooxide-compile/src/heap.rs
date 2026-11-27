@@ -209,7 +209,9 @@ impl<'a> Compiler<'a> {
         }
         let ExprKind::Member(b, m) = &e.kind else { return Ok(None) };
         let Some(c) = self.handle_class(b, sid)? else { return Ok(None) };
-        if self.class_const(c, m).is_some() {
+        // (a constant, or a method called without parentheses)
+        let is_prop = self.classes.list[c as usize].props.iter().any(|p| p.name == *m);
+        if self.class_const(c, m).is_some() || (!is_prop && self.find_method(c, m).is_some()) {
             return Ok(None);
         }
         let p = self.prop(c, m)?;
