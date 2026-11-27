@@ -80,10 +80,15 @@ impl Parser {
             return Ok(Dim::Queue(max));
         }
         // `[int]`, `[string]`, `[T]`: an associative array indexed by a type
+        // (`[C::N-1:0]`: a class's parameter in a range, not one of its types)
         if self.type_at_bracket() {
-            let t = self.data_type()?.unwrap();
-            self.expect_p("]")?;
-            return Ok(Dim::Assoc(Some(t)));
+            let save = self.pos;
+            if let Some(t) = self.data_type()? {
+                if self.eat_p("]") {
+                    return Ok(Dim::Assoc(Some(t)));
+                }
+            }
+            self.pos = save;
         }
         let a = self.expr()?;
         let d = if self.eat_p(":") {

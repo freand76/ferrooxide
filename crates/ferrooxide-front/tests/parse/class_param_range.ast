@@ -1,0 +1,18 @@
+module top ();
+  // imports $unit
+  wire [(SFR::w - 1):0] a;
+  int(32) signed m[reg [3:0]];
+  reg [SFR::w:1] b;
+  initial begin
+    m[4'h3] = 5;
+    if (((($bits(a) == 8) && ($bits(b) == 8)) && (m.num() == 1)))
+      $display("PASSED");
+    else
+      $display("FAILED");
+  end
+endmodule
+package $unit ();
+  class SFR;
+    localparam integer signed w = 8;
+  endclass
+endpackage
