@@ -13,9 +13,9 @@
 //! them.
 
 use crate::*;
-use crate::types::Type;
+use crate::types::{DynKind, Type};
 use ferrooxide_front::ast::{BinOp, CItem, UnOp};
-use rt::{ObjOp, SysFn};
+use rt::{ObjOp, SysFn, Target};
 
 /// Attempts per phase (with soft constraints, without them).
 const TRIES: i64 = 1000;
@@ -38,6 +38,18 @@ enum Home {
     Prop { off: u32 },
     /// a variable (`std::randomize(x)`) in scope `sid`
     Var { e: Expr, sid: usize },
+}
+
+/// A rand dynamic array or queue property.
+struct RDyn {
+    name: String,
+    /// the scope of the class that declares it
+    sid: usize,
+    queue: bool,
+    /// of handles: their objects are randomized
+    objs: bool,
+    /// the signal holding its new size (a constraint names its size)
+    size: Option<u32>,
 }
 
 /// A constraint item with the scope its expressions are compiled in.
@@ -126,6 +138,36 @@ fn subst_item(it: &CItem, name: &str, v: i64) -> CItem {
         CItem::Unique(v2) => CItem::Unique(v2.iter().map(e).collect()),
         CItem::SolveBefore => CItem::SolveBefore,
         CItem::DisableSoft(x) => CItem::DisableSoft(e(x)),
+    }
+}
+
+/// `e` with each subexpression whose key is one of `keys` replaced by `to`.
+fn replace(e: &Expr, keys: &[String], to: &Expr) -> Expr {
+    if keys.contains(&key(e)) {
+        return to.clone();
+    }
+    let mut e = e.clone();
+    e.for_each_child_mut(&mut |c| *c = replace(c, keys, to));
+    e
+}
+
+/// The item with `f` applied to each of its expressions.
+fn map_item(it: &CItem, f: &dyn Fn(&Expr) -> Expr) -> CItem {
+    let items = |x: &[CItem]| x.iter().map(|i| map_item(i, f)).collect::<Vec<_>>();
+    match it {
+        CItem::Expr { soft, e } => CItem::Expr { soft: *soft, e: f(e) },
+        CItem::Inside { soft, e, set } => CItem::Inside { soft: *soft, e: f(e), set: set.iter().map(|(a, b)| (f(a), b.as_ref().map(f))).collect() },
+        CItem::Dist { soft, e, items: d } => CItem::Dist {
+            soft: *soft,
+            e: f(e),
+            items: d.iter().map(|i| ferrooxide_front::ast::DistItem { lo: f(&i.lo), hi: i.hi.as_ref().map(f), per_value: i.per_value, weight: f(&i.weight) }).collect(),
+        },
+        CItem::Implies(g, v) => CItem::Implies(f(g), items(v)),
+        CItem::If(g, a, b) => CItem::If(f(g), items(a), items(b)),
+        CItem::Foreach { arr, vars, items: v } => CItem::Foreach { arr: f(arr), vars: vars.clone(), items: items(v) },
+        CItem::Unique(v) => CItem::Unique(v.iter().map(f).collect()),
+        CItem::SolveBefore => CItem::SolveBefore,
+        CItem::DisableSoft(x) => CItem::DisableSoft(f(x)),
     }
 }
 
@@ -236,6 +278,7 @@ impl<'a> Compiler<'a> {
         let mut rv = Vec::new();
         // rand class handle properties (18.4): their objects are randomized too
         let mut subs: Vec<(String, usize)> = Vec::new();
+        let mut dyns: Vec<RDyn> = Vec::new();
         for (k, (n, cyclic)) in names.iter().enumerate() {
             // a static rand property (IEEE 1800-2017 18.4): its variable `C$p`, shared by the
             // objects of the class; constraints name it so
@@ -264,6 +307,20 @@ impl<'a> Compiler<'a> {
             if let (Type::Class(_), []) = (&p.ty, p.dims.as_slice()) {
                 let owner = chain.iter().rev().find(|&&c| self.classes.list[c as usize].props.iter().any(|q| q.name == *n && q.off == p.off)).copied().unwrap_or(d);
                 subs.push((n.clone(), self.classes.list[owner as usize].init_scope));
+                continue;
+            }
+            // a rand dynamic array or queue (18.4): its elements are random, its size when
+            // a constraint names `size()`; one of handles: the objects are randomized
+            if let (Type::Dyn { kind: kind @ (DynKind::Darray | DynKind::Queue(_)), elem }, []) = (&p.ty, p.dims.as_slice()) {
+                let owner = chain.iter().rev().find(|&&c| self.classes.list[c as usize].props.iter().any(|q| q.name == *n && q.off == p.off)).copied().unwrap_or(d);
+                let osid = self.classes.list[owner as usize].init_scope;
+                if *cyclic {
+                    return self.err(format!("randc property '{n}': a randc array of variable size is not supported"));
+                }
+                if elem.nested != NONE || (elem.class == NONE && elem.leaf != crate::types::Leaf::Bits) {
+                    return self.err(format!("rand property '{n}': an array of this element type is not supported as random"));
+                }
+                dyns.push(RDyn { name: n.clone(), sid: osid, queue: matches!(kind, DynKind::Queue(_)), objs: elem.class != NONE, size: None });
                 continue;
             }
             let (w, signed) = match p.ty {
@@ -324,6 +381,49 @@ impl<'a> Compiler<'a> {
                 return self.err(format!("a constraint on members of the rand object property '{n}' is not supported"));
             }
         }
+        // the random arrays: constraints may name their sizes only (one on their elements is
+        // not supported); a size is one more variable, at least 0
+        let this_e = |n: &str| Expr::from(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), n.into()));
+        let size_e = |a: Expr| Expr::from(ExprKind::MethodCall(Box::new(a), "size".into(), vec![]));
+        for dy in dyns.iter_mut() {
+            let mut arr = vec![key(&this_e(&dy.name))];
+            let mut sizes = vec![key(&size_e(this_e(&dy.name)))];
+            if let Some(o) = obj {
+                let m = Expr::from(ExprKind::Member(Box::new(o.clone()), dy.name.clone()));
+                arr.push(key(&m));
+                sizes.push(key(&size_e(m)));
+            }
+            let (mut sized, mut elems) = (false, false);
+            for i in &items {
+                Self::size_uses(&Self::item_expr(&i.it), &arr, &sizes, &mut sized, &mut elems);
+                if let CItem::Foreach { arr: a, .. } = &i.it {
+                    elems |= arr.contains(&key(a));
+                }
+            }
+            if elems {
+                return self.err(format!("a constraint on the elements of the rand array '{}' is not supported (only on its size)", dy.name));
+            }
+            if !sized {
+                continue;
+            }
+            if dy.queue {
+                return self.err(format!("a constraint on the size of the rand queue '{}' is not supported", dy.name));
+            }
+            let (hn, hs) = self.rand_hidden(dy.sid, 32);
+            // (the constraints of `with` name it in the caller's scope)
+            self.scopes[sid].syms.insert(hn.clone(), Sym::Sig(hs));
+            // (it starts at the array's size: kept when there is no solution)
+            let st = Stmt::Assign { lhs: ExprKind::Ident(hn.clone()).into(), rhs: size_e(this_e(&dy.name)), nonblocking: false, timing: None, line: self.line };
+            self.stmt(&st, dy.sid)?;
+            let he = Expr::from(ExprKind::Ident(hn.clone()));
+            // (the constraints name the new size: the variable)
+            for i in items.iter_mut() {
+                i.it = map_item(&i.it, &|e| replace(e, &sizes, &he));
+            }
+            rv.push(RVar { names: vec![key(&he)], w: 32, signed: true, home: Home::Var { e: he.clone(), sid: dy.sid }, cyc: None });
+            items.push(Item { it: CItem::Expr { soft: false, e: bin(BinOp::Ge, he, num(0)) }, sid: dy.sid });
+            dy.size = Some(hs);
+        }
         // pre_randomize(), then the values, then post_randomize() after a success
         let at = self.loc();
         if let Some((f, owner)) = self.find_method(d, "pre_randomize") {
@@ -332,6 +432,7 @@ impl<'a> Compiler<'a> {
         }
         let outer = self.code.rand_obj.replace(h);
         let r = self.solve(&rv, &items, Some(h), res, &at);
+        let r = r.and_then(|_| self.rand_arrays(&dyns, d, res));
         self.code.rand_obj = outer;
         r?;
         // the objects of the rand handles that are not null, after a success
@@ -368,6 +469,89 @@ impl<'a> Compiler<'a> {
             let here = self.here();
             self.patch(skip, here);
         }
+        Ok(())
+    }
+
+    /// Whether `e` names the size of an array (one of the keys `sizes`) or the array (`arr`)
+    /// otherwise.
+    fn size_uses(e: &Expr, arr: &[String], sizes: &[String], sized: &mut bool, elems: &mut bool) {
+        let k = key(e);
+        if sizes.contains(&k) {
+            *sized = true;
+            return;
+        }
+        if arr.contains(&k) {
+            *elems = true;
+            return;
+        }
+        let mut e2 = e.clone();
+        e2.for_each_child_mut(&mut |c| Self::size_uses(c, arr, sizes, sized, elems));
+    }
+
+    /// A variable of the compiler's own (`$randN`, `w` bits, signed) in scope `sid`: its name
+    /// and signal.
+    fn rand_hidden(&mut self, sid: usize, w: u32) -> (String, u32) {
+        self.subr.auto_count += 1;
+        let n = format!("$rand{}", self.subr.auto_count);
+        let path = format!("{}.{n}", self.scopes[sid].name);
+        let s = self.new_signal(path, w, true, 0, w as i64 - 1, 0, 0, SigKind::Reg);
+        self.scopes[sid].syms.insert(n.clone(), Sym::Sig(s));
+        (n, s)
+    }
+
+    /// After a successful attempt (`res` 1) of class `d`: the random arrays get their new
+    /// sizes and random elements; the objects of arrays of handles that are not null are
+    /// randomized (`res` 0 when one fails).
+    fn rand_arrays(&mut self, dyns: &[RDyn], d: u32, res: u32) -> R<()> {
+        if dyns.is_empty() {
+            return Ok(());
+        }
+        let skip = self.emit(Instr::Jz { c: res, w: 32, to: 0 });
+        let line = self.line;
+        for dy in dyns {
+            let a = Expr::from(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), dy.name.clone()));
+            if let Some(hs) = dy.size {
+                let hn = self.sig(hs).name.rsplit('.').next().unwrap().to_string();
+                let new = Expr::from(ExprKind::NewArray(Box::new(ExprKind::Ident(hn).into()), None));
+                self.stmt(&Stmt::Assign { lhs: a.clone(), rhs: new, nonblocking: false, timing: None, line }, dy.sid)?;
+            }
+            self.subr.auto_count += 1;
+            let iv = format!("$ri{}", self.subr.auto_count);
+            let el = Expr::from(ExprKind::Index(Box::new(a.clone()), Box::new(ExprKind::Ident(iv.clone()).into())));
+            let body = if dy.objs {
+                if self.code.rand_nest.contains(&d) {
+                    return self.err(format!("randomize() of class '{}' through a rand property of its own class is not supported", self.classes.list[d as usize].name));
+                }
+                // if (a[i] != null && !a[i].randomize()) fail = 1
+                let (fname, fs) = self.rand_hidden(dy.sid, 32);
+                let zero = self.const_slot(&Const::zero(32));
+                let fslot = self.sig(fs).slot;
+                self.emit(Instr::Store { t: Target::Whole { sig: fs }, s: zero, mode: rt::StoreMode::Blocking });
+                let call = Expr::from(ExprKind::Randomize { obj: Some(Box::new(el.clone())), vars: vec![], with: None, std: false });
+                let bad = bin(BinOp::LAnd, bin(BinOp::Ne, el.clone(), ExprKind::Null.into()), ExprKind::Unary(UnOp::LNot, Box::new(call)).into());
+                let set = Stmt::Assign { lhs: ExprKind::Ident(fname).into(), rhs: num(1), nonblocking: false, timing: None, line };
+                let st = Stmt::If { cond: bad, then_s: Box::new(set), else_s: None, line };
+                self.code.rand_nest.push(d);
+                let r = self.stmt(&Stmt::Foreach { array: a, vars: vec![Some(iv)], body: Box::new(st), line }, dy.sid);
+                self.code.rand_nest.pop();
+                r?;
+                let fv = self.tmp(32);
+                self.emit(Instr::Copy { d: fv, s: fslot, w: 32 });
+                let ok = self.tmp(1);
+                self.emit(Instr::Cmp { op: rt::CmpOp::Eq, d: ok, a: fv, b: zero, w: 32 });
+                let okw = self.tmp(32);
+                self.emit(Instr::Copy { d: okw, s: zero, w: 32 });
+                self.emit(Instr::Copy { d: okw, s: ok, w: 1 });
+                self.emit(Instr::Copy { d: res, s: okw, w: 32 });
+                continue;
+            } else {
+                // (from the object's random generator)
+                Stmt::Discard { e: ExprKind::Randomize { obj: None, vars: vec![el], with: None, std: true }.into(), line }
+            };
+            self.stmt(&Stmt::Foreach { array: a, vars: vec![Some(iv)], body: Box::new(body), line }, dy.sid)?;
+        }
+        let here = self.here();
+        self.patch(skip, here);
         Ok(())
     }
 

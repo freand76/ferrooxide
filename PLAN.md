@@ -123,7 +123,9 @@ machinery must not assume static targets only (A3).
    bound to the inner call's variables (`Instr::Bind`). Virtual interfaces work
    (`vif.rs`). A `ref` argument of a task that waits works when it is a variable of the
    calling automatic subroutine (copy in and out is then the same as a reference). Tests
-   stop at: rand dynamic arrays (40, the TLM2 generic payload), a parameterized class first used after a virtual call that could
+   stop at: a rand handle whose class's subclasses include its own class (40,
+   `uvm_reg_item`'s `rand uvm_object extension`: randomize() is expanded per class at
+   the call; it needs to be one subroutine per class, dispatched), a parameterized class first used after a virtual call that could
    reach it was compiled (6: virtual calls through a table would remove this). Some
    compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
    crash): the large processes need less memory. Error lines
@@ -243,8 +245,8 @@ SystemVerilog data and testbench:
   `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle
   ports, NBAs to properties, `rand_mode`, `constraint_mode`,
-  `disable soft`, rand dynamic arrays and real/string rand
-  properties, constraints on members of rand object properties (global constraints,
+  `disable soft`, constraints on the elements of rand dynamic arrays and
+  queues and on the size of a rand queue, real/string rand properties, constraints on members of rand object properties (global constraints,
   18.5.9; such objects are randomized on their own), rand arrays of handles,
   `randomize(null)`.
 - randsequence: productions that return values or use themselves (it is expanded), `rand
