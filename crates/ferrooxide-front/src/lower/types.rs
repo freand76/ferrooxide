@@ -65,6 +65,51 @@ pub struct Struct {
     /// stored flat as well, but its members may be real or string
     pub packed: bool,
     pub fields: Vec<(String, SvType)>,
+    /// the default values of the members of an unpacked struct (IEEE 1800-2017 7.2.2), one
+    /// per member
+    pub defaults: Vec<Option<Expr>>,
+}
+
+impl SvType {
+    /// The start value of a variable of this unpacked struct type when its type gives member
+    /// defaults (IEEE 1800-2017 7.2.2): a pattern with every member, the default where one is
+    /// given, else the type's start value (0 for 2-state, x for 4-state); None without
+    /// defaults.
+    pub fn struct_defaults(&self) -> Option<Expr> {
+        let f = self.fields.as_ref()?;
+        if f.packed || !self.dims.is_empty() || !self.has_member_defaults() {
+            return None;
+        }
+        let items = f.fields.iter().zip(&f.defaults).map(|((n, ft), d)| PatItem::Key(n.clone(), d.clone().unwrap_or_else(|| ft.start_value()))).collect();
+        Some(ExprKind::Pattern(None, items).into())
+    }
+
+    /// The struct, or an unpacked struct member of it, gives a member default.
+    fn has_member_defaults(&self) -> bool {
+        self.fields.as_ref().is_some_and(|f| !f.packed && (f.defaults.iter().any(Option::is_some) || f.fields.iter().any(|x| x.1.has_member_defaults())))
+    }
+
+    /// The value a member of this type starts with.
+    fn start_value(&self) -> Expr {
+        if let Some(e) = self.struct_defaults() {
+            return e;
+        }
+        if self.fields.as_ref().is_some_and(|f| !f.packed) {
+            let f = self.fields.as_ref().unwrap();
+            let items = f.fields.iter().map(|(n, ft)| PatItem::Key(n.clone(), ft.start_value())).collect();
+            return ExprKind::Pattern(None, items).into();
+        }
+        if self.class.is_some() {
+            return ExprKind::Null.into();
+        }
+        let fill = |d: &str| -> Expr { ExprKind::Num(Number { size: None, signed: false, base: 2, based: true, digits: d.into(), fill: true }).into() };
+        match self.kind {
+            NetKind::Real => ExprKind::Real(0.0).into(),
+            NetKind::String => ExprKind::Str(String::new()).into(),
+            NetKind::Bit | NetKind::Int(_) => fill("0"),
+            _ => fill("x"),
+        }
+    }
 }
 
 /// The width of the tag of a tagged union with `n` members: the fewest bits that hold
@@ -449,6 +494,8 @@ impl Lower {
             t::TypeKind::Struct(st) => {
                 let signed = ty.signed.unwrap_or(false);
                 let mut fields = Vec::new();
+                let mut defaults = Vec::new();
+                let mut default_at = None;
                 for m in &st.members {
                     if m.rand.is_some() {
                         return self.unsupported(m.loc, "a rand struct member");
@@ -457,7 +504,7 @@ impl Lower {
                         Some(ft) => ft,
                         // a void member of a tagged union: no value (0 bits)
                         None if st.tagged && matches!(m.ty.kind, t::TypeKind::Void) && m.ty.packed.is_empty() => SvType {
-                            fields: Some(Rc::new(Struct { union: false, tagged: false, packed: true, fields: vec![] })),
+                            fields: Some(Rc::new(Struct { union: false, tagged: false, packed: true, fields: vec![], defaults: vec![] })),
                             ..SvType::vector(NetKind::Bit, false, vec![])
                         },
                         // a string member: a 64-bit handle
@@ -474,9 +521,16 @@ impl Lower {
                         return self.err(m.loc, "a member of a packed struct or union cannot be an unpacked struct");
                     }
                     for d in &m.decls {
-                        if d.init.is_some() {
-                            return self.unsupported(d.loc, "a struct member default");
-                        }
+                        // (IEEE 1800-2017 7.2.2: members of an unpacked struct only)
+                        let default = match &d.init {
+                            None => None,
+                            Some(_) if st.packed || st.union => return self.err(d.loc, "a member of a packed struct or of a union cannot have a default value"),
+                            Some(e) => {
+                                default_at.get_or_insert(d.loc);
+                                Some(self.expr(e)?)
+                            }
+                        };
+                        defaults.push(default);
                         let n = self.name(&d.name, d.loc);
                         if d.dims.is_empty() {
                             fields.push((n, ft.clone()));
@@ -506,9 +560,15 @@ impl Lower {
                         fields.push((n, at));
                     }
                 }
+                // (nor of one that contains a union)
+                if let Some(loc) = default_at {
+                    if fields.iter().any(|f| f.1.fields.as_ref().is_some_and(|f| f.union)) {
+                        return self.err(loc, "a member of a struct that contains a union cannot have a default value");
+                    }
+                }
                 let dims = self.packed_dims(&ty.packed, ty.loc)?;
                 let kind = if fields.iter().all(|f| f.1.kind == NetKind::Bit) { NetKind::Bit } else { NetKind::Reg };
-                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, tagged: st.tagged, packed: st.packed, fields })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, inner_heap: None, param: None, class: None }))
+                Ok(Some(SvType { kind, signed, dims, fields: Some(Rc::new(Struct { union: st.union, tagged: st.tagged, packed: st.packed, fields, defaults })), int_kind: false, enum_names: None, unpacked: vec![], heap: None, inner_heap: None, param: None, class: None }))
             }
             t::TypeKind::Enum(et) => {
                 let int32 = |signed: bool| SvType { kind: NetKind::Int(32), signed, dims: vec![(num(31), num(0))], fields: None, int_kind: true, enum_names: None, unpacked: vec![], heap: None, inner_heap: None, param: None, class: None };
@@ -1148,6 +1208,26 @@ impl Lower {
             explicit_kind = true;
         }
         Ok(Decl { dir, net: netk, explicit_kind, real_net, strength, delay, range_written, ty: t, names: Vec::new(), automatic: false, static_: false, konst: false, single: false, interconnect: false, line })
+    }
+
+    /// Variables of an unpacked struct type with member defaults that have no initializer
+    /// start with the defaults (IEEE 1800-2017 7.2.2).
+    pub(crate) fn member_defaults(&mut self, d: &mut Decl, loc: t::Loc) -> Result<()> {
+        let Some(p) = d.ty.struct_defaults() else { return Ok(()) };
+        for n in &mut d.names {
+            if n.init.is_some() {
+                continue;
+            }
+            if n.heap.is_some() {
+                return self.unsupported(loc, "member defaults in the elements of a queue, dynamic or associative array");
+            }
+            let mut init = p.clone();
+            for _ in &n.dims {
+                init = ExprKind::Pattern(None, vec![PatItem::Default(init)]).into();
+            }
+            n.init = Some(init);
+        }
+        Ok(())
     }
 
     /// The declarators of a declaration (after `decl_head`).

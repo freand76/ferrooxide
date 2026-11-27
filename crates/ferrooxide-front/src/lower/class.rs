@@ -440,6 +440,7 @@ impl Lower {
                 }
             }
             d.names = self.declarators(&v.decls)?;
+            self.member_defaults(&mut d, v.loc)?;
             for n in &d.names {
                 self.own_name(&mut own, &n.name, n.line, &name)?;
             }

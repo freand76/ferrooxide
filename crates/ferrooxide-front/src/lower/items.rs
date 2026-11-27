@@ -300,6 +300,7 @@ impl Lower {
                 let mut d = self.decl_head(None, None, v.var, &v.ty, None, None, v.loc)?;
                 d.konst = v.const_;
                 d.names = self.declarators(&v.decls)?;
+                self.member_defaults(&mut d, v.loc)?;
                 items.append(&mut self.pending);
                 items.push(Item::Decl(d));
             }
@@ -656,6 +657,9 @@ impl Lower {
                 d.set_kind(NetKind::Reg);
             }
             d.names = self.declarators(dl)?;
+            if dir.is_none() {
+                self.member_defaults(&mut d, loc)?;
+            }
             // (`automatic` in a static subroutine: initialized at each call)
             d.automatic = !automatic && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
             // (declared `static`: in an automatic subroutine, one variable for all calls; a

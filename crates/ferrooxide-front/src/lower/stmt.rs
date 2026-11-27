@@ -211,6 +211,7 @@ impl Lower {
                 d.set_kind(NetKind::Reg);
             }
             d.names = self.declarators(dl)?;
+            self.member_defaults(&mut d, loc)?;
             d.automatic = matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
             d.static_ = self.in_subroutine && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Static));
             d.konst = matches!(it, t::Item::Var(v) if v.const_);
