@@ -6,7 +6,7 @@ module a (x);
   input wire x;
 endmodule
 module b (x);
-  // timescale 1e0 / 1e0
+  // timescale 1e-9 / 1e-9
   // imports $unit
   input wire(implicit) x;
 endmodule

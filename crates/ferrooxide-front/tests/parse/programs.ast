@@ -13,18 +13,18 @@ program chk (a);
     $display(a);
 endprogram
 module outer ();
-  // timescale 1e-9 / 1e0
+  // timescale 1e-9 / 1e-9
   // imports $unit
   reg [7:0] s;
   chk c(s);
   program setter ();
-    // timescale 1e-9 / 1e0
+    // timescale 1e-9 / 1e-9
     // imports $unit
     initial
       s <= 8'h55;
   endprogram
   module inner ();
-    // timescale 1e-8 / 1e0
+    // timescale 1e-8 / 1e-9
     // imports $unit
     reg r;
     initial
