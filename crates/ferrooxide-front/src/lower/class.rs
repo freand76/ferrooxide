@@ -43,6 +43,9 @@ pub(crate) struct ClassNames {
     pub parameterized: bool,
     /// an interface class
     pub interface: bool,
+    /// a base class (or one of its bases) is a type parameter's or declared later: names of
+    /// its members are not known here
+    pub open_base: bool,
     /// the pure constraints (IEEE 1800-2017 18.5.2) of the class and its base classes that
     /// no class overrides yet
     pub pure_constraints: HashSet<String>,
@@ -215,8 +218,10 @@ impl Lower {
 
     fn class_decl_inner(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
         let saved = self.in_class.replace(c.name.clone());
+        let saved_open = std::mem::replace(&mut self.open_base, false);
         let r = self.class_decl_body(c);
         self.in_class = saved;
+        self.open_base = saved_open;
         r
     }
 
@@ -311,6 +316,8 @@ impl Lower {
                 if b.interface {
                     return self.err(c.loc, format!("class '{name}' extends interface class '{}' (a class implements it)", n.name));
                 }
+                names.open_base = b.later || b.open_base;
+                self.open_base = names.open_base;
                 names.origins.extend(b.origins.iter().map(|(k, v)| (k.clone(), v.clone())));
                 names.pure_constraints.extend(b.pure_constraints.iter().cloned());
                 names.props.extend(b.props.iter().cloned());

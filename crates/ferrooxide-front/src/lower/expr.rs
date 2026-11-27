@@ -1107,6 +1107,11 @@ impl Lower {
             }
             return Ok(call);
         }
+        // `m.f()` in a class whose base is a type parameter: m may be a property of the base
+        // (resolved in the compiler, as a name without a select is)
+        if self.open_base && var.is_none() && matches!(ops, [Op::Member(..), Op::Call(..), ..]) && !self.classes.contains_key(&name) && !self.packages.contains_key(&name) {
+            return self.class_chain(ExprKind::Ident(name).into(), ops, lvalue);
+        }
         let (parts, k) = self.hier_tail(&name, ops)?;
         if parts.len() > 1 {
             if let Some((Op::Call(a, l), rest)) = ops[k..].split_first() {

@@ -47,6 +47,9 @@ pub(crate) struct Lower {
     pub(crate) spec_count: usize,
     /// the class being lowered
     pub(crate) in_class: Option<String>,
+    /// the class being lowered has a base whose names are not known here
+    /// (`ClassNames::open_base`)
+    pub(crate) open_base: bool,
     /// the specializations made: (specialization, class)
     pub(crate) spec_of: Vec<(String, String)>,
     /// lowering the arguments and constraints of `obj.randomize()`: the object and its
@@ -212,6 +215,7 @@ impl Lower {
             specs: Vec::new(),
             spec_count: 0,
             in_class: None,
+            open_base: false,
             spec_of: Vec::new(),
             with_obj: None,
             early: HashSet::new(),
