@@ -5,7 +5,7 @@ use crate::ops;
 use crate::history::History;
 use crate::vcd::Vcd;
 use crate::*;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufWriter, Write};
 use std::rc::Rc;
 
@@ -272,6 +272,8 @@ pub struct Sim {
     /// event objects (`Instr::Ev`): handle h is `events[h - 1]`
     events: Vec<EvObj>,
     heap_free: Vec<usize>,
+    /// the values the current cycle of each static `randc` property has given
+    randc: HashMap<u32, HashSet<u64>>,
     /// run-time warnings start with "file:line: "
     fileline: bool,
     /// open files
@@ -589,6 +591,7 @@ impl Sim {
             heap: Vec::new(),
             events: Vec::new(),
             heap_free: Vec::new(),
+            randc: HashMap::new(),
             fileline: false,
             files: HashMap::new(),
             next_fd: 3,
@@ -841,6 +844,40 @@ impl Sim {
     }
 
     /// Re-evaluate the waiting processes that write `sig`.
+    /// The heap index of the object whose handle is in slot `obj` (None: NONE, null or an
+    /// unknown handle), whose generator `randomize` uses.
+    fn rand_obj(&self, obj: u32) -> Option<usize> {
+        (obj != NONE && self.mem[obj as usize + 1] == 0)
+            .then(|| self.mem[obj as usize] as usize)
+            .filter(|&h| h != 0 && self.heap.get(h - 1).is_some_and(|o| o.is_some()))
+            .map(|h| h - 1)
+    }
+
+    /// 64 random bits from the generator of object `oi`, or of process `p`.
+    fn rand64(&mut self, oi: Option<usize>, p: u32) -> u64 {
+        let r = match oi {
+            Some(i) => &mut self.heap[i].as_mut().unwrap().rng,
+            None => &mut self.rngs[p as usize],
+        };
+        ((urandom(r, 0, u32::MAX) as u64) << 32) | urandom(r, 0, u32::MAX) as u64
+    }
+
+    /// The values the current cycle of `randc` variable `key` of object `oi` has given (a
+    /// static one's, keys from 1 << 31, are the simulation's).
+    fn randc_set(&self, oi: Option<usize>, key: u32) -> Option<&HashSet<u64>> {
+        match oi.filter(|_| key >> 31 == 0) {
+            Some(i) => self.heap[i].as_ref().unwrap().randc.get(&key),
+            None => self.randc.get(&key),
+        }
+    }
+
+    fn randc_set_mut(&mut self, oi: Option<usize>, key: u32) -> Option<&mut HashSet<u64>> {
+        Some(match oi.filter(|_| key >> 31 == 0) {
+            Some(i) => self.heap[i].as_mut().unwrap().randc.entry(key).or_default(),
+            None => self.randc.entry(key).or_default(),
+        })
+    }
+
     fn kick(&mut self, sig: u32) {
         let ws = self.writers.get(&sig).cloned().unwrap_or_default();
         // a net no continuous assignment drives (only forces write it) floats again: z
@@ -2866,18 +2903,8 @@ impl Sim {
                         }
                         SysFn::RandRange { lo, hi, w, signed, obj } => {
                             let n = nw(*w);
-                            // (the object's generator, or the process's)
-                            let oi = (*obj != NONE && self.mem[*obj as usize + 1] == 0)
-                                .then(|| self.mem[*obj as usize] as usize)
-                                .filter(|&h| h != 0 && self.heap.get(h - 1).is_some_and(|o| o.is_some()))
-                                .map(|h| h - 1);
-                            let r64 = |me: &mut Self| {
-                                let r = match oi {
-                                    Some(i) => &mut me.heap[i].as_mut().unwrap().rng,
-                                    None => &mut me.rngs[p as usize],
-                                };
-                                ((urandom(r, 0, u32::MAX) as u64) << 32) | urandom(r, 0, u32::MAX) as u64
-                            };
+                            let oi = self.rand_obj(*obj);
+                            let r64 = |me: &mut Self| me.rand64(oi, p);
                             if *w > 64 {
                                 for k in 0..n {
                                     let full = if k == n - 1 { ops::mask(*w - 64 * k as u32) } else { !0 };
@@ -2907,6 +2934,77 @@ impl Sim {
                                 self.mem[d] = v & ops::mask(*w);
                                 self.mem[d + 1] = 0;
                             }
+                        }
+                        SysFn::RandcPick { lo, hi, w, signed, obj, key } => {
+                            let oi = self.rand_obj(*obj);
+                            let m = ops::mask(*w);
+                            // the bounds as values of the variable (x bits: its whole range)
+                            let known = |me: &Self, s: u32| me.mem[s as usize + 1] == 0;
+                            let (min, max) = if *signed { (-(1i128 << (*w - 1)), (1i128 << (*w - 1)) - 1) } else { (0, m as i128) };
+                            let (a, b) = if !known(self, *lo) || !known(self, *hi) {
+                                (min, max)
+                            } else if *signed {
+                                (self.mem[*lo as usize] as i64 as i128, self.mem[*hi as usize] as i64 as i128)
+                            } else {
+                                (self.mem[*lo as usize] as i128, self.mem[*hi as usize] as i128)
+                            };
+                            let (a, b) = (a.max(min), b.min(max));
+                            let v = if a >= b {
+                                a
+                            } else {
+                                let span = (b - a + 1) as u128;
+                                let draw = |me: &mut Self| a + (me.rand64(oi, p) as u128 % span) as i128;
+                                let used = |me: &Self, x: i128| me.randc_set(oi, *key).is_some_and(|u| u.contains(&((x as u64) & m)));
+                                // a few draws, then the values left
+                                let mut v = None;
+                                for _ in 0..32 {
+                                    let x = draw(self);
+                                    if !used(self, x) {
+                                        v = Some(x);
+                                        break;
+                                    }
+                                }
+                                match v {
+                                    Some(x) => x,
+                                    None if span <= 1 << 20 => {
+                                        let free: Vec<i128> = (a..=b).filter(|&x| !used(self, x)).collect();
+                                        if free.is_empty() {
+                                            // all given: a new cycle for these values
+                                            if let Some(u) = self.randc_set_mut(oi, *key) {
+                                                u.retain(|&x| {
+                                                    let x = if *signed { (((x << (64 - *w)) as i64) >> (64 - *w)) as i128 } else { x as i128 };
+                                                    x < a || x > b
+                                                });
+                                            }
+                                            draw(self)
+                                        } else {
+                                            let k = (self.rand64(oi, p) % free.len() as u64) as usize;
+                                            free[k]
+                                        }
+                                    }
+                                    None => draw(self),
+                                }
+                            };
+                            self.mem[d] = (v as u64) & m;
+                            self.mem[d + 1] = 0;
+                        }
+                        SysFn::RandcFree { v, w, obj, key } => {
+                            let oi = self.rand_obj(*obj);
+                            let x = self.mem[*v as usize] & ops::mask(*w);
+                            self.mem[d] = !self.randc_set(oi, *key).is_some_and(|u| u.contains(&x)) as u64;
+                            self.mem[d + 1] = 0;
+                        }
+                        SysFn::RandcMark { v, w, obj, key } => {
+                            let oi = self.rand_obj(*obj);
+                            let x = self.mem[*v as usize] & ops::mask(*w);
+                            if let Some(u) = self.randc_set_mut(oi, *key) {
+                                if !u.insert(x) {
+                                    u.clear();
+                                    u.insert(x);
+                                }
+                            }
+                            self.mem[d] = 0;
+                            self.mem[d + 1] = 0;
                         }
                         SysFn::Dist { kind, seed: sig, a, b } => {
                             let r = self.sigs[*sig as usize];
@@ -5917,6 +6015,8 @@ struct HObj {
     class: u32,
     /// a class object: the state of its random number generator (IEEE 1800-2017 18.14.1)
     rng: i32,
+    /// a class object: the values the current cycle of each `randc` property has given
+    randc: HashMap<u32, HashSet<u64>>,
 }
 
 /// An event object (`Instr::Ev`).

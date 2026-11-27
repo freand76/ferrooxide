@@ -283,7 +283,8 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, f: SysFn::UrandomRange(a, b) } => vec![*d, *a, *b],
-        Instr::SysF { d, f: SysFn::RandRange { lo, hi, obj, .. } } => [*d, *lo, *hi, *obj].into_iter().filter(|&x| x != NONE).collect(),
+        Instr::SysF { d, f: SysFn::RandRange { lo, hi, obj, .. } | SysFn::RandcPick { lo, hi, obj, .. } } => [*d, *lo, *hi, *obj].into_iter().filter(|&x| x != NONE).collect(),
+        Instr::SysF { d, f: SysFn::RandcFree { v, obj, .. } | SysFn::RandcMark { v, obj, .. } } => [*d, *v, *obj].into_iter().filter(|&x| x != NONE).collect(),
         Instr::SysF { d, f: SysFn::Dist { a, b, .. } } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
         Instr::CallSub { dsts, .. } => dsts.to_vec(),
         Instr::RetSub { srcs } => srcs.iter().map(|x| x.0).collect(),
@@ -521,6 +522,17 @@ pub enum SysFn {
     /// `obj`: the slot of the handle of the object whose generator gives the value (18.14.1;
     /// NONE: the process's)
     RandRange { lo: u32, hi: u32, w: u32, signed: bool, obj: u32 },
+    /// a `randc` variable's value between the bounds (as `RandRange`; at most 64 bits) that
+    /// its current cycle has not given yet (IEEE 1800-2017 18.4.2); when every value between
+    /// them has been given, a new cycle starts for them. `key` names the variable in the
+    /// object `obj` (from 1 << 31: a static one); the value is marked given by `RandcMark`.
+    RandcPick { lo: u32, hi: u32, w: u32, signed: bool, obj: u32, key: u32 },
+    /// 1 when the `w`-bit value in slot `v` has not been given in the current cycle of the
+    /// `randc` variable (`RandcPick`)
+    RandcFree { v: u32, w: u32, obj: u32, key: u32 },
+    /// marks the `w`-bit value in slot `v` given in the current cycle of the `randc`
+    /// variable; a value given already starts a new cycle with it
+    RandcMark { v: u32, w: u32, obj: u32, key: u32 },
     /// `$dist_*(seed, a[, b])` (IEEE 1800-2017 20.15): the seed variable is a signal, `a` and
     /// `b` slots of 32-bit signed arguments (`b` NONE when the function has one)
     Dist { kind: Dist, seed: u32, a: u32, b: u32 },

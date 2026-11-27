@@ -70,7 +70,7 @@ first, time-0 processes by scope, `always_comb` after all others at time 0 (9.2.
   2-state types, unpacked array parameters.
 - Classes: properties, constructors, inheritance, virtual/pure/extern/static methods,
   parameterized classes, forward declarations, static members through type parameters,
-  constraints and `randomize()`, `randcase`, mailbox, semaphore, `std::process`
+  constraints and `randomize()`, `randc` (cycles of up to 64-bit variables), `randcase`, mailbox, semaphore, `std::process`
   (self/status/kill/await).
 - Procedural: `always_*`, `final`, `unique`/`priority`, `inside`, `foreach` (also over
   members, strings and queues; resolved in the compiler), `ref` arguments (by copy, see
@@ -231,7 +231,7 @@ SystemVerilog data and testbench:
   (`C::get().v = 1`), an untyped `mailbox`, members of
   `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle
-  ports, NBAs to properties, `randc`, `rand_mode`, `constraint_mode`,
+  ports, NBAs to properties, `rand_mode`, `constraint_mode`,
   `disable soft`, rand dynamic arrays and real/string/class rand
   properties, `randomize(null)`.
 - randsequence: productions that return values or use themselves (it is expanded), `rand

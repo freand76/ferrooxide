@@ -28,6 +28,8 @@ struct RVar {
     w: u32,
     signed: bool,
     home: Home,
+    /// a `randc` variable (IEEE 1800-2017 18.4.2): the key of its cycle's state
+    cyc: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -140,7 +142,7 @@ impl<'a> Compiler<'a> {
                     Type::Vec { w, signed } => (w, signed),
                     _ => return self.err("std::randomize() of a variable that is not integral is not supported"),
                 };
-                rv.push(RVar { names: vec![key(v)], w, signed, home: Home::Var { e: v.clone(), sid } });
+                rv.push(RVar { names: vec![key(v)], w, signed, home: Home::Var { e: v.clone(), sid }, cyc: None });
             }
             let at = self.loc();
             self.solve(&rv, &items, None, res, &at)?;
@@ -220,7 +222,10 @@ impl<'a> Compiler<'a> {
         } else {
             for v in vars {
                 match &v.kind {
-                    ExprKind::Member(_, p) => names.push((p.clone(), false)),
+                    ExprKind::Member(_, p) => {
+                        let cyclic = chain.iter().any(|&c| self.classes.list[c as usize].decl.rand.iter().any(|(n, cy)| *cy && n == p));
+                        names.push((p.clone(), cyclic))
+                    }
                     _ => return self.err("randomize() of something that is not a property of the object is not supported"),
                 }
             }
@@ -230,9 +235,6 @@ impl<'a> Compiler<'a> {
         let obj_k = |p: &str| obj.map(|o| key(&Expr::from(ExprKind::Member(Box::new(o.clone()), p.into()))));
         let mut rv = Vec::new();
         for (k, (n, cyclic)) in names.iter().enumerate() {
-            if *cyclic {
-                return self.err(format!("randc property '{n}': randc is not supported"));
-            }
             // a static rand property (IEEE 1800-2017 18.4): its variable `C$p`, shared by the
             // objects of the class; constraints name it so
             if let (Some(&psid), Some((_, p))) = (owner_scope.get(k), n.split_once('$')) {
@@ -243,7 +245,15 @@ impl<'a> Compiler<'a> {
                 };
                 let mut k = vec![key(&e), this_k(p)];
                 k.extend(obj_k(p));
-                rv.push(RVar { names: k, w, signed, home: Home::Var { e, sid: psid } });
+                let cyc = match (cyclic, self.lookup(n, psid)) {
+                    (false, _) => None,
+                    (true, Some(Sym::Sig(id))) => Some(1 << 31 | id),
+                    (true, _) => return self.err(format!("randc property '{p}': not a variable")),
+                };
+                if cyc.is_some() && w > 64 {
+                    return self.err(format!("randc property '{p}': a randc variable of more than 64 bits is not supported"));
+                }
+                rv.push(RVar { names: k, w, signed, home: Home::Var { e, sid: psid }, cyc });
                 continue;
             }
             let Some(p) = props.iter().rev().find(|p| &p.name == n) else {
@@ -253,11 +263,15 @@ impl<'a> Compiler<'a> {
                 Type::Vec { w, signed } => (w, signed),
                 _ => return self.err(format!("rand property '{n}': only integral properties can be random (others are not supported)")),
             };
+            if *cyclic && w > 64 {
+                return self.err(format!("randc property '{n}': a randc variable of more than 64 bits is not supported"));
+            }
+            let cyc = |off: u32| cyclic.then_some(off);
             match p.dims.as_slice() {
                 [] => {
                     let mut k = vec![this_k(n)];
                     k.extend(obj_k(n));
-                    rv.push(RVar { names: k, w, signed, home: Home::Prop { off: p.off } });
+                    rv.push(RVar { names: k, w, signed, home: Home::Prop { off: p.off }, cyc: cyc(p.off) });
                 }
                 [(lo, cnt)] => {
                     for e in 0..*cnt {
@@ -266,7 +280,7 @@ impl<'a> Compiler<'a> {
                         if let Some(o) = obj {
                             k.push(ix(ExprKind::Member(Box::new(o.clone()), n.clone()).into()));
                         }
-                        rv.push(RVar { names: k, w, signed, home: Home::Prop { off: p.off + e * w } });
+                        rv.push(RVar { names: k, w, signed, home: Home::Prop { off: p.off + e * w }, cyc: cyc(p.off + e * w) });
                     }
                 }
                 _ => return self.err(format!("rand property '{n}': a multi-dimensional rand array is not supported")),
@@ -663,7 +677,12 @@ impl<'a> Compiler<'a> {
                     }
                     self.patch_all(skips);
                 }
-                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo, hi, w: v.w, signed: v.signed, obj: self.code.rand_obj.unwrap_or(NONE) } });
+                let obj = self.code.rand_obj.unwrap_or(NONE);
+                let f = match v.cyc {
+                    Some(key) => SysFn::RandcPick { lo, hi, w: v.w, signed: v.signed, obj, key },
+                    None => SysFn::RandRange { lo, hi, w: v.w, signed: v.signed, obj },
+                };
+                self.emit(Instr::SysF { d: val, f });
             } else {
                 self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo: NONE, hi: NONE, w: v.w, signed: false, obj: self.code.rand_obj.unwrap_or(NONE) } });
             }
@@ -689,6 +708,27 @@ impl<'a> Compiler<'a> {
             }
             self.emit(Instr::Bin { op: rt::BinOp::And, d: ok, a: ok, b: known, w: 1 });
         }
+        // the randc variables' values not given yet in their cycles, in the first half of
+        // each phase (then a value of a cycle that constraints leave no value of starts a
+        // new one)
+        if rv.iter().any(|v| v.cyc.is_some()) {
+            let ph = self.tmp(32);
+            let t = self.const_slot(&Const::from_i64(TRIES, 32, true));
+            self.emit(Instr::Bin { op: rt::BinOp::Mod, d: ph, a: tries, b: t, w: 32 });
+            let half = self.const_slot(&Const::from_i64(TRIES / 2, 32, true));
+            let first = self.tmp(1);
+            self.emit(Instr::Cmp { op: rt::CmpOp::Lt, d: first, a: ph, b: half, w: 32 });
+            let skip = self.emit(Instr::Jz { c: first, w: 1, to: 0 });
+            for v in rv {
+                let Some(key) = v.cyc else { continue };
+                let x = self.rvar_load(v, h)?;
+                let free = self.tmp(1);
+                let obj = self.code.rand_obj.unwrap_or(NONE);
+                self.emit(Instr::SysF { d: free, f: SysFn::RandcFree { v: x, w: v.w, obj, key } });
+                self.emit(Instr::Bin { op: rt::BinOp::And, d: ok, a: ok, b: free, w: 1 });
+            }
+            self.patch_all(vec![skip]);
+        }
         let done = self.jump_if(ok);
         // another attempt
         let one32 = self.const_slot(&Const::from_i64(1, 32, true));
@@ -710,6 +750,13 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::Sys(Box::new(rt::SysTask::Display { nl: true, args: vec![rt::FmtArg::Lit(msg)], scope, fd: None, prefix: "", texp: 0, radix: 'd' })));
         let fail_end = self.emit(Instr::Jmp { to: 0 });
         self.patch_all(vec![done]);
+        for v in rv {
+            let Some(key) = v.cyc else { continue };
+            let x = self.rvar_load(v, h)?;
+            let d = self.tmp(1);
+            let obj = self.code.rand_obj.unwrap_or(NONE);
+            self.emit(Instr::SysF { d, f: SysFn::RandcMark { v: x, w: v.w, obj, key } });
+        }
         let one32 = self.const_slot(&Const::from_i64(1, 32, true));
         self.emit(Instr::Copy { d: res, s: one32, w: 32 });
         self.patch_all(vec![fail_end]);
@@ -755,7 +802,12 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Copy { d: lo, s: y, w: 64 });
                 self.emit(Instr::Copy { d: hi, s: x, w: 64 });
                 self.patch_all(vec![j]);
-                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo, hi, w: v.w.min(64), signed: v.signed, obj: self.code.rand_obj.unwrap_or(NONE) } });
+                let obj = self.code.rand_obj.unwrap_or(NONE);
+                let f = match v.cyc {
+                    Some(key) => SysFn::RandcPick { lo, hi, w: v.w, signed: v.signed, obj, key },
+                    None => SysFn::RandRange { lo, hi, w: v.w.min(64), signed: v.signed, obj },
+                };
+                self.emit(Instr::SysF { d: val, f });
             }
         }
         Ok(())
