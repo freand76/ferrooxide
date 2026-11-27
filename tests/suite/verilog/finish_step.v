@@ -1,6 +1,6 @@
 // expected
-// $finish ends the simulation after the current time step's other scheduled processes, its
-// NBAs and its $monitor / $strobe output (as in the reference); the calling process stops.
+// $finish ends the simulation at once (IEEE 1800-2017 20.2): the rest of its time step,
+// its NBAs and its $monitor / $strobe output do not run; the calling process stops.
 module top;
   reg [3:0] a = 0;
   reg [8:0] state = 0;

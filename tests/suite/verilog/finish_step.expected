@@ -4,4 +4,3 @@ after #0
 1 strobe a=2
 5 monitor a=2 state=1 next=2
 finish_step.v:14: $finish called at 10 (1s)
-10 monitor a=2 state=2 next=3
