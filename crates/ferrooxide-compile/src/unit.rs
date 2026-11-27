@@ -1,20 +1,22 @@
-//! Shared subroutines: a function that cannot wait is compiled once into a unit
+//! Shared subroutines: a function, or a class method task, compiled once into a unit
 //! (`Program::units`) that every process calls (`SaveUnit`, `CallUnit`), instead of a copy
 //! of its body per call path in each process. Its temporaries live in memory of its own (not
-//! the scratch region of the calling process); a recursive call saves the unit's frame.
+//! the scratch region of the calling process); a recursive call saves the unit's frame. A
+//! task's unit can wait: the process then suspends inside the call (its event controls have
+//! `rt::UNIT_PROC` as their process: their waiters are dynamic).
 
 use crate::expr::SUB_DEPTH;
 use crate::codegen::merge_ranges;
 use crate::types::Type;
 use crate::*;
 
-/// The `proc` of a shared subroutine's code buffer.
-const UNIT_PROC: u32 = NONE - 1;
+use rt::UNIT_PROC;
 
 impl<'a> Compiler<'a> {
     /// A call of `f` (declared in scope `fs_def`) through its shared subroutine, if it gets
     /// one: a method, or a recursive or deeply nested call, of a function whose body cannot
-    /// wait, fork or start processes. None: the call is compiled as before.
+    /// wait, fork or start processes; or a call of a class method task whose body can wait
+    /// but not fork or start processes. None: the call is compiled as before.
     pub(crate) fn unit_call(
         &mut self,
         f: &'a SubroutineDecl,
@@ -24,10 +26,14 @@ impl<'a> Compiler<'a> {
         dflt: &[bool],
         sid: usize,
     ) -> R<Option<(Option<u32>, u32, bool)>> {
-        if self.subr.no_units || f.is_task || self.code.pb.last().is_none_or(|p| p.proc == NONE) {
+        if self.subr.no_units || self.code.pb.last().is_none_or(|p| p.proc == NONE) {
             return Ok(None);
         }
         let method = self.classes.of_scope.contains_key(&fs_def);
+        // (a module task can be disabled by name, which a unit's call cannot)
+        if f.is_task && !method {
+            return Ok(None);
+        }
         let base = self.subr.proc_base.last().copied().unwrap_or(0).min(self.subr.inline_stack.len());
         let recursive = self.subr.inline_stack[base..].iter().any(|x| x.0 == fs_def && x.1 == f.name);
         if !(method || recursive || self.subr.call_depth >= SUB_DEPTH) || !self.unit_ok(f) {
@@ -51,7 +57,7 @@ impl<'a> Compiler<'a> {
             return ok;
         }
         // (an unpacked array result is returned through its variable: inlined)
-        let ok = (f.ret_ty.unpacked.is_empty() || f.ret_ty.heap.is_some()) && unit_stmt(&f.body);
+        let ok = (f.ret_ty.unpacked.is_empty() || f.ret_ty.heap.is_some()) && unit_stmt(&f.body, f.is_task);
         self.subr.unit_ok.insert(k, ok);
         ok
     }
@@ -71,7 +77,7 @@ impl<'a> Compiler<'a> {
         let scratch = std::mem::replace(&mut self.code.scratch_top, 0);
         self.code.pb.push(PState { proc: UNIT_PROC, unit: true, ..Default::default() });
         self.subr.proc_base.push(self.subr.inline_stack.len());
-        let (start, holes) = (self.prog.mem.len() as u32, self.subr.static_mem.len());
+        let (start, holes, procs) = (self.prog.mem.len() as u32, self.subr.static_mem.len(), self.prog.procs.len());
         let mut lo = start;
         let r = self.unit_body(f, key, &mut lo);
         self.subr.proc_base.pop();
@@ -86,6 +92,12 @@ impl<'a> Compiler<'a> {
             Ok(true) if !st.bad => {}
             r => {
                 self.subr.units.remove(key);
+                // (the fork branches it made are never started: the calls are compiled as
+                // before, with branches of their own)
+                for pd in &mut self.prog.procs[procs..] {
+                    pd.code = vec![Instr::Halt];
+                    pd.frame.clear();
+                }
                 if matches!(r, Ok(_)) {
                     self.subr.unit_ok.insert(f as *const SubroutineDecl, false);
                 }
@@ -134,7 +146,12 @@ impl<'a> Compiler<'a> {
         }
         self.subr.inline_stack.push((key.0, f.name.clone(), key.clone()));
         self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
+        let level = self.code.pb.len();
         let r = self.unit_stmts(f, key.0, fscope, ret, this_sig);
+        // (an error can leave code buffers of nested processes open)
+        while self.code.pb.len() > level {
+            self.pop_pb();
+        }
         let (_, patches) = self.code.pb.last_mut().unwrap().rets.pop().unwrap();
         self.subr.inline_stack.pop();
         r?;
@@ -179,27 +196,28 @@ impl<'a> Compiler<'a> {
     }
 }
 
-/// A statement that a shared subroutine can hold: no timing, fork, `disable`, procedural
-/// continuous assignment, deferred assertion, or system task that starts a process or stops.
-fn unit_stmt(st: &Stmt) -> bool {
+/// A statement that a shared subroutine can hold: no timing (except in a task), fork,
+/// `disable`, procedural continuous assignment, deferred assertion, or system task that
+/// starts a process or stops.
+fn unit_stmt(st: &Stmt, task: bool) -> bool {
+    let u = |s: &Stmt| unit_stmt(s, task);
     match st {
+        Stmt::Timed { body, .. } | Stmt::Wait { body, .. } => task && u(body),
+        Stmt::Assign { timing: Some(_), .. } => task,
         Stmt::Block { fork: Some(_), .. }
-        | Stmt::Timed { .. }
-        | Stmt::Wait { .. }
         | Stmt::WaitFork { .. }
         | Stmt::Disable { .. }
         | Stmt::Force { .. }
-        | Stmt::Deferred { .. }
-        | Stmt::Assign { timing: Some(_), .. } => false,
+        | Stmt::Deferred { .. } => false,
         Stmt::SysTask { name, .. } => !matches!(
             name.as_str(),
             "$strobe" | "$strobeb" | "$strobeo" | "$strobeh" | "$monitor" | "$monitorb" | "$monitoro" | "$monitorh" | "$fstrobe" | "$fstrobeb" | "$fstrobeo" | "$fstrobeh" | "$fmonitor" | "$fmonitorb" | "$fmonitoro" | "$fmonitorh" | "$stop" | "$assign" | "$deassign"
         ),
-        Stmt::Block { stmts, .. } => stmts.iter().all(unit_stmt),
-        Stmt::If { then_s, else_s, .. } => unit_stmt(then_s) && else_s.as_deref().is_none_or(unit_stmt),
-        Stmt::Case { arms, default, .. } => arms.iter().all(|a| unit_stmt(&a.1)) && default.as_deref().is_none_or(unit_stmt),
-        Stmt::For { init, step, body, .. } => unit_stmt(init) && unit_stmt(step) && unit_stmt(body),
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Repeat { body, .. } | Stmt::Forever { body, .. } | Stmt::Foreach { body, .. } => unit_stmt(body),
+        Stmt::Block { stmts, .. } => stmts.iter().all(u),
+        Stmt::If { then_s, else_s, .. } => u(then_s) && else_s.as_deref().is_none_or(u),
+        Stmt::Case { arms, default, .. } => arms.iter().all(|a| u(&a.1)) && default.as_deref().is_none_or(u),
+        Stmt::For { init, step, body, .. } => u(init) && u(step) && u(body),
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Repeat { body, .. } | Stmt::Forever { body, .. } | Stmt::Foreach { body, .. } => u(body),
         _ => true,
     }
 }

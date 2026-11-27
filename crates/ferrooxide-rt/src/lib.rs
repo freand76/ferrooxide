@@ -18,6 +18,9 @@ pub mod vm;
 pub use vm::{RunState, Sim};
 
 pub const NONE: u32 = u32::MAX;
+/// The process of an event control in a shared subroutine (`EventCtl::proc`): whichever
+/// process calls it waits there (a dynamic waiter).
+pub const UNIT_PROC: u32 = NONE - 1;
 
 #[inline(always)]
 pub fn nw(w: u32) -> usize {

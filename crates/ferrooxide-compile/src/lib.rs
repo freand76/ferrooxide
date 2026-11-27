@@ -134,7 +134,7 @@ pub(crate) struct PState {
     pub frame: Vec<(u32, u32)>,
     /// the code of a shared subroutine (`unit.rs`): temporaries in memory of its own
     pub unit: bool,
-    /// the shared subroutine's code waits or forks: it cannot be one
+    /// the shared subroutine's code forks or disables: it cannot be one
     pub bad: bool,
 }
 

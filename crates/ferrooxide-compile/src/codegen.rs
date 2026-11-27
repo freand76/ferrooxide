@@ -65,7 +65,7 @@ impl<'a> Compiler<'a> {
             }
         }
         let pb = self.code.pb.last_mut().unwrap();
-        if pb.unit && matches!(i, Instr::Wait { .. } | Instr::Delay { .. } | Instr::Fork { .. } | Instr::WaitFork | Instr::Evict { .. } | Instr::Bind { .. } | Instr::Stash { .. }) {
+        if pb.unit && matches!(i, Instr::Fork { .. } | Instr::WaitFork | Instr::Evict { .. } | Instr::Bind { .. } | Instr::Stash { .. } | Instr::Disable { .. }) {
             pb.bad = true;
         }
         let c = &mut pb.code;

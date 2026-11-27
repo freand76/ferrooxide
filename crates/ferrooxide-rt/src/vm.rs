@@ -130,6 +130,17 @@ struct Bind {
     src: u32,
 }
 
+/// An active call of a shared subroutine: its unit, where it continues (after the call it
+/// makes, or where it suspended), its activation and the activation of the unit that was in
+/// memory when it began (restored at its end).
+#[derive(Clone, Copy)]
+struct UAct {
+    unit: u32,
+    pc: u32,
+    act: u64,
+    prev: u64,
+}
+
 struct Frame {
     saved: Vec<(u32, Vec<u64>)>,
     ret: u32,
@@ -205,10 +216,23 @@ pub struct Sim {
     force_mask: HashMap<u32, Vec<u64>>,
     /// recursion: per process, the saved frames of active subroutine calls
     frames: HashMap<u32, Vec<Frame>>,
-    /// per shared subroutine: its calls in progress (all of the running process: a unit
-    /// cannot wait), and the frames `SaveUnit` saved, innermost last (None: not active)
-    unit_active: Vec<u32>,
-    unit_saves: Vec<Option<Vec<u64>>>,
+    /// shared subroutines (`Program::units`): each call is an activation (numbered from 1);
+    /// per unit, the activation whose frame is in memory (0: none)
+    unit_res: Vec<u64>,
+    /// the frames of activations that are not in memory, and their total size in words
+    unit_saved: HashMap<u64, Vec<u64>>,
+    unit_saved_words: usize,
+    unit_next: u64,
+    /// calls `SaveUnit` began whose `CallUnit` has not run yet: (unit, activation, the
+    /// activation in memory before)
+    unit_pending: Vec<(u32, u64, u64)>,
+    /// the running process's active calls of shared subroutines, outermost first
+    unit_chain: Vec<UAct>,
+    /// processes suspended inside a shared subroutine: (generation, pc of the `CallUnit`,
+    /// active calls)
+    unit_susp: HashMap<u32, (u32, u32, Vec<UAct>)>,
+    /// per event control of a shared subroutine (`UNIT_PROC`): the processes waiting on it
+    unit_waiters: HashMap<u32, Vec<u32>>,
     /// pending inertial (continuous-assignment delay) updates: target -> current generation
     /// and the pending value
     inertial: HashMap<(u32, u32), (u32, Box<[u64]>)>,
@@ -416,7 +440,7 @@ impl Sim {
         for (ci, c) in prog.ctls.iter().enumerate() {
             // a group member's wait is represented by its group's (one entry, at the first member)
             let (proc, ctl) = match c.proc {
-                NONE => (NONE, ci as u32),
+                NONE | UNIT_PROC => (c.proc, ci as u32),
                 p => match group_of[p as usize] {
                     NONE => (p, ci as u32),
                     g if groups[g as usize].0[0] == p => (nprocs + g, NONE - 1 - g),
@@ -521,8 +545,14 @@ impl Sim {
             inertial: HashMap::new(),
             inertial_seq: 0,
             frames: HashMap::new(),
-            unit_active: vec![0; prog.units.len()],
-            unit_saves: Vec::new(),
+            unit_res: vec![0; prog.units.len()],
+            unit_saved: HashMap::new(),
+            unit_saved_words: 0,
+            unit_next: 0,
+            unit_pending: Vec::new(),
+            unit_chain: Vec::new(),
+            unit_susp: HashMap::new(),
+            unit_waiters: HashMap::new(),
             dump_pending: false,
             force_bypass: false,
             keep_override: None,
@@ -1831,6 +1861,12 @@ impl Sim {
         }
         for i in r.fan_lo..r.fan_hi {
             let f = self.fan[i as usize];
+            if f.proc == UNIT_PROC {
+                if r.depth != 0 || edge_fires(f.edge, old, new) {
+                    self.wake_unit_waiters(f.ctl);
+                }
+                continue;
+            }
             let pr = &mut self.procs[f.proc as usize];
             if pr.wait != f.ctl {
                 continue;
@@ -2747,80 +2783,206 @@ impl Sim {
         }
     }
 
-    /// A call of shared subroutine `u` begins: a recursive one saves the unit's frame.
-    /// Returns true if the recursion is too deep (the simulation stops).
+    /// A call of shared subroutine `u` begins (before its arguments are stored): a new
+    /// activation gets the unit's frame, the one in memory is saved. Returns true if the
+    /// calls nest too deeply (the simulation stops).
     fn save_unit(&mut self, u: u32) -> bool {
-        let active = self.unit_active[u as usize];
-        let saved = if active > 0 {
-            let depth = self.unit_saves.len();
-            let frame = &self.prog.units[u as usize].frame;
-            let words: usize = frame.iter().map(|r| r.1 as usize).sum();
-            if depth >= 100_000 || (active as usize + 1) * words > 64 << 20 {
-                let _ = writeln!(self.out, "ERROR: recursion too deep ({depth} calls) in {}", self.prog.units[u as usize].name);
-                self.finished = true;
-                self.flush();
-                self.unit_saves.clear();
-                self.unit_active.fill(0);
-                return true;
-            }
-            let mut v = Vec::with_capacity(words);
-            for &(lo, n) in frame {
-                v.extend_from_slice(&self.mem[lo as usize..(lo + n) as usize]);
-            }
-            Some(v)
-        } else {
-            None
-        };
-        self.unit_saves.push(saved);
-        self.unit_active[u as usize] = active + 1;
+        if self.unit_chain.len() + self.unit_pending.len() >= 100_000 || self.unit_saved_words > 64 << 20 {
+            let depth = self.unit_chain.len() + self.unit_pending.len();
+            let _ = writeln!(self.out, "ERROR: recursion too deep ({depth} calls) in {}", self.prog.units[u as usize].name);
+            self.finished = true;
+            self.flush();
+            self.unit_reset();
+            return true;
+        }
+        self.unit_next += 1;
+        let act = self.unit_next;
+        let prev = self.unit_res[u as usize];
+        self.unit_resident(u, act);
+        self.unit_pending.push((u, act, prev));
         false
     }
 
-    /// Run shared subroutine `u` for process `p` to its end, the units it calls included;
-    /// its results go to `dsts`. Returns true if the process must stop (`$finish`, a kill).
+    /// Put activation `act`'s frame of unit `u` into memory (saving the one there). A new
+    /// activation takes the memory as it is.
+    #[inline]
+    fn unit_resident(&mut self, u: u32, act: u64) {
+        let r = self.unit_res[u as usize];
+        if r == act {
+            return;
+        }
+        let frame = &self.prog.units[u as usize].frame;
+        if !frame.is_empty() {
+            if r != 0 {
+                let mut v = Vec::with_capacity(frame.iter().map(|f| f.1 as usize).sum());
+                for &(lo, n) in frame {
+                    v.extend_from_slice(&self.mem[lo as usize..(lo + n) as usize]);
+                }
+                self.unit_saved_words += v.len();
+                self.unit_saved.insert(r, v);
+            }
+            if let Some(v) = self.unit_saved.remove(&act) {
+                self.unit_saved_words -= v.len();
+                let mut k = 0;
+                for &(lo, n) in &self.prog.units[u as usize].frame {
+                    self.mem[lo as usize..(lo + n) as usize].copy_from_slice(&v[k..k + n as usize]);
+                    k += n as usize;
+                }
+            }
+        }
+        self.unit_res[u as usize] = act;
+    }
+
+    /// Activation `act` of unit `u` has ended (or was abandoned): its frame is dropped.
+    fn unit_end(&mut self, u: u32, act: u64) {
+        if self.unit_res[u as usize] == act {
+            self.unit_res[u as usize] = 0;
+        }
+        if let Some(v) = self.unit_saved.remove(&act) {
+            self.unit_saved_words -= v.len();
+        }
+    }
+
+    /// Every call of a shared subroutine is abandoned (the simulation stops).
+    fn unit_reset(&mut self) {
+        self.unit_pending.clear();
+        self.unit_chain.clear();
+        self.unit_susp.clear();
+        self.unit_saved.clear();
+        self.unit_saved_words = 0;
+        self.unit_res.fill(0);
+    }
+
+    /// Wake the processes waiting on event control `ctl` of a shared subroutine.
+    #[cold]
     #[inline(never)]
-    fn call_unit(&mut self, p: u32, u: u32, dsts: &[u32]) -> bool {
+    fn wake_unit_waiters(&mut self, ctl: u32) {
+        let Some(ws) = self.unit_waiters.remove(&ctl) else { return };
+        for q in ws {
+            let pr = &mut self.procs[q as usize];
+            // (a process that stopped waiting there is left out)
+            if pr.wait == ctl {
+                pr.wait = NONE;
+                if pr.class == ProcClass::Postponed {
+                    self.postponed.push(q);
+                } else {
+                    self.wake_buf.push((pr.wseq, q));
+                }
+            }
+        }
+    }
+
+    /// Run (or continue) the call of shared subroutine `u` that process `p` makes with the
+    /// `CallUnit` before `pc`, the units it calls included; its results go to `dsts`.
+    /// Returns true if the process suspended inside the call or must stop (`$finish`, a
+    /// kill); a suspended process continues the call when it runs that `CallUnit` again.
+    #[inline(never)]
+    fn call_unit(&mut self, p: u32, u: u32, dsts: &[u32], pc: usize) -> bool {
         // SAFETY: as in `exec_body`, the code outlives the call and is never modified
         let code: &Code = unsafe { &*Rc::as_ptr(&self.code) };
-        // the callers: (unit, pc to return to, their destinations)
-        let mut stack: Vec<(u32, usize, &[u32])> = Vec::new();
-        let (mut cur, mut pc, mut ds) = (u, 0usize, dsts);
-        loop {
-            let ins = &code.units[cur as usize][pc];
-            pc += 1;
-            match ins {
-                Instr::CallUnit { unit, dsts } => {
-                    stack.push((cur, pc, ds));
-                    (cur, pc, ds) = (*unit, 0, &dsts[..]);
-                }
-                Instr::RetUnit { srcs } => {
-                    let vals: Vec<Vec<u64>> = srcs.iter().map(|&(s, n)| self.mem[s as usize..(s + n) as usize].to_vec()).collect();
-                    if let Some(Some(v)) = self.unit_saves.pop() {
-                        let mut k = 0;
-                        for &(lo, n) in &self.prog.units[cur as usize].frame {
-                            self.mem[lo as usize..(lo + n) as usize].copy_from_slice(&v[k..k + n as usize]);
-                            k += n as usize;
-                        }
-                    }
-                    self.unit_active[cur as usize] -= 1;
-                    for (d, v) in ds.iter().zip(&vals) {
-                        self.mem[*d as usize..*d as usize + v.len()].copy_from_slice(v);
-                    }
-                    match stack.pop() {
-                        Some(c) => (cur, pc, ds) = c,
-                        None => return false,
-                    }
-                }
-                _ => {
-                    if self.exec_gen(p, ins, &mut pc) {
-                        // (stopped inside: the calls are abandoned)
-                        self.unit_saves.clear();
-                        self.unit_active.fill(0);
-                        return true;
+        let gen = self.procs[p as usize].gen;
+        let at = (pc - 1) as u32;
+        let mut resumed = false;
+        if !self.unit_susp.is_empty() {
+            if let Some((g, cpc, chain)) = self.unit_susp.remove(&p) {
+                if g == gen && cpc == at && chain.first().is_some_and(|c| c.unit == u) {
+                    self.unit_chain = chain;
+                    resumed = true;
+                } else {
+                    // (the process was disabled or restarted while it waited inside)
+                    for c in chain {
+                        self.unit_end(c.unit, c.act);
                     }
                 }
             }
         }
+        if !resumed {
+            let Some((pu, act, prev)) = self.unit_pending.pop() else { return false };
+            debug_assert_eq!(pu, u);
+            self.unit_chain.clear();
+            self.unit_chain.push(UAct { unit: u, pc: 0, act, prev });
+        }
+        'act: loop {
+            let top = *self.unit_chain.last().unwrap();
+            let cur = top.unit;
+            self.unit_resident(cur, top.act);
+            let mut upc = top.pc as usize;
+            loop {
+                let ins = &code.units[cur as usize][upc];
+                upc += 1;
+                match ins {
+                    Instr::CallUnit { unit, .. } => {
+                        let Some((pu, act, prev)) = self.unit_pending.pop() else { return false };
+                        debug_assert_eq!(pu, *unit);
+                        self.unit_chain.last_mut().unwrap().pc = upc as u32;
+                        self.unit_chain.push(UAct { unit: *unit, pc: 0, act, prev });
+                        continue 'act;
+                    }
+                    Instr::RetUnit { srcs } => {
+                        let vals: Vec<Vec<u64>> = srcs.iter().map(|&(s, n)| self.mem[s as usize..(s + n) as usize].to_vec()).collect();
+                        self.unit_end(cur, top.act);
+                        // (the activation in memory before the call, if it waits for its
+                        // frame: the caller's, whose arguments may be half stored)
+                        if top.prev != 0 && self.unit_saved.contains_key(&top.prev) {
+                            self.unit_resident(cur, top.prev);
+                        }
+                        self.unit_chain.pop();
+                        let ds: &[u32] = match self.unit_chain.last() {
+                            None => dsts,
+                            Some(c) => match &code.units[c.unit as usize][c.pc as usize - 1] {
+                                Instr::CallUnit { dsts, .. } => dsts,
+                                _ => unreachable!("a unit call returns after its CallUnit"),
+                            },
+                        };
+                        for (d, v) in ds.iter().zip(&vals) {
+                            self.mem[*d as usize..*d as usize + v.len()].copy_from_slice(v);
+                        }
+                        if self.unit_chain.is_empty() {
+                            return false;
+                        }
+                        continue 'act;
+                    }
+                    Instr::Wait { ctl } => {
+                        let pr = &mut self.procs[p as usize];
+                        pr.wait = *ctl;
+                        pr.wseq = self.hot.wseq;
+                        self.hot.wseq += 1;
+                        self.unit_waiters.entry(*ctl).or_default().push(p);
+                        self.unit_chain.last_mut().unwrap().pc = upc as u32;
+                        return self.unit_suspend(p, gen, at);
+                    }
+                    _ => {
+                        if self.exec_gen(p, ins, &mut upc) {
+                            if self.finished {
+                                self.unit_reset();
+                                return true;
+                            }
+                            // (where it suspended: `exec_gen` put it in the process's pc)
+                            self.unit_chain.last_mut().unwrap().pc = self.procs[p as usize].pc;
+                            return self.unit_suspend(p, gen, at);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process `p` (of generation `gen`) suspended inside the shared subroutine calls of
+    /// `unit_chain`, made by its `CallUnit` at `at`. Returns true.
+    #[cold]
+    #[inline(never)]
+    fn unit_suspend(&mut self, p: u32, gen: u32, at: u32) -> bool {
+        let chain = std::mem::take(&mut self.unit_chain);
+        if self.procs[p as usize].gen != gen {
+            // (killed or disabled from inside: the calls are abandoned)
+            for c in chain {
+                self.unit_end(c.unit, c.act);
+            }
+            return true;
+        }
+        self.procs[p as usize].pc = at;
+        self.unit_susp.insert(p, (gen, at, chain));
+        true
     }
 
     /// Execute one instruction through the generic path. `pc` already points past it.
@@ -2866,7 +3028,7 @@ impl Sim {
                 self.mem.copy_within(*s as usize..(*s + *n) as usize, *d as usize);
                 return false;
             }
-            Instr::CallUnit { unit, dsts } => return self.call_unit(p, *unit, dsts),
+            Instr::CallUnit { unit, dsts } => return self.call_unit(p, *unit, dsts, *pc),
             // (only inside `call_unit`)
             Instr::RetUnit { .. } => return false,
             _ => {}
@@ -5512,14 +5674,14 @@ pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>)
     };
     let mut reads: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
     for c in &prog.ctls {
-        if c.proc == NONE {
+        if c.proc == NONE || c.proc == UNIT_PROC {
             continue;
         }
         reads[c.proc as usize].extend(c.triggers.iter().map(|t| norm(t.0, t.2)));
     }
     let mut level = vec![true; n];
     for c in &prog.ctls {
-        if c.proc != NONE && c.triggers.iter().any(|t| t.1 != Edge::Any) {
+        if c.proc != NONE && c.proc != UNIT_PROC && c.triggers.iter().any(|t| t.1 != Edge::Any) {
             level[c.proc as usize] = false;
         }
     }
@@ -6170,6 +6332,7 @@ fn string_to_bits(m: &mut [u64], d: usize, w: u32, s: &[u8]) {
 /// (groups as (members, triggers), group of each process or NONE).
 fn edge_groups(prog: &Program, ranks: &[u32]) -> (Vec<(Vec<u32>, Vec<(u32, Edge, u32)>)>, Vec<u32>) {
     let n = prog.procs.len();
+    let waits = unit_waits(prog);
     let mut by_trig: HashMap<Vec<(u32, u8, u32)>, Vec<u32>> = HashMap::new();
     let mut order: Vec<Vec<(u32, u8, u32)>> = Vec::new();
     for p in 0..n {
@@ -6181,7 +6344,11 @@ fn edge_groups(prog: &Program, ranks: &[u32]) -> (Vec<(Vec<u32>, Vec<(u32, Edge,
             (Instr::Wait { ctl }, Instr::Jmp { to: 0 }) => *ctl,
             _ => continue,
         };
-        let simple = pd.code[1..].iter().all(|i| !matches!(i, Instr::Wait { .. } | Instr::Delay { .. } | Instr::Halt));
+        let simple = pd.code[1..].iter().all(|i| match i {
+            Instr::Wait { .. } | Instr::Delay { .. } | Instr::Halt => false,
+            Instr::CallUnit { unit, .. } => !waits[*unit as usize],
+            _ => true,
+        });
         let c = &prog.ctls[ctl as usize];
         if !simple || c.triggers.is_empty() || c.triggers.iter().all(|t| t.1 == Edge::Any) {
             continue;
@@ -6211,6 +6378,23 @@ fn edge_groups(prog: &Program, ranks: &[u32]) -> (Vec<(Vec<u32>, Vec<(u32, Edge,
         groups.push((members, first.triggers.clone()));
     }
     (groups, group_of)
+}
+
+/// Per shared subroutine: whether it can suspend (it waits, or calls one that can).
+fn unit_waits(prog: &Program) -> Vec<bool> {
+    let mut w: Vec<bool> = prog.units.iter().map(|u| u.code.iter().any(|i| matches!(i, Instr::Wait { .. } | Instr::Delay { .. } | Instr::Proc { .. }))).collect();
+    loop {
+        let mut changed = false;
+        for (k, u) in prog.units.iter().enumerate() {
+            if !w[k] && u.code.iter().any(|i| matches!(i, Instr::CallUnit { unit, .. } if w[*unit as usize])) {
+                w[k] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return w;
+        }
+    }
 }
 
 /// Evaluate a UDP table: level rows first, then (for a changed input) edge rows. No matching row

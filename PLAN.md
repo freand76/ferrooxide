@@ -123,9 +123,10 @@ machinery must not assume static targets only (A3).
    bound to the inner call's variables (`Instr::Bind`). Virtual interfaces work
    (`vif.rs`). A `ref` argument of a task that waits works when it is a variable of the
    calling automatic subroutine (copy in and out is then the same as a reference). Tests
-   stop at: memory (40; with shared functions, A3 (1), 16.12--property-interface-uvm
-   compiles in 3 s elaboration + 12 s JIT, 1 GB, 64k signals, and runs to its end, where
-   it stops with UVM's `PH_TIMEOUT` at 9200: the run phase does not end), a
+   stop at: memory (with shared functions and tasks, A3 (1),
+   16.12--property-interface-uvm runs in under 5 s; processes over 2000 ops are
+   interpreted), the run phase, which never starts (UVM's `PH_TIMEOUT` at 9200 after the
+   connect phase: 16.7--sequence-uvm, 16.12--property-interface-uvm), a
    parameterized class first used after a virtual call that could
    reach it was compiled (6: virtual calls through a table would remove this). Some
    compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
@@ -150,21 +151,26 @@ machinery must not assume static targets only (A3).
 - **A3. Real calls, dynamic waiters.** NEXT (decided 2026-11-27), in this order:
   (1) subroutines compiled once into the program and called from any process with a frame
   per call, instead of a copy per call path in each process (the UVM memory and JIT time).
-  Done for functions (`unit.rs`): a method, or a recursive or deeply nested call, of a
-  function without timing, fork, `disable` or process-starting system tasks runs its
-  shared subroutine (`Program::units`: `SaveUnit`, `CallUnit`, `RetUnit`), interpreted on
-  the generic path; its temporaries are memory of its own, a recursive call saves its
-  frame. Left: tasks that wait (a unit that can suspend: its frames saved with the
-  process; most of the remaining UVM code, `uvm_sequence_base::start` and its forks),
-  then lowering units to fast ops / the JIT if they get hot;
+  Done (`unit.rs`): a method, or a recursive or deeply nested call, of a function without
+  timing, fork, `disable` or process-starting system tasks, and a class method task
+  without fork or `disable` (it may wait), runs its shared subroutine (`Program::units`:
+  `SaveUnit`, `CallUnit`, `RetUnit`), interpreted on the generic path. Its temporaries are
+  memory of its own; each call is an activation whose frame is swapped in when it runs
+  (recursion, other processes in the same unit). A process that waits inside keeps its
+  chain of calls (`Sim::unit_susp`) and its pc at the `CallUnit`, which continues the call;
+  waits inside units are dynamic waiters (`UNIT_PROC` controls, `Sim::unit_waiters`). A
+  unit that fails (a fork inside) leaves its fork branches as empty processes. Left: tasks
+  that fork (`uvm_sequence_base::start`: fork branches started from a unit), module tasks
+  (a call cannot be disabled by name yet), then lowering units to fast ops / the JIT if
+  they get hot;
   (2) virtual calls and `randomize()` dispatch through a per-class table (no "used after a
   virtual call" restriction, an open class set); then decide on (3) a precompiled UVM
   library: a saved, relocatable program fragment for the non-parameterized code, the
   parsed library for specializations, JIT code cached per process shape.
   Process instances are done. Calls nested deeper than
   `SUB_DEPTH` (4) are subroutines of the process (`CallSub`/`RetSub`, saved temporaries;
-  an automatic one also saves its variables). Left: tasks shared between processes
-  (each process compiles its own copy), virtual calls through a table instead of a chain
+  an automatic one also saves its variables). Left: module tasks and tasks that fork
+  shared between processes (each process compiles its own copy), virtual calls through a table instead of a chain
   of class compares per call site, array outputs and unpacked array results of such
   calls, and a per-signal list of dynamic waiters next to the static fan-out (a flag
   keeps the static path fast).

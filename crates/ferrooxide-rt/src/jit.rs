@@ -23,8 +23,9 @@ pub type ProcFn = unsafe extern "C" fn(*mut Sim, *mut u64, u32, *const u32, *mut
 
 /// Processes longer than this many ops are interpreted: compile time (register allocation)
 /// grows much faster than their length, and one huge process (a 48-fold inlined function of
-/// a 256-deep `?:` chain) took gigabytes. Processes of real designs stay far below it.
-pub const MAX_OPS: usize = 8000;
+/// a 256-deep `?:` chain) took gigabytes; a UVM test's processes of 4000-6000 ops took 2 ms
+/// per op. Processes of real designs stay far below it.
+pub const MAX_OPS: usize = 2000;
 
 pub struct Jit {
     // keeps the generated code alive
