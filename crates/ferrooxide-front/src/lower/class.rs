@@ -580,6 +580,10 @@ impl Lower {
                     if m.lifetime == Some(t::Lifetime::Static) {
                         return self.err(m.loc, format!("method '{}' cannot have a static lifetime", m.name.name));
                     }
+                    // (IEEE 1800-2017 18.6.1, 18.8, 18.9: built in, not to be overridden)
+                    if matches!(m.name.name.as_str(), "randomize" | "rand_mode" | "constraint_mode") {
+                        return self.err(m.loc, format!("'{}' is a built-in method: a class cannot declare it", m.name.name));
+                    }
                     let mut f = self.subroutine_in(m, true)?;
                     f.automatic = true;
                     let mut locals: Vec<String> = vec![f.name.clone()];
