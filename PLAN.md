@@ -117,7 +117,10 @@ machinery must not assume static targets only (A3).
 5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`). The package compiles in about 2 s
    (calls deeper than 4 go through subroutines, static initializers share a process).
    The whole library compiles; the first UVM tests pass (a run compiles for about 12 s:
-   large processes, see A3). Tests stop in their own code: `randc` (56 tests), virtual
+   large processes, see A3). Tests stop at: a fork branch that reaches its own fork
+   again (58: `uvm_sequence_base::start` forks `body()`, which starts child sequences;
+   inlined calls give each level its own variables, so the branch processes cannot be
+   reused; needs A3 activation records), virtual
    interfaces (`this data type is not supported`, 51), a parameterized class first used
    after a virtual call that could reach it was compiled (4: virtual calls through a table
    would remove this). Error lines
