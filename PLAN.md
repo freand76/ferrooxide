@@ -12,8 +12,8 @@
 - One command, no intermediate files: `ferrooxide tb.v dut.v` parses, elaborates, compiles
   (milliseconds) and simulates.
 
-## Status (2026-11-26)
-- sv-tests: 4911 of 5112 (96.1%); all of chapters 5 and 6. Baseline in
+## Status (2026-11-27)
+- sv-tests: 5013 of 5112 (98.1%); all of chapters 5, 6, 11, 18 and 20 outside UVM. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -100,8 +100,10 @@ UVM must run eventually (item 5): new work keeps it possible. In particular, cla
 features must work per specialization and for classes declared later, and the event/wait
 machinery must not assume static targets only (A3).
 
-1. **sv-tests features, by tests won**, chapter by chapter outside UVM (18: 3, 16: ~29,
-   11: 2, 20: 5). DPI (9) needs a C interface: last.
+1. **sv-tests features, by tests won**, chapter by chapter outside UVM (16: 3: sequence
+   local variables, which the automata cannot hold, and `expect`; 14: clocking signals,
+   with input and output skews; 9: `@seq`, `process::suspend`; 7: 2). DPI (9) needs a C
+   interface: last. `let` works in modules only (not in packages or blocks).
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
    patterns also lack); enum methods of a call's result (`p.status().name()`: the
