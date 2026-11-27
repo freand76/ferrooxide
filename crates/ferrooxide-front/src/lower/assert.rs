@@ -34,6 +34,8 @@ pub(crate) struct Sva {
     /// the named sequences and properties being expanded, innermost last: their formal
     /// arguments and the actual ones
     pub(crate) env: Vec<HashMap<String, t::Expr>>,
+    /// `let` declarations
+    pub(crate) lets: HashMap<String, Rc<t::LetDecl>>,
 }
 
 /// A concurrent assertion's clock and `disable iff`, as found while lowering its property.
@@ -87,6 +89,9 @@ impl Lower {
                 None => return self.err(*loc, format!("unknown clocking block '{name}'")),
             },
             t::Item::DefaultDisable(e, _) => self.sva.default_disable = Some(e.clone()),
+            t::Item::Let(d) => {
+                self.sva.lets.insert(d.name.clone(), Rc::new((**d).clone()));
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -197,33 +202,87 @@ impl Lower {
             return Ok(None);
         }
         let Some(d) = self.sva.decls.get(name).cloned() else { return Ok(None) };
+        let env = self.bind_formals(&d.ports, args, name, e.loc)?;
+        Ok(Some((d, env)))
+    }
+
+    /// The actual arguments of formal arguments `ports` of `name` (a named sequence or
+    /// property, a `let`) from the arguments of a use: positional, named, defaults.
+    fn bind_formals(&mut self, ports: &[t::TfPort], args: &[t::Arg], name: &str, loc: t::Loc) -> Result<HashMap<String, t::Expr>> {
         let mut env = HashMap::new();
         for (k, a) in args.iter().enumerate() {
             let (port, actual) = match a {
-                t::Arg::Pos(x) => match d.ports.get(k) {
+                t::Arg::Pos(x) => match ports.get(k) {
                     Some(p) => (p, x),
-                    None => return self.err(e.loc, format!("too many arguments to '{name}'")),
+                    None => return self.err(loc, format!("too many arguments to '{name}'")),
                 },
-                t::Arg::Named(n, x) => match d.ports.iter().find(|p| &p.name == n) {
+                t::Arg::Named(n, x) => match ports.iter().find(|p| &p.name == n) {
                     Some(p) => (p, x),
-                    None => return self.err(e.loc, format!("'{name}' has no argument '{n}'")),
+                    None => return self.err(loc, format!("'{name}' has no argument '{n}'")),
                 },
             };
             if let Some(x) = actual {
-                env.insert(port.name.clone(), x.clone());
+                if env.insert(port.name.clone(), x.clone()).is_some() {
+                    return self.err(loc, format!("argument '{}' of '{name}' is given twice", port.name));
+                }
             }
         }
-        for p in &d.ports {
+        for p in ports {
             if !env.contains_key(&p.name) {
                 match &p.default {
                     Some(x) => {
                         env.insert(p.name.clone(), x.clone());
                     }
-                    None => return self.err(e.loc, format!("argument '{}' of '{name}' has no value", p.name)),
+                    None => return self.err(loc, format!("argument '{}' of '{name}' has no value", p.name)),
                 }
             }
         }
-        Ok(Some((d, env)))
+        Ok(env)
+    }
+
+    /// A use of a `let` declaration (IEEE 1800-2017 11.12), `name` or `name(args)`: its
+    /// expression with the formal arguments standing for the actual ones (cast to the type of
+    /// a typed formal); None if `e` is none.
+    pub(crate) fn let_use(&mut self, e: &t::Expr) -> Result<Option<Expr>> {
+        let (name, args): (&str, &[t::Arg]) = match &e.kind {
+            t::ExprKind::Ident(n) => (n, &[]),
+            t::ExprKind::Call { func, args, with_: None, parens: true } => match &func.kind {
+                t::ExprKind::Ident(n) => (n, args),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        // (a formal argument hides a let of its name)
+        if self.sva.env.last().is_some_and(|m| m.contains_key(name)) {
+            return Ok(None);
+        }
+        let Some(d) = self.sva.lets.get(name).cloned() else { return Ok(None) };
+        let mut env = self.bind_formals(&d.ports, args, name, e.loc)?;
+        // (a port without a type takes the previous one's, unless it has a direction)
+        let mut ty: Option<&t::DataType> = None;
+        for p in &d.ports {
+            if p.dir.is_some() {
+                return self.err(p.loc, "a let argument cannot have a direction");
+            }
+            if !p.dims.is_empty() {
+                return self.unsupported(p.loc, "an unpacked dimension of a let argument");
+            }
+            if let Some(t) = &p.ty {
+                ty = Some(t);
+            }
+            // (`untyped`: no cast)
+            let Some(t) = ty.filter(|t| !(matches!(t.kind, t::TypeKind::Implicit) && t.packed.is_empty() && t.signed.is_none())) else { continue };
+            let a = env.get_mut(&p.name).unwrap();
+            let loc = a.loc;
+            *a = t::Expr::new(t::ExprKind::Cast(t::CastTarget::Type(Box::new(t.clone())), Box::new(a.clone())), loc);
+        }
+        if self.sva.env.len() > 64 {
+            return self.err(d.loc, "let declarations nested too deeply (a recursive one?)");
+        }
+        self.sva.env.push(env);
+        let r = self.expr(&d.expr);
+        self.sva.env.pop();
+        r.map(Some)
     }
 
     /// `f` on the body of named sequence or property `d` with its formal arguments bound.

@@ -136,6 +136,11 @@ impl Lower {
 
     fn expr_at(&mut self, e: &t::Expr) -> Result<Expr> {
         let loc = e.loc;
+        if !self.sva.lets.is_empty() {
+            if let Some(x) = self.let_use(e)? {
+                return Ok(x);
+            }
+        }
         Ok(match &e.kind {
             t::ExprKind::Num(n) => ExprKind::Num(n.clone()).into(),
             t::ExprKind::Real(r) => ExprKind::Real(*r).into(),

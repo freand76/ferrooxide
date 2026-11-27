@@ -375,7 +375,7 @@ impl Lower {
                 }
                 items.push(Item::ElabTask { name: name.clone(), args: v, line: loc.line });
             }
-            t::Item::Property(_) | t::Item::Sequence(_) | t::Item::Clocking(_) | t::Item::ClockingRef { .. } | t::Item::DefaultDisable(..) => {
+            t::Item::Property(_) | t::Item::Sequence(_) | t::Item::Let(_) | t::Item::Clocking(_) | t::Item::ClockingRef { .. } | t::Item::DefaultDisable(..) => {
                 self.sva_item(it)?;
             }
             other => return self.unsupported(item_loc(other), item_what(other)),
