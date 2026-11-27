@@ -17,6 +17,9 @@ use crate::types::{DynKind, Type};
 use ferrooxide_front::ast::{BinOp, CItem, UnOp};
 use rt::{ObjOp, SysFn, Target};
 
+/// The name of the function of a class that `randomize()` calls (`rand_method`).
+const RAND_FN: &str = "$randomize";
+
 /// Attempts per phase (with soft constraints, without them).
 const TRIES: i64 = 1000;
 
@@ -201,6 +204,14 @@ impl<'a> Compiler<'a> {
                 (self.handle_value(&Expr::from(ExprKind::Ident("this".into())), sid)?, c)
             }
         };
+        let plain = vars.is_empty() && with.is_none();
+        // the body of class c's randomize function: its own variables and constraints
+        if plain && obj.is_none() && self.subr.inline_stack.last().is_some_and(|x| x.1 == RAND_FN) {
+            let zero = self.const_slot(&Const::zero(32));
+            self.emit(Instr::Copy { d: res, s: zero, w: 32 });
+            self.randomize_class(c, h, None, &[], None, sid, res)?;
+            return Ok(res);
+        }
         // the object's own class decides (randomize() is virtual): its variables and
         // constraints
         let classes: Vec<u32> = (0..self.classes.list.len() as u32).filter(|&d| d == c || self.derives(d, c)).collect();
@@ -217,7 +228,16 @@ impl<'a> Compiler<'a> {
             let is = self.tmp(1);
             self.emit(Instr::Cmp { op: rt::CmpOp::Eq, d: is, a: cls, b: k, w: 32 });
             let skip = self.emit(Instr::Jz { c: is, w: 1, to: 0 });
-            self.randomize_class(d, h, obj.as_deref(), vars, with.as_deref(), sid, res)?;
+            if plain {
+                // (a call of the class's randomize function: one that reaches the same class
+                // again, through a rand handle, is a recursive call)
+                let f = self.rand_method(d);
+                let scope = self.class_scope(d);
+                let (r, _, _) = self.call_resolved(f, scope, RAND_FN, Some(h), &[], sid)?;
+                self.emit(Instr::Copy { d: res, s: r.unwrap(), w: 32 });
+            } else {
+                self.randomize_class(d, h, obj.as_deref(), vars, with.as_deref(), sid, res)?;
+            }
             ends.push(self.emit(Instr::Jmp { to: 0 }));
             let here = self.here();
             self.patch(skip, here);
@@ -227,6 +247,31 @@ impl<'a> Compiler<'a> {
             self.patch(j, end);
         }
         Ok(res)
+    }
+
+    /// The function `randomize()` of an object of class `d` calls: `int $randomize()`, whose
+    /// body randomizes the object as one of class `d`.
+    fn rand_method(&mut self, d: u32) -> &'a SubroutineDecl {
+        if let Some(f) = self.subr.rand_methods.get(&d) {
+            return f;
+        }
+        let line = self.line;
+        let call = Expr::from(ExprKind::Randomize { obj: None, vars: vec![], with: None, std: false });
+        let f: &'a SubroutineDecl = Box::leak(Box::new(SubroutineDecl {
+            name: RAND_FN.into(),
+            is_task: false,
+            automatic: true,
+            ret_ty: std::rc::Rc::new(ferrooxide_front::lower::SvType::flat(NetKind::Integer, true, vec![])),
+            decls: vec![],
+            refs: vec![],
+            scalar_vec_ports: vec![],
+            decls_written: vec![],
+            params: vec![],
+            body: Stmt::Return { value: Some(call), line },
+            line,
+        }));
+        self.subr.rand_methods.insert(d, f);
+        f
     }
 
     /// The classes of `d` from its first base class to itself.
@@ -432,15 +477,11 @@ impl<'a> Compiler<'a> {
         }
         let outer = self.code.rand_obj.replace(h);
         let r = self.solve(&rv, &items, Some(h), res, &at);
-        let r = r.and_then(|_| self.rand_arrays(&dyns, d, res));
+        let r = r.and_then(|_| self.rand_arrays(&dyns, h, res));
         self.code.rand_obj = outer;
         r?;
         // the objects of the rand handles that are not null, after a success
         if !subs.is_empty() {
-            if self.code.rand_nest.contains(&d) {
-                return self.err(format!("randomize() of class '{}' through a rand property of its own class is not supported", self.classes.list[d as usize].name));
-            }
-            self.code.rand_nest.push(d);
             let r = (|| -> R<()> {
                 for (n, psid) in &subs {
                     let skip = self.emit(Instr::Jz { c: res, w: 32, to: 0 });
@@ -459,7 +500,6 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(())
             })();
-            self.code.rand_nest.pop();
             r?;
         }
         if let Some((f, owner)) = self.find_method(d, "post_randomize") {
@@ -502,14 +542,20 @@ impl<'a> Compiler<'a> {
     /// After a successful attempt (`res` 1) of class `d`: the random arrays get their new
     /// sizes and random elements; the objects of arrays of handles that are not null are
     /// randomized (`res` 0 when one fails).
-    fn rand_arrays(&mut self, dyns: &[RDyn], d: u32, res: u32) -> R<()> {
+    fn rand_arrays(&mut self, dyns: &[RDyn], h: u32, res: u32) -> R<()> {
         if dyns.is_empty() {
             return Ok(());
         }
         let skip = self.emit(Instr::Jz { c: res, w: 32, to: 0 });
         let line = self.line;
         for dy in dyns {
-            let a = Expr::from(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), dy.name.clone()));
+            // (the object through a handle of its own: a randomize() of another object of a
+            // class with the same base, called in the loop, sets that class's `this`)
+            let (on, os) = self.rand_hidden(dy.sid, 64);
+            let owner = self.class_of_scope(dy.sid).unwrap();
+            self.sigs.types[os as usize] = Type::Class(owner);
+            self.emit(Instr::Store { t: Target::Whole { sig: os }, s: h, mode: rt::StoreMode::Blocking });
+            let a = Expr::from(ExprKind::Member(Box::new(ExprKind::Ident(on).into()), dy.name.clone()));
             if let Some(hs) = dy.size {
                 let hn = self.sig(hs).name.rsplit('.').next().unwrap().to_string();
                 let new = Expr::from(ExprKind::NewArray(Box::new(ExprKind::Ident(hn).into()), None));
@@ -519,9 +565,6 @@ impl<'a> Compiler<'a> {
             let iv = format!("$ri{}", self.subr.auto_count);
             let el = Expr::from(ExprKind::Index(Box::new(a.clone()), Box::new(ExprKind::Ident(iv.clone()).into())));
             let body = if dy.objs {
-                if self.code.rand_nest.contains(&d) {
-                    return self.err(format!("randomize() of class '{}' through a rand property of its own class is not supported", self.classes.list[d as usize].name));
-                }
                 // if (a[i] != null && !a[i].randomize()) fail = 1
                 let (fname, fs) = self.rand_hidden(dy.sid, 32);
                 let zero = self.const_slot(&Const::zero(32));
@@ -531,10 +574,7 @@ impl<'a> Compiler<'a> {
                 let bad = bin(BinOp::LAnd, bin(BinOp::Ne, el.clone(), ExprKind::Null.into()), ExprKind::Unary(UnOp::LNot, Box::new(call)).into());
                 let set = Stmt::Assign { lhs: ExprKind::Ident(fname).into(), rhs: num(1), nonblocking: false, timing: None, line };
                 let st = Stmt::If { cond: bad, then_s: Box::new(set), else_s: None, line };
-                self.code.rand_nest.push(d);
-                let r = self.stmt(&Stmt::Foreach { array: a, vars: vec![Some(iv)], body: Box::new(st), line }, dy.sid);
-                self.code.rand_nest.pop();
-                r?;
+                self.stmt(&Stmt::Foreach { array: a, vars: vec![Some(iv)], body: Box::new(st), line }, dy.sid)?;
                 let fv = self.tmp(32);
                 self.emit(Instr::Copy { d: fv, s: fslot, w: 32 });
                 let ok = self.tmp(1);

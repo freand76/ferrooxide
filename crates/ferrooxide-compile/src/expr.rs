@@ -2186,6 +2186,14 @@ impl<'a> Compiler<'a> {
         // process of its own, without that call)
         let base = self.subr.proc_base.last().copied().unwrap_or(0).min(self.subr.inline_stack.len());
         if let Some(k) = self.subr.inline_stack[base..].iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
+            // (one subroutine per function and process: an automatic function's instances
+            // have names of their own, and recursion through several functions would
+            // otherwise compile new ones without end)
+            let level = self.code.pb.len();
+            let k = match self.subr.subs.iter().find(|r| r.level == level && r.key.0 == fs_def && std::ptr::eq(r.f, f)) {
+                Some(r) if fresh => r.key.clone(),
+                _ => k,
+            };
             return self.sub_call(f, k, this, args, &dflt, sid, fresh, want_array);
         }
         // calls nested deeper than SUB_DEPTH: a subroutine of the process (one copy of the
