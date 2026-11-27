@@ -1743,7 +1743,9 @@ impl<'a> Compiler<'a> {
                 let (real, vw) = (t.is_real(), t.width());
                 let val = self.tmp(vw);
                 let d = self.tmp(1);
-                self.emit(Instr::Sys(Box::new(rt::SysTask::ValuePlusargs { d, fmt, val, w: vw, real })));
+                // (a string variable gets the text as it is)
+                let rw = if t == Type::Str { 0 } else { vw };
+                self.emit(Instr::Sys(Box::new(rt::SysTask::ValuePlusargs { d, fmt, val, w: rw, real })));
                 // assign the variable only when the plusarg was found
                 let jz = self.emit(Instr::Jz { c: d, w: 1, to: 0 });
                 self.store_value(&stmt::Lhs::Expr(var, sid), val, vw, rt::StoreMode::Blocking)?;

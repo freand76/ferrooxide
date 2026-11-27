@@ -637,7 +637,8 @@ pub enum SysTask {
     /// d (1 bit) = some plusarg starts with `prefix`
     TestPlusargs { d: u32, prefix: FileName },
     /// d (1 bit) = a plusarg `<prefix><value>` exists; its value, converted by `conv`
-    /// (d h o b s f e g), goes to `val` (`w` bits, or f64 bits if `real`)
+    /// (d h o b s f e g), goes to `val` (`w` bits, or f64 bits if `real`; w = 0: a string
+    /// variable's handle, the text after the prefix)
     /// `fmt`: the prefix and a conversion (`"name=%d"`), read when the call runs
     ValuePlusargs { d: u32, fmt: FileName, val: u32, w: u32, real: bool },
     /// format into the `w`-bit value at `d` (characters right-aligned)

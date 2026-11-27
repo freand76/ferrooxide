@@ -1,8 +1,17 @@
 // args: +hex=12_ab_x_z +bin=1_0z +dec=1_000 +neg=-1_0 +decx=x +bad=nope +r=2.5units +name=abc
 // $test$plusargs and $value$plusargs with the prefix or format in a variable, and the
 // values of the plusargs (IEEE 1800-2017 21.6): `_` separators, x and z digits, a leading
-// minus, an invalid number (x), a real followed by other characters.
+// minus, an invalid number (x), a real followed by other characters, text into a string
+// variable (also a method's argument).
 module m;
+  class C;
+    function string get(string name = "");
+      void'($value$plusargs("name=%s", name));
+      return name;
+    endfunction
+  endclass
+  C c;
+  string str;
   reg [8*8:1] f;
   string sf;
   reg [23:0] h;
@@ -24,6 +33,9 @@ module m;
     if (!$value$plusargs("r=%f", r) || r != 2.5) begin errors++; $display("FAILED -- real %f", r); end
     if (!$value$plusargs("dec=%d", r) || r != 1000.0) begin errors++; $display("FAILED -- dec real %f", r); end
     if ($value$plusargs("missing=%d", d)) begin errors++; $display("FAILED -- missing"); end
+    if (!$value$plusargs("name=%s", str) || str != "abc" || str.len() != 3) begin errors++; $display("FAILED -- string '%s'", str); end
+    c = new;
+    if (c.get() != "abc") begin errors++; $display("FAILED -- string argument"); end
     sf = "name";
     if (!$test$plusargs(sf) || $test$plusargs("nam_")) begin errors++; $display("FAILED -- test$plusargs"); end
     if (errors == 0) $display("PASSED");

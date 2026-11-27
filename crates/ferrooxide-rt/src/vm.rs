@@ -3689,7 +3689,13 @@ impl Sim {
                 self.mem[d] = found.is_some() as u64;
                 self.mem[d + 1] = 0;
                 if let Some((conv, a)) = found {
-                    plusarg_value(&mut self.mem, val, *w, *real, conv, &a);
+                    if *w == 0 {
+                        let h = self.intern(a.as_bytes());
+                        self.mem[val] = h;
+                        self.mem[val + 1] = 0;
+                    } else {
+                        plusarg_value(&mut self.mem, val, *w, *real, conv, &a);
+                    }
                 }
             }
             SysTask::SFormat { d, w, args, scope, texp, radix, nul_warn } => {

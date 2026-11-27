@@ -7,7 +7,7 @@ the sv-tests ferrooxide runner does, and compare the results with a baseline.
 $FX_BIN selects another ferrooxide binary (default target/release/ferrooxide).
 
 Each test runs in the most complete mode its `:type:` allows (simulation, then elaboration,
-then parsing): simulation is a full run (once per `:simvariants:` entry, whose `:assert:`
+then parsing): simulation is a full run (once per `:simvariants:` entry, given as a plusarg, whose `:assert:`
 output lines must hold), elaboration `--elab-only`, parsing `--parse-only`. A test passes when
 ferrooxide succeeds, or fails for a test marked `:should_fail_because:`.
 
@@ -111,7 +111,7 @@ def run(job):
     log = ""
     rc = 0
     with tempfile.TemporaryDirectory() as tmp:
-        for extra in ([[v] for v in variants] or [[]]):
+        for extra in ([["+" + v] for v in variants] or [[]]):
             try:
                 r = subprocess.run(cmd + extra, cwd=tmp, capture_output=True, timeout=timeout, preexec_fn=limit)
                 out = r.stdout.decode("utf-8", "ignore") + r.stderr.decode("utf-8", "ignore")
