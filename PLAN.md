@@ -121,8 +121,9 @@ machinery must not assume static targets only (A3).
    large processes, see A3). A fork that a recursive call reaches again (`start` forks
    `body()`, which starts child sequences) starts the branch processes already compiled,
    bound to the inner call's variables (`Instr::Bind`). Virtual interfaces work
-   (`vif.rs`). Tests stop at: `ref` arguments of tasks that wait (40, `uvm_config_db`
-   & co.: needs A3), a parameterized class first used after a virtual call that could
+   (`vif.rs`). A `ref` argument of a task that waits works when it is a variable of the
+   calling automatic subroutine (copy in and out is then the same as a reference). Tests
+   stop at: rand dynamic arrays (40, the TLM2 generic payload), a parameterized class first used after a virtual call that could
    reach it was compiled (6: virtual calls through a table would remove this). Some
    compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
    crash): the large processes need less memory. Error lines

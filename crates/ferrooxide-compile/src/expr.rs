@@ -2043,6 +2043,7 @@ impl<'a> Compiler<'a> {
         if f.automatic {
             self.note_frame(mem.0, mem.1);
             self.sigs.automatic.extend(sig_lo..self.prog.signals.len() as u32);
+            self.subr.auto_scopes.insert(fs, f);
         }
         self.subr.func_inst.insert(key, FuncInst { scope: fs, ret, ports, mem, this });
         Ok(())
@@ -2335,11 +2336,20 @@ impl<'a> Compiler<'a> {
 
     /// `ref` arguments are copied in and out like `inout` ones (IEEE 1800-2017 13.5.2 passes a
     /// reference). The two differ only where the actual changes or is read through another
-    /// path during the call: a task that can wait, or a body that names the actual's
-    /// variable itself. Those calls are rejected.
+    /// path during the call: a task that can wait (unless the actual is a variable of the
+    /// calling automatic subroutine, which nothing else sees while the caller waits), or a
+    /// body that names the actual's variable itself. Those calls are rejected.
     fn check_ref_args(&mut self, f: &SubroutineDecl, fscope: usize, ports: &[(Dir, u32)], args: &[Expr], sid: usize) -> R<()> {
         if f.is_task && may_wait(&f.body) {
-            return self.err(format!("a ref argument of task '{}', which can wait, is not supported (it is passed by copy)", f.name));
+            for (i, a) in args.iter().enumerate() {
+                let pname = self.sig(ports[i].1).name.rsplit('.').next().unwrap_or_default().to_string();
+                if f.refs.contains(&pname) && !self.caller_private(a, sid) {
+                    return self.err(format!(
+                        "a ref argument of task '{}', which can wait, is not supported (it is passed by copy) unless it is a variable of the calling automatic subroutine",
+                        f.name
+                    ));
+                }
+            }
         }
         let mut used: Vec<u32> = Vec::new();
         let mut reads = Vec::new();
@@ -2377,6 +2387,34 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
+    }
+
+    /// The variable `a` (in scope `sid`), or a select of it, is an automatic variable of the
+    /// subroutine instance the call is in, and that subroutine starts no branches that run on
+    /// beside it (`join_any`, `join_none`): no other process reaches the variable while the
+    /// call waits.
+    fn caller_private(&mut self, a: &Expr, sid: usize) -> bool {
+        let mut base = a;
+        while let ExprKind::Index(b, _) | ExprKind::Range(b, _, _) | ExprKind::IndexedRange(b, _, _, _) = &base.kind {
+            base = b;
+        }
+        if !matches!(base.kind, ExprKind::Ident(_)) {
+            return false;
+        }
+        let Ok(Some(Base::Sig(s))) = self.resolve_base(base, sid) else {
+            return false;
+        };
+        if !self.sigs.automatic.contains(&s) {
+            return false;
+        }
+        let mut c = Some(sid);
+        while let Some(x) = c {
+            if let Some(f) = self.subr.auto_scopes.get(&x) {
+                return !has_open_fork(&f.body);
+            }
+            c = self.scopes[x].parent;
+        }
+        false
     }
 
     /// An unpacked array argument `a` (in scope `sid`) of array port `ps` (of the subroutine
@@ -3132,6 +3170,26 @@ impl<'a> Compiler<'a> {
         }
         let (s, w, _) = self.self_expr(e, sid)?;
         Ok(rt::FileName::Val { s, w })
+    }
+}
+
+/// A statement contains a fork whose branches run on beside the code after it (`join_any`,
+/// `join_none`).
+fn has_open_fork(st: &Stmt) -> bool {
+    match st {
+        Stmt::Block { fork: Some(j), .. } if *j != Join::All => true,
+        Stmt::Block { stmts, .. } => stmts.iter().any(has_open_fork),
+        Stmt::If { then_s, else_s, .. } => has_open_fork(then_s) || else_s.as_deref().is_some_and(has_open_fork),
+        Stmt::Case { arms, default, .. } => arms.iter().any(|a| has_open_fork(&a.1)) || default.as_deref().is_some_and(has_open_fork),
+        Stmt::For { init, step, body, .. } => has_open_fork(init) || has_open_fork(step) || has_open_fork(body),
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::Repeat { body, .. }
+        | Stmt::Forever { body, .. }
+        | Stmt::Foreach { body, .. }
+        | Stmt::Timed { body, .. }
+        | Stmt::Wait { body, .. } => has_open_fork(body),
+        _ => false,
     }
 }
 

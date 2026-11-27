@@ -302,6 +302,8 @@ pub(crate) struct Code<'a> {
 #[derive(Default)]
 pub(crate) struct Subr<'a> {
     pub(crate) func_inst: HashMap<(usize, String), FuncInst>,
+    /// the scopes of automatic subroutine instances (one per call): their declarations
+    pub(crate) auto_scopes: HashMap<usize, &'a SubroutineDecl>,
     pub(crate) call_depth: u32,
     /// functions being inlined: (definition scope, name, instance key)
     pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
