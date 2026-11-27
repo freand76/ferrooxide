@@ -232,8 +232,10 @@ SystemVerilog data and testbench:
   `P::f().p`, enum
   methods on an enum property from outside the class, whole array properties, class handle
   ports, NBAs to properties, `rand_mode`, `constraint_mode`,
-  `disable soft`, rand dynamic arrays and real/string/class rand
-  properties, `randomize(null)`.
+  `disable soft`, rand dynamic arrays and real/string rand
+  properties, constraints on members of rand object properties (global constraints,
+  18.5.9; such objects are randomized on their own), rand arrays of handles,
+  `randomize(null)`.
 - randsequence: productions that return values or use themselves (it is expanded), `rand
   join` of productions with arguments, alternatives or `return`; the `rand join` weight
   does not bias the interleaving (each is equally likely).

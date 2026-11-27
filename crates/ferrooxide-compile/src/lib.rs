@@ -234,6 +234,8 @@ pub(crate) struct Code<'a> {
     pub(crate) init_write: bool,
     /// the slot of the handle of the object being randomized: its generator gives the values
     pub(crate) rand_obj: Option<u32>,
+    /// the classes whose `randomize()` is being compiled (rand handle properties nest them)
+    pub(crate) rand_nest: Vec<u32>,
     /// hidden variables of assignments to parts of vector properties, by property select
     pub(crate) part_vars: HashMap<*const Expr, u32>,
     /// the fork blocks whose branches are being compiled

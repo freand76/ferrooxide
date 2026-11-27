@@ -234,6 +234,8 @@ impl<'a> Compiler<'a> {
         let this_k = |p: &str| key(&Expr::from(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), p.into())));
         let obj_k = |p: &str| obj.map(|o| key(&Expr::from(ExprKind::Member(Box::new(o.clone()), p.into()))));
         let mut rv = Vec::new();
+        // rand class handle properties (18.4): their objects are randomized too
+        let mut subs: Vec<(String, usize)> = Vec::new();
         for (k, (n, cyclic)) in names.iter().enumerate() {
             // a static rand property (IEEE 1800-2017 18.4): its variable `C$p`, shared by the
             // objects of the class; constraints name it so
@@ -259,6 +261,11 @@ impl<'a> Compiler<'a> {
             let Some(p) = props.iter().rev().find(|p| &p.name == n) else {
                 return self.err(format!("'{n}' is not a property of the object"));
             };
+            if let (Type::Class(_), []) = (&p.ty, p.dims.as_slice()) {
+                let owner = chain.iter().rev().find(|&&c| self.classes.list[c as usize].props.iter().any(|q| q.name == *n && q.off == p.off)).copied().unwrap_or(d);
+                subs.push((n.clone(), self.classes.list[owner as usize].init_scope));
+                continue;
+            }
             let (w, signed) = match p.ty {
                 Type::Vec { w, signed } => (w, signed),
                 _ => return self.err(format!("rand property '{n}': only integral properties can be random (others are not supported)")),
@@ -301,6 +308,22 @@ impl<'a> Compiler<'a> {
             }
         }
         items.extend(with.iter().flat_map(|w| w.iter()).map(|it| Item { it: it.clone(), sid }));
+        // (the objects of rand handles are randomized on their own: constraints that name
+        // their members are not supported)
+        for (n, _) in &subs {
+            let is_sub = |x: &Expr| -> bool {
+                let ExprKind::Member(o, _) = &x.kind else { return false };
+                match &o.kind {
+                    ExprKind::Ident(i) => i == n,
+                    ExprKind::Member(t, i) => i == n && (matches!(&t.kind, ExprKind::Ident(th) if th == "this") || obj.is_some_and(|ob| key(ob) == key(t))),
+                    _ => false,
+                }
+            };
+            let names_sub = |e: &Expr| Self::any_expr(e, &is_sub);
+            if items.iter().any(|i| names_sub(&Self::item_expr(&i.it))) {
+                return self.err(format!("a constraint on members of the rand object property '{n}' is not supported"));
+            }
+        }
         // pre_randomize(), then the values, then post_randomize() after a success
         let at = self.loc();
         if let Some((f, owner)) = self.find_method(d, "pre_randomize") {
@@ -311,6 +334,33 @@ impl<'a> Compiler<'a> {
         let r = self.solve(&rv, &items, Some(h), res, &at);
         self.code.rand_obj = outer;
         r?;
+        // the objects of the rand handles that are not null, after a success
+        if !subs.is_empty() {
+            if self.code.rand_nest.contains(&d) {
+                return self.err(format!("randomize() of class '{}' through a rand property of its own class is not supported", self.classes.list[d as usize].name));
+            }
+            self.code.rand_nest.push(d);
+            let r = (|| -> R<()> {
+                for (n, psid) in &subs {
+                    let skip = self.emit(Instr::Jz { c: res, w: 32, to: 0 });
+                    let m = Expr::from(ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), n.clone()));
+                    // (`this` of the class's constraints is the object here)
+                    let ps = self.sig(self.classes.list[self.class_of_scope(*psid).unwrap() as usize].init_this).slot;
+                    self.emit(Instr::Copy { d: ps, s: h, w: 64 });
+                    let sh = self.handle_value(&m, *psid)?;
+                    let nn = self.tmp(1);
+                    self.emit(Instr::Red { op: rt::RedOp::Bool, d: nn, s: sh, w: 64 });
+                    let null = self.emit(Instr::Jz { c: nn, w: 1, to: 0 });
+                    let call = Expr::from(ExprKind::Randomize { obj: Some(Box::new(m)), vars: vec![], with: None, std: false });
+                    let r2 = self.randomize(&call, *psid)?;
+                    self.emit(Instr::Copy { d: res, s: r2, w: 32 });
+                    self.patch_all(vec![skip, null]);
+                }
+                Ok(())
+            })();
+            self.code.rand_nest.pop();
+            r?;
+        }
         if let Some((f, owner)) = self.find_method(d, "post_randomize") {
             let skip = self.emit(Instr::Jz { c: res, w: 32, to: 0 });
             let scope = self.class_scope(owner);
@@ -391,6 +441,22 @@ impl<'a> Compiler<'a> {
             ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().any(|x| Self::reads_rand(x, rv)),
             ExprKind::MethodCall(o, _, v) => Self::reads_rand(o, rv) || v.iter().any(|x| Self::reads_rand(x, rv)),
             ExprKind::Repl(n, v) => Self::reads_rand(n, rv) || v.iter().any(|x| Self::reads_rand(x, rv)),
+            _ => false,
+        }
+    }
+
+    /// Whether `f` holds for `e` or an expression in it.
+    fn any_expr(e: &Expr, f: &dyn Fn(&Expr) -> bool) -> bool {
+        if f(e) {
+            return true;
+        }
+        let a = |x: &Expr| Self::any_expr(x, f);
+        match &e.kind {
+            ExprKind::Member(x, _) | ExprKind::Unary(_, x) => a(x),
+            ExprKind::Index(x, y) | ExprKind::Binary(_, x, y) => a(x) || a(y),
+            ExprKind::Range(x, y, z) | ExprKind::IndexedRange(x, y, z, _) | ExprKind::Cond(x, y, z) => a(x) || a(y) || a(z),
+            ExprKind::Concat(v) | ExprKind::Call(_, v) | ExprKind::SysCall(_, v) | ExprKind::StaticCall(_, _, v) => v.iter().any(a),
+            ExprKind::MethodCall(o, _, v) | ExprKind::Repl(o, v) => a(o) || v.iter().any(a),
             _ => false,
         }
     }
