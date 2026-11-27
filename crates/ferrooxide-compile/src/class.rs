@@ -759,6 +759,17 @@ impl<'a> Compiler<'a> {
                     return Some(c);
                 }
             }
+            // a class's scope: also the names of its base classes (a specialization named
+            // through an inherited typedef is the base class's, of its parameter values)
+            if let Some(&k) = self.classes.of_scope.get(&sid) {
+                let mut b = self.classes.list[k as usize].base;
+                while let Some(x) = b {
+                    if let Some(&c) = self.classes.by_name.get(&(self.classes.list[x as usize].scope, name.to_string())) {
+                        return Some(c);
+                    }
+                    b = self.classes.list[x as usize].base;
+                }
+            }
             match self.scopes[sid].parent {
                 Some(p) => sid = p,
                 // a specialization the lowering made in another class (`C#N`, its names
