@@ -69,6 +69,9 @@ fn body(code: &[Instr]) -> Option<(Vec<Instr>, bool)> {
             | Instr::Bind { .. }
             | Instr::CallSub { .. }
             | Instr::RetSub { .. }
+            | Instr::SaveUnit { .. }
+            | Instr::CallUnit { .. }
+            | Instr::RetUnit { .. }
             | Instr::Unforce { .. }
             | Instr::Udp { .. } => return None,
             // fused members must see each other's results at once: only blocking writes
@@ -153,6 +156,28 @@ pub fn fuse(prog: &mut Program) -> usize {
                     w.push(p as u32);
                 }
                 writes[p].push(sig);
+            }
+        }
+    }
+    // (a shared subroutine's stores: another writer, whichever process calls it)
+    for (u, ud) in prog.units.iter().enumerate() {
+        for ins in &ud.code {
+            if let Instr::Store { t, .. } = ins {
+                let sig = match *t {
+                    Target::Whole { sig }
+                    | Target::Part { sig, .. }
+                    | Target::DynPart { sig, .. }
+                    | Target::Elem { sig, .. }
+                    | Target::ElemK { sig, .. }
+                    | Target::ElemPart { sig, .. }
+                    | Target::ElemDynPart { sig, .. } => sig,
+                };
+                let sig = prog.signals[sig as usize].alias_of.map(|a| a.0).unwrap_or(sig);
+                let w = writers.entry(sig).or_default();
+                let id = (n + u) as u32;
+                if !w.contains(&id) {
+                    w.push(id);
+                }
             }
         }
     }

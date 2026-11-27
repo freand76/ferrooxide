@@ -598,6 +598,9 @@ impl<'a> Compiler<'a> {
                                     let ty = self.sig_type(s);
                                     let v = self.value_for(init, b, 64, ty, None)?;
                                     self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
+                                } else if d.automatic || in_auto {
+                                    // (empty on each entry, IEEE 1800-2017 6.21)
+                                    self.reset_auto(s);
                                 }
                                 continue;
                             }
@@ -659,6 +662,10 @@ impl<'a> Compiler<'a> {
                             if shared {
                                 // its initial value once, as for a module variable
                                 self.subr.static_vars.insert(key, s);
+                                let i = self.sig(s);
+                                let lo = i.slot;
+                                let hi = lo + rt::words(i.width) * i.depth.max(1);
+                                self.subr.static_mem.push((lo, hi));
                                 if let Some(init) = &dl.init {
                                     self.decl_init(init, s, kind, d.kind(), is_real, depth, w, None, None, &dl.name, b)?;
                                 }
@@ -669,6 +676,9 @@ impl<'a> Compiler<'a> {
                                 let l = self.layout(s);
                                 let v = self.value_for(init, b, w, ty, l.as_deref())?;
                                 self.emit(Instr::Store { t: Target::Whole { sig: s }, s: v, mode: StoreMode::Blocking });
+                            } else if self.sigs.automatic.contains(&s) {
+                                // (its default value on each entry, IEEE 1800-2017 6.21)
+                                self.reset_auto(s);
                             }
                         }
                         if d.konst {

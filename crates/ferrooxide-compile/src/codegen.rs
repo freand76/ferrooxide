@@ -64,7 +64,11 @@ impl<'a> Compiler<'a> {
                 i = Instr::Store { t, s: d, mode };
             }
         }
-        let c = &mut self.code.pb.last_mut().unwrap().code;
+        let pb = self.code.pb.last_mut().unwrap();
+        if pb.unit && matches!(i, Instr::Wait { .. } | Instr::Delay { .. } | Instr::Fork { .. } | Instr::WaitFork | Instr::Evict { .. } | Instr::Bind { .. } | Instr::Stash { .. }) {
+            pb.bad = true;
+        }
+        let c = &mut pb.code;
         c.push(i);
         c.len() - 1
     }
@@ -104,6 +108,8 @@ impl<'a> Compiler<'a> {
         let p = &self.prog;
         let lens = (p.mem.len(), p.signals.len(), p.procs.len(), p.ctls.len(), p.names.len(), p.strings.len(), p.locs.len(), p.classes.len());
         let mem_error = self.sigs.mem_error.take();
+        // (shared subroutines would outlive the dropped code)
+        let no_units = std::mem::replace(&mut self.subr.no_units, true);
         let mut r = Ok(());
         for (sid, f) in todo {
             self.file = self.scopes[sid].file.clone();
@@ -141,7 +147,11 @@ impl<'a> Compiler<'a> {
             p.obj_sig = None;
         }
         self.code.part_vars.retain(|_, s| (*s as usize) < lens.1);
+        // (and the constants and default values placed in the dropped memory)
+        self.code.consts.retain(|_, s| (*s as usize) < lens.0);
+        self.subr.default_images.retain(|_, s| (*s as usize) < lens.0);
         self.sigs.mem_error = mem_error;
+        self.subr.no_units = no_units;
         r
     }
 
@@ -202,8 +212,8 @@ impl<'a> Compiler<'a> {
     /// Register a named block / task body; returns its registry index.
     pub(crate) fn open_block(&mut self, path: String) -> Option<usize> {
         let proc = self.code.pb.last().map(|p| p.proc).unwrap_or(NONE);
-        if proc == NONE {
-            return None; // constant evaluation
+        if proc == NONE || self.code.pb.last().is_some_and(|p| p.unit) {
+            return None; // constant evaluation, a shared subroutine
         }
         let start = self.here();
         self.code.block_reg.push((path, rt::BlockDef { proc, start, end: start, children: Vec::new() }));

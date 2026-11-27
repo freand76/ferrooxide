@@ -163,6 +163,18 @@ pub struct Program {
     /// sampled values (IEEE 1800-2017 16.5.1): (from, to, words) copied before each time
     /// step, so that `to` holds the values of `from` from before the step (Preponed region)
     pub samples: Vec<(u32, u32, u32)>,
+    /// subroutines compiled once and called from any process (`Instr::CallUnit`)
+    pub units: Vec<UnitDef>,
+}
+
+/// A shared subroutine: a function that cannot wait, compiled once. Its code ends in
+/// `RetUnit`; jumps are within it. `frame`: the memory (lo, words) a recursive call saves
+/// (its automatic variables and the memory its body uses).
+#[derive(Clone, Debug, Default)]
+pub struct UnitDef {
+    pub name: String,
+    pub code: Vec<Instr>,
+    pub frame: Vec<(u32, u32)>,
 }
 
 /// A class: an object holds its properties flat, `nw(width)` value words then as many
@@ -286,8 +298,10 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::SysF { d, f: SysFn::RandRange { lo, hi, obj, .. } | SysFn::RandcPick { lo, hi, obj, .. } } => [*d, *lo, *hi, *obj].into_iter().filter(|&x| x != NONE).collect(),
         Instr::SysF { d, f: SysFn::RandcFree { v, obj, .. } | SysFn::RandcMark { v, obj, .. } } => [*d, *v, *obj].into_iter().filter(|&x| x != NONE).collect(),
         Instr::SysF { d, f: SysFn::Dist { a, b, .. } } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
-        Instr::CallSub { dsts, .. } => dsts.to_vec(),
-        Instr::RetSub { srcs } => srcs.iter().map(|x| x.0).collect(),
+        Instr::CallSub { dsts, .. } | Instr::CallUnit { dsts, .. } => dsts.to_vec(),
+        Instr::RetSub { srcs } | Instr::RetUnit { srcs } => srcs.iter().map(|x| x.0).collect(),
+        Instr::SaveUnit { .. } => vec![],
+        Instr::Reset { d, s, .. } => vec![*d, *s],
         Instr::SaveFrame { .. } | Instr::Stash { .. } | Instr::Unstash | Instr::Bind { .. } => vec![],
         Instr::ResolveStr { d, drv, .. } => std::iter::once(*d).chain(drv.iter().map(|x| x.0)).collect(),
         Instr::SysF { d, .. } => vec![*d],
@@ -895,6 +909,17 @@ pub enum Instr {
     /// recursion: return; the values (slot, words) in `srcs` go to the caller's `dsts` after the
     /// saved frame is restored
     RetSub { srcs: Box<[(u32, u32)]> },
+    /// copy `n` words from `s` to `d`, without events: an automatic variable's default value
+    /// at the start of a call
+    Reset { d: u32, s: u32, n: u32 },
+    /// a call of shared subroutine `unit` (`Program::units`) begins: if the unit is active
+    /// (recursion), its frame is saved; before the arguments are stored
+    SaveUnit { unit: u32 },
+    /// run shared subroutine `unit` to its end (it cannot wait); its results go to `dsts`
+    CallUnit { unit: u32, dsts: Box<[u32]> },
+    /// the end of a shared subroutine: the values (slot, words) in `srcs` go to the caller's
+    /// `dsts` after the frame saved by `SaveUnit` is restored
+    RetUnit { srcs: Box<[(u32, u32)]> },
     /// a change event on `sig` without an edge (time-0 events of initial values, like Icarus)
     Touch { sig: u32 },
     /// release / deassign: the bits of the target are no longer forced

@@ -243,6 +243,18 @@ fn main() -> ExitCode {
         eprintln!("{w}");
     }
     if elab_only {
+        if stats {
+            let ninstr: usize = prog.procs.iter().map(|p| p.code.len()).sum::<usize>() + prog.units.iter().map(|u| u.code.len()).sum::<usize>();
+            let big = prog.procs.iter().map(|p| p.code.len()).max().unwrap_or(0);
+            eprintln!(
+                "ferrooxide: elaborated in {:.3}s; {} signals, {} processes, {} shared subroutines, {ninstr} instructions (largest process {big}), memory {} words",
+                (Instant::now() - t1).as_secs_f64(),
+                prog.signals.len(),
+                prog.procs.len(),
+                prog.units.len(),
+                prog.mem.len()
+            );
+        }
         return ExitCode::SUCCESS;
     }
     if lint {
@@ -262,12 +274,19 @@ fn main() -> ExitCode {
                 eprintln!("  {k:4}: {ins:?}");
             }
         }
+        for (i, u) in prog.units.iter().enumerate() {
+            eprintln!("unit {i} {} (frame {:?})", u.name, u.frame);
+            for (k, ins) in u.code.iter().enumerate() {
+                eprintln!("  {k:4}: {ins:?}");
+            }
+        }
     }
     let t2 = Instant::now();
     prog.no_fuse = !fuse;
     let nsig = prog.signals.len();
     if stats {
-        eprintln!("ferrooxide: memory {} words", prog.mem.len());
+        let ninstr: usize = prog.procs.iter().map(|p| p.code.len()).sum::<usize>() + prog.units.iter().map(|u| u.code.len()).sum::<usize>();
+        eprintln!("ferrooxide: memory {} words, {ninstr} instructions", prog.mem.len());
     }
     let nproc = prog.procs.len();
     let precision = prog.precision;

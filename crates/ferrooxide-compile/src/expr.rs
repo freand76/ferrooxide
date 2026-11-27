@@ -41,7 +41,7 @@ pub(crate) enum Base {
 }
 
 /// Calls nested this deep (inlined) go through a subroutine of the process instead.
-const SUB_DEPTH: u32 = 4;
+pub(crate) const SUB_DEPTH: u32 = 4;
 
 impl<'a> Compiler<'a> {
     pub(crate) fn resolve_base(&mut self, e: &Expr, sid: usize) -> R<Option<Base>> {
@@ -1997,11 +1997,15 @@ impl<'a> Compiler<'a> {
         // `static` variables of an automatic subroutine: one for all its instances
         // (IEEE 1800-2017 6.21), outside the instance's memory
         let shared = |d: &Decl| d.static_ && d.dir.is_none() && f.automatic && !key.1.ends_with("$const");
+        let start = self.prog.mem.len() as u32;
         let mut no_ports = Vec::new();
         for d in f.decls.iter().filter(|d| shared(d)) {
             self.func_decl(f, d, fs, &path, &key, &mut no_ports)?;
         }
         let mem_lo = self.prog.mem.len() as u32;
+        if mem_lo > start {
+            self.subr.static_mem.push((start, mem_lo));
+        }
         let sig_lo = self.prog.signals.len() as u32;
         // a method: `this`, the object's handle
         let this = match self.classes.of_scope.get(&def_scope) {
@@ -2069,6 +2073,9 @@ impl<'a> Compiler<'a> {
             self.scopes[def_scope].children.entry(f.name.clone()).or_insert(fs);
         }
         let mem = (mem_lo, self.prog.mem.len() as u32);
+        if !f.automatic && mem.1 > mem.0 {
+            self.subr.static_mem.push(mem);
+        }
         // an automatic subroutine's variables (per call site) are private to the process
         if f.automatic {
             self.note_frame(mem.0, mem.1);
@@ -2208,6 +2215,11 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        // a method, a recursive or deeply nested call of a function that cannot wait: through
+        // its shared subroutine
+        if let Some(r) = self.unit_call(f, fs_def, this, args, &dflt, sid)? {
+            return Ok(r);
+        }
         // a call of a function that is being inlined: recursion, through a subroutine
         // a constant function call (elaboration): every call starts afresh, also for a static
         // function, and leaves its run-time variables alone
@@ -2224,7 +2236,7 @@ impl<'a> Compiler<'a> {
                 Some(r) if fresh => r.key.clone(),
                 _ => k,
             };
-            return self.sub_call(f, k, this, args, &dflt, sid, fresh, want_array);
+            return self.sub_call(f, k, this, args, &dflt, sid, fresh, want_array, None);
         }
         // calls nested deeper than SUB_DEPTH: a subroutine of the process (one copy of the
         // body instead of one per call path)
@@ -2244,7 +2256,7 @@ impl<'a> Compiler<'a> {
                     (fs_def, f.name.clone())
                 }
             };
-            return self.sub_call(f, key, this, args, &dflt, sid, fresh, want_array);
+            return self.sub_call(f, key, this, args, &dflt, sid, fresh, want_array, None);
         }
         let kname = if f.automatic {
             self.subr.auto_count += 1;
@@ -2495,7 +2507,7 @@ impl<'a> Compiler<'a> {
     /// one called in a constant expression), applied on each call.
     /// The initializers of a call's automatic variables (`fresh`: all, the subroutine is
     /// automatic; else those declared `automatic` in a static one).
-    fn auto_inits(&mut self, f: &'a SubroutineDecl, fscope: usize, fresh: bool) -> R<()> {
+    pub(crate) fn auto_inits(&mut self, f: &'a SubroutineDecl, fscope: usize, fresh: bool) -> R<()> {
         for d in f.decls.iter().filter(|d| d.dir.is_none() && (fresh || d.automatic)) {
             // (a `static` variable of an automatic subroutine: initialized once, `func_decl`)
             let def = self.scopes[fscope].parent.unwrap_or(fscope);
@@ -2509,10 +2521,33 @@ impl<'a> Compiler<'a> {
                     let r = self.stmt(&st, fscope);
                     self.code.init_write = false;
                     r?;
+                } else if let Some(Sym::Sig(s)) = self.scopes[fscope].syms.get(&n.name).cloned() {
+                    self.reset_auto(s);
                 }
             }
         }
         Ok(())
+    }
+
+    /// An automatic variable without an initializer starts each call at its default value
+    /// (IEEE 1800-2017 6.21): the words it has before time 0, copied back.
+    pub(crate) fn reset_auto(&mut self, s: u32) {
+        let i = self.sig(s);
+        if i.event || i.alias_of.is_some() {
+            return;
+        }
+        let (slot, n) = (i.slot, 2 * rt::nw(i.width) as u32 * i.depth.max(1));
+        let image = self.prog.mem[slot as usize..(slot + n) as usize].to_vec();
+        let src = match self.subr.default_images.get(&image) {
+            Some(&k) => k,
+            None => {
+                let k = self.prog.mem.len() as u32;
+                self.prog.mem.extend_from_slice(&image);
+                self.subr.default_images.insert(image, k);
+                k
+            }
+        };
+        self.emit(Instr::Reset { d: slot, s: src, n });
     }
 
     /// A call through a subroutine of the process (a recursive or deeply nested one): save the
@@ -2537,7 +2572,8 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn sub_call(
+    /// `unit`: a call of that shared subroutine (`unit.rs`) instead.
+    pub(crate) fn sub_call(
         &mut self,
         f: &'a SubroutineDecl,
         key: (usize, String),
@@ -2547,6 +2583,7 @@ impl<'a> Compiler<'a> {
         sid: usize,
         whole: bool,
         want_array: bool,
+        unit: Option<u32>,
     ) -> R<(Option<u32>, u32, bool)> {
         let (fscope, ret, ports, this_sig) = {
             let fi = &self.subr.func_inst[&key];
@@ -2608,17 +2645,21 @@ impl<'a> Compiler<'a> {
         // recursion from another process (a fork branch inside the function) would need frames
         // shared between processes
         // (a static function's variables are shared by all processes anyway)
-        if whole && self.subr.subs.iter().any(|r| r.key == key && r.level != level) {
+        if unit.is_none() && whole && self.subr.subs.iter().any(|r| r.key == key && r.level != level) {
             return self.err(format!("recursive call of '{}' from a fork branch is not supported", f.name));
         }
         let si = match self.subr.subs.iter().position(|r| r.level == level && r.key == key) {
+            _ if unit.is_some() => usize::MAX,
             Some(i) => i,
             None => {
                 self.subr.subs.push(SubReq { level, f, key: key.clone(), whole, calls: Vec::new(), saves: Vec::new(), entry: None, alloc: (0, 0) });
                 self.subr.subs.len() - 1
             }
         };
-        let save = self.emit(Instr::SaveFrame { ranges: Box::new([]) });
+        let save = match unit {
+            Some(u) => self.emit(Instr::SaveUnit { unit: u }),
+            None => self.emit(Instr::SaveFrame { ranges: Box::new([]) }),
+        };
         // array inputs, copied element by element (their sources read the caller's frame)
         for (i, a) in args.iter().enumerate() {
             let ps = ports[i].1;
@@ -2643,9 +2684,13 @@ impl<'a> Compiler<'a> {
             }
         }
         let dsts: Vec<u32> = outs.iter().map(|&(_, w)| self.tmp(w)).collect();
-        let call = self.emit(Instr::CallSub { entry: 0, dsts: dsts.clone().into_boxed_slice() });
-        self.subr.subs[si].saves.push(save);
-        self.subr.subs[si].calls.push(call);
+        if let Some(u) = unit {
+            self.emit(Instr::CallUnit { unit: u, dsts: dsts.clone().into_boxed_slice() });
+        } else {
+            let call = self.emit(Instr::CallSub { entry: 0, dsts: dsts.clone().into_boxed_slice() });
+            self.subr.subs[si].saves.push(save);
+            self.subr.subs[si].calls.push(call);
+        }
         // outputs to the caller's arguments
         let mut k = if ret.is_some() { 1 } else { 0 };
         for (i, a) in args.iter().enumerate() {

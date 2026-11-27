@@ -64,6 +64,8 @@ struct ProcRt {
 struct Code {
     ops: Vec<Vec<Op>>,
     orig: Vec<Vec<Instr>>,
+    /// the code of the shared subroutines (`Program::units`)
+    units: Vec<Vec<Instr>>,
 }
 
 /// A resolved store destination inside a signal.
@@ -203,6 +205,10 @@ pub struct Sim {
     force_mask: HashMap<u32, Vec<u64>>,
     /// recursion: per process, the saved frames of active subroutine calls
     frames: HashMap<u32, Vec<Frame>>,
+    /// per shared subroutine: its calls in progress (all of the running process: a unit
+    /// cannot wait), and the frames `SaveUnit` saved, innermost last (None: not active)
+    unit_active: Vec<u32>,
+    unit_saves: Vec<Option<Vec<u64>>>,
     /// pending inertial (continuous-assignment delay) updates: target -> current generation
     /// and the pending value
     inertial: HashMap<(u32, u32), (u32, Box<[u64]>)>,
@@ -502,6 +508,7 @@ impl Sim {
         let code = Rc::new(Code {
             ops: prog.procs.iter().map(|p| fast::lower(&p.code, &prog.signals, &elem_sig)).collect(),
             orig: prog.procs.iter().map(|p| p.code.clone()).collect(),
+            units: prog.units.iter().map(|u| u.code.clone()).collect(),
         });
         let mut sim = Sim {
             code,
@@ -514,6 +521,8 @@ impl Sim {
             inertial: HashMap::new(),
             inertial_seq: 0,
             frames: HashMap::new(),
+            unit_active: vec![0; prog.units.len()],
+            unit_saves: Vec::new(),
             dump_pending: false,
             force_bypass: false,
             keep_override: None,
@@ -2738,6 +2747,82 @@ impl Sim {
         }
     }
 
+    /// A call of shared subroutine `u` begins: a recursive one saves the unit's frame.
+    /// Returns true if the recursion is too deep (the simulation stops).
+    fn save_unit(&mut self, u: u32) -> bool {
+        let active = self.unit_active[u as usize];
+        let saved = if active > 0 {
+            let depth = self.unit_saves.len();
+            let frame = &self.prog.units[u as usize].frame;
+            let words: usize = frame.iter().map(|r| r.1 as usize).sum();
+            if depth >= 100_000 || (active as usize + 1) * words > 64 << 20 {
+                let _ = writeln!(self.out, "ERROR: recursion too deep ({depth} calls) in {}", self.prog.units[u as usize].name);
+                self.finished = true;
+                self.flush();
+                self.unit_saves.clear();
+                self.unit_active.fill(0);
+                return true;
+            }
+            let mut v = Vec::with_capacity(words);
+            for &(lo, n) in frame {
+                v.extend_from_slice(&self.mem[lo as usize..(lo + n) as usize]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+        self.unit_saves.push(saved);
+        self.unit_active[u as usize] = active + 1;
+        false
+    }
+
+    /// Run shared subroutine `u` for process `p` to its end, the units it calls included;
+    /// its results go to `dsts`. Returns true if the process must stop (`$finish`, a kill).
+    #[inline(never)]
+    fn call_unit(&mut self, p: u32, u: u32, dsts: &[u32]) -> bool {
+        // SAFETY: as in `exec_body`, the code outlives the call and is never modified
+        let code: &Code = unsafe { &*Rc::as_ptr(&self.code) };
+        // the callers: (unit, pc to return to, their destinations)
+        let mut stack: Vec<(u32, usize, &[u32])> = Vec::new();
+        let (mut cur, mut pc, mut ds) = (u, 0usize, dsts);
+        loop {
+            let ins = &code.units[cur as usize][pc];
+            pc += 1;
+            match ins {
+                Instr::CallUnit { unit, dsts } => {
+                    stack.push((cur, pc, ds));
+                    (cur, pc, ds) = (*unit, 0, &dsts[..]);
+                }
+                Instr::RetUnit { srcs } => {
+                    let vals: Vec<Vec<u64>> = srcs.iter().map(|&(s, n)| self.mem[s as usize..(s + n) as usize].to_vec()).collect();
+                    if let Some(Some(v)) = self.unit_saves.pop() {
+                        let mut k = 0;
+                        for &(lo, n) in &self.prog.units[cur as usize].frame {
+                            self.mem[lo as usize..(lo + n) as usize].copy_from_slice(&v[k..k + n as usize]);
+                            k += n as usize;
+                        }
+                    }
+                    self.unit_active[cur as usize] -= 1;
+                    for (d, v) in ds.iter().zip(&vals) {
+                        self.mem[*d as usize..*d as usize + v.len()].copy_from_slice(v);
+                    }
+                    match stack.pop() {
+                        Some(c) => (cur, pc, ds) = c,
+                        None => return false,
+                    }
+                }
+                _ => {
+                    if self.exec_gen(p, ins, &mut pc) {
+                        // (stopped inside: the calls are abandoned)
+                        self.unit_saves.clear();
+                        self.unit_active.fill(0);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     /// Execute one instruction through the generic path. `pc` already points past it.
     /// Returns true if the process suspended.
     #[inline(never)]
@@ -2774,6 +2859,17 @@ impl Sim {
         if let Instr::Ev { op, d, a } = ins {
             self.exec_ev(p, *op, *d, *a);
             return false;
+        }
+        match ins {
+            Instr::SaveUnit { unit } => return self.save_unit(*unit),
+            Instr::Reset { d, s, n } => {
+                self.mem.copy_within(*s as usize..(*s + *n) as usize, *d as usize);
+                return false;
+            }
+            Instr::CallUnit { unit, dsts } => return self.call_unit(p, *unit, dsts),
+            // (only inside `call_unit`)
+            Instr::RetUnit { .. } => return false,
+            _ => {}
         }
         if let Instr::Assert(op) = ins {
             return self.exec_assert(p, *op, *pc);
@@ -3191,7 +3287,17 @@ impl Sim {
                 | Instr::RToTicks { .. } => {
                     ops::exec_real(ins, m);
                 }
-                Instr::Str { .. } | Instr::Heap { .. } | Instr::Assoc { .. } | Instr::Obj { .. } | Instr::Ev { .. } | Instr::Assert(_) | Instr::Proc { .. } => unreachable!("handled before"),
+                Instr::Str { .. }
+                | Instr::Heap { .. }
+                | Instr::Assoc { .. }
+                | Instr::Obj { .. }
+                | Instr::Ev { .. }
+                | Instr::Assert(_)
+                | Instr::Proc { .. }
+                | Instr::SaveUnit { .. }
+                | Instr::Reset { .. }
+                | Instr::CallUnit { .. }
+                | Instr::RetUnit { .. } => unreachable!("handled before"),
                 Instr::Sys(task) => {
                     if self.systask(p, task, *pc) {
                         return true;
@@ -5322,6 +5428,7 @@ pub fn eval_const(code: &[Instr], mem: &mut [u64], sigs: &[SignalInfo]) -> Resul
                 pc = f.ret as usize;
             }
             Instr::Halt => break,
+            Instr::Reset { d, s, n } => m.copy_within(*s as usize..(*s + *n) as usize, *d as usize),
             Instr::Store { t, s, mode: StoreMode::Blocking } => {
                 let s = *s as usize;
                 match *t {
@@ -5426,7 +5533,8 @@ pub(crate) fn comb_graph(prog: &Program) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>)
         for ins in &p.code {
             match ins {
                 Instr::Wait { .. } => waits += 1,
-                Instr::Delay { .. } | Instr::Halt | Instr::Proc { .. } | Instr::Ev { .. } | Instr::WaitFork => ok = false,
+                // (a shared subroutine's stores are not seen here)
+                Instr::Delay { .. } | Instr::Halt | Instr::Proc { .. } | Instr::Ev { .. } | Instr::WaitFork | Instr::CallUnit { .. } => ok = false,
                 Instr::Sys(t) if matches!(**t, SysTask::Finish { .. } | SysTask::Monitor { .. } | SysTask::Strobe { .. }) => {
                     ok = false
                 }

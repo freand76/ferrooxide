@@ -18,6 +18,7 @@ mod random;
 mod stmt;
 mod strings;
 mod types;
+mod unit;
 mod vif;
 
 pub use konst::Const;
@@ -131,6 +132,10 @@ pub(crate) struct PState {
     pub rets: Vec<(Option<u32>, Vec<usize>)>,
     /// private memory of a fork branch (`ProcDef::frame`)
     pub frame: Vec<(u32, u32)>,
+    /// the code of a shared subroutine (`unit.rs`): temporaries in memory of its own
+    pub unit: bool,
+    /// the shared subroutine's code waits or forks: it cannot be one
+    pub bad: bool,
 }
 
 pub(crate) struct FuncInst {
@@ -325,6 +330,18 @@ pub(crate) struct Subr<'a> {
     pub(crate) func_reads_seen: std::cell::RefCell<Vec<(usize, String)>>,
     /// the result variable of the last call (an unpacked array result is read from it)
     pub(crate) last_ret: Option<u32>,
+    /// shared subroutines (`unit.rs`) by function instance key
+    pub(crate) units: HashMap<(usize, String), u32>,
+    /// per function: whether its body can be a shared subroutine
+    pub(crate) unit_ok: HashMap<*const SubroutineDecl, bool>,
+    /// no shared subroutines are made (compiling code that is dropped again)
+    pub(crate) no_units: bool,
+    /// memory of static variables (lo, hi): of subroutine instances and blocks, and the
+    /// whole of each shared subroutine; not in the frame of a shared subroutine whose
+    /// compilation made them
+    pub(crate) static_mem: Vec<(u32, u32)>,
+    /// default values of automatic variables (memory images) -> their slot
+    pub(crate) default_images: HashMap<Vec<u64>, u32>,
     /// a call whose unpacked array result is used as an array
     pub(crate) want_array: bool,
 }
@@ -688,7 +705,7 @@ impl<'a> Compiler<'a> {
     /// A temporary that is dead at every suspension point. Process temporaries share one
     /// scratch region (only one process runs at a time), which keeps them hot in the cache.
     pub(crate) fn tmp(&mut self, w: u32) -> u32 {
-        let in_proc = self.code.pb.last().map(|p| p.proc != NONE).unwrap_or(false);
+        let in_proc = self.code.pb.last().map(|p| p.proc != NONE && !p.unit).unwrap_or(false);
         let n = rt::words(w);
         if in_proc && self.code.scratch_top + n <= SCRATCH_WORDS {
             let s = self.code.scratch_top;
@@ -708,7 +725,7 @@ impl<'a> Compiler<'a> {
     /// Memory [lo, hi) belongs to the fork branch being compiled (if one is).
     pub(crate) fn note_frame(&mut self, lo: u32, hi: u32) {
         if let Some(pb) = self.code.pb.last_mut() {
-            if pb.proc != NONE && self.prog.procs[pb.proc as usize].class == rt::ProcClass::Spawned && hi > lo {
+            if !pb.unit && pb.proc != NONE && self.prog.procs[pb.proc as usize].class == rt::ProcClass::Spawned && hi > lo {
                 pb.frame.push((lo, hi - lo));
             }
         }
