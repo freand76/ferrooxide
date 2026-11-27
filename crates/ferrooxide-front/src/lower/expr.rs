@@ -673,11 +673,19 @@ impl Lower {
 
     /// Selects and members after a variable whose type has members.
     fn members(&mut self, mut e: Expr, ops: &[Op]) -> Result<Expr> {
-        for (k, op) in ops.iter().enumerate() {
-            e = match op {
-                Op::Member(m, _) => ExprKind::Member(Box::new(e), m.to_string()).into(),
+        let mut k = 0;
+        while k < ops.len() {
+            e = match (&ops[k], ops.get(k + 1)) {
+                // a method of a member (`s.name.len()`, `s.q.size()`, `s.obj.f()`)
+                (Op::Member(m, _), Some(Op::Call(a, _))) => {
+                    let args = self.call_args(a)?;
+                    k += 1;
+                    ExprKind::MethodCall(Box::new(e), m.to_string(), args).into()
+                }
+                (Op::Member(m, _), _) => ExprKind::Member(Box::new(e), m.to_string()).into(),
                 _ => self.selects(e, &ops[k..k + 1])?,
             };
+            k += 1;
         }
         Ok(e)
     }

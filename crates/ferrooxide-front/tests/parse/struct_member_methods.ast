@@ -1,0 +1,29 @@
+module top ();
+  // imports $unit
+  class C;
+    int(32) signed v = 7;
+    function automatic integer signed get;
+      return this.v;
+    endfunction
+  endclass
+  reg type(reg unpacked struct { string name; class obj; }) [127:0] row;
+  reg type(reg unpacked struct { string name; class obj; }) [127:0] rows[0:(2 - 1)];
+  int(32) signed errors = 0;
+  initial begin
+    row.name = "abcd";
+    row.obj = new();
+    rows[1].name = "xy";
+    if ((row.name.len() != 4))
+      errors = (errors + 1);
+    if ((row.obj.get() != 7))
+      errors = (errors + 1);
+    if ((row.name.substr(1, 2) != "bc"))
+      errors = (errors + 1);
+    if ((rows[1].name.len() != 2))
+      errors = (errors + 1);
+    if ((errors == 0))
+      $display("PASSED");
+    else
+      $display("FAILED: %0d", errors);
+  end
+endmodule
