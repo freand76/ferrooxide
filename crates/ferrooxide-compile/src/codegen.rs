@@ -139,6 +139,14 @@ impl<'a> Compiler<'a> {
         r
     }
 
+    /// Close the innermost code buffer; subroutine calls it left incomplete (an error that
+    /// was caught) go with it.
+    pub(crate) fn pop_pb(&mut self) -> PState {
+        let level = self.code.pb.len();
+        self.subr.subs.retain(|r| r.level != level);
+        self.code.pb.pop().unwrap()
+    }
+
     pub(crate) fn begin_proc(&mut self, name: String, class: ProcClass) -> u32 {
         let id = self.prog.procs.len() as u32;
         self.code.proc_scope.push(self.code.job_scope);
@@ -158,7 +166,7 @@ impl<'a> Compiler<'a> {
         // nested processes ($monitor/$strobe bodies) restart at 0: the enclosing process's
         // temporaries are dead whenever the nested one runs (it runs in the postponed region)
         self.code.scratch_top = self.code.scratch_saved.pop().unwrap().max(self.code.scratch_top);
-        let st = self.code.pb.pop().unwrap();
+        let st = self.pop_pb();
         self.prog.procs[st.proc as usize].code = st.code;
         if !st.frame.is_empty() {
             self.prog.procs[st.proc as usize].frame = merge_ranges(st.frame);
@@ -698,7 +706,26 @@ impl<'a> Compiler<'a> {
                     self.nets.redirect.insert(s, d);
                 }
             }
+            if self.code.init_open && !matches!(job, Job::Init { .. }) {
+                self.close_init();
+            }
             self.codegen_job(job)?;
+        }
+        if self.code.init_open {
+            self.close_init();
+        }
+        // the static initializers of the default specializations in use (they start with
+        // the other initializers, before the processes)
+        loop {
+            let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.code.lazy_inits).into_iter().partition(|(c, _)| self.class_used(*c));
+            self.code.lazy_inits = later;
+            if now.is_empty() {
+                break;
+            }
+            for (_, job) in &now {
+                self.codegen_job(job)?;
+            }
+            self.close_init();
         }
         self.nets.redirect.clear();
         for &(s, scope, line) in &whole {
@@ -811,6 +838,29 @@ impl<'a> Compiler<'a> {
         self.end_proc();
     }
 
+    /// An initializer job; one of a static property of a parameterized class waits until
+    /// that class turns out to be used (`Code::lazy_inits`, `class_used`).
+    pub(crate) fn push_init(&mut self, job: Job<'a>) {
+        let sid = match &job {
+            Job::Init { scope, .. } => *scope,
+            _ => unreachable!(),
+        };
+        if let Some(&c) = self.classes.of_scope.get(&sid) {
+            if !self.classes.list[c as usize].decl.params.is_empty() {
+                self.code.lazy_inits.push((c, job));
+                return;
+            }
+        }
+        self.code.jobs.push(job);
+    }
+
+    /// End the process of the static variable initializers compiled last.
+    fn close_init(&mut self) {
+        self.emit(Instr::Halt);
+        self.end_proc();
+        self.code.init_open = false;
+    }
+
     pub(crate) fn codegen_job(&mut self, job: &Job<'a>) -> R<()> {
         // (only initial / always blocks start in scope order; continuous assignments and
         // port connections keep theirs)
@@ -884,15 +934,18 @@ impl<'a> Compiler<'a> {
                 Job::Init { lhs, rhs, scope, line } => {
                     self.line = *line;
                     self.file = self.scopes[*scope].file.clone();
-                    let name = self.scopes[*scope].name.clone();
-                    self.begin_proc(name, ProcClass::Normal);
+                    // (initializers that follow each other share a process: they cannot wait,
+                    // and the subroutines they call are compiled once for all of them)
+                    if !self.code.init_open {
+                        let name = self.scopes[*scope].name.clone();
+                        self.begin_proc(name, ProcClass::Normal);
+                        self.code.init_open = true;
+                    }
                     let st = Stmt::Assign { lhs: lhs.clone(), rhs: rhs.clone(), nonblocking: false, timing: None, line: *line };
                     self.code.init_write = true;
                     let r = self.stmt(&st, *scope);
                     self.code.init_write = false;
                     r?;
-                    self.emit(Instr::Halt);
-                    self.end_proc();
                 }
                 Job::Assign { lhs, rhs, delay, scope, line } => {
                     self.line = *line;

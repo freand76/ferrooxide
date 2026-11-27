@@ -76,6 +76,13 @@ pub(crate) struct Classes<'a> {
     /// specializations whose declaration waits until no class is being declared: (class,
     /// declaration, declaring scope, name, scope with the parameters)
     pub pending_bodies: Vec<(u32, &'a ClassDecl, usize, String, usize)>,
+    /// parameterized classes as declared that are named outside themselves, or whose
+    /// parameter values a specialization gives: the default specializations in use
+    pub used: std::cell::RefCell<HashSet<u32>>,
+    /// `find_class` does not count as a use (the class of a specialization being made)
+    pub quiet: std::cell::Cell<bool>,
+    /// specializations named in the bodies of parameterized classes: those classes
+    pub owners: HashMap<u32, Vec<u32>>,
 }
 
 /// The scope of a class that is reserved but not yet declared (`ClassInfo::scope`).
@@ -434,7 +441,10 @@ impl<'a> Compiler<'a> {
     /// `C #(args)` used in scope `sid` as class `name` (`Item::ClassSpec`): the class with
     /// these parameter values, declared where C is (once for equal values).
     pub(crate) fn class_spec(&mut self, name: &str, class: &str, args: &'a [Conn], sid: usize) -> R<()> {
-        let Some(g) = self.find_class(class, sid) else { return self.err(format!("unknown class '{class}'")) };
+        self.classes.quiet.set(true);
+        let g = self.find_class(class, sid);
+        self.classes.quiet.set(false);
+        let Some(g) = g else { return self.err(format!("unknown class '{class}'")) };
         let (decl, dscope) = (self.classes.list[g as usize].decl, self.classes.decl_scope[&g]);
         if decl.params.is_empty() {
             return self.err(format!("class '{class}' has no parameters"));
@@ -477,6 +487,15 @@ impl<'a> Compiler<'a> {
                 id
             }
         };
+        // a use of the specialization, unless it is named in the body of a parameterized
+        // class: then it is used if that class is
+        match self.class_of_scope(sid) {
+            Some(x) if x == id => {}
+            Some(x) if !self.classes.list[x as usize].decl.params.is_empty() => self.classes.owners.entry(id).or_default().push(x),
+            _ => {
+                self.classes.used.borrow_mut().insert(id);
+            }
+        }
         self.classes.by_name.insert((sid, name.to_string()), id);
         let cs = self.classes.list[id as usize].scope;
         if cs == UNDECLARED {
@@ -633,7 +652,41 @@ impl<'a> Compiler<'a> {
     }
 
     /// The class named `name` visible from scope `sid`.
-    pub(crate) fn find_class(&self, name: &str, mut sid: usize) -> Option<u32> {
+    /// Parameterized class `c` (as declared or a specialization) is used (`Classes::used`).
+    pub(crate) fn class_used(&self, c: u32) -> bool {
+        let mut seen = vec![c];
+        let mut todo = vec![c];
+        while let Some(x) = todo.pop() {
+            if self.classes.used.borrow().contains(&x) {
+                return true;
+            }
+            for &o in self.classes.owners.get(&x).into_iter().flatten() {
+                // (a class that is not parameterized is used)
+                if self.classes.list[o as usize].decl.params.is_empty() {
+                    return true;
+                }
+                if !seen.contains(&o) {
+                    seen.push(o);
+                    todo.push(o);
+                }
+            }
+        }
+        false
+    }
+
+    pub(crate) fn find_class(&self, name: &str, sid: usize) -> Option<u32> {
+        let c = self.find_class_here(name, sid)?;
+        // (a use of a parameterized class as declared: outside its own body)
+        if !self.classes.quiet.get() {
+            let ci = &self.classes.list[c as usize];
+            if !ci.decl.params.is_empty() && ci.name == ci.decl.name && self.class_of_scope(sid) != Some(c) {
+                self.classes.used.borrow_mut().insert(c);
+            }
+        }
+        Some(c)
+    }
+
+    fn find_class_here(&self, name: &str, mut sid: usize) -> Option<u32> {
         // (a class itself, `pval`)
         if let Some(id) = name.strip_prefix("$class#") {
             return id.parse().ok();
@@ -763,8 +816,8 @@ impl<'a> Compiler<'a> {
 
     /// A parameter or enum constant `name` of class `c` (or of a base class).
     pub(crate) fn class_const(&self, c: u32, name: &str) -> Option<Sym> {
-        let s = self.classes.list[c as usize].scope;
-        match self.scopes[s].syms.get(name) {
+        let s = self.class_scope(c);
+        match self.scopes.get(s)?.syms.get(name) {
             Some(x @ (Sym::Const(_) | Sym::Real(_))) => Some(x.clone()),
             _ => None,
         }
@@ -791,6 +844,14 @@ impl<'a> Compiler<'a> {
         let Some(mut c) = cn.and_then(|n| self.find_class(&n, sid)) else {
             return self.err(format!("'{class}::{name}': '{class}' is not a class here"));
         };
+        // `C::f` of a static function without arguments: a call (IEEE 1800-2017 13.4.5)
+        if self.class_const(c, name).is_none() && !self.classes.list[c as usize].props.iter().any(|p| p.name == *name) {
+            if let Some((_, owner)) = self.find_method(c, name) {
+                if self.classes.list[owner as usize].decl.statics.iter().any(|s| s == name) {
+                    return Ok(Some((ExprKind::StaticCall(class.clone(), name.clone(), vec![]).into(), sid)));
+                }
+            }
+        }
         loop {
             let ci = &self.classes.list[c as usize];
             // (a static property of a parameterized class: in the class's scope)
@@ -1017,12 +1078,20 @@ impl<'a> Compiler<'a> {
                             if let Some((w, s)) = Self::str_method_width(m) {
                                 return Ok(Some(Type::vec(w, s)));
                             }
+                            if crate::types::STR_METHODS.contains(&m.as_str()) {
+                                return Ok(Some(Type::Str));
+                            }
                         }
                         _ => {}
                     }
                     return self.err(format!("'.{m}()' of a value that is not an object"));
                 };
                 let Some((f, owner)) = self.find_method(c, m) else {
+                    match m.as_str() {
+                        "get_randstate" => return Ok(Some(Type::Str)),
+                        "srandom" | "set_randstate" => return self.err(format!("'{m}' gives no value")),
+                        _ => {}
+                    }
                     return self.err(format!("class '{}' has no method '{m}'", self.classes.list[c as usize].name));
                 };
                 if f.is_task || f.ret_kind() == NetKind::Int(0) {
@@ -1159,6 +1228,13 @@ impl<'a> Compiler<'a> {
 
     /// The class named `name` (of `C::new`).
     fn named_class(&self, name: &str, sid: usize) -> R<u32> {
+        // inside a class (or a specialization of it), its own name is that class: the
+        // current specialization (`C::m()` in a method of `C#(byte)`)
+        if !name.contains(['#', ':']) {
+            if let Some(c) = self.class_of_scope(sid).filter(|&c| self.classes.list[c as usize].decl.name == name) {
+                return Ok(c);
+            }
+        }
         match self.find_class(name, sid) {
             Some(c) => Ok(c),
             None => self.err(format!("unknown class '{name}'")),
@@ -1343,6 +1419,39 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The random number generator methods every class has (IEEE 1800-2017 18.13.3-5):
+    /// `obj.srandom(seed)`, `obj.get_randstate()`, `obj.set_randstate(state)`. None for
+    /// another method.
+    fn rng_method(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<Option<(Option<u32>, u32, bool)>> {
+        let n = match m {
+            "srandom" | "set_randstate" => 1,
+            "get_randstate" => 0,
+            _ => return Ok(None),
+        };
+        let args = if let [Expr { kind: ExprKind::EmptyArg, .. }] = args { &[][..] } else { args };
+        if args.len() != n {
+            return self.err(format!("'{m}' takes {n} argument{}", if n == 1 { "" } else { "s" }));
+        }
+        let h = self.handle_value(obj, sid)?;
+        Ok(Some(match m {
+            "srandom" => {
+                let v = self.expr(&args[0], sid, 32, true)?;
+                self.emit(Instr::Obj { op: ObjOp::Srandom, d: NONE, a: h, b: v, off: 0, w: 0 });
+                (None, 0, false)
+            }
+            "set_randstate" => {
+                let v = self.str_expr(&args[0], sid)?;
+                self.emit(Instr::Obj { op: ObjOp::SetRandstate, d: NONE, a: h, b: v, off: 0, w: 0 });
+                (None, 0, false)
+            }
+            _ => {
+                let d = self.tmp(64);
+                self.emit(Instr::Obj { op: ObjOp::GetRandstate, d, a: h, b: NONE, off: 0, w: 0 });
+                (Some(d), 64, false)
+            }
+        }))
+    }
+
     /// `obj.m(args)`: (result slot, width, signed).
     pub(crate) fn method_call(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
         let is_super = matches!(&obj.kind, ExprKind::Ident(n) if n == "super");
@@ -1354,7 +1463,8 @@ impl<'a> Compiler<'a> {
             return Ok((None, 0, false));
         }
         let Some(c) = self.handle_class(obj, sid)? else {
-            if let Some((w, s)) = Self::str_method_width(m) {
+            let width = Self::str_method_width(m).or(crate::types::STR_METHODS.contains(&m).then_some((64, false)));
+            if let Some((w, s)) = width {
                 if self.type_of(obj, sid)?.is_str() {
                     let d = self.str_method_call(obj, m, args, sid)?;
                     return Ok((Some(d), w, s));
@@ -1364,6 +1474,9 @@ impl<'a> Compiler<'a> {
         };
         self.ensure_declared(c)?;
         let Some((f, owner)) = self.find_method(c, m) else {
+            if let Some(r) = self.rng_method(obj, m, args, sid)? {
+                return Ok(r);
+            }
             return self.err(format!("class '{}' has no method '{m}'", self.classes.list[c as usize].name));
         };
         self.check_access(c, m, sid)?;
@@ -1450,6 +1563,21 @@ impl<'a> Compiler<'a> {
             Sym::Sig(s) if matches!(self.sig_type(s), Type::Class(_)) => Some((ExprKind::Hier(parts).into(), m.to_string())),
             _ => None,
         }
+    }
+
+    /// `hier_member` of the name a select starts with (`h.q[i]`, `h.v[3:0]`): the select of
+    /// the member. None if `e` is not one.
+    pub(crate) fn hier_select_member(&self, e: &Expr, sid: usize) -> Option<Expr> {
+        let b = |x: &Expr| Box::new(x.clone());
+        Some(match &e.kind {
+            ExprKind::Index(a, i) => ExprKind::Index(Box::new(self.hier_select_member(a, sid).or_else(|| self.hier_member(a, sid))?), b(i)),
+            ExprKind::Range(a, l, r) => ExprKind::Range(Box::new(self.hier_select_member(a, sid).or_else(|| self.hier_member(a, sid))?), b(l), b(r)),
+            ExprKind::IndexedRange(a, l, r, up) => {
+                ExprKind::IndexedRange(Box::new(self.hier_select_member(a, sid).or_else(|| self.hier_member(a, sid))?), b(l), b(r), *up)
+            }
+            _ => return None,
+        }
+        .into())
     }
 
     /// `inst.obj.p`, `inst.s.f.g` (a hierarchical name that resolves to nothing else) as
@@ -1611,16 +1739,28 @@ impl<'a> Compiler<'a> {
 
     /// `lhs = rhs` where lhs is a property (`obj.p`); false if it is not one.
     pub(crate) fn prop_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize) -> R<bool> {
+        self.prop_store(lhs, PropRhs::Expr(rhs), sid)
+    }
+
+    /// The value of `rhs` for a property of type `t`.
+    fn prop_rhs(&mut self, rhs: PropRhs, t: Type, layout: Option<&crate::types::Packed>, sid: usize) -> R<u32> {
+        match (rhs, t) {
+            (PropRhs::Expr(e), Type::Class(pc)) => self.handle_for(e, pc, sid),
+            (PropRhs::Expr(e), t) => self.value_for(e, sid, t.width(), t, layout),
+            (PropRhs::Slot(v, w), Type::Vec { w: tw, .. }) => Ok(self.resize(v, w, tw, false)),
+            (PropRhs::Slot(v, _), _) => Ok(v),
+        }
+    }
+
+    /// `lhs = rhs` where lhs is a property (`obj.p`); false if it is not one.
+    pub(crate) fn prop_store(&mut self, lhs: &Expr, rhs: PropRhs, sid: usize) -> R<bool> {
         // `inst.obj.p = v`
         if let Some(m) = self.hier_member(lhs, sid) {
-            return self.prop_assign(&m, rhs, sid);
+            return self.prop_store(&m, rhs, sid);
         }
         // an element of an array property
         if let Some((b, p, idx)) = self.prop_elem(lhs, sid)? {
-            let v = match p.ty {
-                Type::Class(pc) => self.handle_for(rhs, pc, sid)?,
-                t => self.value_for(rhs, sid, t.width(), t, None)?,
-            };
+            let v = self.prop_rhs(rhs, p.ty, None, sid)?;
             let h = self.handle_value(b, sid)?;
             let ix = self.prop_index(&p, &idx, sid)?;
             self.emit(Instr::Obj { op: ObjOp::SetAt(p.count()), d: ix, a: h, b: v, off: p.off, w: p.ty.width() });
@@ -1638,7 +1778,7 @@ impl<'a> Compiler<'a> {
                     crate::types::Leaf::Str => Type::Str,
                     crate::types::Leaf::Bits => Type::vec(w as u32, walk.ty.as_ref().is_some_and(|t| t.signed)),
                 };
-                let v = self.value_for(rhs, sid, w as u32, t, walk.ty.as_ref())?;
+                let v = self.prop_rhs(rhs, t, walk.ty.as_ref(), sid)?;
                 let h = self.handle_value(b, sid)?;
                 self.emit(Instr::Obj { op: ObjOp::Set, d: NONE, a: h, b: v, off: p.off + off as u32, w: w as u32 });
                 return Ok(true);
@@ -1648,10 +1788,7 @@ impl<'a> Compiler<'a> {
         let Some(c) = self.handle_class(b, sid)? else { return Ok(false) };
         self.check_access(c, m, sid)?;
         let p = self.scalar_prop(c, m)?;
-        let v = match p.ty {
-            Type::Class(pc) => self.handle_for(rhs, pc, sid)?,
-            t => self.value_for(rhs, sid, t.width(), t, p.layout.as_deref())?,
-        };
+        let v = self.prop_rhs(rhs, p.ty, p.layout.as_deref(), sid)?;
         let h = self.handle_value(b, sid)?;
         self.emit(Instr::Obj { op: ObjOp::Set, d: NONE, a: h, b: v, off: p.off, w: p.ty.width() });
         Ok(true)
@@ -1677,4 +1814,12 @@ impl<'a> Compiler<'a> {
             _ => false,
         })
     }
+}
+
+/// The value assigned to a property: an expression, or a computed value (slot, width) such
+/// as an output argument's.
+#[derive(Clone, Copy)]
+pub(crate) enum PropRhs<'e> {
+    Expr(&'e Expr),
+    Slot(u32, u32),
 }

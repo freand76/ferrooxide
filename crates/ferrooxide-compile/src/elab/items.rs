@@ -414,8 +414,8 @@ impl<'a> Compiler<'a> {
             String::new()
         } else {
             self.code.pb.push(PState { proc: NONE, ..Default::default() });
-            let fa = self.fmt_args(args, sid);
-            let st = self.code.pb.pop().unwrap();
+            let fa = self.fmt_args(args, sid).and_then(|x| self.finish_subs().map(|_| x));
+            let st = self.pop_pb();
             let fa = fa?;
             if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {
                 return self.err(m);

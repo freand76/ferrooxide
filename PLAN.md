@@ -113,10 +113,12 @@ machinery must not assume static targets only (A3).
    targets other than event properties (`vif.clk`), VPI callbacks and MCP conditional
    breakpoints. The gate for UVM. (Event properties wait through per-object waiter lists,
    `EvOp::Arm`.)
-5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`; after A3). Stops at
-   `uvm_pool.svh:65` ("calls nested too deeply"): the static initialization of the
-   package runs a call graph 33 calls deep, all inlined. Needs A3 (real calls) first.
-   Then fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
+5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`). The package compiles in about 2 s
+   (calls deeper than 4 go through subroutines, static initializers share a process).
+   Stops at `uvm_resource.svh:84`: `$typename` of a class (82 tests); the format the
+   standard gives (20.6.1) is still to be checked against its text. Next: virtual
+   interfaces (`this data type is not supported`, 51 tests). Fix the blockers one at a
+   time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
@@ -132,9 +134,13 @@ machinery must not assume static targets only (A3).
 11. **Multi-threading** (A5): last; pays off only on large designs.
 
 ## Architecture changes ahead
-- **A3. Real calls, dynamic waiters.** Process instances are done. Left: subroutines that are
-  called instead of inlined (methods through a handle, large functions), and a per-signal list
-  of dynamic waiters next to the static fan-out (a flag keeps the static path fast).
+- **A3. Real calls, dynamic waiters.** Process instances are done. Calls nested deeper than
+  `SUB_DEPTH` (4) are subroutines of the process (`CallSub`/`RetSub`, saved temporaries;
+  an automatic one also saves its variables). Left: subroutines shared between processes
+  (each process compiles its own copy), virtual calls through a table instead of a chain
+  of class compares per call site, array outputs and unpacked array results of such
+  calls, and a per-signal list of dynamic waiters next to the static fan-out (a flag
+  keeps the static path fast).
 - **A4. VPI** (cocotb): a handle tree from the hierarchy model, get/put value through the
   force-mask path, value-change callbacks as dynamic waiters, region hooks in the scheduler.
 - **A5. Multi-threading**: needs per-thread scratch (a base pointer in the JIT ABI),
@@ -203,9 +209,9 @@ SystemVerilog data and testbench:
 - `ref` arguments are copied in and out; calls where that differs from a reference are
   rejected (a task with ref arguments that can wait, a ref argument whose variable the
   subroutine also names) [sv-tests chapter-7/queues/persistence]. Needs A3.
-- `process`: `suspend`/`resume`; `process::self().kill();` as a statement. Objects have
-  no random generators of their own (`randomize()` draws from the process's, IEEE
-  1800-2017 18.14.3), and `obj.srandom()` is missing.
+- `process`: `suspend`/`resume`; `process::self().kill();` as a statement.
+- `$sscanf`/`$fscanf` into a `string` variable with a conversion other than `%s`/`%c`
+  (a run-time error).
 - unpacked array members of unpacked structs are laid out as packed arrays of their
   elements (`$size` & co. and `%p` see a packed array); real, string and unpacked-struct
   elements; member defaults; type keys in patterns of unpacked arrays.

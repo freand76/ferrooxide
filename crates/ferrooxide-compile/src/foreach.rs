@@ -126,7 +126,8 @@ impl<'a> Compiler<'a> {
         Ok(Stmt::Block { name: None, decls, imports: vec![], params: vec![], stmts: vec![lp], fork: None })
     }
 
-    /// The struct key type of the associative array property `e` (`obj.p`), if it has one.
+    /// The struct or class key type of the associative array property `e` (`obj.p`), if it
+    /// has one.
     fn struct_key(&mut self, e: &Expr, sid: usize) -> Option<Rc<SvType>> {
         let ExprKind::Member(b, m) = &e.kind else { return None };
         let mut c = self.handle_class(b, sid).ok()??;
@@ -135,7 +136,7 @@ impl<'a> Compiler<'a> {
             for d in &ci.decl.props {
                 if let Some(n) = d.names.iter().find(|n| n.name == *m) {
                     return match &n.heap {
-                        Some(HeapKind::Assoc(Some(k))) if k.has_struct() => Some(k.clone()),
+                        Some(HeapKind::Assoc(Some(k))) if k.has_struct() || k.class.is_some() => Some(k.clone()),
                         _ => None,
                     };
                 }

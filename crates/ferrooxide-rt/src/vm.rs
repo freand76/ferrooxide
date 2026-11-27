@@ -2610,6 +2610,7 @@ impl Sim {
             return false;
         }
         if let Instr::Obj { op, d, a, b, off, w } = ins {
+            self.cur_proc = p;
             self.exec_obj(*op, *d, *a, *b, *off, *w);
             return false;
         }
@@ -2863,10 +2864,18 @@ impl Sim {
                             self.mem[d] = v as u64;
                             self.mem[d + 1] = 0;
                         }
-                        SysFn::RandRange { lo, hi, w, signed } => {
+                        SysFn::RandRange { lo, hi, w, signed, obj } => {
                             let n = nw(*w);
+                            // (the object's generator, or the process's)
+                            let oi = (*obj != NONE && self.mem[*obj as usize + 1] == 0)
+                                .then(|| self.mem[*obj as usize] as usize)
+                                .filter(|&h| h != 0 && self.heap.get(h - 1).is_some_and(|o| o.is_some()))
+                                .map(|h| h - 1);
                             let r64 = |me: &mut Self| {
-                                let r = &mut me.rngs[p as usize];
+                                let r = match oi {
+                                    Some(i) => &mut me.heap[i].as_mut().unwrap().rng,
+                                    None => &mut me.rngs[p as usize],
+                                };
                                 ((urandom(r, 0, u32::MAX) as u64) << 32) | urandom(r, 0, u32::MAX) as u64
                             };
                             if *w > 64 {
@@ -3253,7 +3262,11 @@ impl Sim {
             let s = fmt::value_bytes(&self.mem, src.0 as usize, src.1);
             let mut pos = 0;
             let mut eof = false;
-            let r = scan(&mut self.mem, &s, &mut pos, &mut eof, fmt, outs, scope, &mut self.out, &format!("{loc}: $sscanf()"));
+            let mut strs = Vec::new();
+            let r = scan(&mut self.mem, &s, &mut pos, &mut eof, fmt, outs, &mut strs, scope, &mut self.out, &format!("{loc}: $sscanf()"));
+            for (d, t) in strs {
+                self.put_str(d, &t);
+            }
             return r;
         }
         let fd = rd(&self.mem, src.0);
@@ -3362,11 +3375,15 @@ impl Sim {
             FileRead::Scan { outs, .. } => {
                 let data = std::mem::take(data);
                 let (mut p, mut e) = (*pos, *eof);
-                let r = scan(&mut self.mem, &data, &mut p, &mut e, fmt, outs, scope, &mut self.out, &format!("{loc}: $fscanf()"));
+                let mut strs = Vec::new();
+                let r = scan(&mut self.mem, &data, &mut p, &mut e, fmt, outs, &mut strs, scope, &mut self.out, &format!("{loc}: $fscanf()"));
                 if let Some(FileH::R { data: d, pos, eof }) = self.files.get_mut(&fd) {
                     *d = data;
                     *pos = p;
                     *eof = e;
+                }
+                for (d, t) in strs {
+                    self.put_str(d, &t);
                 }
                 r
             }
@@ -3715,8 +3732,10 @@ impl Sim {
         };
         match op {
             ObjOp::New => {
+                // (seeded from the generator of the process that makes it, 18.14.1)
+                let rng = urandom(&mut self.rngs[self.cur_proc as usize], 0, u32::MAX) as i32;
                 let c = &self.prog.classes[w as usize];
-                let mut o = HObj { data: c.init.clone(), class: w, ..Default::default() };
+                let mut o = HObj { data: c.init.clone(), class: w, rng, ..Default::default() };
                 // (each event property refers to an event of its own)
                 for k in 0..c.events.len() {
                     let off = self.prog.classes[w as usize].events[k];
@@ -3727,11 +3746,32 @@ impl Sim {
                 self.mem[d] = h;
                 self.mem[d + 1] = 0;
             }
+            ObjOp::Srandom => {
+                let v = self.mem[b] as u32 as i32;
+                if let Some(i) = obj(self) {
+                    self.heap[i].as_mut().unwrap().rng = v;
+                }
+            }
+            ObjOp::GetRandstate => {
+                let s = obj(self).map(|i| format!("{}", self.heap[i].as_ref().unwrap().rng as u32)).unwrap_or_default();
+                self.put_str(d as u32, s.as_bytes());
+            }
+            ObjOp::SetRandstate => {
+                let s = self.str_at(b as u32);
+                match (obj(self), std::str::from_utf8(&s).ok().and_then(|t| t.trim().parse::<u32>().ok())) {
+                    (Some(i), Some(v)) => self.heap[i].as_mut().unwrap().rng = v as i32,
+                    (Some(_), None) => {
+                        let _ = writeln!(self.out, "WARNING: set_randstate: '{}' is not a state get_randstate gave", String::from_utf8_lossy(&s));
+                    }
+                    _ => {}
+                }
+            }
             ObjOp::Copy => {
                 let h = match obj(self) {
                     Some(i) => {
+                        let rng = urandom(&mut self.rngs[self.cur_proc as usize], 0, u32::MAX) as i32;
                         let o = self.heap[i].as_ref().unwrap();
-                        let o = HObj { data: o.data.clone(), class: o.class, ..Default::default() };
+                        let o = HObj { data: o.data.clone(), class: o.class, rng, ..Default::default() };
                         self.alloc_obj(o)
                     }
                     None => 0,
@@ -4513,6 +4553,20 @@ impl Sim {
                     }
                     ops::set_bits(&mut self.mem, d as usize, bit, 8.min(w - bit), ch as u64);
                 }
+            }
+            StrOp::Join => {
+                let hs: Vec<(u64, u64)> = self.harr(a).chunks(2).map(|c| (c[0], c[1])).collect();
+                // (the table of strings is made on first use)
+                self.intern(b"");
+                let mut v = Vec::new();
+                for (h, x) in hs {
+                    if x == 0 {
+                        if let Some(t) = self.strs.get(h as usize) {
+                            v.extend_from_slice(t);
+                        }
+                    }
+                }
+                self.put_str(d, &v);
             }
             StrOp::Concat => {
                 let mut v = self.str_at(a).to_vec();
@@ -5308,7 +5362,9 @@ enum FileH {
 /// `out`, `who`: where and as which call (`file:line: $fscanf()`) to warn about input that
 /// ends inside a %u / %z value.
 #[allow(clippy::too_many_arguments)]
-fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, outs: &[ScanOut], scope: &str, out: &mut dyn Write, who: &str) -> i32 {
+/// `strs`: the characters for the `string` variables among `outs` (slot, text).
+#[allow(clippy::too_many_arguments)]
+fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, outs: &[ScanOut], strs: &mut Vec<(u32, Vec<u8>)>, scope: &str, out: &mut dyn Write, who: &str) -> i32 {
     for o in outs {
         m[o.ok as usize] = 0;
         m[o.ok as usize + 1] = 0;
@@ -5474,6 +5530,17 @@ fn scan(m: &mut [u64], inp: &[u8], pos: &mut usize, eof: &mut bool, fmt: &str, o
         oi += 1;
         let text = String::from_utf8_lossy(tok).into_owned();
         let d = o.val as usize;
+        if o.str {
+            // (IEEE 1800-2017 21.3.4.3: %s and %c read characters into a string)
+            if !matches!(conv, b's' | b'c') {
+                let _ = writeln!(out, "ERROR: {who}: a %{} conversion into a string variable is not supported", conv as char);
+                break;
+            }
+            strs.push((o.val, tok.to_vec()));
+            m[o.ok as usize] = 1;
+            n += 1;
+            continue;
+        }
         match conv {
             b'c' => {
                 if o.real {
@@ -5848,6 +5915,8 @@ struct HObj {
     dflt: Option<Vec<u64>>,
     /// a class object: its class (`Program::classes`)
     class: u32,
+    /// a class object: the state of its random number generator (IEEE 1800-2017 18.14.1)
+    rng: i32,
 }
 
 /// An event object (`Instr::Ev`).

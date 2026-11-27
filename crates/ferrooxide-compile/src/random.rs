@@ -293,7 +293,10 @@ impl<'a> Compiler<'a> {
             let scope = self.class_scope(owner);
             self.call_resolved(f, scope, "pre_randomize", Some(h), &[], sid)?;
         }
-        self.solve(&rv, &items, Some(h), res, &at)?;
+        let outer = self.code.rand_obj.replace(h);
+        let r = self.solve(&rv, &items, Some(h), res, &at);
+        self.code.rand_obj = outer;
+        r?;
         if let Some((f, owner)) = self.find_method(d, "post_randomize") {
             let skip = self.emit(Instr::Jz { c: res, w: 32, to: 0 });
             let scope = self.class_scope(owner);
@@ -660,9 +663,9 @@ impl<'a> Compiler<'a> {
                     }
                     self.patch_all(skips);
                 }
-                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo, hi, w: v.w, signed: v.signed } });
+                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo, hi, w: v.w, signed: v.signed, obj: self.code.rand_obj.unwrap_or(NONE) } });
             } else {
-                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo: NONE, hi: NONE, w: v.w, signed: false } });
+                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo: NONE, hi: NONE, w: v.w, signed: false, obj: self.code.rand_obj.unwrap_or(NONE) } });
             }
             self.patch_all(vec![skip]);
             self.rvar_store(v, val, h)?;
@@ -719,7 +722,7 @@ impl<'a> Compiler<'a> {
         let n = set.len() as i64;
         let (lo, hi) = (self.const_slot(&Const::zero(64)), self.const_slot(&Const::from_i64(n - 1, 64, false)));
         let k = self.tmp(64);
-        self.emit(Instr::SysF { d: k, f: SysFn::RandRange { lo, hi, w: 64, signed: false } });
+        self.emit(Instr::SysF { d: k, f: SysFn::RandRange { lo, hi, w: 64, signed: false, obj: self.code.rand_obj.unwrap_or(NONE) } });
         for (j, (a, b)) in set.iter().enumerate() {
             let kj = self.const_slot(&Const::from_i64(j as i64, 64, false));
             let is = self.tmp(1);
@@ -752,7 +755,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Copy { d: lo, s: y, w: 64 });
                 self.emit(Instr::Copy { d: hi, s: x, w: 64 });
                 self.patch_all(vec![j]);
-                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo, hi, w: v.w.min(64), signed: v.signed } });
+                self.emit(Instr::SysF { d: val, f: SysFn::RandRange { lo, hi, w: v.w.min(64), signed: v.signed, obj: self.code.rand_obj.unwrap_or(NONE) } });
             }
         }
         Ok(())
@@ -788,7 +791,7 @@ impl<'a> Compiler<'a> {
         let hi = self.tmp(64);
         let one = self.const_slot(&Const::from_i64(1, 64, false));
         self.emit(Instr::Bin { op: rt::BinOp::Sub, d: hi, a: total, b: one, w: 64 });
-        self.emit(Instr::SysF { d: r, f: SysFn::RandRange { lo: z, hi, w: 64, signed: false } });
+        self.emit(Instr::SysF { d: r, f: SysFn::RandRange { lo: z, hi, w: 64, signed: false, obj: self.code.rand_obj.unwrap_or(NONE) } });
         let mut out = Vec::new();
         for (d, e) in items.iter().zip(ends) {
             let c = self.tmp(1);

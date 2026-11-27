@@ -150,6 +150,9 @@ pub(crate) struct SubReq<'a> {
     pub level: usize,
     pub f: &'a SubroutineDecl,
     pub key: (usize, String),
+    /// a call saves the function's variables too (automatic, or a constant function call),
+    /// not only the temporaries
+    pub whole: bool,
     /// CallSub instructions to point at the entry
     pub calls: Vec<usize>,
     /// SaveFrame instructions to complete with the ranges
@@ -222,10 +225,17 @@ pub(crate) struct Diag {
 #[derive(Default)]
 pub(crate) struct Code<'a> {
     pub(crate) jobs: Vec<Job<'a>>,
+    /// initializers of static properties of parameterized classes: compiled only if the
+    /// class (a specialization, or the default one) is used
+    pub(crate) lazy_inits: Vec<(u32, Job<'a>)>,
     /// variables procedural assignments write (for the check against continuous ones)
     pub(crate) proc_writes: HashSet<u32>,
     /// the assignment being compiled is a declaration's initializer (it may write a `const`)
     pub(crate) init_write: bool,
+    /// the slot of the handle of the object being randomized: its generator gives the values
+    pub(crate) rand_obj: Option<u32>,
+    /// the process of static variable initializers (`Job::Init`) is open
+    pub(crate) init_open: bool,
     pub(crate) consts: HashMap<Const, u32>,
     pub(crate) pb: Vec<PState>,
     pub(crate) scratch_top: u32,
@@ -1003,7 +1013,7 @@ impl<'a> Compiler<'a> {
         self.code.pb.push(PState { proc: NONE, ..Default::default() });
         let r = self.self_expr(e, sid);
         let r = r.and_then(|x| self.finish_subs().map(|_| x));
-        let st = self.code.pb.pop().unwrap();
+        let st = self.pop_pb();
         let (slot, w, s) = r?;
         if !st.code.is_empty() {
             if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {

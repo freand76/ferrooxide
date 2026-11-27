@@ -40,6 +40,9 @@ pub(crate) enum Base {
     Real(f64),
 }
 
+/// Calls nested this deep (inlined) go through a subroutine of the process instead.
+const SUB_DEPTH: u32 = 4;
+
 impl<'a> Compiler<'a> {
     pub(crate) fn resolve_base(&mut self, e: &Expr, sid: usize) -> R<Option<Base>> {
         let sym = match &e.kind {
@@ -710,8 +713,8 @@ impl<'a> Compiler<'a> {
             if !matches!(&e.kind, ExprKind::Num(_) | ExprKind::Ident(_)) {
                 // evaluate in the context width and signedness (operands are extended first)
                 self.code.pb.push(PState { proc: NONE, ..Default::default() });
-                let r = self.expr(e, sid, w, s);
-                let st = self.code.pb.pop().unwrap();
+                let r = self.expr(e, sid, w, s).and_then(|x| self.finish_subs().map(|_| x));
+                let st = self.pop_pb();
                 let slot = r?;
                 if !st.code.is_empty() {
                     if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {
@@ -1462,7 +1465,7 @@ impl<'a> Compiler<'a> {
                     let (real, w) = (t.is_real(), t.width());
                     let val = self.tmp(w);
                     let ok = self.tmp(1);
-                    outs.push(rt::ScanOut { val, w, real, ok });
+                    outs.push(rt::ScanOut { val, w, real, str: t.is_str(), ok });
                 }
                 self.emit(sys(F::Scan { string, fmt, outs: outs.clone() }, src));
                 // assign the variables that got a value
@@ -2055,6 +2058,24 @@ impl<'a> Compiler<'a> {
             if let Some((f, scope)) = self.class_static_method(name, sid) {
                 return self.call_resolved(f, scope, name, None, args, sid);
             }
+            // `h.p.m(..)`: a method of a member through a handle the lowering did not know
+            // (a foreach variable of a class key type)
+            if let Some((base, m)) = name.rsplit_once('.').filter(|_| !self.classes.list.is_empty()) {
+                let parts: Vec<String> = base.split('.').map(String::from).collect();
+                if let Some(obj) = self.hier_member(&ExprKind::Hier(parts).into(), sid) {
+                    if as_task {
+                        let st = Stmt::MethodCall { obj, name: m.to_string(), args: args.to_vec(), line: self.line };
+                        self.stmt(&st, sid)?;
+                        return Ok((None, 0, false));
+                    }
+                    let (v, w, s) = self.self_expr(&ExprKind::MethodCall(Box::new(obj), m.to_string(), args.to_vec()).into(), sid)?;
+                    return Ok((Some(v), w, s));
+                }
+            }
+            // a method every class has, through `this`
+            if matches!(name, "srandom" | "get_randstate" | "set_randstate") && self.lookup("this", sid).is_some() {
+                return self.method_call(&ExprKind::Ident("this".into()).into(), name, args, sid);
+            }
             let p: Vec<String> = name.split('.').map(String::from).collect();
             self.fixed_arr_method(&p, sid)?;
             return self.err(format!("unknown {} '{name}'", if as_task { "task" } else { "function" }));
@@ -2145,15 +2166,32 @@ impl<'a> Compiler<'a> {
             }
         }
         // a call of a function that is being inlined: recursion, through a subroutine
-        if let Some(k) = self.subr.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
-            return self.recursive_call(f, k, this, args, sid);
-        }
-        if self.subr.call_depth > 32 {
-            return self.err(format!("calls nested too deeply in '{name}'"));
-        }
         // a constant function call (elaboration): every call starts afresh, also for a static
         // function, and leaves its run-time variables alone
         let fresh = f.automatic || self.code.pb.last().is_none_or(|p| p.proc == NONE);
+        if let Some(k) = self.subr.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
+            return self.sub_call(f, k, this, args, sid, fresh, want_array);
+        }
+        // calls nested deeper than SUB_DEPTH: a subroutine of the process (one copy of the
+        // body instead of one per call path)
+        if self.subr.call_depth >= SUB_DEPTH {
+            let level = self.code.pb.len();
+            let found = self.subr.subs.iter().find(|r| r.level == level && r.key.0 == fs_def && std::ptr::eq(r.f, f)).map(|r| r.key.clone());
+            let key = match found {
+                Some(k) => k,
+                None if fresh => {
+                    self.subr.auto_count += 1;
+                    let k = format!("{}#{}", f.name, self.subr.auto_count);
+                    self.func_instance(f, fs_def, &k)?;
+                    (fs_def, k)
+                }
+                None => {
+                    self.func_instance(f, fs_def, &f.name)?;
+                    (fs_def, f.name.clone())
+                }
+            };
+            return self.sub_call(f, key, this, args, sid, fresh, want_array);
+        }
         let kname = if f.automatic {
             self.subr.auto_count += 1;
             format!("{}#{}", f.name, self.subr.auto_count)
@@ -2374,22 +2412,46 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// A recursive call: save the function's variables (and temporaries), pass the arguments,
-    /// jump to the function's subroutine; results come back in fresh temporaries.
-    fn recursive_call(
+    /// A call through a subroutine of the process (a recursive or deeply nested one): save the
+    /// temporaries (`whole`: also the function's variables, an automatic one), pass the
+    /// arguments, jump to the subroutine; results come back in fresh temporaries.
+    #[allow(clippy::too_many_arguments)]
+    fn sub_call(
         &mut self,
         f: &'a SubroutineDecl,
         key: (usize, String),
         this: Option<u32>,
         args: &[Expr],
         sid: usize,
+        whole: bool,
+        want_array: bool,
     ) -> R<(Option<u32>, u32, bool)> {
-        let (ret, ports, this_sig) = {
+        let (fscope, ret, ports, this_sig) = {
             let fi = &self.subr.func_inst[&key];
-            (fi.ret, fi.ports.clone(), fi.this)
+            (fi.scope, fi.ret, fi.ports.clone(), fi.this)
         };
         if args.len() > ports.len() {
             return self.err(format!("too many arguments to '{}'", f.name));
+        }
+        if !f.refs.is_empty() {
+            self.check_ref_args(f, fscope, &ports, args, sid)?;
+        }
+        if let Some(r) = ret {
+            if self.sig(r).depth > 0 {
+                return self.err(if want_array {
+                    format!("an unpacked array result of '{}', called as a subroutine (recursive or nested deeply), is not supported", f.name)
+                } else {
+                    format!("the result of '{}' is an unpacked array: it can only be assigned to an array", f.name)
+                });
+            }
+        }
+        for (i, a) in args.iter().enumerate() {
+            let ps = ports[i].1;
+            let port_dyn = matches!(self.sig_type(ps), Type::Dyn { .. });
+            if !port_dyn && self.sig(ps).depth == 0 && matches!(self.type_of(a, sid), Ok(Type::Dyn { .. })) {
+                let pname = self.sig(ps).name.rsplit('.').next().unwrap_or_default().to_string();
+                return self.err(format!("argument '{pname}' of '{}' is not a queue or dynamic array; it cannot be given one", f.name));
+            }
         }
         // argument values first (they may read the current frame)
         let mut vals = Vec::new();
@@ -2401,7 +2463,10 @@ impl<'a> Compiler<'a> {
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
             if self.sig(ps).depth > 0 {
-                return self.err(format!("an array argument of recursive '{}' is not supported", f.name));
+                if dir != Dir::Input {
+                    return self.err(format!("an array output or result of '{}', called as a subroutine (recursive or nested deeply), is not supported", f.name));
+                }
+                continue;
             }
             if dir == Dir::Input || dir == Dir::Inout {
                 self.check_enum_arg(ps, a, sid, true)?;
@@ -2423,11 +2488,18 @@ impl<'a> Compiler<'a> {
         let si = match self.subr.subs.iter().position(|r| r.level == level && r.key == key) {
             Some(i) => i,
             None => {
-                self.subr.subs.push(SubReq { level, f, key: key.clone(), calls: Vec::new(), saves: Vec::new(), entry: None, alloc: (0, 0) });
+                self.subr.subs.push(SubReq { level, f, key: key.clone(), whole, calls: Vec::new(), saves: Vec::new(), entry: None, alloc: (0, 0) });
                 self.subr.subs.len() - 1
             }
         };
         let save = self.emit(Instr::SaveFrame { ranges: Box::new([]) });
+        // array inputs, copied element by element (their sources read the caller's frame)
+        for (i, a) in args.iter().enumerate() {
+            let ps = ports[i].1;
+            if self.sig(ps).depth > 0 {
+                self.array_arg(ps, fscope, a, sid, true)?;
+            }
+        }
         for (ps, k) in vals {
             self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: k, mode: rt::StoreMode::Blocking });
         }
@@ -2478,9 +2550,9 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::Halt);
         while let Some(i) = self.subr.subs.iter().position(|r| r.level == level && r.entry.is_none()) {
             let (f, key) = (self.subr.subs[i].f, self.subr.subs[i].key.clone());
-            let (fscope, ret, ports, _) = {
+            let (fscope, ret, ports, this_sig) = {
                 let fi = &self.subr.func_inst[&key];
-                (fi.scope, fi.ret, fi.ports.clone(), fi.mem)
+                (fi.scope, fi.ret, fi.ports.clone(), fi.this)
             };
             let entry = self.here();
             self.subr.subs[i].entry = Some(entry as usize);
@@ -2490,7 +2562,22 @@ impl<'a> Compiler<'a> {
             self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
             let bpath = format!("{}.{}", self.scopes[key.0].name, f.name);
             let reg = self.open_block(bpath);
-            self.auto_inits(f, fscope, f.automatic)?;
+            let whole = self.subr.subs[i].whole;
+            // an automatic function's queue result starts empty on each call
+            if let (true, Some(r)) = (f.automatic, ret) {
+                if let Type::Dyn { .. } = self.sig_type(r) {
+                    let z = self.const_slot(&Const::zero(64));
+                    self.emit(Instr::Store { t: Target::Whole { sig: r }, s: z, mode: rt::StoreMode::Blocking });
+                }
+            }
+            // a constructor: the base class's constructor and the property initializers first,
+            // unless the body starts with `super.new(..)`
+            if let (true, Some(t)) = (f.name == "new" && !crate::Compiler::calls_super_new(f), this_sig) {
+                let ts = self.sig(t).slot;
+                let c = self.classes.of_scope[&key.0];
+                self.ctor_prologue(c, ts, None, fscope)?;
+            }
+            self.auto_inits(f, fscope, whole || f.automatic)?;
             let r = self.stmt(&f.body, fscope);
             // (on an error the compilation stops: the state is not cleaned up)
             r?;
@@ -2523,7 +2610,7 @@ impl<'a> Compiler<'a> {
         for i in reqs.iter().rev() {
             let r = self.subr.subs.remove(*i);
             let fm = self.subr.func_inst[&r.key].mem;
-            let mut ranges = vec![(fm.0, fm.1 - fm.0), (r.alloc.0, r.alloc.1 - r.alloc.0)];
+            let mut ranges = if r.whole { vec![(fm.0, fm.1 - fm.0), (r.alloc.0, r.alloc.1 - r.alloc.0)] } else { Vec::new() };
             if hw > 0 {
                 ranges.push((0, hw));
             }
@@ -2902,8 +2989,8 @@ impl<'a> Compiler<'a> {
             return Ok(*r);
         }
         self.code.pb.push(PState { proc: NONE, ..Default::default() });
-        let r = self.rexpr(e, sid);
-        let st = self.code.pb.pop().unwrap();
+        let r = self.rexpr(e, sid).and_then(|x| self.finish_subs().map(|_| x));
+        let st = self.pop_pb();
         let slot = r?;
         if !st.code.is_empty() {
             if let Err(m) = rt::vm::eval_const(&st.code, &mut self.prog.mem, &self.prog.signals) {

@@ -87,6 +87,45 @@ impl<'a> Compiler<'a> {
         Some((ExprKind::Index(Box::new(a.into()), Box::new(i)).into(), m))
     }
 
+    /// `{>> {q}}` of strings and queues or dynamic arrays of strings (and integral items of
+    /// whole bytes): their characters one after another (IEEE 1800-2017 11.4.14; a string
+    /// streams as its bytes, first one first). None for another expression.
+    fn str_stream(&mut self, e: &Expr, sid: usize) -> R<Option<u32>> {
+        let ExprKind::Stream { left: false, items, .. } = &e.kind else { return Ok(None) };
+        let mut kinds = Vec::new();
+        let mut strs = false;
+        for x in items {
+            match self.type_of(x, sid)? {
+                Type::Str => {
+                    strs = true;
+                    kinds.push(None)
+                }
+                // (whole bytes: the characters of the stream stay aligned)
+                Type::Vec { w, .. } if w % 8 == 0 => kinds.push(None),
+                Type::Dyn { kind, elem } if !matches!(kind, crate::types::DynKind::Assoc(_)) && elem.leaf == crate::types::Leaf::Str && elem.class == NONE => kinds.push(Some(elem)),
+                _ => return Ok(None),
+            }
+        }
+        if !strs && !kinds.iter().any(|k| k.is_some()) {
+            return Ok(None);
+        }
+        let mut acc: Option<u32> = None;
+        for (x, k) in items.iter().zip(kinds) {
+            let h = match k {
+                None => self.str_expr(x, sid)?,
+                Some(el) => {
+                    let (q, _) = self.dyn_rhs(x, el, sid)?;
+                    self.str_op(StrOp::Join, q, NONE, NONE, 0)
+                }
+            };
+            acc = Some(match acc {
+                None => h,
+                Some(a) => self.str_op(StrOp::Concat, a, h, NONE, 0),
+            });
+        }
+        Ok(acc)
+    }
+
     /// The text of a constant string operand: a literal or a `string` parameter.
     fn const_text(&self, e: &Expr, sid: usize) -> Option<Vec<u8>> {
         let c = match &e.kind {
@@ -129,6 +168,9 @@ impl<'a> Compiler<'a> {
     fn str_expr_here(&mut self, e: &Expr, sid: usize) -> R<u32> {
         if let Some((n, s)) = self.class_member(e, sid)? {
             return self.str_expr(&n, s);
+        }
+        if let Some(h) = self.str_stream(e, sid)? {
+            return Ok(h);
         }
         if let Some(x) = self.typename_str(e, sid)? {
             return self.str_expr(&x, sid);
@@ -238,6 +280,9 @@ impl<'a> Compiler<'a> {
                 self.patch(j, h);
                 self.patch(j2, h);
                 return Ok(d);
+            }
+            ExprKind::MethodCall(o, m, args) if STR_METHODS.contains(&m.as_str()) && self.type_of(o, sid)?.is_str() => {
+                return self.str_method_call(o, m, args, sid);
             }
             ExprKind::Call(name, args) => {
                 if let Some((base, m)) = self.str_method(name, sid) {

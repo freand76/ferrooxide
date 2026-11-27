@@ -324,7 +324,7 @@ impl<'a> Compiler<'a> {
                 self.code.pb.push(PState { proc: NONE, ..Default::default() });
                 let st = Stmt::Assign { lhs: ExprKind::Ident(p.name.clone()).into(), rhs: v.clone(), nonblocking: false, timing: None, line: p.line };
                 let r = self.stmt(&st, sid).and_then(|_| self.finish_subs());
-                let code = self.code.pb.pop().unwrap().code;
+                let code = self.pop_pb().code;
                 r?;
                 if let Err(m) = rt::vm::eval_const(&code, &mut self.prog.mem, &self.prog.signals) {
                     return self.err(m);

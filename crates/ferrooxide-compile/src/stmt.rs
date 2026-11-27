@@ -221,6 +221,12 @@ impl<'a> Compiler<'a> {
 
     /// Store a value (slot, width) into an lvalue.
     pub(crate) fn store_value(&mut self, lhs: &Lhs, slot: u32, w: u32, mode: StoreMode) -> R<()> {
+        // a property of an object (an output argument, a `$sscanf` result)
+        if let Lhs::Expr(e, s) = lhs {
+            if !self.classes.list.is_empty() && self.has_prop(e, *s)? && self.prop_store(e, crate::class::PropRhs::Slot(slot, w), *s)? {
+                return Ok(());
+            }
+        }
         // an element of a queue or dynamic array
         if let Lhs::Expr(e @ Expr { kind: ExprKind::Index(a, _), .. }, s) = lhs {
             if self.sigs.has_dyn {
@@ -777,6 +783,14 @@ impl<'a> Compiler<'a> {
                 }
                 if !*nonblocking && timing.is_none() && !self.code.str_ids.is_empty() && self.str_index_assign(lhs, rhs, sid)? {
                     return Ok(());
+                }
+                // a select of a member through a handle the lowering did not know (`h.q[i]`
+                // of a foreach variable of a class key type)
+                if !self.classes.list.is_empty() {
+                    if let Some(n) = self.hier_select_member(lhs, sid) {
+                        let st = Stmt::Assign { lhs: n, rhs: rhs.clone(), nonblocking: *nonblocking, timing: timing.clone(), line: *line };
+                        return self.stmt(&st, sid);
+                    }
                 }
                 // an element of an array property (`obj.q[i] = v`)
                 if self.sigs.has_dyn && !*nonblocking && timing.is_none() && matches!(&lhs.kind, ExprKind::Index(..)) && self.dyn_elem_assign(lhs, rhs, sid)? {

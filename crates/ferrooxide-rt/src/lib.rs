@@ -283,7 +283,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::Jz { c, .. } => vec![*c],
         Instr::Delay { s } => vec![*s],
         Instr::SysF { d, f: SysFn::UrandomRange(a, b) } => vec![*d, *a, *b],
-        Instr::SysF { d, f: SysFn::RandRange { lo, hi, .. } } => vec![*d, *lo, *hi],
+        Instr::SysF { d, f: SysFn::RandRange { lo, hi, obj, .. } } => [*d, *lo, *hi, *obj].into_iter().filter(|&x| x != NONE).collect(),
         Instr::SysF { d, f: SysFn::Dist { a, b, .. } } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
         Instr::CallSub { dsts, .. } => dsts.to_vec(),
         Instr::RetSub { srcs } => srcs.iter().map(|x| x.0).collect(),
@@ -518,7 +518,9 @@ pub enum SysFn {
     UrandomRange(u32, u32),
     /// a random `w`-bit value between the 64-bit bounds in slots lo and hi (`signed`
     /// bounds; lo > hi gives lo; more than 64 bits: all bits random) for `randomize`
-    RandRange { lo: u32, hi: u32, w: u32, signed: bool },
+    /// `obj`: the slot of the handle of the object whose generator gives the value (18.14.1;
+    /// NONE: the process's)
+    RandRange { lo: u32, hi: u32, w: u32, signed: bool, obj: u32 },
     /// `$dist_*(seed, a[, b])` (IEEE 1800-2017 20.15): the seed variable is a signal, `a` and
     /// `b` slots of 32-bit signed arguments (`b` NONE when the function has one)
     Dist { kind: Dist, seed: u32, a: u32, b: u32 },
@@ -666,6 +668,8 @@ pub struct ScanOut {
     pub val: u32,
     pub w: u32,
     pub real: bool,
+    /// a `string` variable: `val` gets a string handle
+    pub str: bool,
     pub ok: u32,
 }
 
@@ -775,6 +779,9 @@ pub enum StrOp {
     Concat,
     /// d = a repeated b (32-bit) times
     Repl,
+    /// d = the strings of the queue or dynamic array a, one after another (a stream of them,
+    /// IEEE 1800-2017 11.4.14)
+    Join,
     /// d (1 bit) = a op b, lexicographic
     Cmp(CmpOp),
     /// d (32 bits) = a.len()
@@ -972,6 +979,13 @@ pub enum ObjOp {
     /// element d (a 32-bit index; x/z or outside 0..n: no change) of the array of n `w`-bit
     /// elements at bit `off` of object a = b
     SetAt(u32),
+    /// seed the random number generator of object a with the 32-bit value b (IEEE
+    /// 1800-2017 18.13.3)
+    Srandom,
+    /// d (a string) = the state of object a's random number generator (18.13.4)
+    GetRandstate,
+    /// the state of object a's random number generator = the string b (18.13.5)
+    SetRandstate,
 }
 
 /// The array of an `Instr::Heap`.

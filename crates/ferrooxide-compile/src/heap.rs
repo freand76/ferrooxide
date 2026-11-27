@@ -552,7 +552,7 @@ impl<'a> Compiler<'a> {
 
     /// A queue or dynamic array value: the slot of its handle and whether the array is new
     /// (else it belongs to a variable and is copied where it is stored).
-    fn dyn_rhs(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<(u32, bool)> {
+    pub(crate) fn dyn_rhs(&mut self, e: &Expr, elem: Elem, sid: usize) -> R<(u32, bool)> {
         self.dyn_rhs_k(e, elem, None, sid)
     }
 

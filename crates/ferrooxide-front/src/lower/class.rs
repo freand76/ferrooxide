@@ -822,7 +822,20 @@ fn this_expr(e: &mut Expr, c: &ClassNames, locals: &[String]) {
             this_expr(b, c, locals);
             this_expr(d, c, locals);
         }
-        ExprKind::Unary(_, a) | ExprKind::Member(a, _) | ExprKind::NewCopy(a) | ExprKind::IncDec { e: a, .. } => this_expr(a, c, locals),
+        ExprKind::Unary(_, a)
+        | ExprKind::Member(a, _)
+        | ExprKind::NewCopy(a)
+        | ExprKind::IncDec { e: a, .. }
+        | ExprKind::NamedArg(_, a)
+        | ExprKind::TagIs(a, _)
+        | ExprKind::Unchecked(a)
+        | ExprKind::Tagged(_, Some(a)) => this_expr(a, c, locals),
+        ExprKind::Stream { slice, items, .. } => {
+            if let Some(x) = slice {
+                this_expr(x, c, locals);
+            }
+            items.iter_mut().for_each(|a| this_expr(a, c, locals));
+        }
         ExprKind::AssignExpr { lhs, rhs } => {
             this_expr(lhs, c, locals);
             this_expr(rhs, c, locals);
@@ -899,17 +912,41 @@ fn this_call(n: &str, c: &ClassNames, locals: &[String]) -> Option<(Expr, String
         None if c.methods.contains(n) && !locals.iter().any(|l| l == n) => Some((ExprKind::Ident("this".into()).into(), n.to_string())),
         Some((obj, m)) => {
             let parts: Vec<&str> = obj.split('.').collect();
-            if !this_name(parts[0], c, locals) {
+            if !this_name(seg_name(parts[0]), c, locals) {
                 return None;
             }
-            let mut x = ExprKind::Member(this(), parts[0].to_string());
-            for p in &parts[1..] {
-                x = ExprKind::Member(Box::new(x.into()), p.to_string());
+            let mut x: Option<Expr> = None;
+            for p in &parts {
+                let base = x.map_or_else(this, Box::new);
+                let mut e: Expr = ExprKind::Member(base, seg_name(p).to_string()).into();
+                // `q[i].m()`: an element of an array property (`name[@N]` / `name[N]`)
+                if let Some(i) = p.strip_suffix(']').and_then(|q| q.split_once('[')).map(|x| x.1) {
+                    let mut k = match i.strip_prefix('@') {
+                        Some(n) => super::hier_index_expr(n.parse().ok()?)?,
+                        None => ExprKind::Num(crate::ast::Number {
+                            size: None,
+                            signed: true,
+                            base: 10,
+                            based: false,
+                            digits: i.parse::<u64>().ok()?.to_string(),
+                            fill: false,
+                        })
+                        .into(),
+                    };
+                    this_expr(&mut k, c, locals);
+                    e = ExprKind::Index(Box::new(e), Box::new(k)).into();
+                }
+                x = Some(e);
             }
-            Some((x.into(), m.to_string()))
+            Some((x?, m.to_string()))
         }
         None => None,
     }
+}
+
+/// The name of a hierarchical segment without its index (`q[@3]` -> `q`).
+fn seg_name(p: &str) -> &str {
+    p.split_once('[').map_or(p, |x| x.0)
 }
 
 /// `this.` before the class's names in a statement; `locals` grows with block declarations.

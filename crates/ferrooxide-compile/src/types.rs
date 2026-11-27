@@ -322,6 +322,15 @@ impl<'a> Compiler<'a> {
                     if let Some((obj, m)) = self.hier_handle(name, sid) {
                         return self.type_of(&Expr::from(ExprKind::MethodCall(Box::new(obj), m, args.clone())), sid);
                     }
+                    if let Some((base, m)) = name.rsplit_once('.').filter(|_| !self.classes.list.is_empty()) {
+                        let parts: Vec<String> = base.split('.').map(String::from).collect();
+                        if let Some(obj) = self.hier_member(&ExprKind::Hier(parts).into(), sid) {
+                            return self.type_of(&Expr::from(ExprKind::MethodCall(Box::new(obj), m.to_string(), args.clone())), sid);
+                        }
+                    }
+                    if name == "get_randstate" && self.lookup("this", sid).is_some() {
+                        return Ok(Type::Str);
+                    }
                     return self.err(format!("unknown function '{name}'"));
                 };
                 if f.is_task {

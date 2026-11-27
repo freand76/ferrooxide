@@ -338,7 +338,7 @@ impl<'a> Compiler<'a> {
             self.dyn_layout(s, layout.as_ref());
             if let Some(init) = mg.init {
                 let line = self.line;
-                self.code.jobs.push(Job::Init { lhs: ExprKind::Ident(name.clone()).into(), rhs: init.clone(), scope: sid, line });
+                self.push_init(Job::Init { lhs: ExprKind::Ident(name.clone()).into(), rhs: init.clone(), scope: sid, line });
             }
             return Ok(());
         }
@@ -368,7 +368,7 @@ impl<'a> Compiler<'a> {
             self.scopes[sid].syms.insert(name.clone(), Sym::Sig(s));
             if let Some(init) = mg.init {
                 let line = self.line;
-                self.code.jobs.push(Job::Init { lhs: ExprKind::Ident(name.clone()).into(), rhs: init.clone(), scope: sid, line });
+                self.push_init(Job::Init { lhs: ExprKind::Ident(name.clone()).into(), rhs: init.clone(), scope: sid, line });
             }
             return Ok(());
         }
@@ -655,7 +655,7 @@ impl<'a> Compiler<'a> {
         // assigned at time 0, before the processes start
         if self.decl_init_const(init, s, nkind, is_real, depth, width, sid).is_err() {
             let line = self.line;
-            self.code.jobs.push(Job::Init { lhs: ExprKind::Ident(name.to_string()).into(), rhs: init.clone(), scope: sid, line });
+            self.push_init(Job::Init { lhs: ExprKind::Ident(name.to_string()).into(), rhs: init.clone(), scope: sid, line });
         }
         Ok(())
     }
