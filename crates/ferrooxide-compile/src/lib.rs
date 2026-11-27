@@ -143,6 +143,23 @@ pub(crate) struct FuncInst {
     pub this: Option<u32>,
 }
 
+/// A fork block whose branches are being compiled (`Code::forks`).
+pub(crate) struct ForkCtx {
+    pub st: *const Stmt,
+    /// the scope the block is in
+    pub sid: usize,
+    /// the block's automatic variables (slot, words), private to each branch
+    pub autos: Vec<(u32, u32)>,
+    /// the block declares static variables
+    pub statics: bool,
+    /// the forks of the block that a recursive call reaches inside its branches start the
+    /// same branch processes: their `Fork` and `Evict` instructions (process, index), patched
+    /// with the branches when those are compiled
+    pub again: Vec<(u32, usize)>,
+    /// the memory (lo, words) of the subroutine call the branches read (the outer one)
+    pub outer: Option<(u32, u32)>,
+}
+
 /// A recursive function compiled as a subroutine of a process: its body is placed after the
 /// process's code; calls jump to it with a saved frame.
 pub(crate) struct SubReq<'a> {
@@ -239,7 +256,7 @@ pub(crate) struct Code<'a> {
     /// hidden variables of assignments to parts of vector properties, by property select
     pub(crate) part_vars: HashMap<*const Expr, u32>,
     /// the fork blocks whose branches are being compiled
-    pub(crate) forks: Vec<*const Stmt>,
+    pub(crate) forks: Vec<ForkCtx>,
     /// the process of static variable initializers (`Job::Init`) is open
     pub(crate) init_open: bool,
     pub(crate) consts: HashMap<Const, u32>,

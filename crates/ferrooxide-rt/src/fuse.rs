@@ -64,6 +64,9 @@ fn body(code: &[Instr]) -> Option<(Vec<Instr>, bool)> {
             | Instr::Kick { .. }
             | Instr::Touch { .. }
             | Instr::SaveFrame { .. }
+            | Instr::Stash { .. }
+            | Instr::Unstash
+            | Instr::Bind { .. }
             | Instr::CallSub { .. }
             | Instr::RetSub { .. }
             | Instr::Unforce { .. }

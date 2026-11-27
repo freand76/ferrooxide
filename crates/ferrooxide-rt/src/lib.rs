@@ -288,7 +288,7 @@ pub fn instr_slots(ins: &Instr) -> Vec<u32> {
         Instr::SysF { d, f: SysFn::Dist { a, b, .. } } => [*d, *a, *b].into_iter().filter(|&x| x != NONE).collect(),
         Instr::CallSub { dsts, .. } => dsts.to_vec(),
         Instr::RetSub { srcs } => srcs.iter().map(|x| x.0).collect(),
-        Instr::SaveFrame { .. } => vec![],
+        Instr::SaveFrame { .. } | Instr::Stash { .. } | Instr::Unstash | Instr::Bind { .. } => vec![],
         Instr::ResolveStr { d, drv, .. } => std::iter::once(*d).chain(drv.iter().map(|x| x.0)).collect(),
         Instr::SysF { d, .. } => vec![*d],
         Instr::Jmp { .. }
@@ -879,6 +879,17 @@ pub enum Instr {
     ResolveStr { d: u32, w: u32, drv: Box<[(u32, u8, u8)]> },
     /// recursion: save memory ranges (lo, words) on the process's frame stack
     SaveFrame { ranges: Box<[(u32, u32)]> },
+    /// a fork that a recursive call reaches again: save the words at each `(dst, src, words)`
+    /// on the process's frame stack, then copy the words at `src` there (the fork block's
+    /// variables of this call into those the branches read); `Unstash` restores them
+    Stash { pairs: Box<[(u32, u32, u32)]> },
+    Unstash,
+    /// the branches the next `Fork` starts read the `n` words at `dst` (the variables of
+    /// the outer call): while one of them runs, those words are the forking process's `n`
+    /// words at `src` (this call's), shared with it (`share`, a fork that waits for its
+    /// branches), or a copy of them made now, shared by the branches (a fork whose call may
+    /// return before they end)
+    Bind { dst: u32, src: u32, n: u32, share: bool },
     /// recursion: call a subroutine at `entry`; its results go to `dsts` on return
     CallSub { entry: u32, dsts: Box<[u32]> },
     /// recursion: return; the values (slot, words) in `srcs` go to the caller's `dsts` after the

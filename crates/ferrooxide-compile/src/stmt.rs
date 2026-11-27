@@ -498,7 +498,9 @@ impl<'a> Compiler<'a> {
             Stmt::Null => {}
             Stmt::Block { name, decls, imports, params, stmts, fork } => {
                 // a fork block's automatic variables belong to each branch (see below)
-                let evict = (fork.is_some() && decls.iter().any(|d| d.automatic)).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
+                // (in an automatic subroutine, block variables are automatic too)
+                let auto_sub = self.subr.inline_stack.last().is_some_and(|f| f.2 .1.contains('#'));
+                let evict = (fork.is_some() && decls.iter().any(|d| d.automatic || (auto_sub && !d.static_))).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
                 let bsid = if name.is_some() || !decls.is_empty() || !imports.is_empty() || !params.is_empty() {
                     let path = match name {
                         Some(n) => format!("{}.{}", self.scopes[sid].name, n),
@@ -676,16 +678,18 @@ impl<'a> Compiler<'a> {
                 } else {
                     sid
                 };
-                // the memory of the automatic variables: private to a fork branch running here
+                // the memory of the automatic variables (also those of a block of an
+                // automatic subroutine): private to a fork branch running here
                 let mut auto_mem: Vec<(u32, u32)> = Vec::new();
-                for d in decls.iter().filter(|d| d.automatic) {
+                for d in decls.iter().filter(|d| !d.static_) {
                     for n in &d.names {
-                        if let Some(Sym::Sig(s)) = self.scopes[bsid].syms.get(&n.name).cloned() {
+                        if let Some(Sym::Sig(s)) = self.scopes[bsid].syms.get(&n.name).cloned().filter(|s| matches!(s, Sym::Sig(x) if self.sigs.automatic.contains(x))) {
                             let i = self.sig(s);
                             auto_mem.push((i.slot, rt::words(i.width) * i.depth.max(1)));
                         }
                     }
                 }
+                let statics = decls.iter().map(|d| d.names.len()).sum::<usize>() != auto_mem.len();
                 if fork.is_none() {
                     for &(lo, n) in &auto_mem {
                         self.note_frame(lo, lo + n);
@@ -711,12 +715,35 @@ impl<'a> Compiler<'a> {
                         }
                     }
                     Some(join) => {
-                        // (a subroutine that calls itself from the branches of its fork: each
-                        // call would need branch processes of its own)
-                        if self.code.forks.contains(&(st as *const Stmt)) {
-                            return self.err("a subroutine that calls itself from a fork branch (directly or through others) is not supported");
+                        let join_k = match join {
+                            Join::All => 0,
+                            Join::Any => 1,
+                            Join::None => 2,
+                        };
+                        // a subroutine that calls itself from the branches of its fork: this
+                        // fork starts new instances of the branches being compiled, which read
+                        // the variables of the outer call; this call's are copied there for
+                        // them (each instance keeps its own copy: a snapshot, not shared)
+                        if let Some(k) = self.code.forks.iter().position(|f| f.st == st as *const Stmt) {
+                            self.fork_again(k, sid, &auto_mem, statics, join_k, evict)?;
+                            if const_block {
+                                let (_, jumps) = self.code.const_blocks.pop().unwrap();
+                                let h = self.here();
+                                for j in jumps {
+                                    self.patch(j, h);
+                                }
+                            }
+                            self.close_block(reg);
+                            return Ok(());
                         }
-                        self.code.forks.push(st as *const Stmt);
+                        self.code.forks.push(ForkCtx {
+                            st: st as *const Stmt,
+                            sid,
+                            autos: auto_mem.clone(),
+                            statics,
+                            again: Vec::new(),
+                            outer: None,
+                        });
                         // each statement runs as its own process; the parent starts them all
                         let parent = self.code.pb.last().unwrap().proc;
                         let mut children = Vec::new();
@@ -732,11 +759,7 @@ impl<'a> Compiler<'a> {
                             self.end_proc();
                             children.push(c);
                         }
-                        let join = match join {
-                            Join::All => 0,
-                            Join::Any => 1,
-                            Join::None => 2,
-                        };
+                        let join = join_k;
                         if let Some(e) = evict {
                             // each branch has the fork block's automatic variables of its own
                             for &c in &children {
@@ -747,7 +770,10 @@ impl<'a> Compiler<'a> {
                             }
                             self.code.pb.last_mut().unwrap().code[e] = Instr::Evict { defs: children.clone().into_boxed_slice() };
                         }
-                        self.code.forks.pop();
+                        let ctx = self.code.forks.pop().unwrap();
+                        if !ctx.again.is_empty() {
+                            self.fork_reused(ctx, &children);
+                        }
                         if !children.is_empty() {
                             self.emit(Instr::Fork { children: children.into_boxed_slice(), join });
                         }
@@ -2149,5 +2175,82 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
+    }
+}
+
+impl<'a> Compiler<'a> {
+    /// The memory (lo, words) of the automatic subroutine call that scope `sid` is in (None:
+    /// not in one); variables of blocks between are not supported.
+    fn call_mem(&self, mut sid: usize) -> R<Option<(u32, u32)>> {
+        loop {
+            if let Some(fi) = self.subr.func_inst.values().find(|fi| fi.scope == sid) {
+                return Ok(Some((fi.mem.0, fi.mem.1 - fi.mem.0)));
+            }
+            if self.scopes[sid].syms.values().any(|s| matches!(s, Sym::Sig(_))) {
+                return self.err("a subroutine that calls itself from a fork branch, in a block with variables around the fork, is not supported");
+            }
+            match self.scopes[sid].parent {
+                Some(p) => sid = p,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// A fork reached again by a recursive call inside the branches of `forks[k]`: copy this
+    /// call's variables (in scope `sid`) and the fork block's (`autos`) into those the
+    /// branches read, start the branches, restore them.
+    fn fork_again(&mut self, k: usize, sid: usize, autos: &[(u32, u32)], statics: bool, join: u8, evict: Option<usize>) -> R<()> {
+        let (osid, oautos, ostatics) = {
+            let f = &self.code.forks[k];
+            (f.sid, f.autos.clone(), f.statics)
+        };
+        if statics || ostatics {
+            return self.err("a subroutine that calls itself from a fork branch, with static variables in the fork block, is not supported");
+        }
+        let outer = match self.code.forks[k].outer {
+            Some(m) => Some(m),
+            None => self.call_mem(osid)?,
+        };
+        let inner = self.call_mem(sid)?;
+        let (Some(outer), Some(inner)) = (outer, inner) else {
+            return self.err("a fork reached again by a recursive call outside a subroutine is not supported");
+        };
+        if outer.1 != inner.1 || oautos.len() != autos.len() || oautos.iter().zip(autos).any(|(a, b)| a.1 != b.1) {
+            return self.err("a subroutine that calls itself from a fork branch through another subroutine's fork is not supported");
+        }
+        self.code.forks[k].outer = Some(outer);
+        // the fork block's variables: as the branches read them, while they start; the call's:
+        // shared with the branches while they run
+        let pairs: Vec<(u32, u32, u32)> = oautos.iter().zip(autos).filter(|(a, b)| a.0 != b.0).map(|(a, b)| (a.0, b.0, a.1)).collect();
+        let proc = self.code.pb.last().unwrap().proc;
+        let stashed = !pairs.is_empty();
+        if stashed {
+            self.emit(Instr::Stash { pairs: pairs.into_boxed_slice() });
+        }
+        if outer.0 != inner.0 {
+            // (a fork that does not wait for all its branches: they may outlive the call)
+            self.emit(Instr::Bind { dst: outer.0, src: inner.0, n: outer.1, share: join == 0 });
+        }
+        let at = self.emit(Instr::Fork { children: Box::new([]), join });
+        if stashed {
+            self.emit(Instr::Unstash);
+        }
+        let f = &mut self.code.forks[k];
+        f.again.push((proc, at));
+        if let Some(e) = evict {
+            f.again.push((proc, e));
+        }
+        Ok(())
+    }
+
+    /// After the branches of a fork that recursive calls reach again: patch those forks with
+    /// the branches.
+    fn fork_reused(&mut self, ctx: ForkCtx, children: &[u32]) {
+        for &(p, at) in &ctx.again {
+            match &mut self.prog.procs[p as usize].code[at] {
+                Instr::Fork { children: c, .. } | Instr::Evict { defs: c } => *c = children.to_vec().into_boxed_slice(),
+                _ => unreachable!(),
+            }
+        }
     }
 }

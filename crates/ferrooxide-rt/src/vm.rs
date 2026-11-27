@@ -116,6 +116,18 @@ enum Fut {
 
 /// A subroutine call of a recursive function: the memory it saved, where to return to and
 /// where its results go.
+/// A branch's view of the variables of the call that forked it (`Instr::Bind`): the `n` words
+/// at `dst` are `home`'s (incarnation `gen`) words at `src`; with `home` NONE, the copy
+/// `Sim::snaps[src]`.
+#[derive(Clone, Copy)]
+struct Bind {
+    dst: u32,
+    n: u32,
+    home: u32,
+    gen: u32,
+    src: u32,
+}
+
 struct Frame {
     saved: Vec<(u32, Vec<u64>)>,
     ret: u32,
@@ -173,6 +185,13 @@ pub struct Sim {
     awaiters: Vec<(u32, u32, u32, u32)>,
     /// frames of instances that are not resident
     saved_frames: HashMap<u32, Vec<u64>>,
+    /// branches started by a fork that a recursive call reached again (`Instr::Bind`): the
+    /// words they share with the process that forked them, and the binding the next fork
+    /// gives its branches
+    binds: HashMap<u32, Bind>,
+    pending_bind: Option<Bind>,
+    snaps: Vec<Vec<u64>>,
+    snap_refs: Vec<u32>,
     /// JIT entries of instances (by id - inst_base); their tables carry their own id
     #[cfg(feature = "jit")]
     inst_entries: Vec<(Option<crate::jit::ProcFn>, *const u32)>,
@@ -536,6 +555,10 @@ impl Sim {
             proc_ends: HashMap::new(),
             awaiters: Vec::new(),
             saved_frames: HashMap::new(),
+            binds: HashMap::new(),
+            pending_bind: None,
+            snaps: Vec::new(),
+            snap_refs: Vec::new(),
             #[cfg(feature = "jit")]
             inst_entries: Vec::new(),
             #[cfg(feature = "jit")]
@@ -1296,6 +1319,9 @@ impl Sim {
     fn instance_done(&mut self, p: u32) {
         let d = self.def(p);
         self.saved_frames.remove(&p);
+        if !self.binds.is_empty() {
+            self.unbind(p);
+        }
         if self.resident[d as usize] == p {
             self.resident[d as usize] = FRAME_FREE;
         }
@@ -1460,6 +1486,7 @@ impl Sim {
     fn fork(&mut self, p: u32, children: &[u32], join: u8) -> bool {
         let no = self.procs[p as usize].forks.wrapping_add(1);
         self.procs[p as usize].forks = no;
+        let bind = self.pending_bind.take();
         // IEEE leaves the order open; Icarus starts the branches last to first
         for &d in children.iter().rev() {
             // a branch still running from an earlier fork: another instance of it
@@ -1482,6 +1509,19 @@ impl Sim {
                 if self.resident[d as usize] == c {
                     self.resident[d as usize] = FRAME_FREE;
                 }
+            }
+            // a branch of a fork that a recursive call reached again shares that call's
+            // variables; a branch of a bound process's fork shares what it shares
+            match bind.or_else(|| self.binds.get(&p).copied()) {
+                Some(b) => {
+                    self.unbind(c);
+                    if b.home == NONE {
+                        self.snap_refs[b.src as usize] += 1;
+                    }
+                    self.binds.insert(c, b);
+                }
+                None if !self.binds.is_empty() => self.unbind(c),
+                None => {}
             }
             // (its generator: seeded from the parent's)
             self.rngs[c as usize] = urandom(&mut self.rngs[p as usize], 0, u32::MAX) as i32;
@@ -2253,6 +2293,86 @@ impl Sim {
                 self.make_resident(d, p);
             }
         }
+        if !self.binds.is_empty() {
+            if let Some(b) = self.binds.get(&p).copied() {
+                self.exec_bound(p, b);
+                return;
+            }
+        }
+        self.exec_body(p);
+    }
+
+    /// Run a branch bound to its forking call's variables: they are in place while it runs.
+    #[cold]
+    #[inline(never)]
+    fn exec_bound(&mut self, p: u32, b: Bind) {
+        let (dst, n) = (b.dst as usize, b.n as usize);
+        if b.home == NONE {
+            let own = self.mem[dst..dst + n].to_vec();
+            self.mem[dst..dst + n].copy_from_slice(&self.snaps[b.src as usize]);
+            self.exec_body(p);
+            let now = self.mem[dst..dst + n].to_vec();
+            self.snaps[b.src as usize] = now;
+            self.mem[dst..dst + n].copy_from_slice(&own);
+            return;
+        }
+        let h = &self.procs[b.home as usize];
+        if h.gen != b.gen || h.done {
+            // (the call has ended: the branch keeps the values it has)
+            self.unbind(p);
+            self.exec_body(p);
+            return;
+        }
+        let own = self.mem[dst..dst + n].to_vec();
+        let shared = match self.home_words(b) {
+            Some((off, _)) => self.saved_frames[&b.home][off..off + n].to_vec(),
+            None => self.mem[b.src as usize..b.src as usize + n].to_vec(),
+        };
+        self.mem[dst..dst + n].copy_from_slice(&shared);
+        self.exec_body(p);
+        let now = self.mem[dst..dst + n].to_vec();
+        match self.home_words(b) {
+            Some((off, _)) => self.saved_frames.get_mut(&b.home).unwrap()[off..off + n].copy_from_slice(&now),
+            None => self.mem[b.src as usize..b.src as usize + n].copy_from_slice(&now),
+        }
+        self.mem[dst..dst + n].copy_from_slice(&own);
+    }
+
+    /// Process `p` no longer shares a call's variables; a copy nobody shares is freed.
+    fn unbind(&mut self, p: u32) {
+        if let Some(b) = self.binds.remove(&p) {
+            if b.home == NONE {
+                let r = &mut self.snap_refs[b.src as usize];
+                *r -= 1;
+                if *r == 0 {
+                    self.snaps[b.src as usize] = Vec::new();
+                }
+            }
+        }
+    }
+
+    /// Where the forking process of binding `b` keeps its words: Some((offset, ())) in its
+    /// saved frame when another instance holds its frame, None in memory.
+    fn home_words(&self, b: Bind) -> Option<(usize, ())> {
+        let d = self.def(b.home);
+        let r = self.resident[d as usize];
+        if r == FRAME_OFF || r == b.home {
+            return None;
+        }
+        let saved = self.saved_frames.get(&b.home)?;
+        let mut off = 0usize;
+        for &(lo, w) in &self.prog.procs[d as usize].frame {
+            if b.src >= lo && b.src + b.n <= lo + w {
+                let o = off + (b.src - lo) as usize;
+                return (o + b.n as usize <= saved.len()).then_some((o, ()));
+            }
+            off += w as usize;
+        }
+        None
+    }
+
+    /// Execute process `p` (its frame in place) until it suspends.
+    fn exec_body(&mut self, p: u32) {
         if self.time >= self.trace {
             eprintln!("{} proc {p} {} pc {}", self.time, self.prog.procs[self.def(p) as usize].name, self.procs[p as usize].pc);
         }
@@ -2842,6 +2962,31 @@ impl Sim {
                     let saved: Vec<(u32, Vec<u64>)> =
                         ranges.iter().map(|&(lo, n)| (lo, self.mem[lo as usize..(lo + n) as usize].to_vec())).collect();
                     self.frames.entry(p).or_default().push(Frame { saved, ret: 0, dsts: Box::new([]) });
+                }
+                Instr::Stash { pairs } => {
+                    let saved: Vec<(u32, Vec<u64>)> =
+                        pairs.iter().map(|&(d, _, n)| (d, self.mem[d as usize..(d + n) as usize].to_vec())).collect();
+                    for &(d, s, n) in pairs.iter() {
+                        self.mem.copy_within(s as usize..(s + n) as usize, d as usize);
+                    }
+                    self.frames.entry(p).or_default().push(Frame { saved, ret: 0, dsts: Box::new([]) });
+                }
+                Instr::Unstash => {
+                    if let Some(f) = self.frames.get_mut(&p).and_then(|v| v.pop()) {
+                        for (lo, v) in &f.saved {
+                            self.mem[*lo as usize..*lo as usize + v.len()].copy_from_slice(v);
+                        }
+                    }
+                }
+                Instr::Bind { dst, src, n, share } => {
+                    self.pending_bind = Some(if *share {
+                        Bind { dst: *dst, n: *n, home: p, gen: self.procs[p as usize].gen, src: *src }
+                    } else {
+                        let k = self.snaps.len() as u32;
+                        self.snaps.push(self.mem[*src as usize..(*src + *n) as usize].to_vec());
+                        self.snap_refs.push(0);
+                        Bind { dst: *dst, n: *n, home: NONE, gen: 0, src: k }
+                    });
                 }
                 Instr::CallSub { entry, dsts } => {
                     if let Some(f) = self.frames.get_mut(&p).and_then(|v| v.last_mut()) {

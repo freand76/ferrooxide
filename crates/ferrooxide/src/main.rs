@@ -255,6 +255,9 @@ fn main() -> ExitCode {
     if dump_code {
         for (i, p) in prog.procs.iter().enumerate() {
             eprintln!("proc {i} {} ({:?})", p.name, p.class);
+            if !p.frame.is_empty() {
+                eprintln!("  frame {:?}{}", p.frame, if p.capture { " (captured)" } else { "" });
+            }
             for (k, ins) in p.code.iter().enumerate() {
                 eprintln!("  {k:4}: {ins:?}");
             }

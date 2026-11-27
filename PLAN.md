@@ -110,17 +110,17 @@ machinery must not assume static targets only (A3).
 3. **sv-tests invalid code** (8 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
 4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
-   reference, `process::suspend`/`resume`, recursion from fork branches, waits on run-time
+   reference, `process::suspend`/`resume`, recursion from `join_any`/`join_none` branches
+   with shared variables (see Unsupported), waits on run-time
    targets other than event properties (`vif.clk`), VPI callbacks and MCP conditional
    breakpoints. The gate for UVM. (Event properties wait through per-object waiter lists,
    `EvOp::Arm`.)
 5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`). The package compiles in about 2 s
    (calls deeper than 4 go through subroutines, static initializers share a process).
    The whole library compiles; the first UVM tests pass (a run compiles for about 12 s:
-   large processes, see A3). Tests stop at: a fork branch that reaches its own fork
-   again (58: `uvm_sequence_base::start` forks `body()`, which starts child sequences;
-   inlined calls give each level its own variables, so the branch processes cannot be
-   reused; needs A3 activation records), virtual
+   large processes, see A3). A fork that a recursive call reaches again (`start` forks
+   `body()`, which starts child sequences) starts the branch processes already compiled,
+   bound to the inner call's variables (`Instr::Bind`). Tests stop at: virtual
    interfaces (`this data type is not supported`, 51), a parameterized class first used
    after a virtual call that could reach it was compiled (4: virtual calls through a table
    would remove this). Error lines
@@ -217,6 +217,11 @@ SystemVerilog data and testbench:
   rejected (a task with ref arguments that can wait, a ref argument whose variable the
   subroutine also names) [sv-tests chapter-7/queues/persistence]. Needs A3.
 - `process`: `suspend`/`resume`; `process::self().kill();` as a statement.
+- A subroutine that calls itself from a branch of its own fork: with `join_any` or
+  `join_none` the branches of the inner calls get a copy of the call's variables at the
+  fork (the call may return first), so the caller and they do not see each other's later
+  writes; a block with variables around the fork, or static variables in the fork block,
+  are rejected.
 - `$sscanf`/`$fscanf` into a `string` variable with a conversion other than `%s`/`%c`
   (a run-time error).
 - unpacked array members of unpacked structs are laid out as packed arrays of their
