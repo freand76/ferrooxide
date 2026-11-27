@@ -7,6 +7,25 @@ use crate::{Error, LineSeg, Options, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// The predefined coverage constants (IEEE 1800-2017 20.14.1).
+const COVERAGE_MACROS: [(&str, &str); 15] = [
+    ("SV_COV_START", "0"),
+    ("SV_COV_STOP", "1"),
+    ("SV_COV_RESET", "2"),
+    ("SV_COV_CHECK", "3"),
+    ("SV_COV_MODULE", "10"),
+    ("SV_COV_HIER", "11"),
+    ("SV_COV_ASSERTION", "20"),
+    ("SV_COV_FSM_STATE", "21"),
+    ("SV_COV_STATEMENT", "22"),
+    ("SV_COV_TOGGLE", "23"),
+    ("SV_COV_OVERFLOW", "-2"),
+    ("SV_COV_ERROR", "-1"),
+    ("SV_COV_NOCOV", "0"),
+    ("SV_COV_OK", "1"),
+    ("SV_COV_PARTIAL", "2"),
+];
+
 #[derive(Clone, Debug)]
 struct Macro {
     params: Option<Vec<String>>,
@@ -34,6 +53,10 @@ impl Preprocessor {
         let mut macros = HashMap::new();
         // Icarus-compatible output is the goal, so code written for Icarus takes its paths
         macros.insert("__ICARUS__".to_string(), Macro { params: None, defaults: Vec::new(), body: "1".into() });
+        // the predefined coverage constants (IEEE 1800-2017 20.14.1)
+        for (k, v) in COVERAGE_MACROS {
+            macros.insert(k.to_string(), Macro { params: None, defaults: Vec::new(), body: v.to_string() });
+        }
         for (k, v) in &opts.defines {
             macros.insert(k.clone(), Macro { params: None, defaults: Vec::new(), body: v.clone() });
         }

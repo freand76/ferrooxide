@@ -126,6 +126,9 @@ pub(crate) fn lit_index(e: &Expr) -> Option<i64> {
     }
 }
 
+/// The coverage functions (IEEE 1800-2017 20.14.2, 19.9) and their numbers of arguments.
+pub(crate) const COVERAGE_FUNCS: [(&str, usize); 6] = [("$coverage_control", 4), ("$coverage_get_max", 3), ("$coverage_get", 3), ("$coverage_merge", 2), ("$coverage_save", 2), ("$get_coverage", 0)];
+
 impl Lower {
     /// An expression, with its line (and that of the parts made for it).
     pub(crate) fn expr(&mut self, e: &t::Expr) -> Result<Expr> {
@@ -598,6 +601,15 @@ impl Lower {
     }
 
     fn sys_call(&mut self, name: &str, args: &[t::Arg], loc: t::Loc) -> Result<Expr> {
+        // the coverage functions (IEEE 1800-2017 20.14.2): ferrooxide keeps no coverage, so
+        // each reports none of the type (`SV_COV_NOCOV`); $get_coverage (19.9), the overall
+        // coverage of the covergroups, has none to report
+        if let Some(&(_, n)) = COVERAGE_FUNCS.iter().find(|f| f.0 == name) {
+            if args.len() != n {
+                return self.err(loc, format!("{name} takes {n} arguments"));
+            }
+            return Ok(if name == "$get_coverage" { ExprKind::Real(0.0).into() } else { ExprKind::Num(Number { size: Some(32), signed: true, base: 10, based: true, digits: "0".into(), fill: false }).into() });
+        }
         // `$typename(x)`: of the type of x, which the compiler names (IEEE 1800-2017 20.6.1)
         if name == "$typename" {
             let [t::Arg::Pos(Some(a))] = args else { return self.err(loc, "$typename takes one argument") };

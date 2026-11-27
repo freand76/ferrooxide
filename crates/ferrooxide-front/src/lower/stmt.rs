@@ -501,6 +501,18 @@ impl Lower {
     fn expr_stmt(&mut self, e: &t::Expr, loc: t::Loc) -> Result<Stmt> {
         let line = loc.line;
         match &e.kind {
+            // (IEEE 1800-2017 20.14.2: no coverage is kept, there is no database to name or load)
+            t::ExprKind::SysCall { name, args, .. } if matches!(name.as_str(), "$set_coverage_db_name" | "$load_coverage_db") => {
+                if args.len() != 1 {
+                    return self.err(loc, format!("{name} takes one argument"));
+                }
+                Ok(Stmt::Null)
+            }
+            // (a coverage function called as a task: its result discarded)
+            t::ExprKind::SysCall { name, .. } if super::expr::COVERAGE_FUNCS.iter().any(|f| f.0 == name) => {
+                self.expr(e)?;
+                Ok(Stmt::Null)
+            }
             t::ExprKind::SysCall { name, args, .. } => {
                 let mut v = Vec::new();
                 for a in args {
