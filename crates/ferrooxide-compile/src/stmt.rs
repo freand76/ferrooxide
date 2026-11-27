@@ -761,6 +761,9 @@ impl<'a> Compiler<'a> {
                         });
                         // each statement runs as its own process; the parent starts them all
                         let parent = self.code.pb.last().unwrap().proc;
+                        let in_unit = self.code.pb.last().unwrap().unit;
+                        let parent = if in_unit { NONE } else { parent };
+                        let mem0 = self.prog.mem.len() as u32;
                         let mut children = Vec::new();
                         for s in stmts {
                             let pname = self.scopes[bsid].name.clone();
@@ -773,6 +776,11 @@ impl<'a> Compiler<'a> {
                             self.emit(Instr::Halt);
                             self.end_proc();
                             children.push(c);
+                        }
+                        if in_unit {
+                            // (the branches' memory is not the call's frame: theirs, if any,
+                            // is their own)
+                            self.subr.static_mem.push((mem0, self.prog.mem.len() as u32));
                         }
                         let join = join_k;
                         if let Some(e) = evict {

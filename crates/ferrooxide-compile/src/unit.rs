@@ -204,10 +204,10 @@ fn unit_stmt(st: &Stmt, task: bool) -> bool {
     match st {
         Stmt::Timed { body, .. } | Stmt::Wait { body, .. } => task && u(body),
         Stmt::Assign { timing: Some(_), .. } => task,
-        Stmt::Block { fork: Some(_), .. }
-        | Stmt::WaitFork { .. }
-        | Stmt::Disable { .. }
-        | Stmt::Force { .. }
+        // (a task's fork branches are processes of their own, which use its call's frame)
+        Stmt::Block { fork: Some(_), .. } | Stmt::WaitFork { .. } => task,
+        Stmt::Disable { name, .. } => name == "fork",
+        Stmt::Force { .. }
         | Stmt::Deferred { .. } => false,
         Stmt::SysTask { name, .. } => !matches!(
             name.as_str(),

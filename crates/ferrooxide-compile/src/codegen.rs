@@ -65,7 +65,9 @@ impl<'a> Compiler<'a> {
             }
         }
         let pb = self.code.pb.last_mut().unwrap();
-        if pb.unit && matches!(i, Instr::Fork { .. } | Instr::WaitFork | Instr::Evict { .. } | Instr::Bind { .. } | Instr::Stash { .. } | Instr::Disable { .. }) {
+        // (a shared subroutine's fork branches use its call's frame, but a fork reached again
+        // in a recursive call, or a disable by name, is not done there)
+        if pb.unit && (matches!(i, Instr::Bind { .. } | Instr::Stash { .. }) || matches!(i, Instr::Disable { target } if target != NONE)) {
             pb.bad = true;
         }
         let c = &mut pb.code;

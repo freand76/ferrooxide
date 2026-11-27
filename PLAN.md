@@ -132,7 +132,9 @@ machinery must not assume static targets only (A3).
    compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
    crash): the large processes need less memory. Error lines
    in the test file are reported far past its end (line numbers after the library's
-   includes). Fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
+   includes). In chapter-16/16.2--assert0-uvm.sv the run phase ends at time 0 and drops
+   its objection, but the phase never ends (PH_TIMEOUT at 9200); its deferred assertion
+   fails as the standard says (a and b are still x). Fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
@@ -153,14 +155,16 @@ machinery must not assume static targets only (A3).
   per call, instead of a copy per call path in each process (the UVM memory and JIT time).
   Done (`unit.rs`): a method, or a recursive or deeply nested call, of a function without
   timing, fork, `disable` or process-starting system tasks, and a class method task
-  without fork or `disable` (it may wait), runs its shared subroutine (`Program::units`:
+  without a `disable` by name (it may wait and fork), runs its shared subroutine (`Program::units`:
   `SaveUnit`, `CallUnit`, `RetUnit`), interpreted on the generic path. Its temporaries are
   memory of its own; each call is an activation whose frame is swapped in when it runs
   (recursion, other processes in the same unit). A process that waits inside keeps its
   chain of calls (`Sim::unit_susp`) and its pc at the `CallUnit`, which continues the call;
   waits inside units are dynamic waiters (`UNIT_PROC` controls, `Sim::unit_waiters`). A
-  unit that fails (a fork inside) leaves its fork branches as empty processes. Left: tasks
-  that fork (`uvm_sequence_base::start`: fork branches started from a unit), module tasks
+  unit's fork branches are processes bound to the activation that started them
+  (`Sim::ubinds`): its frame is swapped in when they run and kept until the last one ends
+  (`Sim::unit_refs`). A unit that fails (a fork reached again in recursion) leaves its fork
+  branches as empty processes. Left: module tasks
   (a call cannot be disabled by name yet), then lowering units to fast ops / the JIT if
   they get hot;
   (2) virtual calls and `randomize()` dispatch through a per-class table (no "used after a
@@ -169,7 +173,7 @@ machinery must not assume static targets only (A3).
   parsed library for specializations, JIT code cached per process shape.
   Process instances are done. Calls nested deeper than
   `SUB_DEPTH` (4) are subroutines of the process (`CallSub`/`RetSub`, saved temporaries;
-  an automatic one also saves its variables). Left: module tasks and tasks that fork
+  an automatic one also saves its variables). Left: module tasks
   shared between processes (each process compiles its own copy), virtual calls through a table instead of a chain
   of class compares per call site, array outputs and unpacked array results of such
   calls, and a per-signal list of dynamic waiters next to the static fan-out (a flag

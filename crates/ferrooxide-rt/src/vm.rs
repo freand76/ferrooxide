@@ -233,6 +233,12 @@ pub struct Sim {
     unit_susp: HashMap<u32, (u32, u32, Vec<UAct>)>,
     /// per event control of a shared subroutine (`UNIT_PROC`): the processes waiting on it
     unit_waiters: HashMap<u32, Vec<u32>>,
+    /// fork branches started inside a shared subroutine: the unit and activation whose
+    /// frame they use (in memory while they run)
+    ubinds: HashMap<u32, (u32, u64)>,
+    /// per activation with bound branches: their number, and whether the call has ended
+    /// (its frame is dropped when the last of them ends)
+    unit_refs: HashMap<u64, (u32, bool)>,
     /// pending inertial (continuous-assignment delay) updates: target -> current generation
     /// and the pending value
     inertial: HashMap<(u32, u32), (u32, Box<[u64]>)>,
@@ -553,6 +559,8 @@ impl Sim {
             unit_chain: Vec::new(),
             unit_susp: HashMap::new(),
             unit_waiters: HashMap::new(),
+            ubinds: HashMap::new(),
+            unit_refs: HashMap::new(),
             dump_pending: false,
             force_bypass: false,
             keep_override: None,
@@ -1361,6 +1369,9 @@ impl Sim {
         if !self.binds.is_empty() {
             self.unbind(p);
         }
+        if !self.ubinds.is_empty() {
+            self.unit_unbind(p);
+        }
         if self.resident[d as usize] == p {
             self.resident[d as usize] = FRAME_FREE;
         }
@@ -1390,7 +1401,7 @@ impl Sim {
                 self.push_active(parent);
             }
         }
-        if self.any_insts || self.any_swap {
+        if self.any_insts || self.any_swap || !self.ubinds.is_empty() {
             self.instance_done(p);
         }
     }
@@ -1562,6 +1573,16 @@ impl Sim {
                 None if !self.binds.is_empty() => self.unbind(c),
                 None => {}
             }
+            // a branch of a fork inside a shared subroutine uses that call's frame; a
+            // branch of such a branch, the same
+            let ub = self.unit_chain.last().map(|a| (a.unit, a.act)).or_else(|| self.ubinds.get(&p).copied());
+            if !self.ubinds.is_empty() {
+                self.unit_unbind(c);
+            }
+            if let Some((u, act)) = ub {
+                self.ubinds.insert(c, (u, act));
+                self.unit_refs.entry(act).or_insert((0, false)).0 += 1;
+            }
             // (its generator: seeded from the parent's)
             self.rngs[c as usize] = urandom(&mut self.rngs[p as usize], 0, u32::MAX) as i32;
             let ch = &mut self.procs[c as usize];
@@ -1617,7 +1638,7 @@ impl Sim {
                     }
                 }
             }
-            if self.any_insts || self.any_swap {
+            if self.any_insts || self.any_swap || !self.ubinds.is_empty() {
                 ended.into_iter().for_each(|c| self.instance_done(c));
             }
             return (None, false);
@@ -1643,7 +1664,7 @@ impl Sim {
                     if c == p {
                         stopped = true;
                     }
-                    if ch.class == ProcClass::Spawned && (self.any_insts || self.any_swap) {
+                    if ch.class == ProcClass::Spawned && (self.any_insts || self.any_swap || !self.ubinds.is_empty()) {
                         self.instance_done(c);
                     }
                 }
@@ -2332,6 +2353,12 @@ impl Sim {
             return;
         }
         self.stats.activations += 1;
+        // (the call's frame first: the branch's own words may lie inside it)
+        if !self.ubinds.is_empty() {
+            if let Some(&(u, act)) = self.ubinds.get(&p) {
+                self.unit_resident(u, act);
+            }
+        }
         if self.any_swap {
             let d = self.def(p);
             if self.resident[d as usize] != FRAME_OFF {
@@ -2835,6 +2862,15 @@ impl Sim {
 
     /// Activation `act` of unit `u` has ended (or was abandoned): its frame is dropped.
     fn unit_end(&mut self, u: u32, act: u64) {
+        if let Some(r) = self.unit_refs.get_mut(&act) {
+            // (fork branches still use its frame)
+            r.1 = true;
+            return;
+        }
+        self.unit_drop(u, act);
+    }
+
+    fn unit_drop(&mut self, u: u32, act: u64) {
         if self.unit_res[u as usize] == act {
             self.unit_res[u as usize] = 0;
         }
@@ -2848,9 +2884,33 @@ impl Sim {
         self.unit_pending.clear();
         self.unit_chain.clear();
         self.unit_susp.clear();
+        self.ubinds.clear();
+        self.unit_refs.clear();
         self.unit_saved.clear();
         self.unit_saved_words = 0;
         self.unit_res.fill(0);
+    }
+
+    /// Fork branch `p` no longer uses the frame of the call that started it (it ended or
+    /// another branch takes its id); calls it was suspended in are abandoned.
+    #[cold]
+    #[inline(never)]
+    fn unit_unbind(&mut self, p: u32) {
+        if let Some((_, _, chain)) = self.unit_susp.remove(&p) {
+            for c in chain {
+                self.unit_end(c.unit, c.act);
+            }
+        }
+        let Some((u, act)) = self.ubinds.remove(&p) else { return };
+        let r = self.unit_refs.get_mut(&act).unwrap();
+        r.0 -= 1;
+        if r.0 == 0 {
+            let ended = r.1;
+            self.unit_refs.remove(&act);
+            if ended {
+                self.unit_drop(u, act);
+            }
+        }
     }
 
     /// Wake the processes waiting on event control `ctl` of a shared subroutine.
