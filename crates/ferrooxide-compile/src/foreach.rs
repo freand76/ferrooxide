@@ -129,6 +129,9 @@ impl<'a> Compiler<'a> {
     /// The struct or class key type of the associative array property `e` (`obj.p`), if it
     /// has one.
     fn struct_key(&mut self, e: &Expr, sid: usize) -> Option<Rc<SvType>> {
+        // (a property named in a method: through `this`)
+        let this = self.this_member(e, sid);
+        let e = this.as_ref().unwrap_or(e);
         let ExprKind::Member(b, m) = &e.kind else { return None };
         let mut c = self.handle_class(b, sid).ok()??;
         loop {

@@ -518,6 +518,15 @@ impl<'a> Compiler<'a> {
                     self.local_params(params, b)?;
                     self.code.block_scopes.insert((sid, st as *const Stmt), b);
                     for d in decls {
+                        // (of a type given by a type parameter: the type it has here)
+                        let orig = d;
+                        let resolved;
+                        let d = if d.ty.param.is_some() {
+                            resolved = ferrooxide_front::ast::Decl { ty: std::rc::Rc::new(self.resolve_type(&d.ty, b)?), ..d.clone() };
+                            &resolved
+                        } else {
+                            d
+                        };
                         let (mut m, mut l) = self.range_vals(&d.range(), b)?;
                         let mut signed = d.signed();
                         let kind = match d.kind() {
@@ -557,7 +566,7 @@ impl<'a> Compiler<'a> {
                         let shared = d.static_ && self.subr.inline_stack.last().is_some_and(|f| !f.2 .1.ends_with("$const"));
                         // (in an automatic subroutine, block variables are automatic too)
                         let in_auto = !d.static_ && self.subr.inline_stack.last().is_some_and(|f| f.2 .1.contains('#'));
-                        for dl in &d.names {
+                        for dl in &orig.names {
                             let key = dl as *const Declarator;
                             if shared {
                                 if let Some(&s) = self.subr.static_vars.get(&key) {
@@ -574,6 +583,7 @@ impl<'a> Compiler<'a> {
                                 let elem = self.nest_elem(elem, &dl.inner, b)?;
                                 let s = self.new_dyn(format!("{path}.{}", dl.name), &dl.name, elem, h, b)?;
                                 self.dyn_layout(s, layout.as_ref());
+                                self.dyn_enum(s, Some(&d.ty), b);
                                 if d.automatic || in_auto {
                                     self.sigs.automatic.insert(s);
                                 }
@@ -701,6 +711,12 @@ impl<'a> Compiler<'a> {
                         }
                     }
                     Some(join) => {
+                        // (a subroutine that calls itself from the branches of its fork: each
+                        // call would need branch processes of its own)
+                        if self.code.forks.contains(&(st as *const Stmt)) {
+                            return self.err("a subroutine that calls itself from a fork branch (directly or through others) is not supported");
+                        }
+                        self.code.forks.push(st as *const Stmt);
                         // each statement runs as its own process; the parent starts them all
                         let parent = self.code.pb.last().unwrap().proc;
                         let mut children = Vec::new();
@@ -731,6 +747,7 @@ impl<'a> Compiler<'a> {
                             }
                             self.code.pb.last_mut().unwrap().code[e] = Instr::Evict { defs: children.clone().into_boxed_slice() };
                         }
+                        self.code.forks.pop();
                         if !children.is_empty() {
                             self.emit(Instr::Fork { children: children.into_boxed_slice(), join });
                         }
@@ -818,7 +835,7 @@ impl<'a> Compiler<'a> {
                         }
                         return Ok(());
                     }
-                    if !self.prop_assign(lhs, rhs, sid)? {
+                    if !self.prop_assign(lhs, rhs, sid)? && !self.prop_part_assign(lhs, rhs, sid, *line)? {
                         return self.err("an assignment to a part of a class property is not supported");
                     }
                     return Ok(());
@@ -1117,6 +1134,11 @@ impl<'a> Compiler<'a> {
             }
             Stmt::MethodCall { obj, name, args, line } => {
                 self.line = *line;
+                // a static property through a handle (`h.sp.m()`)
+                if let Some((n, _)) = self.static_via_handle(obj, sid, true) {
+                    let st = Stmt::MethodCall { obj: n, name: name.clone(), args: args.clone(), line: *line };
+                    return self.stmt(&st, sid);
+                }
                 if self.sigs.has_dyn && self.dyn_method_task(obj, name, args, sid)? {
                     return Ok(());
                 }
@@ -1373,6 +1395,62 @@ impl<'a> Compiler<'a> {
         for j in brk {
             self.patch(j, end);
         }
+    }
+
+    /// `obj.p[i] = v`, `obj.p[a:b] = v` of a vector property: through a hidden variable
+    /// with the property's value (nothing runs in between that could see it). False if
+    /// `lhs` is no such select.
+    fn prop_part_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize, line: Line) -> R<bool> {
+        let mut base = lhs;
+        while let ExprKind::Index(a, _) | ExprKind::Range(a, ..) | ExprKind::IndexedRange(a, ..) = &base.kind {
+            base = a;
+        }
+        let ExprKind::Member(b, m) = &base.kind else { return Ok(false) };
+        if std::ptr::eq(base, lhs) {
+            return Ok(false);
+        }
+        let Some(c) = self.handle_class(b, sid)? else { return Ok(false) };
+        let p = self.prop(c, m)?;
+        let Type::Vec { w, signed } = p.ty else { return Ok(false) };
+        if !p.dims.is_empty() || p.layout.as_ref().is_some_and(|l| l.fields.is_some()) {
+            return Ok(false);
+        }
+        // (a range other than [w-1:0]: its selects are not mapped, see PLAN.md)
+        if self.prop_range(c, m)?.is_some_and(|r| r != (w as i64 - 1, 0)) {
+            return Ok(false);
+        }
+        let (msb, lsb) = (w as i64 - 1, 0);
+        let key = base as *const Expr;
+        let t = match self.code.part_vars.get(&key) {
+            Some(&t) => t,
+            None => {
+                let t = self.new_signal(format!("$part{}", self.code.part_vars.len()), w, signed, 0, msb, lsb, 0, SigKind::Reg);
+                self.prog.names.pop();
+                if let Some(l) = p.layout.as_deref().filter(|l| l.dims.len() > 1) {
+                    self.set_layout(t, "$part", Some(l.clone()), sid)?;
+                }
+                self.code.part_vars.insert(key, t);
+                t
+            }
+        };
+        let name = format!("$part{t}");
+        self.scopes[sid].syms.insert(name.clone(), Sym::Sig(t));
+        let v = self.expr(base, sid, w, signed)?;
+        self.emit(Instr::Store { t: Target::Whole { sig: t }, s: v, mode: StoreMode::Blocking });
+        fn swap(e: &Expr, base: *const Expr, name: &str) -> Expr {
+            let b = |x: &Expr| Box::new(swap(x, base, name));
+            let kind = match &e.kind {
+                _ if std::ptr::eq(e, base) => ExprKind::Ident(name.to_string()),
+                ExprKind::Index(a, i) => ExprKind::Index(b(a), i.clone()),
+                ExprKind::Range(a, l, r) => ExprKind::Range(b(a), l.clone(), r.clone()),
+                ExprKind::IndexedRange(a, l, r, up) => ExprKind::IndexedRange(b(a), l.clone(), r.clone(), *up),
+                k => k.clone(),
+            };
+            Expr::new(kind, e.line)
+        }
+        let st = Stmt::Assign { lhs: swap(lhs, key, &name), rhs: rhs.clone(), nonblocking: false, timing: None, line };
+        self.stmt(&st, sid)?;
+        self.prop_assign(base, &ExprKind::Ident(name).into(), sid)
     }
 
     pub(crate) fn fmt_args(&mut self, args: &[Option<Expr>], sid: usize) -> R<Vec<FmtArg>> {

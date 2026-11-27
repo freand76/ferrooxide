@@ -1312,6 +1312,21 @@ thread_local! {
     /// Index expressions of hierarchical-name segments that are not literals (`blk[i].x`): the
     /// segment is stored as `blk[@N]` and resolved by the compiler in the referencing scope.
     static HIER_INDEX: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
+    static ENUM_NAMES: std::cell::RefCell<HashMap<usize, String>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// The name of the typedef that declared the enum with constants `names` (None: an
+/// anonymous enum), for `$typename`.
+pub fn enum_type_name(names: &Rc<Vec<String>>) -> Option<String> {
+    ENUM_NAMES.with(|m| m.borrow().get(&(Rc::as_ptr(names) as usize)).cloned())
+}
+
+/// Record the typedef name of an enum type (the first one: a typedef of it names the same
+/// type).
+pub(crate) fn set_enum_type_name(names: &Rc<Vec<String>>, name: &str) {
+    ENUM_NAMES.with(|m| {
+        m.borrow_mut().entry(Rc::as_ptr(names) as usize).or_insert_with(|| name.to_string());
+    })
 }
 
 /// The index expression of a `name[@N]` hierarchical-name segment.

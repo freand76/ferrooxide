@@ -702,13 +702,18 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Mux { d, c: b, cw: 1, t: x, f: y, w: 64 });
                 Ok((d, true))
             }
-            ExprKind::Call(name, args) if self.lookup_func(name, sid).is_some() => {
+            ExprKind::Call(name, args) if self.lookup_func(name, sid).is_some() || matches!(self.type_of(e, sid), Ok(Type::Dyn { .. })) => {
                 // a function returning an array: its result variable
                 match self.call(name, args, sid, false)? {
                     (Some(slot), _, _) => Ok((slot, false)),
                     _ => self.err(format!("'{name}' gives no value")),
                 }
             }
+            // a method returning an array
+            ExprKind::MethodCall(..) | ExprKind::StaticCall(..) if matches!(self.type_of(e, sid), Ok(Type::Dyn { .. })) => match self.obj_value(e, sid)? {
+                Some((slot, _)) => Ok((slot, false)),
+                None => self.err("expected a queue or dynamic array value"),
+            },
             _ => self.err("expected a queue or dynamic array value"),
         }
     }

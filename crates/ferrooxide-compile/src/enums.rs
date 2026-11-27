@@ -83,6 +83,11 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// The scope that declares the constants of enum `id` (its constant list at `ptr`).
+    pub(crate) fn enum_owner(&self, ptr: usize, id: u32) -> Option<usize> {
+        self.enums.owners.get(&ptr)?.iter().copied().find(|&o| self.enums.ids.get(&(ptr, o)) == Some(&id))
+    }
+
     /// The id of the enum with constants `names` used in scope `sid`: the one whose
     /// constants are declared in `sid` or a scope around it, else (a package's) the first
     /// (NONE: no constants of it were declared).
@@ -398,11 +403,16 @@ impl<'a> Compiler<'a> {
     /// expression it stands for, as the lowering writes it for other enum variables (IEEE
     /// 1800-2017 6.19.5). None for any other expression.
     pub(crate) fn enum_method(&self, e: &Expr, sid: usize) -> R<Option<Expr>> {
+        self.enum_method_of(e, None, sid)
+    }
+
+    /// `enum_method` of a value of enum `id` (None: of an enum variable).
+    pub(crate) fn enum_method_of(&self, e: &Expr, id: Option<u32>, sid: usize) -> R<Option<Expr>> {
         let ExprKind::MethodCall(o, m, args) = &e.kind else { return Ok(None) };
         if !matches!(m.as_str(), "first" | "last" | "num" | "next" | "prev" | "name") {
             return Ok(None);
         }
-        let Some(id) = self.var_enum(o, sid) else { return Ok(None) };
+        let Some(id) = id.or_else(|| self.var_enum(o, sid)) else { return Ok(None) };
         let vals = self.enums.values.get(&id).cloned().unwrap_or_default();
         let n = vals.len();
         if n == 0 {

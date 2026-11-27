@@ -270,6 +270,17 @@ impl<'a> Compiler<'a> {
             },
             ExprKind::Cond(_, t, f) => {
                 let (tt, tf) = (self.type_of(t, sid)?, self.type_of(f, sid)?);
+                // class handles: the class the other one's is assignment compatible with
+                // (IEEE 1800-2017 11.4.11; null goes with any)
+                let null = |x: &Expr| matches!(x.kind, ExprKind::Null);
+                match (&tt, &tf) {
+                    (Type::Class(a), Type::Class(b)) if a == b || self.derives(*b, *a) => return Ok(Type::Class(*a)),
+                    (Type::Class(a), Type::Class(b)) if self.derives(*a, *b) => return Ok(Type::Class(*b)),
+                    (Type::Class(a), _) if null(f) => return Ok(Type::Class(*a)),
+                    (_, Type::Class(b)) if null(t) => return Ok(Type::Class(*b)),
+                    (Type::Class(_), Type::Class(_)) => return self.err("the branches of the conditional are handles of classes that are not assignment compatible"),
+                    _ => {}
+                }
                 if tt.is_str() || tf.is_str() {
                     Type::Str
                 } else if tt.is_real() || tf.is_real() {
@@ -476,6 +487,8 @@ pub(crate) struct Packed {
     pub(crate) leaf: Leaf,
     /// an enum (or a packed array of them): its constants
     pub(crate) enum_names: Option<Rc<Vec<String>>>,
+    /// a class handle member of an unpacked struct: the class's name (64 bits, null at first)
+    pub(crate) class: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,12 +554,12 @@ pub(crate) fn packed_of(t: &SvType) -> Packed {
         NetKind::String => Leaf::Str,
         _ => Leaf::Bits,
     };
-    Packed { dims, signed: t.signed, int_kind: t.int_kind, fields, leaf, enum_names: t.enum_names.clone() }
+    Packed { dims, signed: t.signed, int_kind: t.int_kind, fields, leaf, enum_names: t.enum_names.clone(), class: t.class.clone() }
 }
 
 /// The bit offsets of the real and string members in a value of type `t` at `off`.
 pub(crate) fn value_members(t: &Packed, off: i64, out: &mut Vec<i64>) {
-    if t.leaf != Leaf::Bits {
+    if t.leaf != Leaf::Bits || t.class.is_some() {
         out.push(off);
         return;
     }
@@ -940,7 +953,7 @@ impl<'a> Compiler<'a> {
                 // (a select of a struct member that is a packed struct: its bits `[w-1:0]`)
                 Some(&op @ (Sel::Index(_) | Sel::Range(..) | Sel::Part(..))) if di < cur.dims.len() || (touched && di == cur.dims.len() && cur.fields.as_ref().is_some_and(|f| !f.fields.is_empty())) => {
                     if di == cur.dims.len() {
-                        cur = Packed { dims: vec![(cur.width() - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None };
+                        cur = Packed { dims: vec![(cur.width() - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None, class: None };
                         di = 0;
                     }
                     let r = cur.dims[di];
@@ -992,7 +1005,7 @@ impl<'a> Compiler<'a> {
                         k += 1;
                         off = arith(B::Add, off, num(st.widest()));
                         let w = st.tag_bits();
-                        cur = Packed { dims: vec![(w - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None };
+                        cur = Packed { dims: vec![(w - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None, class: None };
                         di = 0;
                         width = num(w);
                         touched = true;
@@ -1065,16 +1078,21 @@ impl<'a> Compiler<'a> {
         Some(Ok(Walk { expr: out, ty: if whole_chain { ty } else { None }, leaf: if whole_chain { leaf } else { Leaf::Bits }, tag_write }))
     }
 
-    /// The type of a member chain that selects a whole real or string member of an unpacked
-    /// struct.
+    /// The type of a member chain that selects a whole real, string or class handle member
+    /// of an unpacked struct.
     pub(crate) fn member_type(&self, e: &Expr, sid: usize) -> Option<Type> {
         if !self.sigs.has_struct_values || !matches!(&e.kind, ExprKind::Member(..) | ExprKind::Index(..)) {
             return None;
         }
-        match self.struct_walk(e, sid, true)?.ok()?.leaf {
+        let w = self.struct_walk(e, sid, true)?.ok()?;
+        match w.leaf {
             Leaf::Real => Some(Type::Real),
             Leaf::Str => Some(Type::Str),
-            Leaf::Bits => None,
+            // a class handle member
+            Leaf::Bits => {
+                let cn = w.ty.as_ref()?.class.as_ref()?;
+                self.find_class(cn, sid).map(Type::Class)
+            }
         }
     }
 
@@ -1133,7 +1151,7 @@ impl<'a> Compiler<'a> {
             Sel::Part(_, w, _) => self.const_value(w, sid)?,
             _ => return None,
         };
-        Some(Packed { dims: vec![(w - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None })
+        Some(Packed { dims: vec![(w - 1, 0)], signed: false, int_kind: false, fields: None, leaf: Leaf::Bits, enum_names: None, class: None })
     }
 
     /// `e` with the assignment patterns at its top (or in a conditional's branches) resolved
@@ -1423,8 +1441,69 @@ impl<'a> Compiler<'a> {
         let ExprKind::SysCall(n, args) = &e.kind else { return Ok(None) };
         let (true, [Expr { kind: ExprKind::Type(t), .. }]) = (n == "$typename", args.as_slice()) else { return Ok(None) };
         let r = self.resolve_type(t, sid)?;
-        if r.enum_names.is_some() || r.fields.is_some() || r.class.is_some() || r.heap.is_some() || r.inner_heap.is_some() {
-            return self.err("$typename of an enum, struct, union, class or dynamic type is not supported");
+        // a class: its name after that of the package or module declaring it (20.6.1 f)
+        if let (Some(cn), None, None) = (&r.class, &r.heap, &r.inner_heap) {
+            if r.unpacked.is_empty() {
+                let Some(c) = self.find_class(cn, sid) else { return self.err(format!("unknown class '{cn}'")) };
+                let ci = &self.classes.list[c as usize];
+                if !ci.decl.params.is_empty() {
+                    return self.err("$typename of a parameterized class is not supported (the standard gives no form for a specialization)");
+                }
+                let ds = self.classes.decl_scope[&c];
+                let ns = match self.hier.pkg_scopes.iter().find(|(_, &s)| s == ds) {
+                    Some((n, _)) => n.clone(),
+                    None => match self.hier.scope_module.get(&ds) {
+                        Some(m) => m.name.clone(),
+                        None => return self.err("$typename of a class declared here is not supported"),
+                    },
+                };
+                return Ok(Some(Expr::new(ExprKind::Str(format!("{ns}::{}", ci.decl.name)), e.line)));
+            }
+        }
+        // an enum: its constants with their values, then its name after that of the package
+        // or module declaring it (20.6.1 e, f)
+        if let (Some(names), None, None, true) = (&r.enum_names, &r.heap, &r.inner_heap, r.unpacked.is_empty()) {
+            let Some(tn) = ferrooxide_front::lower::enum_type_name(names) else {
+                return self.err("$typename of an anonymous enum is not supported");
+            };
+            let id = self.enum_id(names, sid);
+            if id == NONE {
+                return self.err("$typename of this enum is not supported");
+            }
+            let ptr = Rc::as_ptr(names) as usize;
+            let owner = self.enum_owner(ptr, id);
+            let ns = owner.and_then(|o| match self.hier.pkg_scopes.iter().find(|(_, &s)| s == o) {
+                Some((n, _)) => Some(n.clone()),
+                None => self.hier.scope_module.get(&o).map(|m| m.name.clone()),
+            });
+            let Some(ns) = ns else { return self.err("$typename of an enum declared here is not supported") };
+            let mut items = Vec::new();
+            for (k, v) in self.enum_values(id).iter().enumerate() {
+                let val = if !v.is_known() || v.w > 64 {
+                    None
+                } else if r.signed {
+                    v.to_i64().filter(|&x| x >= 0).map(|x| x as u64)
+                } else {
+                    Some(v.a[0])
+                };
+                let Some(val) = val else { return self.err("$typename of an enum with negative, wide or unknown values is not supported") };
+                items.push(format!("{}={}'{}d{val}", names[k], v.w, if r.signed { "s" } else { "" }));
+            }
+            return Ok(Some(Expr::new(ExprKind::Str(format!("enum{{{}}}{ns}::{tn}", items.join(","))), e.line)));
+        }
+        let kind = if r.heap.is_some() || r.inner_heap.is_some() {
+            Some("a queue, dynamic or associative array")
+        } else if r.enum_names.is_some() {
+            Some("an enum")
+        } else if r.fields.is_some() {
+            Some("a struct or union")
+        } else if r.class.is_some() {
+            Some("an array of class handles")
+        } else {
+            None
+        };
+        if let Some(k) = kind {
+            return self.err(format!("$typename of {k} is not supported"));
         }
         let (name, dflt_signed) = match r.kind {
             NetKind::Int(32) => ("int", true),

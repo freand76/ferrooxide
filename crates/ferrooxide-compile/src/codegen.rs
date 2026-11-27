@@ -135,6 +135,11 @@ impl<'a> Compiler<'a> {
         p.strings.truncate(lens.5);
         p.locs.truncate(lens.6);
         p.classes.truncate(lens.7);
+        // (signals made for the checked code alone go with it)
+        if p.obj_sig.is_some_and(|s| s as usize >= lens.1) {
+            p.obj_sig = None;
+        }
+        self.code.part_vars.retain(|_, s| (*s as usize) < lens.1);
         self.sigs.mem_error = mem_error;
         r
     }
@@ -152,17 +157,27 @@ impl<'a> Compiler<'a> {
         self.code.proc_scope.push(self.code.job_scope);
         self.prog.procs.push(ProcDef { name, code: Vec::new(), class, parent: NONE, fusible: false, kick0: false, frame: Vec::new(), capture: false, fused: false });
         self.code.pb.push(PState { proc: id, ..Default::default() });
+        self.subr.proc_base.push(self.subr.inline_stack.len());
         self.code.scratch_saved.push(self.code.scratch_top);
         self.code.scratch_top = 0;
         id
     }
 
     pub(crate) fn end_proc(&mut self) {
+        let (level, saved, bases, forks) = (self.code.pb.len(), self.code.scratch_saved.len(), self.subr.proc_base.len(), self.code.forks.len());
         if let Err(e) = self.finish_subs() {
             if self.sigs.mem_error.is_none() {
                 self.sigs.mem_error = Some(e);
             }
+            // (the compilation ends with the error: processes it left open are dropped)
+            while self.code.pb.len() > level {
+                self.pop_pb();
+            }
+            self.code.scratch_saved.truncate(saved);
+            self.subr.proc_base.truncate(bases);
+            self.code.forks.truncate(forks);
         }
+        self.subr.proc_base.pop();
         // nested processes ($monitor/$strobe bodies) restart at 0: the enclosing process's
         // temporaries are dead whenever the nested one runs (it runs in the postponed region)
         self.code.scratch_top = self.code.scratch_saved.pop().unwrap().max(self.code.scratch_top);

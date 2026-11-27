@@ -130,6 +130,13 @@ impl<'a> Compiler<'a> {
         // the elements of a queue of structs: the iterator has their members
         if let Some(l) = self.dyn_var(arr, sid).and_then(|(s, _)| self.sigs.elem_layout.get(&s).cloned()) {
             self.set_layout(it, &format!("$it{depth}"), Some((*l).clone()), isid)?;
+        } else if !self.classes.list.is_empty() {
+            // (of an array property: the layout of its elements)
+            let a = self.this_member(arr, sid).unwrap_or_else(|| arr.clone());
+            let el: Expr = ExprKind::Index(Box::new(a), Box::new(ExprKind::Num(ferrooxide_front::ast::dec(0)).into())).into();
+            if let Some(l) = self.prop_elem_layout(&el, sid).filter(|l| l.fields.is_some()) {
+                self.set_layout(it, &format!("$it{depth}"), Some(l), isid)?;
+            }
         }
         self.code.iter_scopes.insert(key, r);
         Ok(r)

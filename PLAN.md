@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4900 of 5112 (95.9%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4908 of 5112 (96.0%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -104,8 +104,9 @@ machinery must not assume static targets only (A3).
    11: 2, 20: 5). DPI (9) needs a C interface: last.
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
-   patterns also lack); enum methods of a call's result (`p.status().name()`) and of a
-   struct member (`r.size.name()`).
+   patterns also lack); enum methods of a call's result (`p.status().name()`: the
+   lowering rejects the call); selects of vector class properties whose range is not
+   `[w-1:0]` (`logic [7:4] n; obj.n[5]` reads x; assigning to such a part is rejected).
 3. **sv-tests invalid code** (8 accepted that must fail): see the ACCEPT lines of the
    baseline; errors in class methods that are never called.
 4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
@@ -115,10 +116,13 @@ machinery must not assume static targets only (A3).
    `EvOp::Arm`.)
 5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`). The package compiles in about 2 s
    (calls deeper than 4 go through subroutines, static initializers share a process).
-   Stops at `uvm_resource.svh:84`: `$typename` of a class (82 tests); the format the
-   standard gives (20.6.1) is still to be checked against its text. Next: virtual
-   interfaces (`this data type is not supported`, 51 tests). Fix the blockers one at a
-   time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
+   The whole library compiles; the first UVM tests pass (a run compiles for about 12 s:
+   large processes, see A3). Tests stop in their own code: `randc` (56 tests), virtual
+   interfaces (`this data type is not supported`, 51), a parameterized class first used
+   after a virtual call that could reach it was compiled (4: virtual calls through a table
+   would remove this). Error lines
+   in the test file are reported far past its end (line numbers after the library's
+   includes). Fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
 6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
    lowering goes. Large; only when feature work slows down.
@@ -264,7 +268,8 @@ SystemVerilog data and testbench:
   (`T'(tagged m v)`); pattern matching only of variables; a real or string member of an
   unpacked tagged union is read without the tag check.
 - `->>` with a delay or event control, `->>` of an event that is no module's;
-  `$typename` of enums, structs, unions, classes and dynamic types.
+  `$typename` of structs, unions, anonymous enums, parameterized classes (20.6.1 gives
+  no form for a specialization) and dynamic types.
 - strings are never reclaimed; non-UTF-8 bytes of a `string` print as U+FFFD; `%v` in
   `$sformatf`.
 

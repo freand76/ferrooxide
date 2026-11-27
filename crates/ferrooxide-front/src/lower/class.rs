@@ -909,7 +909,9 @@ fn static_call(n: &str, c: &ClassNames, locals: &[String]) -> bool {
 /// A call `m(...)` / `p.m(...)` of a method through `this`: (object, method).
 fn this_call(n: &str, c: &ClassNames, locals: &[String]) -> Option<(Expr, String)> {
     match n.rsplit_once('.') {
-        None if c.methods.contains(n) && !locals.iter().any(|l| l == n) => Some((ExprKind::Ident("this".into()).into(), n.to_string())),
+        // (a local of the same name, e.g. a function's own result variable, is no
+        // subroutine: a call names the method)
+        None if c.methods.contains(n) => Some((ExprKind::Ident("this".into()).into(), n.to_string())),
         Some((obj, m)) => {
             let parts: Vec<&str> = obj.split('.').collect();
             if !this_name(seg_name(parts[0]), c, locals) {

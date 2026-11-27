@@ -1623,6 +1623,8 @@ impl<'a> Compiler<'a> {
                     let size = match &a.kind {
                         ExprKind::Ident(n) => ExprKind::Call(format!("{n}.size"), vec![]),
                         ExprKind::Hier(p) => ExprKind::Call(format!("{}.size", p.join(".")), vec![]),
+                        // (a property, an element of an array of arrays)
+                        ExprKind::Member(..) | ExprKind::Index(..) => ExprKind::MethodCall(Box::new(a.clone()), "size".into(), vec![]),
                         _ => return self.err(format!("{name} of this array is not supported")),
                     };
                     let last = ExprKind::Binary(BinOp::Sub, Box::new(size.clone().into()), Box::new(ExprKind::Num(ferrooxide_front::ast::dec(1)).into()));
@@ -2169,7 +2171,10 @@ impl<'a> Compiler<'a> {
         // a constant function call (elaboration): every call starts afresh, also for a static
         // function, and leaves its run-time variables alone
         let fresh = f.automatic || self.code.pb.last().is_none_or(|p| p.proc == NONE);
-        if let Some(k) = self.subr.inline_stack.iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
+        // (calls inlined in this process only: a fork branch started inside a call is a
+        // process of its own, without that call)
+        let base = self.subr.proc_base.last().copied().unwrap_or(0).min(self.subr.inline_stack.len());
+        if let Some(k) = self.subr.inline_stack[base..].iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
             return self.sub_call(f, k, this, args, sid, fresh, want_array);
         }
         // calls nested deeper than SUB_DEPTH: a subroutine of the process (one copy of the
@@ -2344,8 +2349,11 @@ impl<'a> Compiler<'a> {
             }
             if let Ok(Some(Base::Sig(s))) = self.resolve_base(base, sid) {
                 let s = self.redir(s);
+                // (a variable of an automatic subroutine given to a recursive call of it: the
+                // names in the called body refer to the callee's own variables)
+                let own = f.automatic && self.scopes[fscope].syms.values().any(|v| matches!(v, Sym::Sig(x) if *x == s));
                 let used_r: Vec<u32> = used.iter().map(|&u| self.redir(u)).collect();
-                if used_r.contains(&s) {
+                if !own && used_r.contains(&s) {
                     return self.err(format!(
                         "ref argument '{pname}' of '{}' is given '{}', which the subroutine also uses by name: not supported (a ref is passed by copy)",
                         f.name,
@@ -2482,7 +2490,8 @@ impl<'a> Compiler<'a> {
         let level = self.code.pb.len();
         // recursion from another process (a fork branch inside the function) would need frames
         // shared between processes
-        if self.subr.subs.iter().any(|r| r.key == key && r.level != level) {
+        // (a static function's variables are shared by all processes anyway)
+        if whole && self.subr.subs.iter().any(|r| r.key == key && r.level != level) {
             return self.err(format!("recursive call of '{}' from a fork branch is not supported", f.name));
         }
         let si = match self.subr.subs.iter().position(|r| r.level == level && r.key == key) {

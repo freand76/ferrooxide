@@ -864,6 +864,9 @@ impl Lower {
                         None => return self.err(*loc, "expected a type after typedef"),
                     }
                 };
+                if let Some(n) = &t.enum_names {
+                    super::set_enum_type_name(n, name);
+                }
                 let name = self.name(name, *loc);
                 self.qualify_type(&mut t);
                 let (_, heap) = self.unpacked_dims(dims, *loc)?;

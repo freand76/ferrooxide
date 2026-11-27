@@ -83,6 +83,8 @@ pub(crate) struct Classes<'a> {
     pub quiet: std::cell::Cell<bool>,
     /// specializations named in the bodies of parameterized classes: those classes
     pub owners: HashMap<u32, Vec<u32>>,
+    /// unused parameterized classes left out of virtual calls
+    pub skipped: std::cell::RefCell<HashSet<u32>>,
 }
 
 /// The scope of a class that is reserved but not yet declared (`ClassInfo::scope`).
@@ -572,6 +574,25 @@ impl<'a> Compiler<'a> {
         Ok((self.prop_type_plain(d, sid)?, None))
     }
 
+    /// The declared range of vector property `m` of class `c` (or of a base class), if it
+    /// has one written.
+    pub(crate) fn prop_range(&mut self, c: u32, m: &str) -> R<Option<(i64, i64)>> {
+        let mut x = Some(c);
+        while let Some(k) = x {
+            let ci = &self.classes.list[k as usize];
+            let scope = self.class_scope(k);
+            let found = ci.decl.props.iter().find(|d| d.names.iter().any(|n| n.name == m));
+            if let Some(d) = found {
+                if d.range().is_none() || !d.packed().is_empty() {
+                    return Ok(None);
+                }
+                return self.range_vals(&d.range(), scope).map(Some);
+            }
+            x = ci.base;
+        }
+        Ok(None)
+    }
+
     /// The type of a class property of no struct type.
     fn prop_type_plain(&mut self, d: &Decl, sid: usize) -> R<Type> {
         Ok(match d.kind() {
@@ -652,6 +673,19 @@ impl<'a> Compiler<'a> {
     }
 
     /// The class named `name` visible from scope `sid`.
+    /// A parameterized class left out of a virtual call that turned out to be used later:
+    /// that call would miss its methods.
+    pub(crate) fn check_skipped_classes(&self) -> R<()> {
+        let skipped: Vec<u32> = self.classes.skipped.borrow().iter().copied().collect();
+        match skipped.into_iter().find(|&c| self.class_used(c)) {
+            Some(c) => self.err(format!(
+                "class '{}' is used after a virtual call that could reach it was compiled: not supported",
+                self.classes.list[c as usize].name
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Parameterized class `c` (as declared or a specialization) is used (`Classes::used`).
     pub(crate) fn class_used(&self, c: u32) -> bool {
         let mut seen = vec![c];
@@ -1071,6 +1105,9 @@ impl<'a> Compiler<'a> {
             ExprKind::MethodCall(o, m, _) => {
                 let Some(c) = self.handle_class(o, sid)? else {
                     // (a method of an array property: `heap.rs`)
+                    if let Some(x) = self.enum_value_method(o, m, &[], sid)? {
+                        return if m == "name" { Ok(Some(Type::Str)) } else { self.type_of(&x, sid).map(Some) };
+                    }
                     match self.type_of(o, sid)? {
                         Type::Dyn { .. } => return Ok(None),
                         // a string method with an integral result (`c.name.len()`)
@@ -1419,6 +1456,21 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// `v.m(args)` of an enum method of the enum value `v`: the expression it is. None if
+    /// `v` is no enum value or `m` no enum method.
+    fn enum_value_method(&mut self, v: &Expr, m: &str, args: &[Expr], sid: usize) -> R<Option<Expr>> {
+        if !matches!(m, "first" | "last" | "num" | "next" | "prev" | "name") {
+            return Ok(None);
+        }
+        // (not of a queue or array of enums: `next` & co. are its methods then)
+        if self.dyn_arr_type(v, sid)?.is_some() || !matches!(self.type_of(v, sid), Ok(Type::Vec { .. })) {
+            return Ok(None);
+        }
+        let Ok(crate::enums::EnumOf::Id(id)) = self.enum_of(v, sid) else { return Ok(None) };
+        let e: Expr = ExprKind::MethodCall(Box::new(v.clone()), m.to_string(), args.to_vec()).into();
+        self.enum_method_of(&e, Some(id), sid)
+    }
+
     /// The random number generator methods every class has (IEEE 1800-2017 18.13.3-5):
     /// `obj.srandom(seed)`, `obj.get_randstate()`, `obj.set_randstate(state)`. None for
     /// another method.
@@ -1454,6 +1506,10 @@ impl<'a> Compiler<'a> {
 
     /// `obj.m(args)`: (result slot, width, signed).
     pub(crate) fn method_call(&mut self, obj: &Expr, m: &str, args: &[Expr], sid: usize) -> R<(Option<u32>, u32, bool)> {
+        // a static property through a handle (`h.sp.m()`)
+        if let Some((n, _)) = self.static_via_handle(obj, sid, true) {
+            return self.method_call(&n, m, args, sid);
+        }
         let is_super = matches!(&obj.kind, ExprKind::Ident(n) if n == "super");
         if is_super && m == "new" {
             // the base part of the object being constructed, then this class's initializers
@@ -1463,6 +1519,13 @@ impl<'a> Compiler<'a> {
             return Ok((None, 0, false));
         }
         let Some(c) = self.handle_class(obj, sid)? else {
+            // an enum method of an enum value (a property, a member)
+            if let Some(x) = self.enum_value_method(obj, m, args, sid)? {
+                if m == "name" {
+                    return Ok((Some(self.str_expr(&x, sid)?), 64, false));
+                }
+                return self.self_expr(&x, sid).map(|(v, w, s)| (Some(v), w, s));
+            }
             let width = Self::str_method_width(m).or(crate::types::STR_METHODS.contains(&m).then_some((64, false)));
             if let Some((w, s)) = width {
                 if self.type_of(obj, sid)?.is_str() {
@@ -1672,6 +1735,12 @@ impl<'a> Compiler<'a> {
         for d in 0..self.classes.list.len() as u32 {
             // (no objects of an interface class)
             if d == c || !self.derives(d, c) || self.classes.list[d as usize].decl.interface {
+                continue;
+            }
+            // (no objects of a parameterized class that is not used, 8.25: checked again at
+            // the end, `check_skipped_classes`)
+            if !self.classes.list[d as usize].decl.params.is_empty() && !self.class_used(d) {
+                self.classes.skipped.borrow_mut().insert(d);
                 continue;
             }
             let (_, owner) = self.find_method(d, m).unwrap();

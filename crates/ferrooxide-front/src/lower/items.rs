@@ -514,10 +514,12 @@ impl Lower {
     /// A function or task.
     /// A function or task; `method`: of a class (its qualifiers are the class's business).
     pub(crate) fn subroutine_in(&mut self, s: &t::Subroutine, method: bool) -> Result<SubroutineDecl> {
-        // (its typedefs stay inside)
+        // (its typedefs, ports and variables stay inside)
         let saved_types = self.types.clone();
+        let saved_vars = self.vars.clone();
         let r = self.subroutine_here(s, method);
         self.types = saved_types;
+        self.vars = saved_vars;
         r
     }
 

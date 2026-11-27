@@ -234,6 +234,10 @@ pub(crate) struct Code<'a> {
     pub(crate) init_write: bool,
     /// the slot of the handle of the object being randomized: its generator gives the values
     pub(crate) rand_obj: Option<u32>,
+    /// hidden variables of assignments to parts of vector properties, by property select
+    pub(crate) part_vars: HashMap<*const Expr, u32>,
+    /// the fork blocks whose branches are being compiled
+    pub(crate) forks: Vec<*const Stmt>,
     /// the process of static variable initializers (`Job::Init`) is open
     pub(crate) init_open: bool,
     pub(crate) consts: HashMap<Const, u32>,
@@ -281,6 +285,8 @@ pub(crate) struct Subr<'a> {
     pub(crate) call_depth: u32,
     /// functions being inlined: (definition scope, name, instance key)
     pub(crate) inline_stack: Vec<(usize, String, (usize, String))>,
+    /// per open process: the length of `inline_stack` when it began
+    pub(crate) proc_base: Vec<usize>,
     /// `static` variables of blocks in subroutines, by declaration: shared by all calls
     pub(crate) static_vars: HashMap<*const Declarator, u32>,
     /// subroutines whose body was compiled (a call inlines it): (declaring scope, name)
@@ -534,6 +540,7 @@ pub fn compile_dialect(
     c.resolve_views();
     c.start_order();
     c.check_uncalled_subs()?;
+    c.check_skipped_classes()?;
     // package variables are not dumped (as in the reference)
     if !c.hier.pkg_scopes.is_empty() {
         let pre: Vec<String> = c.hier.pkg_scopes.keys().map(|n| format!("{n}.")).collect();

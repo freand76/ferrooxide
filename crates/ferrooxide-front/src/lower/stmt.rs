@@ -237,8 +237,9 @@ impl Lower {
                     _ => None,
                 };
                 // `import` in the block: the package's types and variables are visible in it
-                // (and its typedefs only in it)
-                let saved = decls.iter().any(|d| matches!(d, t::Item::Import(..) | t::Item::Typedef(_))).then(|| (self.types.clone(), self.vars.clone()));
+                // (and its typedefs only in it); its variables are visible only in it too
+                let saved = decls.iter().any(|d| matches!(d, t::Item::Import(..) | t::Item::Typedef(_))).then(|| self.types.clone());
+                let saved_vars = (!decls.is_empty()).then(|| self.vars.clone());
                 let mut imports = Vec::new();
                 for d in decls {
                     if let t::Item::Import(v, _) = d {
@@ -256,8 +257,10 @@ impl Lower {
                 });
                 self.wild.locals.truncate(nlocals);
                 r?;
-                if let Some((types, vars)) = saved {
+                if let Some(types) = saved {
                     self.types = types;
+                }
+                if let Some(vars) = saved_vars {
                     self.vars = vars;
                 }
                 let fork = fork.map(|j| match j {
@@ -894,7 +897,7 @@ impl Lower {
         // the loop variable: of the key type (`[*]`: 64-bit)
         let kd = match key {
             Some(k) if k.kind == NetKind::String => decl(NetKind::String, false, None, v),
-            Some(k) if k.has_struct() => Decl::var(k.clone(), vec![Declarator { name: v.to_string(), dims: vec![], heap: None, inner: vec![], init: None, line }], true, line),
+            Some(k) if k.has_struct() || k.class.is_some() || k.enum_names.is_some() => Decl::var(k.clone(), vec![Declarator { name: v.to_string(), dims: vec![], heap: None, inner: vec![], init: None, line }], true, line),
             Some(k) => {
                 let (kind, signed, range, _) = k.decl_parts();
                 let range = range.or_else(|| Some((super::types::minus_one(k.width()), ExprKind::Num(dec(0)).into())));
@@ -909,9 +912,10 @@ impl Lower {
     fn foreach_heap(&mut self, name: &str, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
         let line = loc.line;
         let heap = self.vars[name].0.heap.clone();
-        // (a struct key: the loop variable's members are named in the body)
+        // (a struct, class handle or enum key: the loop variable's members or methods are
+        // named in the body)
         let key_struct = match &heap {
-            Some(HeapKind::Assoc(Some(k))) if k.has_struct() => Some(k.clone()),
+            Some(HeapKind::Assoc(Some(k))) if k.has_struct() || k.class.is_some() || k.enum_names.is_some() => Some(k.clone()),
             _ => None,
         };
         let saved = match (vars, &key_struct) {
