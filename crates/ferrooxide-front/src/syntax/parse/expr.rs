@@ -337,6 +337,11 @@ impl Parser {
                     e
                 };
                 self.expect_p(")")?;
+                // `(e).m`, `(e).f()`: a member or method of a parenthesized primary (a
+                // method_call_root, IEEE 1800-2017 A.8.2)
+                if self.is_p(".") && !self.is_p_at(1, "*") {
+                    return self.postfix(e);
+                }
                 return self.size_cast(e);
             }
             T::Punct("{") => {

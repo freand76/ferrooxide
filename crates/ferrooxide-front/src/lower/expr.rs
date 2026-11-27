@@ -833,6 +833,11 @@ impl Lower {
                         let base = self.expr(e)?;
                         return self.selects(base, ops);
                     }
+                    // a member or method of one in parentheses: `(c ? a : b).f()`
+                    if matches!(e.kind, t::ExprKind::Cond(..)) && matches!(ops.first(), Some(Op::Member(..))) {
+                        let base = self.expr(e)?;
+                        return self.class_chain(base, ops, lvalue);
+                    }
                     return self.unsupported(e.loc, "a select of this expression");
                 };
                 // `C #(..)::x`: of a specialization

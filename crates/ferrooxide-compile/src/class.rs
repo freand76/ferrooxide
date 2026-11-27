@@ -1052,7 +1052,7 @@ impl<'a> Compiler<'a> {
                 };
             }
         }
-        if !matches!(&e.kind, ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Member(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Call(..) | ExprKind::StaticCall(..)) {
+        if !matches!(&e.kind, ExprKind::Ident(_) | ExprKind::Hier(_) | ExprKind::Member(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Call(..) | ExprKind::StaticCall(..) | ExprKind::Cond(..)) {
             return Ok(None);
         }
         Ok(match self.type_of(e, sid)? {

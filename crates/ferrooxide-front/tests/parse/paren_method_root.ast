@@ -1,0 +1,18 @@
+module t ();
+  // imports $unit
+  class A a, b;
+  int(32) signed i, x;
+  initial begin
+    x = (i ? a : b).f();
+    x = (i ? a : b).v;
+    x = a.f();
+  end
+endmodule
+package $unit ();
+  class A;
+    int(32) signed v;
+    function automatic integer signed f;
+      return this.v;
+    endfunction
+  endclass
+endpackage
