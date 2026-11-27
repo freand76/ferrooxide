@@ -163,7 +163,9 @@ machinery must not assume static targets only (A3).
   (`Sim::ubinds`): its frame is swapped in when they run and kept until the last one ends
   (`Sim::unit_refs`). A unit that fails (a fork reached again in recursion) leaves its fork
   branches as empty processes. Left: module tasks
-  (a call cannot be disabled by name yet), then lowering units to fast ops / the JIT if
+  (a call cannot be disabled by name yet) and module functions with fork: inlined, the
+  branches of a call made again from the same place (a loop) see the newer call's
+  automatic variables, then lowering units to fast ops / the JIT if
   they get hot;
   (2) virtual calls and `randomize()` dispatch through a per-class table (no "used after a
   virtual call" restriction, an open class set); then decide on (3) a precompiled UVM

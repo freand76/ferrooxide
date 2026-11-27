@@ -15,8 +15,8 @@ use rt::UNIT_PROC;
 impl<'a> Compiler<'a> {
     /// A call of `f` (declared in scope `fs_def`) through its shared subroutine, if it gets
     /// one: a method, or a recursive or deeply nested call, of a function whose body cannot
-    /// wait, fork or start processes; or a call of a class method task whose body can wait
-    /// but not fork or start processes. None: the call is compiled as before.
+    /// wait or start processes other than join_none fork branches; or a call of a class
+    /// method task whose body can wait and fork but not start other processes. None: the call is compiled as before.
     pub(crate) fn unit_call(
         &mut self,
         f: &'a SubroutineDecl,
@@ -205,16 +205,18 @@ impl<'a> Compiler<'a> {
     }
 }
 
-/// A statement that a shared subroutine can hold: no timing (except in a task), fork,
-/// `disable`, procedural continuous assignment, deferred assertion, or system task that
+/// A statement that a shared subroutine can hold: no timing (except in a task), fork
+/// (except in a task, or join_none), `disable` (except `disable fork`), procedural continuous assignment, deferred assertion, or system task that
 /// starts a process or stops.
 fn unit_stmt(st: &Stmt, task: bool) -> bool {
     let u = |s: &Stmt| unit_stmt(s, task);
     match st {
         Stmt::Timed { body, .. } | Stmt::Wait { body, .. } => task && u(body),
         Stmt::Assign { timing: Some(_), .. } => task,
-        // (a task's fork branches are processes of their own, which use its call's frame)
-        Stmt::Block { fork: Some(_), .. } | Stmt::WaitFork { .. } => task,
+        // (fork branches are processes of their own, which use the call's frame; a
+        // function's can only be join_none, IEEE 1800-2017 13.4.4)
+        Stmt::Block { fork: Some(j), .. } => task || *j == ferrooxide_front::ast::Join::None,
+        Stmt::WaitFork { .. } => task,
         Stmt::Disable { name, .. } => name == "fork",
         Stmt::Force { .. }
         | Stmt::Deferred { .. } => false,
