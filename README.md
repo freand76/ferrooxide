@@ -57,7 +57,7 @@ Verilog-2005 plus common SystemVerilog:
   `for`/`while`/`do`/`repeat`/`forever`, `#` delays, `@` events, `wait`, named blocks + `disable`,
   `break`/`continue`, `++`/`+=`
 - functions and tasks (inlined; recursive calls with saved frames), all operators with IEEE width/sign rules and x/z semantics
-- `` `timescale `` (per module, fractional delays), `$time`/`$stime`/`$realtime`, `%t`
+- `` `timescale `` (per module, fractional delays; without one 1ns / 1ns), `$time`/`$stime`/`$realtime`, `%t`
 - `real`/`realtime` variables, arrays, parameters, task arguments and function results
 - nets with several drivers (tri-state buses through `inout` ports, also on parts of nets),
   drive strengths (`assign (pull0, pull1) ...`), `wand`/`wor`/`tri0`/`tri1`/`supply0`/`supply1`,

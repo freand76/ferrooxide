@@ -100,8 +100,8 @@ impl<'a> Compiler<'a> {
         self.scopes[sid].inst_parent = conns.map(|c| c.1);
         self.hier.scope_module.insert(sid, m);
         self.scopes[sid].imports = m.imports.iter().filter_map(|n| self.hier.pkg_scopes.get(n).copied()).collect();
-        self.scopes[sid].tunit = m.timescale.map(|t| t.0).unwrap_or(0);
-        self.scopes[sid].tprec = m.timescale.map(|t| t.1).unwrap_or(0);
+        self.scopes[sid].tunit = m.timescale.unwrap_or(DEFAULT_TIMESCALE).0;
+        self.scopes[sid].tprec = m.timescale.unwrap_or(DEFAULT_TIMESCALE).1;
         self.scopes[sid].nettype = m.default_nettype.clone();
         self.scopes[sid].uncdrive = m.unconnected_drive;
         for it in &m.items {

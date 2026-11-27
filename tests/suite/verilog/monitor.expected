@@ -4,4 +4,4 @@
 11 a= 4 b=0
 strobe a= 9
 17 a= 9 b=0
-monitor.v:14: $finish called at 18 (1s)
+monitor.v:14: $finish called at 18 (1ns)

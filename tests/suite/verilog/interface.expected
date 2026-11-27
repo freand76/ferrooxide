@@ -6,4 +6,4 @@
 45: data 12
 55: data 15
 sum 30 valid 1 ready 1 W 8 flag 1
-interface.v:56: $finish called at 62 (1s)
+interface.v:56: $finish called at 62 (1ns)

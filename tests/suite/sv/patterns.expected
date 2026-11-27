@@ -9,4 +9,4 @@ arr[1] 022f
 arr[2] 1e40
 arr[3] 0661
 pair 0110001
-patterns.v:41: $finish called at 0 (1s)
+patterns.v:41: $finish called at 0 (1ns)

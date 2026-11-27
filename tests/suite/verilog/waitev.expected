@@ -2,4 +2,4 @@
 8 negedge
 data=243
 34 data=250
-waitev.v:22: $finish called at 34 (1s)
+waitev.v:22: $finish called at 34 (1ns)

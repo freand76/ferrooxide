@@ -14,4 +14,4 @@
 50 sel=x a=0 b=0 m=0 md=0 | clk=0 d=0 q=1 | en=0 l=1
 55 sel=x a=0 b=0 m=0 md=0 | clk=x d=0 q=x | en=0 l=1
 60 sel=x a=0 b=0 m=0 md=0 | clk=1 d=0 q=x | en=0 l=1
-udp.v:62: $finish called at 65 (1s)
+udp.v:62: $finish called at 65 (1ns)

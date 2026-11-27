@@ -16,4 +16,4 @@
 75 rep
 75 not
 75 if
-sequence_ops.v:26: $finish called at 130 (1s)
+sequence_ops.v:26: $finish called at 130 (1ns)

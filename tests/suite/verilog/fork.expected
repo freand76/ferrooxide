@@ -17,4 +17,4 @@
 45: long_task step 1
 47: after disable task
 58: end
-fork.v:64: $finish called at 58 (1s)
+fork.v:64: $finish called at 58 (1ns)

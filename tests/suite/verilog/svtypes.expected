@@ -18,4 +18,4 @@ u beef b1 be b0 ef
 u be01
 casts b ed 4 -1 010
 st cast 2
-svtypes.v:92: $finish called at 3 (1s)
+svtypes.v:92: $finish called at 3 (1ns)

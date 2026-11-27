@@ -5,4 +5,4 @@
 30 q is 5 (reported once)
 30 final pass
 36 covered t.d1 q=3
-deferred.v:23: $finish called at 46 (1s)
+deferred.v:23: $finish called at 46 (1ns)

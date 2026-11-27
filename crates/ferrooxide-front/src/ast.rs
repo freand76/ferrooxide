@@ -2,6 +2,10 @@ pub use crate::lexer::Number;
 
 pub type Line = u32;
 
+/// The time unit and precision of a module without `timescale or timeunit (powers of ten of
+/// seconds): 1ns / 1ns (IEEE 1800-2017 3.14.2.3 leaves it to the tool)
+pub const DEFAULT_TIMESCALE: (i32, i32) = (-9, -9);
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,

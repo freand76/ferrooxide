@@ -22,4 +22,4 @@
 71 a=1 g=1 rf=x t=x vd=0 b=x en=1
 72 a=1 g=1 rf=x t=x vd=x b=x en=1
 78 a=x g=x rf=x t=x vd=x b=x en=1
-inertial.v:23: $finish called at 98 (1s)
+inertial.v:23: $finish called at 98 (1ns)

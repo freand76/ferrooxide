@@ -10,4 +10,4 @@
 31 EN=1 I=0 O=0 a=1 q=0
 36 EN=1 I=0 O=0 a=0 q=0
 39 EN=1 I=0 O=0 a=0 q=1
-specify.v:29: $finish called at 46 (1s)
+specify.v:29: $finish called at 46 (1ns)

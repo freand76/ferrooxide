@@ -7,4 +7,4 @@ i=3 a=  9 sum=10
          -5  -56
   9  1
 time=                   6 now=6
-basic.v:20: $finish called at 6 (1s)
+basic.v:20: $finish called at 6 (1ns)

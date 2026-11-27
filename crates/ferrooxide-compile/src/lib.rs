@@ -531,7 +531,7 @@ pub fn compile_dialect(
     let mut c = Compiler::new(modules);
     c.diag.lint_enabled = lint;
     c.dialect = dialect.clone();
-    c.gprec = modules.iter().map(|m| m.timescale.map(|t| t.1).unwrap_or(0)).min().unwrap_or(0);
+    c.gprec = modules.iter().map(|m| m.timescale.unwrap_or(DEFAULT_TIMESCALE).1).min().unwrap_or(DEFAULT_TIMESCALE.1);
     if let Some(sd) = &seed {
         c.hier.defparams = sd.clone();
         c.hier.restarted = true;
@@ -832,8 +832,8 @@ impl<'a> Compiler<'a> {
             string_params: HashSet::new(),
             specparams: HashSet::new(),
             file,
-            tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(0),
-            tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(0),
+            tunit: parent.map(|p| self.scopes[p].tunit).unwrap_or(DEFAULT_TIMESCALE.0),
+            tprec: parent.map(|p| self.scopes[p].tprec).unwrap_or(DEFAULT_TIMESCALE.1),
             nettype: parent.and_then(|p| self.scopes[p].nettype.clone()),
             uncdrive: parent.and_then(|p| self.scopes[p].uncdrive),
             imports: Vec::new(),

@@ -15,4 +15,4 @@
 75 p3 fail
 85 p1 pass
 95 p1 pass
-implication.v:30: $finish called at 100 (1s)
+implication.v:30: $finish called at 100 (1ns)

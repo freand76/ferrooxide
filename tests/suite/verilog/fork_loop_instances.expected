@@ -6,4 +6,4 @@
 65 worker 10 done after 2 edges
 75 worker 11 done after 3 edges
 285 end
-fork_loop_instances.v:49: $finish called at 285 (1s)
+fork_loop_instances.v:49: $finish called at 285 (1ns)

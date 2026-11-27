@@ -18,4 +18,4 @@
 185 q4= 1 q8= 17
 195 q4= 2 q8= 18
 205 q4= 3 q8= 19
-seq.v:18: $finish called at 205 (1s)
+seq.v:18: $finish called at 205 (1ns)

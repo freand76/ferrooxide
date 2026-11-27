@@ -291,9 +291,8 @@ impl Lower {
             t::Directive::UnconnectedDrive(d) => self.unconnected_drive = *d,
             t::Directive::Keywords(Some(v)) => self.keywords.push(v.clone()),
             t::Directive::Keywords(None) => _ = self.keywords.pop(),
-            // (the default timescale is 1s / 1s)
             t::Directive::ResetAll => {
-                self.timescale = Some((0, 0));
+                self.timescale = Some(DEFAULT_TIMESCALE);
                 self.default_nettype = None;
                 self.unconnected_drive = None;
             }
@@ -441,17 +440,17 @@ impl Lower {
     pub(crate) fn eff_timescale(&self) -> Option<(i32, i32)> {
         let base = self.timescale.or(match self.file_tu {
             (None, None) => None,
-            (u, p) => Some((u.unwrap_or(0), p.unwrap_or(0))),
+            (u, p) => Some((u.unwrap_or(DEFAULT_TIMESCALE.0), p.unwrap_or(DEFAULT_TIMESCALE.1))),
         });
         match self.local_tu {
             (None, None) => base,
-            (u, p) => Some((u.or(base.map(|b| b.0)).unwrap_or(0), p.or(base.map(|b| b.1)).unwrap_or(0))),
+            (u, p) => Some((u.or(base.map(|b| b.0)).unwrap_or(DEFAULT_TIMESCALE.0), p.or(base.map(|b| b.1)).unwrap_or(DEFAULT_TIMESCALE.1))),
         }
     }
 
     /// A time literal in units of the current module, rounded to its precision, as a real.
     pub(crate) fn time_literal(&self, v: f64, e: i32) -> Expr {
-        let (unit, prec) = self.eff_timescale().unwrap_or((0, 0));
+        let (unit, prec) = self.eff_timescale().unwrap_or(DEFAULT_TIMESCALE);
         let scale = |v: f64, k: i32| if k >= 0 { v * 10f64.powi(k) } else { v / 10f64.powi(-k) };
         let steps = scale(v, e - prec).round();
         ExprKind::Real(scale(steps, prec - unit)).into()

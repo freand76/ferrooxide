@@ -14,4 +14,4 @@
 75 a##[1:2]b##1!b
 85 b[->2]
 85 b[->2]
-cover_sequence.v:22: $finish called at 130 (1s)
+cover_sequence.v:22: $finish called at 130 (1ns)
