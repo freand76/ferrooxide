@@ -1259,6 +1259,10 @@ impl<'a> Compiler<'a> {
                     let d = self.dyn_compare(matches!(op, B::Ne | B::CaseNe), a, b, elem, sid)?;
                     return Ok(self.resize(d, 1, w, false));
                 }
+                if op == B::InsideEq {
+                    let op = if ta.is_str() || tb.is_str() || ta.is_real() || tb.is_real() { B::Eq } else { B::WildEq };
+                    return self.binary(op, a, b, sid, w, s);
+                }
                 if matches!(op, B::WildEq | B::WildNe) && (ta.is_str() || tb.is_str() || ta.is_real() || tb.is_real()) {
                     return self.err("the operands of ==? and !=? must be integral, not real or string");
                 }

@@ -149,7 +149,7 @@ impl<'a> Compiler<'a> {
         }
         let (x, y) = (self.const_text(a, sid)?, self.const_text(b, sid)?);
         let r = match op {
-            BinOp::Eq | BinOp::CaseEq => x == y,
+            BinOp::Eq | BinOp::CaseEq | BinOp::InsideEq => x == y,
             BinOp::Ne | BinOp::CaseNe => x != y,
             BinOp::Lt => x < y,
             BinOp::Le => x <= y,

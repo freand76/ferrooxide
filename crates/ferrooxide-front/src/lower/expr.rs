@@ -496,7 +496,7 @@ impl Lower {
             }
             t::ValueRange::Value(v) => {
                 let v = self.expr(v)?;
-                Ok(ExprKind::Binary(BinOp::WildEq, b(e), Box::new(v)).into())
+                Ok(ExprKind::Binary(BinOp::InsideEq, b(e), Box::new(v)).into())
             }
         }
     }

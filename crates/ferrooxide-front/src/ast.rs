@@ -663,6 +663,9 @@ pub enum BinOp {
     CaseNe,
     WildEq,
     WildNe,
+    /// an `inside` set's value test (IEEE 1800-2017 11.4.13): `==?` of integral operands,
+    /// `==` of others (strings, reals)
+    InsideEq,
     Lt,
     Le,
     Gt,

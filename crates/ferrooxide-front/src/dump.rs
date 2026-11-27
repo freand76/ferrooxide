@@ -72,7 +72,7 @@ fn binop(op: BinOp) -> &'static str {
         BinOp::Ne => "!=",
         BinOp::CaseEq => "===",
         BinOp::CaseNe => "!==",
-        BinOp::WildEq => "==?",
+        BinOp::WildEq | BinOp::InsideEq => "==?",
         BinOp::WildNe => "!=?",
         BinOp::Lt => "<",
         BinOp::Le => "<=",
