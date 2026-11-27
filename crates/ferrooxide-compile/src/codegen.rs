@@ -86,7 +86,8 @@ impl<'a> Compiler<'a> {
     pub(crate) fn check_uncalled_subs(&mut self) -> R<()> {
         let mut todo: Vec<(usize, &'a SubroutineDecl)> = Vec::new();
         for sid in 0..self.scopes.len() {
-            if self.classes.of_scope.contains_key(&sid) {
+            // (nor the scratch scopes of port widths, `port_widths`)
+            if self.classes.of_scope.contains_key(&sid) || self.scopes[sid].name.starts_with("$ports.") {
                 continue;
             }
             for (name, &f) in &self.scopes[sid].funcs {

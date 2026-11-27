@@ -18,6 +18,7 @@ mod random;
 mod stmt;
 mod strings;
 mod types;
+mod vif;
 
 pub use konst::Const;
 
@@ -514,6 +515,7 @@ pub fn compile_dialect(
         c.hier.defparams = sd.clone();
         c.hier.restarted = true;
     }
+    c.declare_vifs(modules);
     c.hier.top_names = top_mods.iter().map(|m| m.name.clone()).collect();
     // defparams in top modules that reach into other top modules must be known before those
     // are elaborated: evaluate them in a scratch copy of their module's parameters
@@ -979,6 +981,10 @@ impl<'a> Compiler<'a> {
             }
             Some(cur)
         };
+        // a scope by its number (an interface instance a virtual interface reaches, `vif.rs`)
+        if let Some(n) = parts[0].strip_prefix("$scope#") {
+            return down(n.parse().ok()?);
+        }
         // inside a class (or a specialization of it), its name is that class
         if let Some((cs, name)) = self.enclosing_class_scope(sid) {
             if name == parts[0] {

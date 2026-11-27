@@ -326,7 +326,12 @@ impl<'a> Compiler<'a> {
             if mg.dir.is_some() && module_level {
                 return self.err(format!("port '{name}': a queue or dynamic array port is not supported"));
             }
-            let elem = self.elem_for(mg.kind, width, signed, mg.ty.map(|t| &**t), sid)?;
+            // (of a type parameter: its type)
+            let pt = match mg.tparam.map(|tp| self.lookup(tp, sid)) {
+                Some(Some(Sym::Type(t))) => Some(t),
+                _ => None,
+            };
+            let elem = self.elem_for(mg.kind, width, signed, pt.as_deref().or(mg.ty.map(|t| &**t)), sid)?;
             let elem = self.nest_elem(elem, mg.inner, sid)?;
             let s = self.new_dyn(full, &name, elem, h, sid)?;
             // (of a type parameter: its type)

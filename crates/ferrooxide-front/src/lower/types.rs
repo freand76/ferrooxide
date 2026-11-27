@@ -437,7 +437,7 @@ impl Lower {
     /// The type is resolved through the type tables (struct, enum, a type name).
     fn is_sv_type(&self, ty: &t::DataType) -> bool {
         match &ty.kind {
-            t::TypeKind::Struct(_) | t::TypeKind::Enum(_) | t::TypeKind::TypeOf(_) => true,
+            t::TypeKind::Struct(_) | t::TypeKind::Enum(_) | t::TypeKind::TypeOf(_) | t::TypeKind::VirtualInterface { .. } => true,
             t::TypeKind::Named(n) => n.scopes.is_empty() || n.scopes.len() == 1,
             _ => false,
         }
@@ -645,6 +645,15 @@ impl Lower {
                     return self.err(ty.loc, "a real type cannot have packed dimensions");
                 }
                 Ok(Some(real_type()))
+            }
+            // a handle of an interface instance (IEEE 1800-2017 25.9), typed like a class
+            // handle of the pseudo class `virtual X` (the compiler's `Compiler::vif_class`);
+            // a modport only restricts access, parameters must match the instances'
+            t::TypeKind::VirtualInterface { name, params, .. } => {
+                if params.is_some() {
+                    return self.unsupported(ty.loc, "a virtual interface with parameter values");
+                }
+                Ok(Some((*super::Lower::class_type(&format!("virtual {name}"))).clone()))
             }
             t::TypeKind::Named(n) => {
                 // `C #(..)`: a specialization of a parameterized class

@@ -494,6 +494,11 @@ impl<'a> Compiler<'a> {
     }
 
     fn stmt_here(&mut self, st: &Stmt, sid: usize) -> R<()> {
+        // accesses through virtual interface handles: a choice between the instances
+        if let Some(v) = self.vif_stmt(st, sid)? {
+            let v: &'a Stmt = Box::leak(Box::new(v));
+            return self.stmt_here(v, sid);
+        }
         match st {
             Stmt::Null => {}
             Stmt::Block { name, decls, imports, params, stmts, fork } => {

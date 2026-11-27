@@ -2132,7 +2132,9 @@ impl<'a> Compiler<'a> {
             args
         };
         // missing trailing arguments and empty ones take their default values (IEEE 1800
-        // 13.5.3)
+        // 13.5.3), evaluated in the subroutine's scope (`dflt`: after the other inputs and
+        // `this` are bound)
+        let mut dflt: Vec<bool> = Vec::new();
         let filled: Vec<Expr>;
         let args: &[Expr] = {
             let defaults: Vec<Option<&Expr>> =
@@ -2143,7 +2145,11 @@ impl<'a> Compiler<'a> {
                 let mut v = Vec::new();
                 for k in 0..defaults.len().max(args.len()) {
                     match (args.get(k), defaults.get(k)) {
-                        (Some(Expr { kind: ExprKind::EmptyArg, .. }) | None, Some(Some(d))) => v.push((*d).clone()),
+                        (Some(Expr { kind: ExprKind::EmptyArg, .. }) | None, Some(Some(d))) => {
+                            dflt.resize(k, false);
+                            dflt.push(true);
+                            v.push((*d).clone());
+                        }
                         (Some(Expr { kind: ExprKind::EmptyArg, .. }) | None, _) => {
                             let missing = f.decls.iter().filter(|d| d.dir.is_some()).flat_map(|d| d.names.iter()).nth(k).map(|n| n.name.clone());
                             return self.err(match missing {
@@ -2179,7 +2185,7 @@ impl<'a> Compiler<'a> {
         // process of its own, without that call)
         let base = self.subr.proc_base.last().copied().unwrap_or(0).min(self.subr.inline_stack.len());
         if let Some(k) = self.subr.inline_stack[base..].iter().rev().find(|x| x.0 == fs_def && x.1 == f.name).map(|x| x.2.clone()) {
-            return self.sub_call(f, k, this, args, sid, fresh, want_array);
+            return self.sub_call(f, k, this, args, &dflt, sid, fresh, want_array);
         }
         // calls nested deeper than SUB_DEPTH: a subroutine of the process (one copy of the
         // body instead of one per call path)
@@ -2199,7 +2205,7 @@ impl<'a> Compiler<'a> {
                     (fs_def, f.name.clone())
                 }
             };
-            return self.sub_call(f, key, this, args, sid, fresh, want_array);
+            return self.sub_call(f, key, this, args, &dflt, sid, fresh, want_array);
         }
         let kname = if f.automatic {
             self.subr.auto_count += 1;
@@ -2243,6 +2249,9 @@ impl<'a> Compiler<'a> {
         let mut vals = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let (dir, ps) = ports[i];
+            if dflt.get(i) == Some(&true) && dir == Dir::Input && self.sig(ps).depth == 0 {
+                continue;
+            }
             if self.sig(ps).depth > 0 {
                 // an unpacked array: copied in element by element
                 if dir == Dir::Input || dir == Dir::Inout {
@@ -2277,6 +2286,7 @@ impl<'a> Compiler<'a> {
                 self.ctor_prologue(c, ts, None, fscope)?;
             }
         }
+        self.default_args(args, &dflt, &ports, fscope)?;
         self.subr.call_depth += 1;
         self.subr.inline_stack.push((fs_def, f.name.clone(), key.clone()));
         self.code.pb.last_mut().unwrap().rets.push((ret, Vec::new()));
@@ -2428,12 +2438,31 @@ impl<'a> Compiler<'a> {
     /// temporaries (`whole`: also the function's variables, an automatic one), pass the
     /// arguments, jump to the subroutine; results come back in fresh temporaries.
     #[allow(clippy::too_many_arguments)]
+    /// The inputs that take their default values (`dflt`), evaluated in the subroutine's
+    /// scope `fscope` once its other inputs and `this` are bound.
+    fn default_args(&mut self, args: &[Expr], dflt: &[bool], ports: &[(Dir, u32)], fscope: usize) -> R<()> {
+        for (i, a) in args.iter().enumerate() {
+            let (dir, ps) = ports[i];
+            if dflt.get(i) != Some(&true) || dir != Dir::Input || self.sig(ps).depth > 0 {
+                continue;
+            }
+            self.check_enum_arg(ps, a, fscope, true)?;
+            let pw = self.sig(ps).width;
+            let real = self.sig_type(ps);
+            let pl = self.layout(ps);
+            let v = self.value_for(a, fscope, pw, real, pl.as_deref())?;
+            self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: v, mode: rt::StoreMode::Blocking });
+        }
+        Ok(())
+    }
+
     fn sub_call(
         &mut self,
         f: &'a SubroutineDecl,
         key: (usize, String),
         this: Option<u32>,
         args: &[Expr],
+        dflt: &[bool],
         sid: usize,
         whole: bool,
         want_array: bool,
@@ -2480,6 +2509,9 @@ impl<'a> Compiler<'a> {
                 }
                 continue;
             }
+            if dflt.get(i) == Some(&true) && dir == Dir::Input {
+                continue;
+            }
             if dir == Dir::Input || dir == Dir::Inout {
                 self.check_enum_arg(ps, a, sid, true)?;
                 let pw = self.sig(ps).width;
@@ -2516,6 +2548,7 @@ impl<'a> Compiler<'a> {
         for (ps, k) in vals {
             self.emit(Instr::Store { t: Target::Whole { sig: ps }, s: k, mode: rt::StoreMode::Blocking });
         }
+        self.default_args(args, dflt, &ports, fscope)?;
         // results: the return value, then output ports
         let mut outs: Vec<(u32, u32)> = Vec::new();
         if let Some(r) = ret {

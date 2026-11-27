@@ -16,7 +16,7 @@ behaviour). Plan and status: `PLAN.md`.
   struct member chains, assignment patterns), `elab/` (hierarchy, params, declarations, the
   item walk, nets with several drivers and links, UDPs, specify), codegen to `Instr` bytecode
   (`codegen.rs`, `expr.rs`, `stmt.rs`, `strings.rs`, `heap.rs` queues/dynamic/associative
-  arrays, `class.rs`), `konst.rs`, `lint.rs`.
+  arrays, `class.rs`, `vif.rs` virtual interfaces), `konst.rs`, `lint.rs`.
 - `crates/ferrooxide-rt`: `vm.rs` (scheduler + interpreter), `fast.rs` (lowering to `Op`),
   `jit.rs` (Cranelift, one function per process *shape*), `fuse.rs`, `ops.rs`, `fmt.rs`, `vcd.rs`,
   `history.rs` (value change log for the debug front ends).

@@ -1445,6 +1445,10 @@ impl<'a> Compiler<'a> {
         if let (Some(cn), None, None) = (&r.class, &r.heap, &r.inner_heap) {
             if r.unpacked.is_empty() {
                 let Some(c) = self.find_class(cn, sid) else { return self.err(format!("unknown class '{cn}'")) };
+                // a virtual interface: the type's keywords and the interface
+                if let Some(i) = self.vif_iface(c) {
+                    return Ok(Some(Expr::new(ExprKind::Str(format!("virtual interface {i}")), e.line)));
+                }
                 let ci = &self.classes.list[c as usize];
                 if !ci.decl.params.is_empty() {
                     return self.err("$typename of a parameterized class is not supported (the standard gives no form for a specialization)");

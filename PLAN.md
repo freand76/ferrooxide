@@ -13,7 +13,7 @@
   (milliseconds) and simulates.
 
 ## Status (2026-11-26)
-- sv-tests: 4908 of 5112 (96.0%); all of chapters 5 and 6. Baseline in
+- sv-tests: 4911 of 5112 (96.1%); all of chapters 5 and 6. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -120,10 +120,12 @@ machinery must not assume static targets only (A3).
    The whole library compiles; the first UVM tests pass (a run compiles for about 12 s:
    large processes, see A3). A fork that a recursive call reaches again (`start` forks
    `body()`, which starts child sequences) starts the branch processes already compiled,
-   bound to the inner call's variables (`Instr::Bind`). Tests stop at: virtual
-   interfaces (`this data type is not supported`, 51), a parameterized class first used
-   after a virtual call that could reach it was compiled (4: virtual calls through a table
-   would remove this). Error lines
+   bound to the inner call's variables (`Instr::Bind`). Virtual interfaces work
+   (`vif.rs`). Tests stop at: `ref` arguments of tasks that wait (40, `uvm_config_db`
+   & co.: needs A3), a parameterized class first used after a virtual call that could
+   reach it was compiled (6: virtual calls through a table would remove this). Some
+   compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
+   crash): the large processes need less memory. Error lines
    in the test file are reported far past its end (line numbers after the library's
    includes). Fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
@@ -253,6 +255,8 @@ SystemVerilog data and testbench:
 - slices with run-time bounds, `$is_signed`.
 - nested modules with ports instantiated from outside; multi-dimensional interface port
   arrays; modport directions are not enforced.
+- virtual interfaces: an access through a `null` handle reaches the interface's last
+  instance (no error); `virtual X #(params)`.
 - assignments to properties of a package's class handle (`P::c.x = 1`); `import` in
   subroutines and in blocks of a package that exports names.
 - `.triggered` only on events declared in a module; `iff` only on a whole event control.

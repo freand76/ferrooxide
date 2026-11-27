@@ -85,6 +85,9 @@ pub(crate) struct Classes<'a> {
     pub owners: HashMap<u32, Vec<u32>>,
     /// unused parameterized classes left out of virtual calls
     pub skipped: std::cell::RefCell<HashSet<u32>>,
+    /// the pseudo classes whose handles are virtual interfaces (`virtual X`, `vif.rs`):
+    /// interface name -> class
+    pub vifs: HashMap<String, u32>,
 }
 
 /// The scope of a class that is reserved but not yet declared (`ClassInfo::scope`).
@@ -721,6 +724,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn find_class_here(&self, name: &str, mut sid: usize) -> Option<u32> {
+        if let Some(i) = name.strip_prefix("virtual ") {
+            return self.classes.vifs.get(i).copied();
+        }
         // (a class itself, `pval`)
         if let Some(id) = name.strip_prefix("$class#") {
             return id.parse().ok();
@@ -1075,6 +1081,9 @@ impl<'a> Compiler<'a> {
         if let Some(call) = self.paren_free_call(e, sid)? {
             return self.obj_type_of(&call, sid);
         }
+        if let Some((c, _)) = self.iface_instance(e, sid) {
+            return Ok(Some(Type::Class(c)));
+        }
         match &e.kind {
             ExprKind::Null | ExprKind::New(_) => Ok(Some(Type::Class(NONE))),
             ExprKind::NewCopy(x) => self.type_of(x, sid).map(Some),
@@ -1145,6 +1154,9 @@ impl<'a> Compiler<'a> {
     pub(crate) fn obj_value(&mut self, e: &Expr, sid: usize) -> R<Option<(u32, Type)>> {
         if let Some(call) = self.paren_free_call(e, sid)? {
             return self.obj_value(&call, sid);
+        }
+        if let Some((c, s)) = self.iface_instance(e, sid) {
+            return Ok(Some((self.iface_handle(s), Type::Class(c))));
         }
         match &e.kind {
             ExprKind::Null => Ok(Some((self.const_slot(&Const::zero(64)), Type::Class(NONE)))),
@@ -1254,6 +1266,10 @@ impl<'a> Compiler<'a> {
             ExprKind::Null => Ok(self.const_slot(&Const::zero(64))),
             _ => match self.type_of(e, sid)? {
                 Type::Class(x) if x == c || x == NONE || self.derives(x, c) => self.handle_value(e, sid),
+                Type::Class(x) if self.vif_iface(x).is_some() || self.vif_iface(c).is_some() => self.err(format!(
+                    "a '{}' value cannot be assigned to a '{}' handle (another interface)",
+                    self.classes.list[x as usize].name, self.classes.list[c as usize].name
+                )),
                 Type::Class(x) => self.err(format!(
                     "an object of class '{}' cannot be assigned to a handle of class '{}'",
                     self.classes.list[x as usize].name, self.classes.list[c as usize].name
