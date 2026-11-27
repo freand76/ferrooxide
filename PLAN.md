@@ -123,7 +123,10 @@ machinery must not assume static targets only (A3).
    bound to the inner call's variables (`Instr::Bind`). Virtual interfaces work
    (`vif.rs`). A `ref` argument of a task that waits works when it is a variable of the
    calling automatic subroutine (copy in and out is then the same as a reference). Tests
-   stop at: a constraint on the size of a rand queue (40), a parameterized class first used after a virtual call that could
+   stop at: memory (40: with the cap raised, 16.12--property-interface-uvm compiles in
+   15 s elaboration + 76 s JIT, 2.3 GB, 394k signals, then reports "recursion too deep"
+   in `uvm_phase_hopper::run_phases` at time 0; A3 first, then that bug), a
+   parameterized class first used after a virtual call that could
    reach it was compiled (6: virtual calls through a table would remove this). Some
    compile to about 1.7 GB before stopping (over the 2 GB cap of `tests/svtests.py` they
    crash): the large processes need less memory. Error lines
@@ -144,7 +147,14 @@ machinery must not assume static targets only (A3).
 11. **Multi-threading** (A5): last; pays off only on large designs.
 
 ## Architecture changes ahead
-- **A3. Real calls, dynamic waiters.** Process instances are done. Calls nested deeper than
+- **A3. Real calls, dynamic waiters.** NEXT (decided 2026-11-27), in this order:
+  (1) subroutines compiled once into the program and called from any process with a frame
+  per call, instead of a copy per call path in each process (the UVM memory and JIT time);
+  (2) virtual calls and `randomize()` dispatch through a per-class table (no "used after a
+  virtual call" restriction, an open class set); then decide on (3) a precompiled UVM
+  library: a saved, relocatable program fragment for the non-parameterized code, the
+  parsed library for specializations, JIT code cached per process shape.
+  Process instances are done. Calls nested deeper than
   `SUB_DEPTH` (4) are subroutines of the process (`CallSub`/`RetSub`, saved temporaries;
   an automatic one also saves its variables). Left: subroutines shared between processes
   (each process compiles its own copy), virtual calls through a table instead of a chain
