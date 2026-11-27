@@ -49,6 +49,8 @@ struct RDyn {
     /// the scope of the class that declares it
     sid: usize,
     queue: bool,
+    /// a bounded queue: its most elements
+    max: Option<u32>,
     /// of handles: their objects are randomized
     objs: bool,
     /// the signal holding its new size (a constraint names its size)
@@ -365,7 +367,11 @@ impl<'a> Compiler<'a> {
                 if elem.nested != NONE || (elem.class == NONE && elem.leaf != crate::types::Leaf::Bits) {
                     return self.err(format!("rand property '{n}': an array of this element type is not supported as random"));
                 }
-                dyns.push(RDyn { name: n.clone(), sid: osid, queue: matches!(kind, DynKind::Queue(_)), objs: elem.class != NONE, size: None });
+                let (queue, max) = match kind {
+                    DynKind::Queue(m) => (true, (*m > 0).then_some(*m)),
+                    _ => (false, None),
+                };
+                dyns.push(RDyn { name: n.clone(), sid: osid, queue, max, objs: elem.class != NONE, size: None });
                 continue;
             }
             let (w, signed) = match p.ty {
@@ -451,9 +457,6 @@ impl<'a> Compiler<'a> {
             if !sized {
                 continue;
             }
-            if dy.queue {
-                return self.err(format!("a constraint on the size of the rand queue '{}' is not supported", dy.name));
-            }
             let (hn, hs) = self.rand_hidden(dy.sid, 32);
             // (the constraints of `with` name it in the caller's scope)
             self.scopes[sid].syms.insert(hn.clone(), Sym::Sig(hs));
@@ -466,7 +469,11 @@ impl<'a> Compiler<'a> {
                 i.it = map_item(&i.it, &|e| replace(e, &sizes, &he));
             }
             rv.push(RVar { names: vec![key(&he)], w: 32, signed: true, home: Home::Var { e: he.clone(), sid: dy.sid }, cyc: None });
-            items.push(Item { it: CItem::Expr { soft: false, e: bin(BinOp::Ge, he, num(0)) }, sid: dy.sid });
+            items.push(Item { it: CItem::Expr { soft: false, e: bin(BinOp::Ge, he.clone(), num(0)) }, sid: dy.sid });
+            // (a bounded queue holds at most its bound's elements)
+            if let Some(max) = dy.max {
+                items.push(Item { it: CItem::Expr { soft: false, e: bin(BinOp::Le, he, num(max as i64)) }, sid: dy.sid });
+            }
             dy.size = Some(hs);
         }
         // pre_randomize(), then the values, then post_randomize() after a success
@@ -558,8 +565,17 @@ impl<'a> Compiler<'a> {
             let a = Expr::from(ExprKind::Member(Box::new(ExprKind::Ident(on).into()), dy.name.clone()));
             if let Some(hs) = dy.size {
                 let hn = self.sig(hs).name.rsplit('.').next().unwrap().to_string();
-                let new = Expr::from(ExprKind::NewArray(Box::new(ExprKind::Ident(hn).into()), None));
-                self.stmt(&Stmt::Assign { lhs: a.clone(), rhs: new, nonblocking: false, timing: None, line }, dy.sid)?;
+                let n = Expr::from(ExprKind::Ident(hn));
+                if dy.queue {
+                    // (emptied, then as many elements as the size says)
+                    let call = |m: &str, args: Vec<Expr>| Stmt::MethodCall { obj: a.clone(), name: m.into(), args, line };
+                    self.stmt(&call("delete", vec![]), dy.sid)?;
+                    let fill = Stmt::Repeat { count: n, body: Box::new(call("push_back", vec![num(0)])), line };
+                    self.stmt(&fill, dy.sid)?;
+                } else {
+                    let new = Expr::from(ExprKind::NewArray(Box::new(n), None));
+                    self.stmt(&Stmt::Assign { lhs: a.clone(), rhs: new, nonblocking: false, timing: None, line }, dy.sid)?;
+                }
             }
             self.subr.auto_count += 1;
             let iv = format!("$ri{}", self.subr.auto_count);

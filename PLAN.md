@@ -244,7 +244,7 @@ SystemVerilog data and testbench:
   methods on an enum property from outside the class, whole array properties, class handle
   ports, NBAs to properties, `rand_mode`, `constraint_mode`,
   `disable soft`, constraints on the elements of rand dynamic arrays and
-  queues and on the size of a rand queue, real/string rand properties, constraints on members of rand object properties (global constraints,
+  queues, real/string rand properties, constraints on members of rand object properties (global constraints,
   18.5.9; such objects are randomized on their own), rand arrays of handles,
   `randomize(null)`.
 - randsequence: productions that return values or use themselves (it is expanded), `rand
