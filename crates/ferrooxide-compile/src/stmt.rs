@@ -427,6 +427,78 @@ impl<'a> Compiler<'a> {
         Ok((self.make_ctl(trig), followed, dynamic))
     }
 
+    /// `@(e, posedge f, ...)` where each expression reads values of objects: their values
+    /// now, then after each property write until one changed as its edge says (IEEE
+    /// 1800-2017 9.4.2: an edge of the least significant bit).
+    fn object_event(&mut self, v: &[(Edge, Expr)], sid: usize) -> R<()> {
+        let mut olds = Vec::new();
+        for (_, e) in v {
+            let (w, _) = self.type_of(e, sid)?.ws();
+            if self.type_of(e, sid)?.is_real() {
+                return self.err("an event control on a real property is not supported");
+            }
+            let x = self.expr(e, sid, w, false)?;
+            let o = self.ptmp(w);
+            self.emit(Instr::Copy { d: o, s: x, w });
+            olds.push((o, w));
+        }
+        let obj = self.obj_sig();
+        let ctl = self.make_ctl(vec![(obj, REdge::Any, NONE)]);
+        let top = self.here();
+        self.emit(Instr::Wait { ctl });
+        let c = |me: &mut Self, k: i64| me.const_slot(&Const::from_i64(k, 1, false));
+        let mut done = Vec::new();
+        for ((edge, e), &(o, w)) in v.iter().zip(&olds) {
+            let n = self.expr(e, sid, w, false)?;
+            let hit = self.tmp(1);
+            match edge {
+                Edge::Any => {
+                    self.emit(Instr::Cmp { op: rt::CmpOp::CaseNe, d: hit, a: o, b: n, w });
+                }
+                Edge::Pos | Edge::Neg => {
+                    let (ob, nb) = (self.resize(o, w, 1, false), self.resize(n, w, 1, false));
+                    // from `from` to anything else, or from x/z to `to`
+                    let (from, to) = if *edge == Edge::Pos { (c(self, 0), c(self, 1)) } else { (c(self, 1), c(self, 0)) };
+                    let (z, one) = (c(self, 0), c(self, 1));
+                    let (a1, a2, b1, b2, b3) = (self.tmp(1), self.tmp(1), self.tmp(1), self.tmp(1), self.tmp(1));
+                    self.emit(Instr::Cmp { op: rt::CmpOp::CaseEq, d: a1, a: ob, b: from, w: 1 });
+                    self.emit(Instr::Cmp { op: rt::CmpOp::CaseNe, d: a2, a: nb, b: from, w: 1 });
+                    self.emit(Instr::Bin { op: rt::BinOp::And, d: a1, a: a1, b: a2, w: 1 });
+                    self.emit(Instr::Cmp { op: rt::CmpOp::CaseNe, d: b1, a: ob, b: z, w: 1 });
+                    self.emit(Instr::Cmp { op: rt::CmpOp::CaseNe, d: b2, a: ob, b: one, w: 1 });
+                    self.emit(Instr::Cmp { op: rt::CmpOp::CaseEq, d: b3, a: nb, b: to, w: 1 });
+                    self.emit(Instr::Bin { op: rt::BinOp::And, d: b1, a: b1, b: b2, w: 1 });
+                    self.emit(Instr::Bin { op: rt::BinOp::And, d: b1, a: b1, b: b3, w: 1 });
+                    self.emit(Instr::Bin { op: rt::BinOp::Or, d: hit, a: a1, b: b1, w: 1 });
+                }
+            }
+            let j = self.emit(Instr::Jz { c: hit, w: 1, to: 0 });
+            done.push(self.emit(Instr::Jmp { to: 0 }));
+            let h = self.here();
+            self.patch(j, h);
+            self.emit(Instr::Copy { d: o, s: n, w });
+        }
+        self.emit(Instr::Jmp { to: top });
+        let end = self.here();
+        for j in done {
+            self.patch(j, end);
+        }
+        Ok(())
+    }
+
+    /// `e` reads a property through a class handle (`obj.p`, `this.p[2]`).
+    fn reads_object(&mut self, e: &Expr, sid: usize) -> bool {
+        if let ExprKind::Member(b, _) = &e.kind {
+            if matches!(self.type_of(b, sid), Ok(Type::Class(_))) {
+                return true;
+            }
+        }
+        let mut found = false;
+        let mut e = e.clone();
+        e.for_each_child_mut(&mut |x| found = found || self.reads_object(x, sid));
+        found
+    }
+
     /// A hidden signal that follows the value of an event expression (e.g. `posedge a[3]`).
     fn event_signal(&mut self, e: &Expr, sid: usize) -> R<u32> {
         let (w, _) = self.type_of(e, sid)?.ws();
@@ -440,6 +512,10 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::Store { t: Target::Whole { sig: h }, s: v, mode: StoreMode::Blocking });
         let mut reads = Vec::new();
         self.reads_expr(e, sid, &mut reads);
+        // (a property of an object: no signal holds it, nothing would wake the wait)
+        if self.reads_object(e, sid) {
+            return self.err("an event control on a class property here (with other events, or in an assignment) is not supported");
+        }
         let ctl = self.make_ctl(reads.into_iter().map(|(s, e)| (s, REdge::Any, e)).collect());
         self.emit(Instr::Wait { ctl });
         self.emit(Instr::Jmp { to: top });
@@ -454,6 +530,12 @@ impl<'a> Compiler<'a> {
             Timing::Delay(d) => {
                 let ds = self.delay_ticks(d, sid)?;
                 self.emit(Instr::Delay { s: ds });
+            }
+            // an event control on values of objects (`@(obj.p)`, `@(posedge this.b)`): no
+            // signal holds them; every property write wakes the process, which waits again
+            // until a value changed (with the edge)
+            Timing::Event(EventCtl::List(v)) if !self.classes.list.is_empty() && !v.is_empty() && v.iter().all(|(_, e)| self.reads_object(e, sid)) && v.iter().all(|(_, e)| !matches!(self.event_handle(e, sid), Ok(Some(_)))) => {
+                self.object_event(v, sid)?;
             }
             Timing::Event(ec) => {
                 let (ctl, followed, dynamic) = self.event_ctl(ec, body, sid)?;
