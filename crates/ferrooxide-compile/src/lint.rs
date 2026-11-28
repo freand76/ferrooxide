@@ -11,7 +11,7 @@ use crate::*;
 
 impl<'a> Compiler<'a> {
     /// Check an `always` block with an explicit, purely level-sensitive event list.
-    pub(crate) fn lint_sensitivity(&mut self, items: &[(Edge, Expr)], body: &Stmt, sid: usize, line: u32) {
+    pub(crate) fn lint_sensitivity(&mut self, items: &[(Edge, Expr)], body: &Stmt, sid: usize, line: Loc) {
         if items.is_empty() || items.iter().any(|(e, _)| *e != Edge::Any) {
             return;
         }
@@ -50,7 +50,7 @@ impl<'a> Compiler<'a> {
         let msg = format!(
             "{}: lint: incomplete sensitivity list: {} {} read but not in the list \
              (synthesis treats the block as combinational logic of all its inputs; use @*)",
-            ferrooxide_front::loc_str(&self.file, line),
+            line.at(&self.file),
             list,
             if missing.len() == 1 { "is" } else { "are" }
         );

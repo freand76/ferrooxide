@@ -386,7 +386,7 @@ impl<'a> Compiler<'a> {
         ps: usize,
         port_conns: &HashMap<String, Option<Expr>>,
         pfile: &str,
-        line: u32,
+        line: Loc,
     ) -> R<()> {
         let mut dirs: HashMap<&str, Dir> = HashMap::new();
         for it in &m.items {
@@ -422,7 +422,7 @@ impl<'a> Compiler<'a> {
                 (_, true) => format!("Padding {n} high bits of the port."),
                 (_, false) => format!("Padding {n} high bits of the expression."),
             };
-            let at = ferrooxide_front::loc_str(&pfile, line);
+            let at = line.at(&pfile);
             let w = format!(
                 "{at}: warning: Port {} ({pn}) of module {} expects {pw} bit(s), given {ew}.\n{at}:        : {detail}",
                 k + 1,

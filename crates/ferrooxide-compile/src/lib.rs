@@ -108,18 +108,18 @@ pub(crate) struct Scope<'a> {
 }
 
 enum Job<'a> {
-    Proc { kind: ProcKind, body: &'a Stmt, scope: usize, line: u32 },
-    Assign { lhs: Expr, rhs: Expr, delay: Option<Expr>, scope: usize, line: u32 },
+    Proc { kind: ProcKind, body: &'a Stmt, scope: usize, line: Loc },
+    Assign { lhs: Expr, rhs: Expr, delay: Option<Expr>, scope: usize, line: Loc },
     /// a concurrent assertion
     Assert { a: &'a ConcAssert, scope: usize },
     /// a variable initializer that is not a constant (a queue's): assigned once at time 0
-    Init { lhs: Expr, rhs: Expr, scope: usize, line: u32 },
+    Init { lhs: Expr, rhs: Expr, scope: usize, line: Loc },
     /// child input port driven by a parent expression
-    PortIn { child_sig: u32, expr: Expr, scope: usize, line: u32 },
+    PortIn { child_sig: u32, expr: Expr, scope: usize, line: Loc },
     /// parent lvalue driven by a child output port
-    PortOut { lhs: Expr, child_sig: u32, scope: usize, line: u32 },
+    PortOut { lhs: Expr, child_sig: u32, scope: usize, line: Loc },
     /// an instance of a user-defined primitive: output, inputs (in the instantiating scope)
-    Udp { module: &'a Module, terms: Vec<Expr>, delay: Option<Expr>, scope: usize, line: u32 },
+    Udp { module: &'a Module, terms: Vec<Expr>, delay: Option<Expr>, scope: usize, line: Loc },
 }
 
 #[derive(Default)]
@@ -192,7 +192,7 @@ pub struct Compiler<'a> {
     pub prog: Program,
     pub(crate) scopes: Vec<Scope<'a>>,
     pub(crate) file: String,
-    pub(crate) line: u32,
+    pub(crate) line: Loc,
     /// simulation precision (power of ten of seconds): the smallest of all modules
     pub(crate) gprec: i32,
     dialect: Dialect,
@@ -219,7 +219,7 @@ pub(crate) struct Hier<'a> {
     /// defparam overrides by full parameter path
     pub(crate) defparams: HashMap<String, PVal>,
     /// where each defparam is (file, line), for one whose target is not a parameter
-    pub(crate) defparam_at: HashMap<String, (String, Line)>,
+    pub(crate) defparam_at: HashMap<String, (String, Loc)>,
     /// parameters already evaluated (full paths), a defparam for one of them came too late,
     /// and whether this is the second elaboration
     pub(crate) params_done: HashSet<String>,
@@ -237,7 +237,7 @@ pub(crate) struct Diag {
     /// messages of elaboration system tasks, printed when elaboration is done
     pub(crate) elab_msgs: Vec<String>,
     /// where `$error` / `$fatal` elaboration tasks were reached (elaboration fails)
-    pub(crate) elab_errors: Vec<(String, u32)>,
+    pub(crate) elab_errors: Vec<(String, Loc)>,
     /// a `$fatal` elaboration task ended elaboration: later ones say nothing
     pub(crate) elab_fatal: bool,
     /// lint findings (only collected with `lint_enabled`)
@@ -289,7 +289,7 @@ pub(crate) struct Code<'a> {
     /// iterator's element and index variables (`arrmeth.rs`)
     pub(crate) iter_scopes: HashMap<(*const Expr, usize), (usize, u32, u32)>,
     /// disable targets to resolve after code generation: (target, candidate paths, file, line)
-    pub(crate) pending_disables: Vec<(u32, Vec<String>, String, u32)>,
+    pub(crate) pending_disables: Vec<(u32, Vec<String>, String, Loc)>,
     /// signals given an initial value before time 0 (declaration initializers, constant
     /// continuous assignments): they get a change event at time 0, as with Icarus
     pub(crate) init_touch: Vec<u32>,
@@ -518,13 +518,13 @@ pub fn compile_dialect(
     // a keyword used as a name (IEEE 1800-2017 5.6.2); Verilog-2005 code keeps the names
     // 1800 added (`-g2005` or `begin_keywords "1364-2005")
     if !dialect.v2005 {
-        let first = modules.iter().find_map(|m| Some((m, m.keyword_names.iter().min_by_key(|k| k.1)?)));
+        let first = modules.iter().find_map(|m| Some((m, m.keyword_names.iter().min_by_key(|k| k.1.line)?)));
         if let Some((m, (n, l))) = first {
             let mut msg = format!("'{n}' is a keyword and cannot be a name");
             if ferrooxide_front::syntax::kw::Kw::from_str(n).is_some_and(|k| k.is_sv()) {
                 msg.push_str(" in SystemVerilog (Verilog-2005 code: -g2005 or `begin_keywords \"1364-2005\")");
             }
-            return Err(Error { msg, file: m.file.clone(), line: *l });
+            return Err(Error::at(msg, *l, &m.file));
         }
     }
     // elaboration; a defparam found after its target parameter was evaluated restarts it once,
@@ -573,7 +573,7 @@ pub fn compile_dialect(
     }
     if let Some((file, line)) = c.diag.elab_errors.first() {
         let n = c.diag.elab_errors.len();
-        return Err(Error { msg: format!("{n} error(s) during elaboration ($error / $fatal)"), file: file.clone(), line: *line });
+        return Err(Error::at(format!("{n} error(s) during elaboration ($error / $fatal)"), *line, file));
     }
     if let Some(e) = c.sigs.mem_error.take() {
         return Err(e);
@@ -610,9 +610,9 @@ pub fn compile_dialect(
                     continue;
                 }
                 let msg = format!(
-                    "{}:{l}: lint: '{n}' is a SystemVerilog keyword (IEEE 1800) used as a name; \
+                    "{}: lint: '{n}' is a SystemVerilog keyword (IEEE 1800) used as a name; \
                      SystemVerilog tools reject it, rename it",
-                    m.file
+                    l.at(&m.file)
                 );
                 if c.diag.lint_seen.insert(msg.clone()) {
                     c.diag.lint.push(msg);
@@ -640,7 +640,7 @@ impl<'a> Compiler<'a> {
             prog: Program { mem: vec![0; SCRATCH_WORDS as usize], ..Program::default() },
             scopes: Vec::new(),
             file: String::new(),
-            line: 0,
+            line: Loc::NONE,
             gprec: 0,
             dialect: Dialect::default(),
             hier: Hier {
@@ -671,14 +671,14 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------------ utilities
     pub(crate) fn err<T>(&self, msg: impl Into<String>) -> R<T> {
-        Err(Error { msg: msg.into(), file: self.file.clone(), line: self.line })
+        Err(Error::at(msg, self.line, &self.file))
     }
 
     /// Runs `f` at `line` (0: at the current location) and returns to the current location
     /// after it, so that code compiled inside (an inlined call) does not move it.
-    pub(crate) fn at<T>(&mut self, line: u32, f: impl FnOnce(&mut Self) -> T) -> T {
+    pub(crate) fn at<T>(&mut self, line: Loc, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved = self.line;
-        if line != 0 {
+        if !line.is_none() {
             self.line = line;
         }
         let r = f(self);
@@ -688,7 +688,7 @@ impl<'a> Compiler<'a> {
 
     /// `file:line` of the current location in the source (through includes).
     pub(crate) fn loc(&self) -> String {
-        ferrooxide_front::loc_str(&self.file, self.line)
+        self.line.at(&self.file)
     }
 
     pub(crate) fn warn(&mut self, msg: impl Into<String>) {
@@ -780,8 +780,8 @@ impl<'a> Compiler<'a> {
                         need * 8 >> 20,
                         self.sigs.mem_limit_words * 8 >> 20
                     ),
-                    file: self.file.clone(),
-                    line: self.line,
+                    file: self.line.file_or(&self.file),
+                    line: self.line.line,
                 });
             }
             depth = depth.min(1);

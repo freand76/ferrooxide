@@ -106,7 +106,7 @@ impl<'a> Compiler<'a> {
         if todo.is_empty() {
             return Ok(());
         }
-        todo.sort_by_key(|(s, f)| (self.scopes[*s].file.clone(), f.line, *s));
+        todo.sort_by_key(|(s, f)| (self.scopes[*s].file.clone(), f.line.line, *s));
         let p = &self.prog;
         let lens = (p.mem.len(), p.signals.len(), p.procs.len(), p.ctls.len(), p.names.len(), p.strings.len(), p.locs.len(), p.classes.len());
         let mem_error = self.sigs.mem_error.take();
@@ -245,7 +245,7 @@ impl<'a> Compiler<'a> {
             }
             if ids.is_empty() && !cands.iter().any(|c| c.starts_with("$force:")) {
                 let n = cands.first().map(|c| c.rsplit('.').next().unwrap_or(c).to_string()).unwrap_or_default();
-                let m = format!("{}: warning: disable: no block or task named '{n}'", ferrooxide_front::loc_str(&file, line));
+                let m = format!("{}: warning: disable: no block or task named '{n}'", line.at(&file));
                 if self.diag.warned.insert(m.clone()) {
                     self.diag.warnings.push(m);
                 }
@@ -581,7 +581,7 @@ impl<'a> Compiler<'a> {
     /// A final procedure runs in zero time: no nonblocking assignments, delays, event or
     /// wait controls, task calls (IEEE 1800-2017 9.2.3).
     fn check_final(&mut self, s: &Stmt, sid: usize) -> R<()> {
-        let err = |c: &mut Self, line: u32, what: &str| -> R<()> {
+        let err = |c: &mut Self, line: Loc, what: &str| -> R<()> {
             c.line = line;
             c.err(format!("final procedures cannot {what}."))
         };
@@ -624,7 +624,7 @@ impl<'a> Compiler<'a> {
             }
         }
         // variables a continuous assignment drives whole: no other driver (6.5)
-        let mut whole: Vec<(u32, usize, u32)> = Vec::new();
+        let mut whole: Vec<(u32, usize, Loc)> = Vec::new();
         for job in &jobs {
             if let Job::Assign { lhs, scope, line, .. } | Job::PortOut { lhs, scope, line, .. } = job {
                 let sym = match &lhs.kind {

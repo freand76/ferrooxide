@@ -153,7 +153,7 @@ impl<'a> Compiler<'a> {
     pub(crate) fn declare_pending(&mut self) -> R<()> {
         while !self.classes.pending_bodies.is_empty() {
             let (x, xd, xs, xn, xscope) = self.classes.pending_bodies.remove(0);
-            self.at(0, |me| me.declare_class_body(xd, xs, &xn, x, xscope))?;
+            self.at(Loc::NONE, |me| me.declare_class_body(xd, xs, &xn, x, xscope))?;
         }
         Ok(())
     }
@@ -238,14 +238,14 @@ impl<'a> Compiler<'a> {
         }
         if let Some(k) = self.classes.pending_bodies.iter().position(|p| p.0 == x) {
             let (x, xd, xs, xn, xscope) = self.classes.pending_bodies.remove(k);
-            self.at(0, |me| me.declare_class_body(xd, xs, &xn, x, xscope))?;
+            self.at(Loc::NONE, |me| me.declare_class_body(xd, xs, &xn, x, xscope))?;
             return Ok(true);
         }
         let (xd, xs, xn) = (self.classes.list[x as usize].decl, self.classes.decl_scope[&x], self.classes.list[x as usize].name.clone());
         if xn != xd.name || Self::needs_params(xd) {
             return Ok(false);
         }
-        self.at(0, |me| me.declare_class(xd, xs, &xn, &[], x))?;
+        self.at(Loc::NONE, |me| me.declare_class(xd, xs, &xn, &[], x))?;
         Ok(true)
     }
 
@@ -476,7 +476,7 @@ impl<'a> Compiler<'a> {
                 let id = self.reserve_class(decl, &own, dscope);
                 // (the class may use this specialization itself: `typedef C #(T) this_type;`)
                 self.classes.specs.insert(written.clone(), id);
-                let scope = self.at(0, |c| c.class_params(decl, dscope, &own, &ovs, id))?;
+                let scope = self.at(Loc::NONE, |c| c.class_params(decl, dscope, &own, &ovs, id))?;
                 // the same parameter values as the class itself or another specialization:
                 // that class (the new one goes unused)
                 let key = self.spec_key(g, scope);
@@ -491,7 +491,7 @@ impl<'a> Compiler<'a> {
                         if self.base_in_progress(decl, scope) {
                             self.classes.pending_bodies.push((id, decl, dscope, own, scope));
                         } else {
-                            self.at(0, |c| c.declare_class_body(decl, dscope, &own, id, scope))?;
+                            self.at(Loc::NONE, |c| c.declare_class_body(decl, dscope, &own, id, scope))?;
                         }
                         id
                     }

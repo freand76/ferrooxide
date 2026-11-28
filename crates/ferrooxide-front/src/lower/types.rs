@@ -666,7 +666,7 @@ impl Lower {
                                 None => num(0),
                             },
                         };
-                        self.pending.push(Item::Param(ParamDecl { local: true, spec: false, signed, ty: const_ty.clone(), unpacked: vec![], name: name.clone(), value: Some(value), enum_type: None, line: it.loc.line }));
+                        self.pending.push(Item::Param(ParamDecl { local: true, spec: false, signed, ty: const_ty.clone(), unpacked: vec![], name: name.clone(), value: Some(value), enum_type: None, line: it.loc }));
                         names.push(name.clone());
                         prev = Some(name);
                     }
@@ -996,7 +996,7 @@ impl Lower {
         let mut t = SvType::vector(NetKind::Reg, false, vec![]);
         t.param = Some(name.clone());
         self.types.insert(name.clone(), Rc::new(t));
-        Ok(Item::TypeParam { local, name, default, line: loc.line })
+        Ok(Item::TypeParam { local, name, default, line: loc })
     }
 
     /// The type of a value parameter.
@@ -1071,7 +1071,7 @@ impl Lower {
         self.decl_type = if unpacked.is_empty() { pt.sv.clone() } else { pt.ty.clone() }.map(Rc::new);
         self.declare_var(&name, &unpacked);
         let ty = pt.ty.clone().map(Rc::new);
-        Ok(ParamDecl { local, spec: false, signed: pt.signed, ty, unpacked, name, value, enum_type: None, line: d.loc.line })
+        Ok(ParamDecl { local, spec: false, signed: pt.signed, ty, unpacked, name, value, enum_type: None, line: d.loc })
     }
 
     /// A module port declaration `dir [net] [var] ty`: an inout port is a net (IEEE 1800-2017
@@ -1096,7 +1096,7 @@ impl Lower {
         delay: Option<&t::Delay>,
         loc: t::Loc,
     ) -> Result<Decl> {
-        let line = loc.line;
+        let line = loc;
         self.decl_type = None;
         let strength = strength.and_then(drive_strength);
         let delay = match delay {
@@ -1247,7 +1247,7 @@ impl Lower {
                 Some(e) => Some(self.expr(e)?),
                 None => None,
             };
-            out.push(Declarator { name, dims, heap, inner, init, line: d.loc.line });
+            out.push(Declarator { name, dims, heap, inner, init, line: d.loc });
         }
         Ok(out)
     }

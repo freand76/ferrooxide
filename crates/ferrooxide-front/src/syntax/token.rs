@@ -30,6 +30,8 @@ pub enum T {
 pub struct Token {
     pub t: T,
     pub line: u32,
+    /// the column (from 1) in the preprocessed text
+    pub col: u32,
     pub pos: u32,
     pub end: u32,
 }
@@ -72,7 +74,7 @@ pub fn convert(toks: Vec<lexer::Token>) -> Vec<Token> {
                     })
                 {
                     let last = &toks[i + parts.len() - 1];
-                    out.push(Token { t: T::Punct(joined), line: tk.line, pos: tk.pos, end: last.end });
+                    out.push(Token { t: T::Punct(joined), line: tk.line, col: 0, pos: tk.pos, end: last.end });
                     i += parts.len();
                     continue 'next;
                 }
@@ -81,7 +83,7 @@ pub fn convert(toks: Vec<lexer::Token>) -> Vec<Token> {
         // `1step`
         if let (Tok::Num(n), Some(next)) = (&tk.tok, toks.get(i + 1)) {
             if n.digits == "1" && !n.based && next.pos == tk.end && matches!(&next.tok, Tok::Ident(s) if s == "step") {
-                out.push(Token { t: T::Step, line: tk.line, pos: tk.pos, end: next.end });
+                out.push(Token { t: T::Step, line: tk.line, col: 0, pos: tk.pos, end: next.end });
                 i += 2;
                 continue;
             }
@@ -103,7 +105,7 @@ pub fn convert(toks: Vec<lexer::Token>) -> Vec<Token> {
             Tok::Punct(p) => T::Punct(p),
             Tok::Eof => T::Eof,
         };
-        out.push(Token { t, line: tk.line, pos: tk.pos, end: tk.end });
+        out.push(Token { t, line: tk.line, col: 0, pos: tk.pos, end: tk.end });
         i += 1;
     }
     out

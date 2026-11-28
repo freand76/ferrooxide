@@ -56,9 +56,9 @@ pub(crate) struct ClassNames {
 
 impl Lower {
     /// A name class `class` declares: an error when it declares it already.
-    fn own_name(&self, own: &mut HashSet<String>, n: &str, line: Line, class: &str) -> Result<()> {
+    fn own_name(&self, own: &mut HashSet<String>, n: &str, line: Loc, class: &str) -> Result<()> {
         if !own.insert(n.to_string()) {
-            return Err(crate::Error { msg: format!("'{n}' is already declared in class '{class}'"), file: self.file.clone(), line });
+            return self.err(line, format!("'{n}' is already declared in class '{class}'"));
         }
         Ok(())
     }
@@ -212,7 +212,7 @@ impl Lower {
         self.classes.insert(spec.clone(), Rc::new(names));
         self.spec_of.push((spec.clone(), full.to_string()));
         self.types.insert(spec.clone(), Self::class_type(&spec));
-        self.specs.push(Item::ClassSpec { name: spec.clone(), class: full.to_string(), args: conns, line: loc.line });
+        self.specs.push(Item::ClassSpec { name: spec.clone(), class: full.to_string(), args: conns, line: loc });
         Ok(spec)
     }
 
@@ -235,7 +235,7 @@ impl Lower {
     }
 
     fn class_decl_body(&mut self, c: &t::ClassDecl) -> Result<ClassDecl> {
-        let line = c.loc.line;
+        let line = c.loc;
         let name = self.name(&c.name, c.loc);
         let mut names = ClassNames { name: name.clone(), interface: c.interface, ..Default::default() };
         // the class is a type from here on (also inside itself)
@@ -400,12 +400,12 @@ impl Lower {
                     }
                 }
                 if let t::Item::Typedef(t::Typedef::Type { name: n, loc, .. }) = i {
-                    self.own_name(&mut own, n, loc.line, &name)?;
+                    self.own_name(&mut own, n, *loc, &name)?;
                     names.origins.insert(n.clone(), name.clone());
                 }
                 if let t::Item::Param(t::ParamDecl { kind: t::ParamKind::Type { assigns }, .. }) = i {
                     for (n, _, loc) in assigns {
-                        self.own_name(&mut own, n, loc.line, &name)?;
+                        self.own_name(&mut own, n, *loc, &name)?;
                         names.origins.insert(n.clone(), name.clone());
                     }
                 }
@@ -490,7 +490,7 @@ impl Lower {
                 if m.quals.contains(&Kw::Pure) {
                     pures.push(n.clone());
                 }
-                self.own_name(&mut own, n, m.loc.line, &name)?;
+                self.own_name(&mut own, n, m.loc, &name)?;
                 names.methods.insert(n.clone());
                 if let Some(l) = vis(&m.quals) {
                     hidden.push((n.clone(), l));
@@ -615,7 +615,7 @@ impl Lower {
                     if k.items.is_some() {
                         return self.err(k.loc, format!("pure constraint '{}' has no body", k.name.name));
                     }
-                    self.own_name(&mut own_c, &k.name.name, k.loc.line, &name)?;
+                    self.own_name(&mut own_c, &k.name.name, k.loc, &name)?;
                 }
                 t::ClassItem::Constraint(k) => {
                     let ext = k.quals.contains(&Kw::Extern);
@@ -632,7 +632,7 @@ impl Lower {
                                 if b.static_ != k.static_ {
                                     return self.err(b.loc, format!("'{name}::{n}' and its prototype differ in `static`"));
                                 }
-                                self.extern_done.insert((format!("{name}::{n}"), b.loc.line as usize));
+                                self.extern_done.insert((format!("{name}::{n}"), b.loc));
                                 b.items.unwrap_or_default()
                             }
                             None if ext => return self.err(k.loc, format!("extern constraint '{n}' of class '{name}' has no body ('{name}::{n}')")),
@@ -744,7 +744,7 @@ impl Lower {
         if pn != bn {
             return self.err(b.loc, format!("'{class}::{n}' has {bn} arguments, its prototype {pn}"));
         }
-        self.extern_done.insert((format!("{class}::{n}"), b.loc.line as usize));
+        self.extern_done.insert((format!("{class}::{n}"), b.loc));
         let mut s = b;
         s.quals = m.quals.iter().copied().filter(|q| *q != Kw::Extern).collect();
         s.name = m.name.clone();
@@ -761,7 +761,7 @@ impl Lower {
     /// `constraint C::c { ... }` after class C: merged into it, the body of a prototype.
     pub(crate) fn constraint_body_done(&self, k: &t::ConstraintDecl) -> Result<()> {
         let (c, n) = (&k.name.scopes[0].name, &k.name.name);
-        if !self.extern_done.contains(&(format!("{c}::{n}"), k.loc.line as usize)) {
+        if !self.extern_done.contains(&(format!("{c}::{n}"), k.loc)) {
             return self.err(k.loc, format!("constraint '{c}::{n}' has no prototype in class '{c}'"));
         }
         Ok(())

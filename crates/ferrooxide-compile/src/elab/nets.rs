@@ -4,7 +4,7 @@ use crate::*;
 
 impl<'a> Compiler<'a> {
     /// A gate instance or an array of them (1-bit terminals per instance).
-    pub(crate) fn gate_items(&mut self, kind: &str, terms: &'a [Expr], dims: &Option<Range>, sid: usize, line: u32) -> R<()> {
+    pub(crate) fn gate_items(&mut self, kind: &str, terms: &'a [Expr], dims: &Option<Range>, sid: usize, line: Loc) -> R<()> {
                     match dims {
                         None => self.gate(kind, terms, sid, line)?,
                         Some((l, r)) => {
@@ -92,7 +92,7 @@ impl<'a> Compiler<'a> {
         true
     }
 
-    pub(crate) fn gate(&mut self, kind: &str, terms: &[Expr], sid: usize, line: u32) -> R<()> {
+    pub(crate) fn gate(&mut self, kind: &str, terms: &[Expr], sid: usize, line: Loc) -> R<()> {
         if terms.len() < 2 && !matches!(kind, "pullup" | "pulldown") {
             return self.err("gate needs at least two terminals");
         }

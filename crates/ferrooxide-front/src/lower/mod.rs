@@ -76,7 +76,7 @@ pub(crate) struct Lower {
     /// modules made for packages (added after the file's modules)
     pkg_modules: Vec<Module>,
     /// names that are keywords of the active keyword set, until the next module ends
-    kw_names: Vec<(String, Line)>,
+    kw_names: Vec<(String, Loc)>,
     /// the `begin_keywords versions in effect (innermost last; none: IEEE 1800-2017)
     keywords: Vec<String>,
     packages: HashMap<String, Rc<Package>>,
@@ -105,7 +105,7 @@ pub(crate) struct Lower {
     extern_bodies: HashMap<String, t::Subroutine>,
     /// the bodies of the constraint prototypes of the class being lowered
     extern_cbodies: HashMap<String, t::ConstraintDecl>,
-    extern_done: HashSet<(String, usize)>,
+    extern_done: HashSet<(String, t::Loc)>,
     /// the wildcard imports of the module being lowered and the names used through them
     wild: WildCheck,
     /// the genvars declared in the module, and those of the generate loops being lowered
@@ -129,7 +129,7 @@ pub(crate) struct WildCheck {
     /// the module's own names declared so far
     declared: HashSet<String>,
     /// names a reference imported: (the package, the line of the first use)
-    used: HashMap<String, (String, Line)>,
+    used: HashMap<String, (String, Loc)>,
     /// names declared by the blocks and subroutines being lowered
     pub(crate) locals: Vec<String>,
     /// in a generate block or a class (their names are not the module's)
@@ -168,7 +168,7 @@ pub fn lower_files(files: &[t::SourceFile], opts: &Options) -> Result<Vec<Module
     }
     let import_std = |l: &mut Lower| -> Result<()> {
         if std.is_some() {
-            l.import(&[t::Import { package: "std".into(), name: None, loc: t::Loc { line: 1 } }], true)?;
+            l.import(&[t::Import { package: "std".into(), name: None, loc: t::Loc { line: 1, ..t::Loc::NONE } }], true)?;
         }
         Ok(())
     };
@@ -254,7 +254,7 @@ impl Lower {
     }
 
     pub(crate) fn err<X>(&self, loc: t::Loc, msg: impl Into<String>) -> Result<X> {
-        Err(Error { msg: msg.into(), file: self.file.clone(), line: loc.line })
+        Err(Error::at(msg, loc, &self.file))
     }
 
     pub(crate) fn unsupported<X>(&self, loc: t::Loc, what: &str) -> Result<X> {
@@ -266,7 +266,7 @@ impl Lower {
     pub(crate) fn name(&mut self, n: &str, loc: t::Loc) -> String {
         self.note_ref(n);
         if Kw::from_str(n).is_some_and(|k| self.reserved(k)) {
-            self.kw_names.push((n.to_string(), loc.line));
+            self.kw_names.push((n.to_string(), loc));
         }
         n.to_string()
     }
@@ -463,7 +463,7 @@ impl Lower {
             default_nettype: self.default_nettype.clone(),
             unconnected_drive: None,
             file: self.file.clone(),
-            line: 0,
+            line: Loc::NONE,
             ports: vec![],
             items,
             udp: None,
@@ -497,7 +497,7 @@ impl Lower {
     }
 
     fn module_inner(&mut self, m: &t::ModuleDecl, nested: bool) -> Result<Module> {
-        let line = m.loc.line;
+        let line = m.loc;
         let interface = m.kind == t::ModuleKind::Interface;
         let program = m.kind == t::ModuleKind::Program;
         let saved_program = std::mem::replace(&mut self.in_program, program);
@@ -599,7 +599,7 @@ impl Lower {
                 if let Item::Decl(d) = it {
                     if d.dir.is_some() {
                         if let Some(x) = d.names.iter().find(|x| !ok.contains(&x.name)) {
-                            return Err(Error { msg: format!("'{}' is declared as a port but is not in the port list of '{mname}'", x.name), file: self.file.clone(), line: x.line });
+                            return self.err(x.line, format!("'{}' is declared as a port but is not in the port list of '{mname}'", x.name));
                         }
                     }
                 }
@@ -652,7 +652,7 @@ impl Lower {
         let mut ports = Vec::new();
         for (pn, e) in v {
             let (x, dir) = self.port_expr(&pn, e, items)?;
-            ports.push((pn, x, dir, e.loc.line));
+            ports.push((pn, x, dir, e.loc));
         }
         for (pn, x, dir, line) in ports {
             let one = ExprKind::Num(crate::ast::dec(1));
@@ -779,7 +779,7 @@ impl Lower {
         let mut cur: Option<Decl> = None;
         let mut cur_iface: Option<(String, Option<String>)> = None;
         for p in v {
-            let pline = p.loc.line;
+            let pline = p.loc;
             if p.expr.is_some() {
                 return self.unsupported(p.loc, "an explicit port `.name(expr)`");
             }
@@ -891,7 +891,7 @@ impl Lower {
                         init = Some(v);
                     }
                 }
-                names.push(Declarator { name: n, dims: vec![], heap: None, inner: vec![], init: None, line: x.loc.line });
+                names.push(Declarator { name: n, dims: vec![], heap: None, inner: vec![], init: None, line: x.loc });
             }
             d.names = names;
             items.push(Item::Decl(d));
@@ -907,7 +907,7 @@ impl Lower {
             default_nettype: None,
             unconnected_drive: None,
             file: self.file.clone(),
-            line: u.loc.line,
+            line: u.loc,
             ports,
             items,
             udp: Some(UdpDef { sequential, rows, init }),
@@ -1196,7 +1196,7 @@ impl Lower {
         match &from[..] {
             [] => Ok(()),
             [(p, _)] => {
-                self.wild.used.insert(n.to_string(), (p.clone(), loc.line));
+                self.wild.used.insert(n.to_string(), (p.clone(), loc));
                 Ok(())
             }
             [(a, _), (b, _), ..] => self.err(loc, format!("'{n}' is imported from both package '{a}' and package '{b}'")),
@@ -1209,7 +1209,7 @@ impl Lower {
         if !self.wild.on {
             return Ok(());
         }
-        let mut names: Vec<(String, Line)> = Vec::new();
+        let mut names: Vec<(String, Loc)> = Vec::new();
         for i in items {
             match i {
                 Item::Decl(d) => names.extend(d.names.iter().map(|n| (n.name.clone(), n.line))),
@@ -1221,15 +1221,11 @@ impl Lower {
             }
         }
         if let t::Item::Typedef(t::Typedef::Type { name, loc, .. } | t::Typedef::Forward { name, loc, .. } | t::Typedef::IfaceType { name, loc, .. }) = it {
-            names.push((name.clone(), loc.line));
+            names.push((name.clone(), *loc));
         }
         for (n, line) in names {
             if let Some((p, used)) = self.wild.used.get(&n) {
-                return Err(Error {
-                    msg: format!("'{n}' is declared after its use at line {used} imported it from package '{p}'"),
-                    file: self.file.clone(),
-                    line,
-                });
+                return self.err(line, format!("'{n}' is declared after its use at line {} imported it from package '{p}'", used.line));
             }
             self.wild.declared.insert(n);
         }
@@ -1351,7 +1347,7 @@ pub(crate) fn push_hier_index(e: Expr) -> usize {
 
 /// Non-ANSI subroutine ports typed by a second declaration (`input x; integer x;`): the
 /// port takes the type, and the type-only declaration is dropped.
-pub(crate) fn merge_port_types(decls: Vec<Decl>) -> (Vec<Decl>, Vec<(String, crate::ast::Line)>) {
+pub(crate) fn merge_port_types(decls: Vec<Decl>) -> (Vec<Decl>, Vec<(String, crate::ast::Loc)>) {
     let typed: Vec<&Decl> = decls.iter().filter(|d| d.dir.is_none()).collect();
     let find = |n: &str| typed.iter().find(|d| d.names.iter().any(|x| x.name == n)).copied();
     let port_names: Vec<String> =

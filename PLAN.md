@@ -121,7 +121,8 @@ machinery must not assume static targets only (A3).
    switch, then delete the old code.
 
    Slices, in order:
-   1. **Locations.** AST `Expr`/`Stmt` get a `Loc` (file index, line, column) instead of a
+   1. **Locations.** DONE 2026-11-28 (columns are recorded, messages still print
+      `file:line`). AST `Expr`/`Stmt` get a `Loc` (file index, line, column) instead of a
       bare line; the lowering copies the syntax tree's `Loc` (add the column in the
       lexer/parser if missing); `Compiler::line`/`file` set from it. Fixes the error lines
       past the end of a file in UVM tests (includes map to their file). Needed first: the

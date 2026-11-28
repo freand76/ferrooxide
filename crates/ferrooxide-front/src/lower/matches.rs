@@ -25,7 +25,7 @@ struct Bind {
     sel: Expr,
 }
 
-fn assign(lhs: Expr, rhs: Expr, line: Line) -> Stmt {
+fn assign(lhs: Expr, rhs: Expr, line: Loc) -> Stmt {
     Stmt::Assign { lhs, rhs, nonblocking: false, timing: None, line }
 }
 
@@ -145,7 +145,7 @@ impl Lower {
     }
 
     /// `inner` run when the tests pass, the tags tested before the members under them.
-    fn tested(tests: Vec<Test>, kind: CaseKind, inner: Stmt, line: Line) -> Stmt {
+    fn tested(tests: Vec<Test>, kind: CaseKind, inner: Stmt, line: Loc) -> Stmt {
         tests.into_iter().rev().fold(inner, |acc, t| match t {
             Test::Tag(e, m) => Stmt::If { cond: ExprKind::TagIs(Box::new(e), m).into(), then_s: Box::new(acc), else_s: None, line },
             Test::Value(e, v) => Stmt::Case { kind, expr: e, arms: vec![(vec![v], acc)], default: None, line },
@@ -163,7 +163,7 @@ impl Lower {
             for b in binds {
                 decls.push(self.match_var(&b.name, b.ty.clone(), loc)?);
                 self.wild.locals.push(b.name.clone());
-                stmts.push(assign(ExprKind::Ident(b.name).into(), b.sel, loc.line));
+                stmts.push(assign(ExprKind::Ident(b.name).into(), b.sel, loc));
             }
             stmts.push(rest(self)?);
             Ok(block(decls, stmts))
@@ -177,7 +177,7 @@ impl Lower {
     /// into a variable) against `p`, each other part is a condition; when all hold, `flag` is
     /// set and `then` runs.
     fn if_chain(&mut self, parts: &[&t::Expr], then: &t::Stmt, flag: &str, loc: t::Loc) -> Result<Stmt> {
-        let line = loc.line;
+        let line = loc;
         let Some((first, rest)) = parts.split_first() else {
             let body = self.stmt(then)?;
             return Ok(block(vec![], vec![assign(ExprKind::Ident(flag.into()).into(), bit(1), line), body]));
@@ -203,7 +203,7 @@ impl Lower {
 
     /// `if (cond) then else` with a pattern or `&&&` in `cond`.
     pub(crate) fn if_matches(&mut self, cond: &t::Expr, then: &t::Stmt, else_: Option<&t::Stmt>, loc: t::Loc) -> Result<Stmt> {
-        let line = loc.line;
+        let line = loc;
         self.spec_count += 1;
         let flag = format!("matched${}", self.spec_count);
         let fd = self.match_var(&flag, Rc::new(SvType::vector(NetKind::Bit, false, vec![])), loc)?;
@@ -219,7 +219,7 @@ impl Lower {
     /// `case (e) matches` (`casez`, `casex`): the first item whose pattern matches and whose
     /// guard holds runs, else the default item.
     pub(crate) fn case_matches(&mut self, kind: CaseKind, qual: Option<Kw>, e: &t::Expr, items: &[t::CaseItem], loc: t::Loc) -> Result<Stmt> {
-        let line = loc.line;
+        let line = loc;
         let ty = self.match_type(e)?;
         let v = self.expr(e)?;
         self.spec_count += 1;
@@ -239,7 +239,7 @@ impl Lower {
                 self.pattern_parts(p, ExprKind::Ident(tmp.clone()).into(), &ty, it.loc, &mut tests, &mut binds)?;
                 let arm = self.with_binds(binds, it.loc, &mut |l| {
                     let body = l.stmt(&it.body)?;
-                    let hit = block(vec![], vec![assign(ExprKind::Ident(flag.clone()).into(), bit(1), it.loc.line), body]);
+                    let hit = block(vec![], vec![assign(ExprKind::Ident(flag.clone()).into(), bit(1), it.loc), body]);
                     Ok(match &it.guard {
                         Some(g) => {
                             let g = cond_parts(g);
@@ -250,13 +250,13 @@ impl Lower {
                             for x in &g[1..] {
                                 cond = ExprKind::Binary(BinOp::LAnd, Box::new(cond), Box::new(l.expr(x)?)).into();
                             }
-                            Stmt::If { cond, then_s: Box::new(hit), else_s: None, line: it.loc.line }
+                            Stmt::If { cond, then_s: Box::new(hit), else_s: None, line: it.loc }
                         }
                         None => hit,
                     })
                 })?;
-                let arm = Self::tested(tests, kind, arm, it.loc.line);
-                stmts.push(Stmt::If { cond: not_yet(), then_s: Box::new(arm), else_s: None, line: it.loc.line });
+                let arm = Self::tested(tests, kind, arm, it.loc);
+                stmts.push(Stmt::If { cond: not_yet(), then_s: Box::new(arm), else_s: None, line: it.loc });
             }
             Ok(())
         })();

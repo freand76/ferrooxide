@@ -22,6 +22,8 @@ pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
     file: String,
+    /// `crate::file_index` of `file`
+    file_idx: u32,
     /// type names per scope, innermost last; the first is the file scope (`$unit`)
     scopes: Vec<HashSet<String>>,
     /// type names each package declares (carried from file to file)
@@ -57,7 +59,8 @@ impl Parser {
             unit.insert(t.to_string());
             classes.entry(t.to_string()).or_default();
         }
-        Parser { toks, pos: 0, file, scopes: vec![unit], packages, classes, in_constraint: false, in_generate: 0, block_label: None, in_package: None }
+        let file_idx = crate::file_index(&file);
+        Parser { toks, pos: 0, file, file_idx, scopes: vec![unit], packages, classes, in_constraint: false, in_generate: 0, block_label: None, in_package: None }
     }
 
     pub fn into_state(mut self) -> UnitState {
@@ -77,7 +80,8 @@ impl Parser {
         self.toks[self.pos].line
     }
     pub(crate) fn loc(&self) -> Loc {
-        Loc { line: self.line() }
+        let t = &self.toks[self.pos];
+        Loc { file: self.file_idx, line: t.line, col: t.col }
     }
     pub(crate) fn bump(&mut self) -> T {
         let t = self.toks[self.pos].t.clone();
@@ -300,7 +304,20 @@ pub(crate) fn describe(t: &T) -> String {
 
 /// Parse one preprocessed file.
 pub fn parse_file(text: &str, name: &str, state: UnitState) -> Result<(SourceFile, UnitState)> {
-    let toks = super::token::lex(text, name)?;
+    let mut toks = super::token::lex(text, name)?;
+    // columns: the offset from the start of the token's line
+    let b = text.as_bytes();
+    let (mut at, mut line_start) = (0usize, 0usize);
+    for t in &mut toks {
+        let pos = (t.pos as usize).min(b.len());
+        while at < pos {
+            if b[at] == b'\n' {
+                line_start = at + 1;
+            }
+            at += 1;
+        }
+        t.col = (pos - line_start) as u32 + 1;
+    }
     let mut p = Parser::new(toks, name.to_string(), state);
     let items = p.source_text()?;
     Ok((SourceFile { name: name.to_string(), items }, p.into_state()))

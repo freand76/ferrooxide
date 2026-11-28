@@ -576,7 +576,7 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn stmt(&mut self, st: &Stmt, sid: usize) -> R<()> {
-        self.at(0, |c| c.stmt_here(st, sid))
+        self.at(Loc::NONE, |c| c.stmt_here(st, sid))
     }
 
     fn stmt_here(&mut self, st: &Stmt, sid: usize) -> R<()> {
@@ -1584,7 +1584,7 @@ impl<'a> Compiler<'a> {
     /// `obj.p[i] = v`, `obj.p[a:b] = v` of a vector property: through a hidden variable
     /// with the property's value (nothing runs in between that could see it). False if
     /// `lhs` is no such select.
-    fn prop_part_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize, line: Line) -> R<bool> {
+    fn prop_part_assign(&mut self, lhs: &Expr, rhs: &Expr, sid: usize, line: Loc) -> R<bool> {
         let mut base = lhs;
         while let ExprKind::Index(a, _) | ExprKind::Range(a, ..) | ExprKind::IndexedRange(a, ..) = &base.kind {
             base = a;

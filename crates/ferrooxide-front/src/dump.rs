@@ -1,7 +1,7 @@
 //! A readable, Verilog-like print of the AST (`--dump-ast`, parser snapshot tests).
 //!
 //! Every binary, unary and conditional expression is parenthesized, so the print shows the
-//! tree's structure exactly. Line numbers are left out (snapshots stay stable when comments
+//! tree's structure exactly. Loc numbers are left out (snapshots stay stable when comments
 //! move); SystemVerilog types appear as resolved by the parser.
 
 use crate::ast::*;

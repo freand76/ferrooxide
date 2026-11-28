@@ -1,6 +1,6 @@
 pub use crate::lexer::Number;
 
-pub type Line = u32;
+pub use crate::syntax::tree::Loc;
 
 /// The time unit and precision of a module without `timescale or timeunit (powers of ten of
 /// seconds): 1ns / 1ns (IEEE 1800-2017 3.14.2.3 leaves it to the tool)
@@ -16,7 +16,7 @@ pub struct Module {
     /// `unconnected_drive pull1 (true) / pull0 (false): unconnected input ports are pulled
     pub unconnected_drive: Option<bool>,
     pub file: String,
-    pub line: Line,
+    pub line: Loc,
     /// Port names in header order.
     pub ports: Vec<String>,
     pub items: Vec<Item>,
@@ -24,7 +24,7 @@ pub struct Module {
     pub udp: Option<UdpDef>,
     /// names that are keywords of the keyword set in effect (an error in SystemVerilog; the
     /// lint check reports those that only IEEE 1800 reserves)
-    pub keyword_names: Vec<(String, Line)>,
+    pub keyword_names: Vec<(String, Loc)>,
     /// an `interface ... endinterface`
     pub interface: bool,
     /// interface ports (`bus_if.master b`, `bus_if b[4]`): (port name, interface name (empty
@@ -111,7 +111,7 @@ pub struct Declarator {
     /// q_t[$]; q_t a[string];`)
     pub inner: Vec<HeapKind>,
     pub init: Option<Expr>,
-    pub line: Line,
+    pub line: Loc,
 }
 
 /// The unpacked dimension of a queue or dynamic array (its only one).
@@ -156,12 +156,12 @@ pub struct Decl {
     pub single: bool,
     /// an `interconnect` net: only port connections use it
     pub interconnect: bool,
-    pub line: Line,
+    pub line: Loc,
 }
 
 impl Decl {
     /// A variable of type `ty` (declared by the lowering, not in the source).
-    pub fn var(ty: impl Into<std::rc::Rc<crate::lower::SvType>>, names: Vec<Declarator>, automatic: bool, line: Line) -> Decl {
+    pub fn var(ty: impl Into<std::rc::Rc<crate::lower::SvType>>, names: Vec<Declarator>, automatic: bool, line: Loc) -> Decl {
         Decl {
             dir: None,
             net: NetType::Wire,
@@ -227,7 +227,7 @@ pub struct ParamDecl {
     /// an enum constant: the constants of its enum (shared by the enum's type, `SvType::
     /// enum_names`, which makes them the enum's identity)
     pub enum_type: Option<std::rc::Rc<Vec<String>>>,
-    pub line: Line,
+    pub line: Loc,
 }
 
 impl ParamDecl {
@@ -275,7 +275,7 @@ pub struct Instance {
     pub name: String,
     pub dims: Vec<Range>,
     pub conns: Vec<Conn>,
-    pub line: Line,
+    pub line: Loc,
 }
 
 #[derive(Debug, Clone)]
@@ -293,14 +293,14 @@ pub struct SubroutineDecl {
     pub refs: Vec<String>,
     /// ports declared without a range that a later declaration gives one (`input a;
     /// reg [3:0] a;`): the line of that declaration (the reference warns about them)
-    pub scalar_vec_ports: Vec<(String, Line)>,
+    pub scalar_vec_ports: Vec<(String, Loc)>,
     /// the port and type declarations as written, when `decls` merged some (for the checks
     /// of names declared twice); empty: `decls` are as written
     pub decls_written: Vec<Decl>,
     /// parameters declared in the subroutine (local to it)
     pub params: Vec<ParamDecl>,
     pub body: Stmt,
-    pub line: Line,
+    pub line: Loc,
 }
 
 impl SubroutineDecl {
@@ -348,28 +348,28 @@ pub enum Item {
     Decl(Decl),
     Param(ParamDecl),
     /// `parameter type T = logic [7:0];` (`default` None: no default type)
-    TypeParam { local: bool, name: String, default: Option<std::rc::Rc<crate::lower::SvType>>, line: Line },
+    TypeParam { local: bool, name: String, default: Option<std::rc::Rc<crate::lower::SvType>>, line: Loc },
     /// a `specify` path delay: `(a, b *> q) = (rise, fall);` (conditions and edges ignored)
     /// `parallel`: a `=>` path between two whole terminals (the same width, 30.4.5)
-    SpecPath { srcs: Vec<String>, dsts: Vec<String>, delay: Expr, parallel: bool, line: Line },
+    SpecPath { srcs: Vec<String>, dsts: Vec<String>, delay: Expr, parallel: bool, line: Loc },
     /// `defparam a.b.P = value;` (the target path includes the parameter name)
-    Defparam { target: Vec<String>, value: Expr, line: Line },
+    Defparam { target: Vec<String>, value: Expr, line: Loc },
     /// `strength`: drive strength (strength0, strength1), levels 0 (highz) .. 7 (supply)
-    ContAssign { delay: Option<Expr>, lhs: Expr, rhs: Expr, strength: Option<(u8, u8)>, line: Line },
-    Process { kind: ProcKind, body: Stmt, line: Line },
-    Instances { module: String, params: Vec<Conn>, insts: Vec<Instance>, line: Line },
+    ContAssign { delay: Option<Expr>, lhs: Expr, rhs: Expr, strength: Option<(u8, u8)>, line: Loc },
+    Process { kind: ProcKind, body: Stmt, line: Loc },
+    Instances { module: String, params: Vec<Conn>, insts: Vec<Instance>, line: Loc },
     Subroutine(SubroutineDecl),
     Class(std::rc::Rc<ClassDecl>),
     /// `C #(args)` (IEEE 1800-2017 8.25): the specialization of parameterized class `class`
     /// with these parameter values (evaluated where it is used), named `name` (`C#<n>`) in
     /// the code that uses it
-    ClassSpec { name: String, class: String, args: Vec<Conn>, line: Line },
-    GenFor { init_var: String, init: Expr, cond: Expr, step_var: String, step: Expr, name: Option<String>, items: Vec<Item>, line: Line },
+    ClassSpec { name: String, class: String, args: Vec<Conn>, line: Loc },
+    GenFor { init_var: String, init: Expr, cond: Expr, step_var: String, step: Expr, name: Option<String>, items: Vec<Item>, line: Loc },
     /// `direct`: the whole block of an enclosing conditional (written without begin-end):
     /// its blocks are in the enclosing conditional's scope (IEEE 1800 27.5)
-    GenIf { cond: Expr, then_items: Vec<Item>, then_name: Option<String>, else_items: Vec<Item>, else_name: Option<String>, direct: bool, line: Line },
-    GenCase { expr: Expr, arms: Vec<(Vec<Expr>, Option<String>, Vec<Item>)>, direct: bool, line: Line },
-    GenBlock { name: Option<String>, items: Vec<Item>, line: Line },
+    GenIf { cond: Expr, then_items: Vec<Item>, then_name: Option<String>, else_items: Vec<Item>, else_name: Option<String>, direct: bool, line: Loc },
+    GenCase { expr: Expr, arms: Vec<(Vec<Expr>, Option<String>, Vec<Item>)>, direct: bool, line: Loc },
+    GenBlock { name: Option<String>, items: Vec<Item>, line: Loc },
     /// gate primitive: and/or/nand/nor/xor/xnor/not/buf
     /// `dims`: an array of gate instances, e.g. `buf b[7:0] (o, i);`
     Gate {
@@ -379,13 +379,13 @@ pub enum Item {
         terms: Vec<Expr>,
         strength: Option<(u8, u8)>,
         delay: Option<Expr>,
-        line: Line,
+        line: Loc,
     },
     /// a concurrent assertion
     Assert(Box<ConcAssert>),
     /// an elaboration system task (IEEE 1800-2017 20.11): `$fatal`, `$error`, `$warning`,
     /// `$info` as an item, reported when its scope is elaborated
-    ElabTask { name: String, args: Vec<Option<Expr>>, line: Line },
+    ElabTask { name: String, args: Vec<Option<Expr>>, line: Loc },
 }
 
 /// A concurrent assertion (IEEE 1800-2017 16.14): `assert property`, `assume property`,
@@ -404,7 +404,7 @@ pub struct ConcAssert {
     pub pass: Stmt,
     /// the fail action; the default reports an error
     pub fail: Stmt,
-    pub line: Line,
+    pub line: Loc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,7 +507,7 @@ pub struct ClassDecl {
     /// constraint blocks (IEEE 1800-2017 18.5); in their expressions the class's properties
     /// are reached through `this`
     pub constraints: Vec<Constraint>,
-    pub line: Line,
+    pub line: Loc,
 }
 
 /// `constraint name { items }`.
@@ -516,7 +516,7 @@ pub struct Constraint {
     pub name: String,
     pub static_: bool,
     pub items: Vec<CItem>,
-    pub line: Line,
+    pub line: Loc,
 }
 
 /// A constraint item (IEEE 1800-2017 18.5).
@@ -594,43 +594,43 @@ pub enum Stmt {
     /// `imports`: packages imported in the block (`P`: all its names, `P::x`: one name)
     /// `params`: parameters declared in the block (local to it)
     Block { name: Option<String>, decls: Vec<Decl>, imports: Vec<String>, params: Vec<ParamDecl>, stmts: Vec<Stmt>, fork: Option<Join> },
-    Assign { lhs: Expr, rhs: Expr, nonblocking: bool, timing: Option<Timing>, line: Line },
-    If { cond: Expr, then_s: Box<Stmt>, else_s: Option<Box<Stmt>>, line: Line },
-    Case { kind: CaseKind, expr: Expr, arms: Vec<(Vec<Expr>, Stmt)>, default: Option<Box<Stmt>>, line: Line },
-    For { init: Box<Stmt>, cond: Expr, step: Box<Stmt>, body: Box<Stmt>, line: Line },
-    While { cond: Expr, body: Box<Stmt>, line: Line },
-    DoWhile { cond: Expr, body: Box<Stmt>, line: Line },
-    Repeat { count: Expr, body: Box<Stmt>, line: Line },
-    Forever { body: Box<Stmt>, line: Line },
-    Timed { timing: Timing, body: Box<Stmt>, line: Line },
-    Wait { cond: Expr, body: Box<Stmt>, line: Line },
-    SysTask { name: String, args: Vec<Option<Expr>>, line: Line },
-    TaskCall { name: String, args: Vec<Expr>, line: Line },
+    Assign { lhs: Expr, rhs: Expr, nonblocking: bool, timing: Option<Timing>, line: Loc },
+    If { cond: Expr, then_s: Box<Stmt>, else_s: Option<Box<Stmt>>, line: Loc },
+    Case { kind: CaseKind, expr: Expr, arms: Vec<(Vec<Expr>, Stmt)>, default: Option<Box<Stmt>>, line: Loc },
+    For { init: Box<Stmt>, cond: Expr, step: Box<Stmt>, body: Box<Stmt>, line: Loc },
+    While { cond: Expr, body: Box<Stmt>, line: Loc },
+    DoWhile { cond: Expr, body: Box<Stmt>, line: Loc },
+    Repeat { count: Expr, body: Box<Stmt>, line: Loc },
+    Forever { body: Box<Stmt>, line: Loc },
+    Timed { timing: Timing, body: Box<Stmt>, line: Loc },
+    Wait { cond: Expr, body: Box<Stmt>, line: Loc },
+    SysTask { name: String, args: Vec<Option<Expr>>, line: Loc },
+    TaskCall { name: String, args: Vec<Expr>, line: Loc },
     /// a method call as a statement (a task, or a function whose result is not used)
-    MethodCall { obj: Expr, name: String, args: Vec<Expr>, line: Line },
+    MethodCall { obj: Expr, name: String, args: Vec<Expr>, line: Loc },
     /// `C::m(args);`: a static method call as a statement
-    StaticCall { class: String, name: String, args: Vec<Expr>, line: Line },
-    Disable { name: String, line: Line },
+    StaticCall { class: String, name: String, args: Vec<Expr>, line: Loc },
+    Disable { name: String, line: Loc },
     /// `force lhs = rhs` (`rhs` None: `release lhs`)
-    Force { lhs: Expr, rhs: Option<Expr>, line: Line },
+    Force { lhs: Expr, rhs: Option<Expr>, line: Loc },
     /// `-> e`, `->> e` (nonblocking: in the NBA region)
     /// `-> e` / `->> e`: a module's event (a name) or an event property
-    Trigger { target: Expr, nonblocking: bool, line: Line },
-    Return { value: Option<Expr>, line: Line },
-    Break { line: Line },
-    Continue { line: Line },
+    Trigger { target: Expr, nonblocking: bool, line: Loc },
+    Return { value: Option<Expr>, line: Loc },
+    Break { line: Loc },
+    Continue { line: Loc },
     /// `void'(f(...))`: a function call whose value is not used; also an array method with
     /// `with` called as a statement (`q.sort with (e);`)
-    Discard { e: Expr, line: Line },
+    Discard { e: Expr, line: Loc },
     /// `wait fork`: until the fork branches the process started have ended
-    WaitFork { line: Line },
+    WaitFork { line: Loc },
     /// `foreach (array[i, j])` over an array the compiler resolves (a member, an element, a
     /// name declared elsewhere): one loop per named variable (None: a skipped dimension)
-    Foreach { array: Expr, vars: Vec<Option<String>>, body: Box<Stmt>, line: Line },
+    Foreach { array: Expr, vars: Vec<Option<String>>, body: Box<Stmt>, line: Loc },
     /// a deferred immediate assertion (IEEE 1800-2017 16.4): the condition is evaluated
     /// here, the action runs in the Reactive region (`#0`) or the Postponed region (`final`)
     /// of the time step, once for the last evaluation in it
-    Deferred { final_: bool, cover: bool, cond: Expr, pass: Box<Stmt>, fail: Box<Stmt>, line: Line },
+    Deferred { final_: bool, cover: bool, cond: Expr, pass: Box<Stmt>, fail: Box<Stmt>, line: Loc },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -680,11 +680,11 @@ pub enum BinOp {
     AShr,
 }
 
-/// An expression with the line it starts on (0: synthesized, no location of its own).
+/// An expression with where it starts (`Loc::NONE`: synthesized, no location of its own).
 #[derive(Clone)]
 pub struct Expr {
     pub kind: ExprKind,
-    pub line: Line,
+    pub line: Loc,
 }
 
 /// Only the expression itself: `{:?}` serves as a key of an expression in places, where
@@ -696,7 +696,7 @@ impl std::fmt::Debug for Expr {
 }
 
 impl Expr {
-    pub fn new(kind: ExprKind, line: Line) -> Expr {
+    pub fn new(kind: ExprKind, line: Loc) -> Expr {
         Expr { kind, line }
     }
 }
@@ -775,9 +775,9 @@ impl Expr {
         }
     }
 
-    /// Gives this expression and the subexpressions without a line of their own `line`.
-    pub fn fill_line(&mut self, line: Line) {
-        if self.line != 0 || line == 0 {
+    /// Gives this expression and the subexpressions without a location of their own `line`.
+    pub fn fill_line(&mut self, line: Loc) {
+        if !self.line.is_none() || line.is_none() {
             return;
         }
         self.line = line;
@@ -830,7 +830,7 @@ impl CItem {
 impl From<ExprKind> for Expr {
     /// an expression without a location (made by the compiler)
     fn from(kind: ExprKind) -> Expr {
-        Expr { kind, line: 0 }
+        Expr { kind, line: Loc::NONE }
     }
 }
 

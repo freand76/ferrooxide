@@ -19,6 +19,13 @@ pub struct Error {
     pub line: u32,
 }
 
+impl Error {
+    /// An error at `loc` (`file`: the preprocessed file where `loc` has none).
+    pub fn at(msg: impl Into<String>, loc: syntax::tree::Loc, file: &str) -> Error {
+        Error { msg: msg.into(), file: loc.file_or(file), line: loc.line }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: error: {}", loc_str(&self.file, self.line), self.msg)
@@ -53,6 +60,29 @@ pub fn src_loc(file: &str, line: u32) -> (String, u32) {
         }
     }
     (file.to_string(), line)
+}
+
+/// The names of the preprocessed files that `Loc::file` indexes (0: no file).
+static FILES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The index of the preprocessed file `name` for `Loc::file` (from 1).
+pub fn file_index(name: &str) -> u32 {
+    let mut f = FILES.lock().unwrap();
+    match f.iter().position(|n| n == name) {
+        Some(i) => i as u32 + 1,
+        None => {
+            f.push(name.to_string());
+            f.len() as u32
+        }
+    }
+}
+
+/// The name of the preprocessed file with index `i` (empty for 0).
+pub fn file_name(i: u32) -> String {
+    if i == 0 {
+        return String::new();
+    }
+    FILES.lock().unwrap().get(i as usize - 1).cloned().unwrap_or_default()
 }
 
 /// `file:line` of line `line` of the preprocessed `file`, in the source.

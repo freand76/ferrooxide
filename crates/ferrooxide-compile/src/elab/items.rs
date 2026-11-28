@@ -5,13 +5,13 @@ use crate::*;
 impl<'a> Compiler<'a> {
     /// Port `name` was declared without a range, its net or variable declaration (at `line`)
     /// with [a:b]: an error, or with `-gno-io-range-error` a warning (as the reference).
-    pub(super) fn scalar_port(&mut self, name: &str, line: u32, a: i64, b: i64) -> R<()> {
+    pub(super) fn scalar_port(&mut self, name: &str, line: Loc, a: i64, b: i64) -> R<()> {
         let msg = format!("Scalar port ``{name}'' has a vectored net declaration [{a}:{b}].");
         if !self.dialect.io_range_warn {
             self.line = line;
             return self.err(msg);
         }
-        let w = format!("{}: warning: {msg}", ferrooxide_front::loc_str(&self.file, line));
+        let w = format!("{}: warning: {msg}", line.at(&self.file));
         if !self.dialect.no_anachronisms && self.diag.warned.insert(w.clone()) {
             self.diag.warnings.push(w);
         }
@@ -40,7 +40,7 @@ impl<'a> Compiler<'a> {
                 *slot = Some(d);
                 let (Some(p), Some(v)) = *e else { continue };
                 self.line = dl.line;
-                let lines = format!("lines {} and {}", p.line.min(v.line), p.line.max(v.line));
+                let lines = format!("lines {} and {}", p.line.line.min(v.line.line), p.line.line.max(v.line.line));
                 // (IEEE 1800-2017 23.2.2.3: an inout port of a module is a net)
                 if !subroutine && p.dir == Some(Dir::Inout) && v.kind() != NetKind::Wire && !v.real_net {
                     return self.err(format!("inout port '{}' cannot be a variable", dl.name));
@@ -296,7 +296,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Instances of module or primitive `module` (with parameter values `params`).
-    fn instances(&mut self, module: &str, params: &'a [Conn], insts: &'a [Instance], line: u32, sid: usize) -> R<()> {
+    fn instances(&mut self, module: &str, params: &'a [Conn], insts: &'a [Instance], line: Loc, sid: usize) -> R<()> {
         self.line = line;
         let m = match self.find_module(module, sid) {
             Some(m) => m,
@@ -403,7 +403,7 @@ impl<'a> Compiler<'a> {
 
     /// An elaboration system task (IEEE 1800-2017 20.11) reached in scope `sid`: its message,
     /// as the reference words it; `$error` and `$fatal` make elaboration fail.
-    fn elab_task(&mut self, name: &str, args: &[Option<Expr>], line: u32, sid: usize) -> R<()> {
+    fn elab_task(&mut self, name: &str, args: &[Option<Expr>], line: Loc, sid: usize) -> R<()> {
         if self.diag.elab_fatal {
             return Ok(());
         }

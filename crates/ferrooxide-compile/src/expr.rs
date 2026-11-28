@@ -531,7 +531,7 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn mkerr(&self, msg: String) -> ferrooxide_front::Error {
-        ferrooxide_front::Error { msg, file: self.file.clone(), line: self.line }
+        ferrooxide_front::Error::at(msg, self.line, &self.file)
     }
 
     /// Compile in a self-determined context.

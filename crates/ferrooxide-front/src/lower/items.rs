@@ -141,7 +141,7 @@ impl Lower {
                 for (l, r, loc) in &c.assigns {
                     let lhs = self.lvalue(l)?;
                     let rhs = self.expr(r)?;
-                    items.push(Item::ContAssign { delay: delay.clone(), lhs, rhs, strength, line: loc.line });
+                    items.push(Item::ContAssign { delay: delay.clone(), lhs, rhs, strength, line: *loc });
                 }
             }
             t::Item::Process(p) => {
@@ -154,7 +154,7 @@ impl Lower {
                     t::ProcKind::Final => ProcKind::Final,
                 };
                 let body = self.stmt(&p.body)?;
-                items.push(Item::Process { kind, body, line: p.loc.line });
+                items.push(Item::Process { kind, body, line: p.loc });
             }
             t::Item::Class(c) => {
                 let key = &**c as *const t::ClassDecl as usize;
@@ -181,7 +181,7 @@ impl Lower {
             t::Item::Constraint(k) if k.name.scopes.len() == 1 => self.constraint_body_done(k)?,
             t::Item::Subroutine(s) => {
                 // the body of an extern method, merged into its class
-                if !s.name.scopes.is_empty() && self.extern_done.contains(&(format!("{}::{}", s.name.scopes[0].name, s.name.name), s.loc.line as usize)) {
+                if !s.name.scopes.is_empty() && self.extern_done.contains(&(format!("{}::{}", s.name.scopes[0].name, s.name.name), s.loc)) {
                     return Ok(());
                 }
                 let s = self.subroutine_in(s, false)?;
@@ -221,7 +221,7 @@ impl Lower {
                     Some(b) => self.gen_items(b)?,
                     None => (None, Vec::new()),
                 };
-                items.push(Item::GenIf { cond, then_items, then_name, else_items, else_name, direct: false, line: g.loc.line });
+                items.push(Item::GenIf { cond, then_items, then_name, else_items, else_name, direct: false, line: g.loc });
             }
             t::Item::GenCase(g) => {
                 let expr = self.expr(&g.expr)?;
@@ -234,11 +234,11 @@ impl Lower {
                     let (name, sub) = self.gen_items(b)?;
                     arms.push((ls, name, sub));
                 }
-                items.push(Item::GenCase { expr, arms, direct: false, line: g.loc.line });
+                items.push(Item::GenCase { expr, arms, direct: false, line: g.loc });
             }
             t::Item::GenBlock(b) => {
                 let (name, sub) = self.gen_items(b)?;
-                items.push(Item::GenBlock { name, items: sub, line: b.loc.line });
+                items.push(Item::GenBlock { name, items: sub, line: b.loc });
             }
             t::Item::Defparam(v, _) => {
                 for (target, value) in v {
@@ -246,7 +246,7 @@ impl Lower {
                         return self.unsupported(target.loc, "this defparam target");
                     };
                     let value = self.expr(value)?;
-                    items.push(Item::Defparam { target: path, value, line: target.loc.line });
+                    items.push(Item::Defparam { target: path, value, line: target.loc });
                 }
             }
             t::Item::Specify(v, _) => self.specify(v, items)?,
@@ -312,14 +312,14 @@ impl Lower {
                 items.push(Item::Decl(d));
             }
             t::Item::Genvar(v) => {
-                let line = v.first().map(|x| x.1.line).unwrap_or(0);
+                let line = v.first().map(|x| x.1).unwrap_or_default();
                 self.decl_type = None;
                 let mut names = Vec::new();
                 for (n, loc) in v {
                     let n = self.name(n, *loc);
                     self.genvars.0.insert(n.clone());
                     self.declare_var(&n, &[]);
-                    names.push(Declarator { name: n, dims: vec![], heap: None, inner: vec![], init: None, line: loc.line });
+                    names.push(Declarator { name: n, dims: vec![], heap: None, inner: vec![], init: None, line: *loc });
                 }
                 let d = Decl::var(super::SvType::flat(NetKind::Genvar, false, vec![]), names, false, line);
                 items.append(&mut self.pending);
@@ -343,7 +343,7 @@ impl Lower {
                     for e in &gi.terms {
                         terms.push(self.expr(e)?);
                     }
-                    items.push(Item::Gate { kind: kind.clone(), inst_name, dims, terms, strength, delay: delay.clone(), line: gi.loc.line });
+                    items.push(Item::Gate { kind: kind.clone(), inst_name, dims, terms, strength, delay: delay.clone(), line: gi.loc });
                 }
             }
             t::Item::Instances(i) => items.push(self.instances(i)?),
@@ -351,7 +351,7 @@ impl Lower {
             // IEEE 1800-2017 16.4.3)
             t::Item::Assertion(a) if matches!(a.body, t::AssertBody::Immediate { deferred: Some(_), .. }) => {
                 let body = self.deferred_assertion(a, a.label.as_ref())?;
-                items.push(Item::Process { kind: ProcKind::AlwaysComb, body, line: a.loc.line });
+                items.push(Item::Process { kind: ProcKind::AlwaysComb, body, line: a.loc });
             }
             t::Item::Assertion(a) if matches!(a.body, t::AssertBody::Immediate { .. }) => {
                 return self.err(a.loc, "an immediate assertion outside a procedure (only deferred ones, `#0` or `final`)");
@@ -373,7 +373,7 @@ impl Lower {
                 if !matches!(name.as_str(), "$fatal" | "$error" | "$warning" | "$info") {
                     return self.err(*loc, format!("'{name}' is not an elaboration system task"));
                 }
-                items.push(Item::ElabTask { name: name.clone(), args: v, line: loc.line });
+                items.push(Item::ElabTask { name: name.clone(), args: v, line: *loc });
             }
             t::Item::Property(_) | t::Item::Sequence(_) | t::Item::Let(_) | t::Item::Clocking(_) | t::Item::ClockingRef { .. } | t::Item::DefaultDisable(..) => {
                 self.sva_item(it)?;
@@ -412,7 +412,7 @@ impl Lower {
         let cond = self.expr(&g.cond)?;
         let (step_var, step) = self.gen_step(&g.step)?;
         let (name, items) = self.gen_items(&g.body)?;
-        Ok(Item::GenFor { init_var, init, cond, step_var, step, name, items, line: g.loc.line })
+        Ok(Item::GenFor { init_var, init, cond, step_var, step, name, items, line: g.loc })
     }
 
     fn instances(&mut self, i: &t::Instances) -> Result<Item> {
@@ -466,9 +466,9 @@ impl Lower {
                     t::PortConn::Wildcard => Conn::Wildcard,
                 });
             }
-            insts.push(Instance { name, dims, conns, line: x.loc.line });
+            insts.push(Instance { name, dims, conns, line: x.loc });
         }
-        Ok(Item::Instances { module, params, insts, line: i.loc.line })
+        Ok(Item::Instances { module, params, insts, line: i.loc })
     }
 
     /// specparams and path delays are kept; conditions, edges and timing checks ignored.
@@ -504,7 +504,7 @@ impl Lower {
                     };
                     let whole = |v: &[t::Expr]| matches!(v, [t::Expr { kind: t::ExprKind::Ident(_), .. }]);
                     let parallel = !p.full && p.data.is_none() && whole(&p.srcs) && whole(&p.dsts);
-                    items.push(Item::SpecPath { srcs, dsts, delay, parallel, line: p.loc.line });
+                    items.push(Item::SpecPath { srcs, dsts, delay, parallel, line: p.loc });
                 }
                 t::SpecifyItem::TimingCheck { .. } | t::SpecifyItem::Pulse { .. } => {}
             }
@@ -525,7 +525,7 @@ impl Lower {
     }
 
     fn subroutine_here(&mut self, s: &t::Subroutine, method: bool) -> Result<SubroutineDecl> {
-        let line = s.loc.line;
+        let line = s.loc;
         if !s.quals.is_empty() && !method {
             return self.unsupported(s.loc, "a qualified subroutine (class method)");
         }
@@ -625,7 +625,7 @@ impl Lower {
                     None => None,
                 };
                 let mut d = cur.clone().unwrap();
-                d.names = vec![Declarator { name: n, dims, heap, inner: vec![], init, line: p.loc.line }];
+                d.names = vec![Declarator { name: n, dims, heap, inner: vec![], init, line: p.loc }];
                 decls.push(d);
             }
         }

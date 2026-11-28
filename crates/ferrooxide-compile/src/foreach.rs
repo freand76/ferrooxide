@@ -35,17 +35,17 @@ fn index(a: &Expr, i: Expr) -> Expr {
 }
 
 /// An automatic variable for a loop.
-fn var_decl(kind: NetKind, signed: bool, range: Option<Range>, n: &str, line: Line) -> Decl {
+fn var_decl(kind: NetKind, signed: bool, range: Option<Range>, n: &str, line: Loc) -> Decl {
     let names = vec![Declarator { name: n.to_string(), dims: vec![], heap: None, inner: vec![], init: None, line }];
     Decl::var(SvType::flat(kind, signed, range.into_iter().collect()), names, true, line)
 }
 
-fn assign(n: &str, rhs: Expr, line: Line) -> Stmt {
+fn assign(n: &str, rhs: Expr, line: Loc) -> Stmt {
     Stmt::Assign { lhs: ExprKind::Ident(n.to_string()).into(), rhs, nonblocking: false, timing: None, line }
 }
 
 impl<'a> Compiler<'a> {
-    pub(crate) fn foreach(&mut self, array: &Expr, vars: &[Option<String>], body: &Stmt, line: Line, sid: usize) -> R<()> {
+    pub(crate) fn foreach(&mut self, array: &Expr, vars: &[Option<String>], body: &Stmt, line: Loc, sid: usize) -> R<()> {
         let st = self.foreach_dims(array, array, vars, body, line, sid)?;
         self.stmt(&st, sid)
     }
@@ -53,7 +53,7 @@ impl<'a> Compiler<'a> {
     /// The loops for `vars` over `sub` (the array with the outer variables as indexes);
     /// `probe` is `sub` with constant indexes instead, to find types before the variables
     /// exist.
-    fn foreach_dims(&mut self, sub: &Expr, probe: &Expr, vars: &[Option<String>], body: &Stmt, line: Line, sid: usize) -> R<Stmt> {
+    fn foreach_dims(&mut self, sub: &Expr, probe: &Expr, vars: &[Option<String>], body: &Stmt, line: Loc, sid: usize) -> R<Stmt> {
         let Some((v, rest)) = vars.split_first() else { return Ok(body.clone()) };
         let dim = self.foreach_dim(probe, sid)?;
         let first = match dim {

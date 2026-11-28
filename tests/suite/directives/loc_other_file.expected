@@ -1,0 +1,8 @@
+INFO: loc_other_file_pkg.sv:5: the package's file, line 5
+      Time: 0  Scope: loc_pkg.c.hello
+INFO: loc_other_file_pkg.sv:10: a specialization, N = 3, line 10
+      Time: 0  Scope: loc_pkg.d#s1.hello
+INFO: ./loc_other_file.svh:3: the included file, line 3
+      Time: 0  Scope: loc_pkg.inc_hello
+INFO: loc_other_file.v:15: the module, line 15
+      Time: 0  Scope: m

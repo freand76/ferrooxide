@@ -146,7 +146,7 @@ impl Lower {
                 None => None,
             },
         };
-        let line = a.loc.line;
+        let line = a.loc;
         let pass = match &a.action.pass {
             Some(s) => self.stmt(s)?,
             None => Stmt::Null,

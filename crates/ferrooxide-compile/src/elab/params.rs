@@ -155,15 +155,15 @@ impl<'a> Compiler<'a> {
     /// Every defparam must have set a parameter that may be overridden: one that exists and
     /// is not local (IEEE 1800-2017 23.10.1).
     pub(crate) fn check_defparams(&self) -> R<()> {
-        let mut left: Vec<(&String, &(String, Line))> =
+        let mut left: Vec<(&String, &(String, Loc))> =
             self.hier.defparam_at.iter().filter(|(k, _)| !self.hier.params_done.contains(*k)).collect();
-        left.sort_by_key(|(k, at)| (at.0.clone(), at.1, (*k).clone()));
+        left.sort_by_key(|(k, at)| (at.0.clone(), at.1.line, (*k).clone()));
         match left.first() {
-            Some((k, (file, line))) => Err(Error {
-                msg: format!("defparam: '{k}' is not a parameter that can be overridden (it does not exist or is local)"),
-                file: file.clone(),
-                line: *line,
-            }),
+            Some((k, (file, line))) => Err(Error::at(
+                format!("defparam: '{k}' is not a parameter that can be overridden (it does not exist or is local)"),
+                *line,
+                file,
+            )),
             None => Ok(()),
         }
     }

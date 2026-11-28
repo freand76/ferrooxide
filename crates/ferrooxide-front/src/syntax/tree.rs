@@ -2,13 +2,69 @@
 //!
 //! Names are plain strings; whether `a.b` is a hierarchical name or a member, or `p::x` a
 //! package item or a class member, is decided later (lowering, elaboration). Lists keep
-//! source order. `Loc` is the line of the construct's first token.
+//! source order. `Loc` is where the construct's first token is.
 
 pub use crate::lexer::Number;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// A place in a preprocessed file: its index (`crate::file_index`), line and column (from
+/// 1; 0: no location, a synthesized construct). Messages print it through the file's line
+/// map (`Display`: `file:line` in the source, through includes).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Loc {
+    pub file: u32,
     pub line: u32,
+    pub col: u32,
+}
+
+impl Loc {
+    /// no location
+    pub const NONE: Loc = Loc { file: 0, line: 0, col: 0 };
+
+    pub fn is_none(self) -> bool {
+        self.line == 0
+    }
+
+    /// The name of the preprocessed file.
+    pub fn file_name(self) -> String {
+        crate::file_name(self.file)
+    }
+
+    /// The name of the preprocessed file, or `file` where there is no location.
+    pub fn file_or(self, file: &str) -> String {
+        if self.file == 0 {
+            file.to_string()
+        } else {
+            self.file_name()
+        }
+    }
+
+    /// `file:line` in the source (`file`: the preprocessed file where `self` has none).
+    pub fn at(self, file: &str) -> String {
+        crate::loc_str(&self.file_or(file), self.line)
+    }
+
+    /// `self`, or `other` where `self` has no location.
+    pub fn or(self, other: Loc) -> Loc {
+        if self.is_none() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// Only the line: `{:?}` of a tree or AST node serves as a key in places, where the same
+/// construct at another column is the same.
+impl std::fmt::Debug for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.line.fmt(f)
+    }
+}
+
+impl std::fmt::Display for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&crate::loc_str(&self.file_name(), self.line))
+    }
 }
 
 /// One source file (after preprocessing).

@@ -133,7 +133,7 @@ impl Lower {
     /// An expression, with its line (and that of the parts made for it).
     pub(crate) fn expr(&mut self, e: &t::Expr) -> Result<Expr> {
         let mut x = self.expr_at(e)?;
-        x.fill_line(e.loc.line);
+        x.fill_line(e.loc);
         Ok(x)
     }
 
@@ -429,7 +429,7 @@ impl Lower {
     /// An assignment target.
     pub(crate) fn lvalue(&mut self, e: &t::Expr) -> Result<Expr> {
         let mut x = self.lvalue_at(e)?;
-        x.fill_line(e.loc.line);
+        x.fill_line(e.loc);
         Ok(x)
     }
 
@@ -564,7 +564,7 @@ impl Lower {
     /// there (`$display(bit)` with a variable `bit`, Verilog-2005), except for `$bits`.
     pub(crate) fn arg(&mut self, e: &t::Expr) -> Result<Expr> {
         let mut x = self.arg_at(e)?;
-        x.fill_line(e.loc.line);
+        x.fill_line(e.loc);
         Ok(x)
     }
 

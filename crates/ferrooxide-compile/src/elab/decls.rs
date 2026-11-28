@@ -25,11 +25,11 @@ struct Merged<'d> {
     heap: Option<&'d HeapKind>,
     /// of queues, dynamic or associative arrays of this kind
     inner: &'d [HeapKind],
-    line: u32,
+    line: Loc,
     /// declared as a port without a range (`input a;`)
     scalar_port: bool,
     /// the line of a declaration without a direction that has a range
-    vec_line: Option<u32>,
+    vec_line: Option<Loc>,
     /// a `const` variable
     konst: bool,
     /// a net that takes one driver only

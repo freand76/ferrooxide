@@ -63,7 +63,7 @@ impl Lower {
     /// nothing, as in the reference (ICARUS_NOTES 11). A label names a scope around it (for
     /// `%m`).
     fn immediate_assertion(&mut self, a: &t::Assertion, label: Option<&String>) -> Result<Stmt> {
-        let line = a.loc.line;
+        let line = a.loc;
         let expr = match &a.body {
             t::AssertBody::Immediate { deferred: None, expr } => expr,
             t::AssertBody::Immediate { deferred: Some(_), .. } => return self.deferred_assertion(a, label),
@@ -94,7 +94,7 @@ impl Lower {
     /// A deferred immediate assertion (IEEE 1800-2017 16.4): `assert #0 (e)`, `assert final
     /// (e)`; the default fail action is `$error`, `cover` has a pass action only.
     pub(crate) fn deferred_assertion(&mut self, a: &t::Assertion, label: Option<&String>) -> Result<Stmt> {
-        let line = a.loc.line;
+        let line = a.loc;
         let t::AssertBody::Immediate { deferred: Some(k), expr } = &a.body else { unreachable!() };
         if a.kind == t::AssertKind::Restrict {
             return self.err(a.loc, "`restrict` takes a property");
@@ -221,7 +221,7 @@ impl Lower {
     }
 
     pub(crate) fn stmt(&mut self, s: &t::Stmt) -> Result<Stmt> {
-        let line = s.loc.line;
+        let line = s.loc;
         if s.label.is_some() && !matches!(s.kind, t::StmtKind::Block { .. } | t::StmtKind::Assertion(_)) {
             return self.unsupported(s.loc, "a statement label");
         }
@@ -323,7 +323,7 @@ impl Lower {
                 let mut st = Stmt::If { cond, then_s, else_s, line };
                 if matches!(qual, Some(Kw::Unique | Kw::Priority)) {
                     // an if / else-if chain without a final else (IEEE 1800 12.4.2)
-                    fn last_else(s: &mut Stmt, line: Line) {
+                    fn last_else(s: &mut Stmt, line: Loc) {
                         if let Stmt::If { else_s, .. } = s {
                             match else_s {
                                 None => *else_s = Some(Box::new(Stmt::SysTask { name: "$__unhandled_if".into(), args: Vec::new(), line })),
@@ -406,8 +406,8 @@ impl Lower {
                             self.wild.locals.push(name.clone());
                             let v = self.expr(init)?;
                             let Some(d) = decls.last_mut() else { return self.unsupported(*loc, "this for-loop initialization") };
-                            d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, inner: vec![], init: None, line: loc.line });
-                            inits.push(Stmt::Assign { lhs: ExprKind::Ident(name).into(), rhs: v, nonblocking: false, timing: None, line: loc.line });
+                            d.names.push(Declarator { name: name.clone(), dims: vec![], heap: None, inner: vec![], init: None, line: *loc });
+                            inits.push(Stmt::Assign { lhs: ExprKind::Ident(name).into(), rhs: v, nonblocking: false, timing: None, line: *loc });
                         }
                         t::ForInit::Assign(st) => inits.push(self.simple_assign(st)?),
                     }
@@ -499,7 +499,7 @@ impl Lower {
 
     /// An expression used as a statement: a task call, `x++`.
     fn expr_stmt(&mut self, e: &t::Expr, loc: t::Loc) -> Result<Stmt> {
-        let line = loc.line;
+        let line = loc;
         match &e.kind {
             // (IEEE 1800-2017 20.14.2: no coverage is kept, there is no database to name or load)
             t::ExprKind::SysCall { name, args, .. } if matches!(name.as_str(), "$set_coverage_db_name" | "$load_coverage_db") => {
@@ -697,7 +697,7 @@ impl Lower {
 
     /// An assignment without terminator: `lhs = e`, `lhs <= #d e`, `lhs op= e`, `x++`, `++x`.
     pub(crate) fn simple_assign(&mut self, s: &t::Stmt) -> Result<Stmt> {
-        let line = s.loc.line;
+        let line = s.loc;
         match &s.kind {
             t::StmtKind::Expr(t::Expr { kind: t::ExprKind::IncDec { inc, e, .. }, .. }) => {
                 let lhs = self.lvalue(e)?;
@@ -853,7 +853,7 @@ impl Lower {
     /// `randcase w1: s1; ... endcase` (IEEE 1800-2017 18.16): a block with a random number
     /// below the sum of the weights, `r`, running the arm whose running sum of weights first
     /// exceeds it; none when the weights add up to 0.
-    fn randcase(&mut self, arms: &[(t::Expr, t::Stmt)], line: u32) -> Result<Stmt> {
+    fn randcase(&mut self, arms: &[(t::Expr, t::Stmt)], line: Loc) -> Result<Stmt> {
         let mut ws = Vec::new();
         let mut bodies = Vec::new();
         for (w, s) in arms {
@@ -893,7 +893,7 @@ impl Lower {
         Ok(Stmt::Block { name: None, decls: vec![d], imports: vec![], params: vec![], stmts: vec![run], fork: None })
     }
 
-    fn foreach_assoc(&mut self, name: &str, v: &str, key: Option<&super::SvType>, body: Stmt, line: u32) -> Stmt {
+    fn foreach_assoc(&mut self, name: &str, v: &str, key: Option<&super::SvType>, body: Stmt, line: Loc) -> Stmt {
         let ok = format!("{v}$ok");
         let call = |m: &str| ExprKind::Call(format!("{name}.{m}"), vec![ExprKind::Ident(v.to_string()).into()]);
         let set = |rhs: Expr| Stmt::Assign { lhs: ExprKind::Ident(ok.clone()).into(), rhs, nonblocking: false, timing: None, line };
@@ -923,7 +923,7 @@ impl Lower {
 
     /// `foreach (q[i])` of a queue or dynamic array: `i` from 0 to `q.size() - 1`.
     fn foreach_heap(&mut self, name: &str, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
-        let line = loc.line;
+        let line = loc;
         let heap = self.vars[name].0.heap.clone();
         // (a struct, class handle or enum key: the loop variable's members or methods are
         // named in the body)
@@ -974,7 +974,7 @@ impl Lower {
     }
 
     fn foreach(&mut self, array: &t::Expr, vars: &[Option<String>], body: &t::Stmt, loc: t::Loc) -> Result<Stmt> {
-        let line = loc.line;
+        let line = loc;
         // an array named here: loops made here; anything else (a member, an element, a
         // name declared elsewhere): by the compiler, which knows its type
         let local = match &array.kind {

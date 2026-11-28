@@ -189,6 +189,6 @@ impl Lower {
         let Some(items) = &k.items else {
             return self.unsupported(k.loc, "a constraint prototype");
         };
-        Ok(Constraint { name: k.name.name.clone(), static_: k.static_, items: self.constraint_items(items)?, line: k.loc.line })
+        Ok(Constraint { name: k.name.name.clone(), static_: k.static_, items: self.constraint_items(items)?, line: k.loc })
     }
 }
