@@ -147,9 +147,17 @@ impl<'a> Compiler<'a> {
                     return self.err(format!("interface '{iface}' has no modport '{mp}' (port '{pn}' of '{}')", m.name));
                 }
             }
-            // the connected instance must be one of the port's interface
+            // the connected instance must be one of the port's interface (of a generic port:
+            // of any interface, with the modport if the port names one)
             let check = |c: &Self, t: usize| -> R<()> {
                 match c.hier.scope_module.get(&t) {
+                    Some(tm) if iface.is_empty() && !tm.interface => {
+                        c.err(format!("interface port '{pn}' of '{}' is connected to an instance of module '{}', not of an interface", m.name, tm.name))
+                    }
+                    Some(tm) if iface.is_empty() => match modport {
+                        Some(mp) if !tm.modports.contains(mp) => c.err(format!("interface '{}' has no modport '{mp}' (port '{pn}' of '{}')", tm.name, m.name)),
+                        _ => Ok(()),
+                    },
                     Some(tm) if tm.interface && tm.name != *iface => {
                         c.err(format!("interface port '{pn}' of '{}' is connected to an instance of '{}', not '{iface}'", m.name, tm.name))
                     }
@@ -189,7 +197,8 @@ impl<'a> Compiler<'a> {
                     _ => None,
                 };
                 let Some((as_, an, (al, ar))) = actual else {
-                    return self.err(format!("interface port '{pn}' of '{}' must be connected to an array of '{iface}' instances", m.name));
+                    let of = if iface.is_empty() { "interface".to_string() } else { format!("'{iface}'") };
+                    return self.err(format!("interface port '{pn}' of '{}' must be connected to an array of {of} instances", m.name));
                 };
                 let n = (pl - pr).abs() + 1;
                 if (al - ar).abs() + 1 != n {
@@ -237,7 +246,8 @@ impl<'a> Compiler<'a> {
                 _ => None,
             };
             let Some(target) = target else {
-                return self.err(format!("interface port '{pn}' of '{}' must be connected to an instance of '{iface}'", m.name));
+                let of = if iface.is_empty() { "an interface".to_string() } else { format!("'{iface}'") };
+                return self.err(format!("interface port '{pn}' of '{}' must be connected to an instance of {of}", m.name));
             };
             check(self, target)?;
             self.scopes[sid].children.insert(pn.clone(), target);

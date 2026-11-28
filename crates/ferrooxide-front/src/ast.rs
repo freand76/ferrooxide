@@ -27,8 +27,8 @@ pub struct Module {
     pub keyword_names: Vec<(String, Line)>,
     /// an `interface ... endinterface`
     pub interface: bool,
-    /// interface ports (`bus_if.master b`, `bus_if b[4]`): (port name, interface name, the
-    /// range of an array port, the modport)
+    /// interface ports (`bus_if.master b`, `bus_if b[4]`): (port name, interface name (empty
+    /// for a generic `interface b`), the range of an array port, the modport)
     pub iface_ports: Vec<(String, String, Option<Range>, Option<String>)>,
     /// modport names of an interface
     pub modports: Vec<String>,

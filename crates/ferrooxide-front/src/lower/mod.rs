@@ -785,7 +785,10 @@ impl Lower {
             }
             let iface = match &p.header {
                 t::PortHeader::Interface { name: Some(n), modport } if p.dir.is_none() => Some((n.clone(), modport.clone())),
-                t::PortHeader::Interface { .. } => return self.unsupported(p.loc, "a generic interface port"),
+                // a generic interface port (`interface p`, IEEE 1800-2017 25.3.3): no
+                // interface name, it takes that of the connected instance
+                t::PortHeader::Interface { name: None, modport } if p.dir.is_none() => Some((String::new(), modport.clone())),
+                t::PortHeader::Interface { .. } => return self.err(p.loc, "an interface port cannot have a direction"),
                 t::PortHeader::None if p.dir.is_none() && cur_iface.is_some() => cur_iface.clone(),
                 _ => None,
             };
