@@ -23,7 +23,7 @@ impl<'a> Compiler<'a> {
     /// net or variable declaration each; a direction declaration with a data type declares
     /// the port completely; with both, the ranges are the same (a typed declaration, or one
     /// without a range, goes only with a direction declaration without a range).
-    pub(crate) fn check_redeclared<'d>(&mut self, decls: impl Iterator<Item = &'d Decl>, sid: usize) -> R<()> {
+    pub(crate) fn check_redeclared<'d>(&mut self, decls: impl Iterator<Item = &'d Decl>, subroutine: bool, sid: usize) -> R<()> {
         let mut seen: HashMap<&str, (Option<&Decl>, Option<&Decl>)> = HashMap::new();
         for d in decls {
             if d.kind() == NetKind::Genvar {
@@ -41,6 +41,10 @@ impl<'a> Compiler<'a> {
                 let (Some(p), Some(v)) = *e else { continue };
                 self.line = dl.line;
                 let lines = format!("lines {} and {}", p.line.min(v.line), p.line.max(v.line));
+                // (IEEE 1800-2017 23.2.2.3: an inout port of a module is a net)
+                if !subroutine && p.dir == Some(Dir::Inout) && v.kind() != NetKind::Wire && !v.real_net {
+                    return self.err(format!("inout port '{}' cannot be a variable", dl.name));
+                }
                 if p.explicit_kind {
                     return self.err(format!(
                         "port '{}' is declared twice ({lines}): a port declaration with a data type declares it completely",
@@ -92,7 +96,7 @@ impl<'a> Compiler<'a> {
         subs.sort_by(|a, b| a.name.cmp(&b.name));
         for f in subs {
             let written = if f.decls_written.is_empty() { &f.decls } else { &f.decls_written };
-            self.check_redeclared(written.iter(), sid)?;
+            self.check_redeclared(written.iter(), true, sid)?;
             for (n, l) in &f.scalar_vec_ports {
                 let Some((a, b)) = f.decls.iter().find(|d| d.dir.is_some() && d.names.iter().any(|x| &x.name == n)).and_then(|d| d.range()) else { continue };
                 let (a, b) = (self.const_int(&a, sid)?, self.const_int(&b, sid)?);

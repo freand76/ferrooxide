@@ -43,6 +43,10 @@ impl<'a> Compiler<'a> {
         match &e.kind {
             ExprKind::Concat(v) => {
                 for x in v {
+                    // (IEEE 1800-2017 11.3.1: no real operands in a concatenation)
+                    if matches!(self.type_of(x, sid)?, Type::Real) {
+                        return self.err("a real value in a concatenation");
+                    }
                     self.targets(x, sid, out)?;
                 }
                 Ok(())

@@ -1704,7 +1704,12 @@ impl<'a> Compiler<'a> {
                         return Ok(self.const_slot(&Const::from_i64(bw, w, false)));
                     }
                 }
-                let (bw, _) = self.type_of(&args[0], sid)?.ws();
+                let t = self.type_of(&args[0], sid)?;
+                // (IEEE 1800-2017 20.6.2: of a bit-stream type, 6.24.3)
+                if matches!(t, Type::Real | Type::Event) {
+                    return self.err("$bits of a real or event value (not a bit-stream type)");
+                }
+                let (bw, _) = t.ws();
                 Ok(self.const_slot(&Const::from_i64(bw as i64, w, false)))
             }
             "$fopen" => {

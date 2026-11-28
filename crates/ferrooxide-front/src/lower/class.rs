@@ -585,6 +585,13 @@ impl Lower {
                     if matches!(m.name.name.as_str(), "randomize" | "rand_mode" | "constraint_mode") {
                         return self.err(m.loc, format!("'{}' is a built-in method: a class cannot declare it", m.name.name));
                     }
+                    // (IEEE 1800-2017 8.15: `super.new` is the first statement of a constructor)
+                    if m.name.name == "new" {
+                        let is_super_new = |st: &t::Stmt| matches!(&st.kind, t::StmtKind::Expr(t::Expr { kind: t::ExprKind::Call { func, .. }, .. }) if matches!(&func.kind, t::ExprKind::Member(b, n) if n == "new" && matches!(b.kind, t::ExprKind::Super)));
+                        if let Some(st) = m.body.as_ref().and_then(|b| b.1.iter().skip(1).find(|st| is_super_new(st))) {
+                            return self.err(st.loc, "super.new must be the first statement of the constructor");
+                        }
+                    }
                     let mut f = self.subroutine_in(m, true)?;
                     f.automatic = true;
                     let mut locals: Vec<String> = vec![f.name.clone()];

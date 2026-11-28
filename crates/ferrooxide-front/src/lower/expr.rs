@@ -658,7 +658,12 @@ impl Lower {
         }
         if name == "$bits" {
             if let Some(t::Arg::Pos(Some(t::Expr { kind: t::ExprKind::Type(dt), .. }))) = args.first() {
-                return Ok(self.data_type_req(dt)?.bits());
+                let ty = self.data_type_req(dt)?;
+                // (IEEE 1800-2017 20.6.2: of a bit-stream type, 6.24.3)
+                if matches!(ty.kind, NetKind::Real | NetKind::Event) {
+                    return self.err(loc, "$bits of a real or event type (not a bit-stream type)");
+                }
+                return Ok(ty.bits());
             }
             // a member of a struct variable: its type's width, a constant (also where the
             // variable is not declared yet for the compiler: a port in a parameter value)

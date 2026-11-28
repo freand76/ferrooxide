@@ -107,7 +107,7 @@ impl<'a> Compiler<'a> {
 
     /// The declarations of `items`, merged by name, in the order of their first declaration.
     fn merged_decls(&mut self, items: &'a [Item], sid: usize) -> R<(Vec<String>, HashMap<String, Merged<'a>>)> {
-        self.check_redeclared(items.iter().filter_map(|it| if let Item::Decl(d) = it { Some(d) } else { None }), sid)?;
+        self.check_redeclared(items.iter().filter_map(|it| if let Item::Decl(d) = it { Some(d) } else { None }), false, sid)?;
         let mut order: Vec<String> = Vec::new();
         let mut merged: HashMap<String, Merged> = HashMap::new();
         for it in items {
@@ -569,9 +569,9 @@ impl<'a> Compiler<'a> {
                 self.code.jobs.push(Job::PortOut { lhs: conn.clone(), child_sig: s, scope: ps, line })
             }
             Dir::Inout if self.link_exprs(&Expr::from(ExprKind::Ident(name.clone())), sid, conn, ps, None) => {}
-            Dir::Inout => self.warn(format!(
-                "inout port '{name}' connected to an expression: connection ignored"
-            )),
+            // (IEEE 1800-2017 23.3.3: an inout port connects to a net expression)
+            Dir::Inout if !net_lvalue(conn) => return self.err(format!("inout port '{name}' must be connected to a net, a select of one or a concatenation of them")),
+            Dir::Inout => return self.err(format!("connecting inout port '{name}' to this expression is not supported")),
         }
         if let Some(init) = mg.init {
             self.decl_init(init, s, kind, mg.kind, is_real, depth, width, mg.strength, mg.delay, &name, sid)?;
@@ -754,5 +754,15 @@ impl<'a> Compiler<'a> {
             Some(Sym::Sig(s)) if self.nets.interconnect.contains(&s) => Some(s),
             _ => None,
         }
+    }
+}
+
+/// A net lvalue (IEEE 1800-2017 23.3.3): a name, a select of one or a concatenation of them.
+fn net_lvalue(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) | ExprKind::Hier(_) => true,
+        ExprKind::Index(a, _) | ExprKind::Range(a, _, _) | ExprKind::IndexedRange(a, _, _, _) => net_lvalue(a),
+        ExprKind::Concat(v) => !v.is_empty() && v.iter().all(net_lvalue),
+        _ => false,
     }
 }
