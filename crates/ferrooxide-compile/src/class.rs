@@ -307,6 +307,12 @@ impl<'a> Compiler<'a> {
                 .map(|(k, s)| (k.clone(), s.clone()))
                 .collect();
             for (k, s) in inherited {
+                // (an inherited enum constant keeps its enum)
+                if !self.scopes[scope].syms.contains_key(&k) {
+                    if let Some(&id) = self.enums.consts.get(&(bs, k.clone())) {
+                        self.enums.consts.insert((scope, k.clone()), id);
+                    }
+                }
                 self.scopes[scope].syms.entry(k).or_insert(s);
             }
         }

@@ -20,7 +20,7 @@ pub(crate) struct Enums {
     /// constant list -> the scopes that declare its constants (one per module instance)
     owners: HashMap<usize, Vec<usize>>,
     /// (declaring scope, constant) -> the id of its enum
-    consts: HashMap<(usize, String), u32>,
+    pub(crate) consts: HashMap<(usize, String), u32>,
     /// signals (of arrays: their elements) of an enum type -> id
     pub(crate) sigs: HashMap<u32, u32>,
     /// queues and dynamic arrays of an enum type -> the id of their elements' enum
