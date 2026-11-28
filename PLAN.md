@@ -96,14 +96,93 @@ first, time-0 processes by scope, `always_comb` after all others at time 0 (9.2.
   requirements in a scratch venv).
 
 ## Next (in priority order)
-UVM must run eventually (item 5): new work keeps it possible. In particular, class
+UVM must run eventually (item 6): new work keeps it possible. In particular, class
 features must work per specialization and for classes declared later, and the event/wait
 machinery must not assume static targets only (A3).
 
-1. **sv-tests features, by tests won**, in this order (85 left; about 11 are not to be
+1. **R4, the rest: the compiler resolves names and types; the lowering only desugars.**
+   NEXT (decided 2026-11-28). Today the lowering (`lower/`, ~8300 lines) keeps type,
+   variable, class and package tables and hands the compiler pre-resolved types
+   (`lower::SvType`), `this.`-rewritten names, enum constants as `localparam`s, `C$x`
+   statics, `C#1` specializations and `$unit` items copied into each module. The compiler
+   already has scopes, lookup, `Type`/`Packed`; it takes over all of that. End state: the
+   AST keeps the statement and expression IR, declarations carry the syntax tree's
+   `t::DataType`, typedefs are items in compiler scopes, and the lowering does only
+   name-free expansions (case-inside, unique/priority, `iff`, `++`, foreach, named
+   sequences/properties, `let`, randsequence, `matches`), with no name tables. Errors keep
+   their line (better: a `Loc` with file and column, so lines in includes are right).
+
+   Rules for every slice: one commit (or a few) per slice; all of `tests/suite.sh`,
+   `cargo test --release` and `tests/svtests.py` unchanged or better at its end; no
+   behaviour change except bugs it fixes (each with a test); the UVM compile time
+   (`--elab-only` of chapter-16/16.12--property-uvm.sv) not more than 10% slower. Where a
+   slice moves a computation, run old and new side by side first behind an env var
+   (`FX_R4CHECK=1`: compare, report differences, run suite and sv-tests with it), then
+   switch, then delete the old code.
+
+   Slices, in order:
+   1. **Locations.** AST `Expr`/`Stmt` get a `Loc` (file index, line, column) instead of a
+      bare line; the lowering copies the syntax tree's `Loc` (add the column in the
+      lexer/parser if missing); `Compiler::line`/`file` set from it. Fixes the error lines
+      past the end of a file in UVM tests (includes map to their file). Needed first: the
+      later slices move errors from the lowering into the compiler.
+   2. **A type resolver in the compiler.** `types.rs`: `resolve_dt(&t::DataType, sid) ->
+      (Type, Option<Packed>)` from the syntax tree type: built-ins, packed dims, signing,
+      structs/unions (packed, unpacked, tagged, member defaults), enums, named types
+      looked up in compiler scopes, `type(e)`, type parameters, class and virtual
+      interface types, queue/dynamic/associative dims. Typedefs become `Item::Typedef {
+      name, ty: t::DataType }` in the AST (module, package, `$unit`, class, block,
+      subroutine), declared in the compiler scope like parameters (forward typedefs: a
+      placeholder). `Packed` gets a 2-state flag. Behind `FX_R4CHECK` compare with the
+      layout from the lowering's `SvType` for every declaration.
+   3. **Declarations use it.** `Decl::ty` becomes the syntax tree type (plus the
+      declarator dims); the compiler derives kind, sign, ranges, layout, heap kinds from
+      `resolve_dt` (`decls.rs`, `stmt.rs` block decls, subroutine ports and returns,
+      class properties). The lowering's `decl_head`/`declarators` keep only names and
+      initializers. Fixes known bugs: 2-state members of unpacked structs (start at 0,
+      no x), selects of vector properties whose range is not `[w-1:0]`.
+   4. **Types in expressions.** Casts `T'(e)` (today `$__cast`), `$bits(T)`, `$typename`,
+      typed patterns `T'{...}`, `ExprKind::Type`, parameter types (`parameter T x`), type
+      parameter values, `new` of a typed class: all carry `t::DataType` and resolve in the
+      compiler. Then delete `SvType`, the lowering's `types` table, `data_type*`,
+      `typedef`, `qualify_type`/`qualify_expr`, `respec_type`, `decl_type`,
+      `later_typedefs`, `early`. Wins sv-test typedef_test_25 (undefined names in an
+      unused typedef are now reported).
+   5. **Enums in the compiler.** The constants are declared by the compiler when the
+      typedef or declaration with the enum type is elaborated (in that scope; `p::C`,
+      inherited ones in classes); the lowering's generated `localparam`s and `pending`
+      go. Enum methods (`first`, `next(n)`, `name`, `num`) compile from the `Type` of any
+      expression: fixes `p.status().name()` (known bug).
+   6. **Array queries, member types, struct details.** `$size`/`$left`/... /`$dimensions`,
+      `$bits(var)`, `member_chain_type`, `struct_defaults` from the compiler's types; the
+      lowering's `vars`/`declare_var`/`var_dims`/`array_query`/`expr_type` go.
+   7. **Class name resolution.** Inside a class, an unqualified name is looked up in the
+      class scope chain (own members, then base classes, then the enclosing scopes), in
+      the compiler (`lookup` gets a class step); `this_expr`/`this_stmt`, `ClassNames`,
+      `open_base`, `in_class`, the `C$x` static variables (static properties become
+      variables of the class scope), `class_statics`, `extern_bodies` matching and the
+      `with_obj` binding of `randomize() with` (and the `bound` flag) go. A class in a
+      class (a class scope inside a class scope) comes with it: sv-test
+      class_member_test_10.
+   8. **Specializations.** `C #(args)` is resolved where it is used, in the compiler
+      (one class instance per distinct parameter values); `despec`, `new_spec`,
+      `Item::ClassSpec`, `ClassDecl::specs` go.
+   9. **Packages and `$unit`.** Packages are compiler scopes read from `Item::Package`
+      (no `pkg_modules`), `$unit` is one scope that modules import (no copies of
+      `unit_items` into each module); imports, exports and the 26.3 wildcard rule
+      (`WildCheck`) are checked in the compiler; the lowering's `Package` table and
+      `mod_pkgs`, `unit_*`, `type_scope`, `pkg_ctx` go. `let` and named
+      sequences/properties declared in packages then work (lookup in the package scope).
+   10. **The rest and cleanup.** Whatever name table is left in `Lower` (genvar checks,
+      modports, nettypes, interface port types: a typedef of an interface port's type,
+      sv-test tnoc) moves to the compiler. `lower/mod.rs` doc and CLAUDE.md (Layout,
+      Rules: "the lowering resolves no names") are rewritten for the new split; dead AST
+      fields deleted. PLAN's Architecture picture updated.
+
+2. **sv-tests features, by tests won**, in this order (85 left; about 11 are not to be
    won: they need what the standard forbids or their files are missing):
    - invalid code accepted (3): an automatic variable in an NBA's event control in a
-     subroutine never called (item 3), a non-constant attribute value (attributes are
+     subroutine never called (item 4), a non-constant attribute value (attributes are
      dropped by the lexer), undefined names in a typedef never used (typedefs do not
      reach the compiler).
    - data types: queues, dynamic and associative arrays as members of unpacked structs
@@ -117,24 +196,26 @@ machinery must not assume static targets only (A3).
    - assertions (~16): sequence local variables (the automata cannot hold them: an
      engine with attempt threads), `expect`, clocks inside sequences, `until`, assertions
      in procedures, `bind`, `@seq`.
-   - real subroutine calls (item 4): `ref` of waiting tasks, `process::suspend`.
+   - real subroutine calls (item 5): `ref` of waiting tasks, `process::suspend`.
    - checkers, covergroups, `extern forkjoin`.
    - DPI (7) needs a C interface: last.
    `let` works in modules only (not in packages or blocks).
-2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
+3. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
    patterns also lack); enum methods of a call's result (`p.status().name()`: the
    lowering rejects the call); selects of vector class properties whose range is not
    `[w-1:0]` (`logic [7:4] n; obj.n[5]` reads x; assigning to such a part is rejected).
-3. **sv-tests invalid code** (8 accepted that must fail): see the ACCEPT lines of the
-   baseline; errors in class methods that are never called.
-4. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
+   All three go with R4 (item 1, slices 3 and 5).
+4. **sv-tests invalid code** (3 accepted that must fail, see item 2): errors in
+   subroutines and class methods that are never called (they are never compiled: check
+   them without emitting code, or compile and drop).
+5. **Real subroutine calls and dynamic waiters** (A3): needed for `ref` as a real
    reference, `process::suspend`/`resume`, recursion from `join_any`/`join_none` branches
    with shared variables (see Unsupported), waits on run-time
    targets other than event properties (`vif.clk`), VPI callbacks and MCP conditional
    breakpoints. The gate for UVM. (Event properties wait through per-object waiter lists,
    `EvOp::Arm`.)
-5. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`). The package compiles in about 2 s
+6. **UVM** (157 sv-tests, run with `-DUVM_NO_DPI`). The package compiles in about 2 s
    (calls deeper than 4 go through subroutines, static initializers share a process).
    The whole library compiles; the first UVM tests pass (a run compiles for about 12 s:
    large processes, see A3). A fork that a recursive call reaches again (`start` forks
@@ -153,8 +234,6 @@ machinery must not assume static targets only (A3).
    in the test file are reported far past its end (line numbers after the library's
    includes). Fix the blockers one at a time, each with a test. Reproduce with the command `tests/svtests.py` builds for a `uvm` test (e.g.
    chapter-16/16.10--property-local-var-uvm.sv).
-6. **R4, the rest**: the compiler reads the syntax tree's types directly and most of the
-   lowering goes. Large; only when feature work slows down.
 7. **Deviations copied from Icarus** (`DEVIATIONS.md`): switch to the standard where a test
    needs it.
 8. **Debug front ends**: report the Surfer bugs upstream; MCP over HTTP, MCP history queries,
