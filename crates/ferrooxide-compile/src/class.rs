@@ -1472,6 +1472,20 @@ impl<'a> Compiler<'a> {
                 for n in &d.names {
                     if let Some(init) = &n.init {
                         let lhs: Expr = ExprKind::Member(Box::new(ExprKind::Ident("this".into()).into()), n.name.clone()).into();
+                        // a fixed-size array property with an assignment pattern: element by
+                        // element
+                        if let ExprKind::Pattern(None, items) = &init.kind {
+                            let p = self.prop(c, &n.name)?;
+                            if !p.dims.is_empty() {
+                                let dims: Vec<(i64, u32, bool)> = p.dims.iter().zip(&p.desc).map(|(&(lo, k), &d)| (lo, k, d)).collect();
+                                let mut pairs = Vec::new();
+                                self.pattern_pairs(&lhs, &dims, items, init_scope, &mut pairs)?;
+                                for (l, r) in &pairs {
+                                    self.prop_assign(l, r, init_scope)?;
+                                }
+                                continue;
+                            }
+                        }
                         self.prop_assign(&lhs, init, init_scope)?;
                     }
                 }

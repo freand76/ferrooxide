@@ -365,7 +365,7 @@ impl<'a> Compiler<'a> {
     /// `lhs = '{...}` for an unpacked array (or subarray) indexed by `lhs` spanning `dims`: one
     /// assignment per element into `out` (IEEE 1800-2017 10.9.1: positional items left to
     /// right, index keys, `default:` for the rest; nested patterns for the inner dimensions).
-    fn pattern_pairs(&mut self, lhs: &Expr, dims: &[(i64, u32, bool)], items: &[PatItem], sid: usize, out: &mut Vec<(Expr, Expr)>) -> R<()> {
+    pub(crate) fn pattern_pairs(&mut self, lhs: &Expr, dims: &[(i64, u32, bool)], items: &[PatItem], sid: usize, out: &mut Vec<(Expr, Expr)>) -> R<()> {
         let items = &self.expand_pattern(items, sid)?[..];
         let idx: Vec<i64> = dim_indexes(dims[0]).collect();
         let mut vals: Vec<Option<&Expr>> = vec![None; idx.len()];
