@@ -12,8 +12,8 @@
 - One command, no intermediate files: `ferrooxide tb.v dut.v` parses, elaborates, compiles
   (milliseconds) and simulates.
 
-## Status (2026-11-27)
-- sv-tests: 5013 of 5112 (98.1%); all of chapters 5, 6, 11, 18 and 20 outside UVM. Baseline in
+## Status (2026-11-28)
+- sv-tests: 5027 of 5112 (98.3%); all of chapters 5, 6, 11 and 20 outside UVM. Baseline in
   `target/svtests-baseline.res`.
 - Speed: 13x (cpuish) and 19x (mixed) fewer cycles than Icarus; the real-design benchmark
   10-13x.
@@ -100,10 +100,27 @@ UVM must run eventually (item 5): new work keeps it possible. In particular, cla
 features must work per specialization and for classes declared later, and the event/wait
 machinery must not assume static targets only (A3).
 
-1. **sv-tests features, by tests won**, chapter by chapter outside UVM (16: 3: sequence
-   local variables, which the automata cannot hold, and `expect`; 14: clocking signals,
-   with input and output skews; 9: `@seq`, `process::suspend`; 7: 2). DPI (9) needs a C
-   interface: last. `let` works in modules only (not in packages or blocks).
+1. **sv-tests features, by tests won**, in this order (85 left; about 11 are not to be
+   won: they need what the standard forbids or their files are missing):
+   - invalid code accepted (3): an automatic variable in an NBA's event control in a
+     subroutine never called (item 3), a non-constant attribute value (attributes are
+     dropped by the lexer), undefined names in a typedef never used (typedefs do not
+     reach the compiler).
+   - data types: queues, dynamic and associative arrays as members of unpacked structs
+     (4; they need a deep copy on every struct copy), a class in a class, a name of a
+     block variable used before its process (`sub.i`).
+   - interfaces: a virtual interface with parameter values, a typedef of an interface
+     port's type, clocking signals with input and output skews.
+   - randomization (~15): `rand_mode`, `constraint_mode`, `randomize(null)`, `disable
+     soft`, whole-array constraints, constraints on members of rand objects, rand struct
+     members.
+   - assertions (~16): sequence local variables (the automata cannot hold them: an
+     engine with attempt threads), `expect`, clocks inside sequences, `until`, assertions
+     in procedures, `bind`, `@seq`.
+   - real subroutine calls (item 4): `ref` of waiting tasks, `process::suspend`.
+   - checkers, covergroups, `extern forkjoin`.
+   - DPI (7) needs a C interface: last.
+   `let` works in modules only (not in packages or blocks).
 2. **Known bugs**: 2-state members (`int`) of unpacked structs start as x and keep x bits
    (the struct is one 4-state signal; `Packed` has no 2-state flag, which type keys of
    patterns also lack); enum methods of a call's result (`p.status().name()`: the
@@ -258,7 +275,8 @@ SystemVerilog data and testbench:
   (a run-time error).
 - unpacked array members of unpacked structs are laid out as packed arrays of their
   elements (`$size` & co. and `%p` see a packed array); real, string and unpacked-struct
-  elements; member defaults; type keys in patterns of unpacked arrays.
+  elements; type keys in patterns of unpacked arrays; queues, dynamic and associative
+  arrays as members.
 - fixed-size arrays of structs as class properties; writes to a member of a
   struct property at a run-time index (`obj.s.a[i] = v`) or to a tagged union property's
   member; fixed-size arrays of queues, arrays of queues as
@@ -270,7 +288,8 @@ SystemVerilog data and testbench:
   event property, queues and dynamic arrays of events; assignments through a call's result
   (`C::get().v = 1`), an untyped `mailbox`, members of
   `P::f().p`, enum
-  methods on an enum property from outside the class, whole array properties, class handle
+  methods on an enum property from outside the class, whole array properties (but for an
+  initializer pattern), class handle
   ports, NBAs to properties, `rand_mode`, `constraint_mode`,
   `disable soft`, constraints on the elements of rand dynamic arrays and
   queues, real/string rand properties, constraints on members of rand object properties (global constraints,
@@ -290,6 +309,13 @@ SystemVerilog data and testbench:
 - assignments to properties of a package's class handle (`P::c.x = 1`); `import` in
   subroutines and in blocks of a package that exports names.
 - `.triggered` only on events declared in a module; `iff` only on a whole event control.
+- an event control on class properties only with all its events on them (not with
+  signals, not in an intra-assignment control); it wakes at each property write.
+- join_none / join_any branches forked in a loop keep the automatic variables of that
+  pass from the fork on: a write of the parent to them after a branch has started is not
+  seen by it.
+- a class declared in a class; attribute values are not checked (the lexer drops
+  attributes).
 - nets of a nettype with a resolution function, nettypes
   from packages; interconnect nets connect only 4-state ports of their own width.
 - `type(e)` of expressions other than variables and operators on them.
