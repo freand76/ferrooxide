@@ -887,7 +887,9 @@ pub enum ExprKind {
     /// `this` (in a method), or `std::randomize(vars)` of variables (`std`); `vars`: the
     /// properties (variables) to randomize, all `rand` ones if empty; a 32-bit value, 1 on
     /// success
-    Randomize { obj: Option<Box<Expr>>, vars: Vec<Expr>, with: Option<Vec<CItem>>, std: bool },
+    /// `bound`: the names of `with` that are the object's members are member expressions (else
+    /// the lowering did not know the object's class: the compiler finds them)
+    Randomize { obj: Option<Box<Expr>>, vars: Vec<Expr>, with: Option<Vec<CItem>>, std: bool, bound: bool },
     /// `$` in an index of a queue: its last index
     Last,
     /// `++x` / `x--` in an expression: assigns `x` and gives the new (prefix) or old value

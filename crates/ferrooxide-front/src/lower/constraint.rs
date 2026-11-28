@@ -44,6 +44,7 @@ impl Lower {
             Some(o) => self.class_of_expr(o),
             None => None,
         };
+        let known = names.is_some();
         let saved = std::mem::replace(&mut self.with_obj, names.map(|n| (obj.as_deref().unwrap().clone(), n)));
         let r = (|| -> Result<(Vec<Expr>, Option<Vec<CItem>>)> {
             let mut vars = Vec::new();
@@ -59,6 +60,9 @@ impl Lower {
                 Some(t::With::Constraint(None, items)) => Some(self.constraint_items(items)?),
                 // `with (a, b) {...}`: only the names listed are the object's, the others the
                 // caller's (IEEE 1800-2017 18.7.1)
+                Some(t::With::Constraint(Some(_), _)) if obj.is_some() && !known => {
+                    return self.unsupported(loc, "an identifier list of randomize() with an object whose class is a type parameter");
+                }
                 Some(t::With::Constraint(Some(list), items)) => {
                     if let Some((o, names)) = self.with_obj.clone() {
                         if let Some(n) = list.iter().find(|n| !names.props.contains(*n) && !names.methods.contains(*n) && !names.statics.contains_key(*n)) {
@@ -81,7 +85,10 @@ impl Lower {
         if vars.iter().any(|v| matches!(&v.kind, ExprKind::Null)) {
             return self.unsupported(loc, "randomize(null)");
         }
-        Ok(ExprKind::Randomize { obj, vars, with, std }.into())
+        // (names of an object whose class the lowering does not know, a handle of a type
+        // parameter's type: the compiler finds its members)
+        let bound = known || obj.is_none();
+        Ok(ExprKind::Randomize { obj, vars, with, std, bound }.into())
     }
 
     /// The names of the class of a class handle expression (a variable, `this`).

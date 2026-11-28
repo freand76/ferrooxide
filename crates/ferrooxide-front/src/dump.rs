@@ -174,7 +174,7 @@ pub fn expr(e: &Expr) -> String {
         ExprKind::NewTyped(c, args) => format!("{c}::new({})", list(args)),
         ExprKind::NewCopy(x) => format!("new {}", expr(x)),
         ExprKind::MethodCall(o, m, args) => format!("{}.{m}({})", expr(o), list(args)),
-        ExprKind::Randomize { obj, vars, with, std } => {
+        ExprKind::Randomize { obj, vars, with, std, .. } => {
             let f = match (obj, std) {
                 (Some(o), _) => format!("{}.randomize", expr(o)),
                 (None, true) => "std::randomize".to_string(),

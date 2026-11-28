@@ -179,7 +179,7 @@ fn map_item(it: &CItem, f: &dyn Fn(&Expr) -> Expr) -> CItem {
 impl<'a> Compiler<'a> {
     /// `randomize()` (`ExprKind::Randomize`): the slot of its 32-bit result.
     pub(crate) fn randomize(&mut self, e: &Expr, sid: usize) -> R<u32> {
-        let ExprKind::Randomize { obj, vars, with, std } = &e.kind else { unreachable!() };
+        let ExprKind::Randomize { obj, vars, with, std, bound } = &e.kind else { unreachable!() };
         let res = self.tmp(32);
         if *std {
             let items: Vec<Item> = with.iter().flatten().map(|it| Item { it: it.clone(), sid }).collect();
@@ -205,6 +205,29 @@ impl<'a> Compiler<'a> {
                 let Some(c) = self.class_of_scope(sid) else { return self.err("randomize() outside a class needs variables to randomize") };
                 (self.handle_value(&Expr::from(ExprKind::Ident("this".into())), sid)?, c)
             }
+        };
+        // (IEEE 1800-2017 18.7: names in the constraints are the object's members first)
+        let bound_with;
+        let with = match (with, obj) {
+            (Some(items), Some(o)) if !*bound => {
+                let names: Vec<String> = self.classes.list[c as usize].props.iter().map(|p| p.name.clone()).collect();
+                fn bind(e: &mut Expr, o: &Expr, names: &[String]) {
+                    if let ExprKind::Ident(n) = &e.kind {
+                        if names.contains(n) {
+                            *e = Expr::new(ExprKind::Member(Box::new(o.clone()), n.clone()), e.line);
+                            return;
+                        }
+                    }
+                    e.for_each_child_mut(&mut |x| bind(x, o, &names));
+                }
+                let mut items = items.clone();
+                for it in &mut items {
+                    it.for_each_expr_mut(&mut |x| bind(x, o, &names));
+                }
+                bound_with = Some(items);
+                &bound_with
+            }
+            _ => with,
         };
         let plain = vars.is_empty() && with.is_none();
         // the body of class c's randomize function: its own variables and constraints
@@ -258,7 +281,7 @@ impl<'a> Compiler<'a> {
             return f;
         }
         let line = self.line;
-        let call = Expr::from(ExprKind::Randomize { obj: None, vars: vec![], with: None, std: false });
+        let call = Expr::from(ExprKind::Randomize { obj: None, vars: vec![], with: None, std: false, bound: true });
         let f: &'a SubroutineDecl = Box::leak(Box::new(SubroutineDecl {
             name: RAND_FN.into(),
             is_task: false,
@@ -500,7 +523,7 @@ impl<'a> Compiler<'a> {
                     let nn = self.tmp(1);
                     self.emit(Instr::Red { op: rt::RedOp::Bool, d: nn, s: sh, w: 64 });
                     let null = self.emit(Instr::Jz { c: nn, w: 1, to: 0 });
-                    let call = Expr::from(ExprKind::Randomize { obj: Some(Box::new(m)), vars: vec![], with: None, std: false });
+                    let call = Expr::from(ExprKind::Randomize { obj: Some(Box::new(m)), vars: vec![], with: None, std: false, bound: true });
                     let r2 = self.randomize(&call, *psid)?;
                     self.emit(Instr::Copy { d: res, s: r2, w: 32 });
                     self.patch_all(vec![skip, null]);
@@ -586,7 +609,7 @@ impl<'a> Compiler<'a> {
                 let zero = self.const_slot(&Const::zero(32));
                 let fslot = self.sig(fs).slot;
                 self.emit(Instr::Store { t: Target::Whole { sig: fs }, s: zero, mode: rt::StoreMode::Blocking });
-                let call = Expr::from(ExprKind::Randomize { obj: Some(Box::new(el.clone())), vars: vec![], with: None, std: false });
+                let call = Expr::from(ExprKind::Randomize { obj: Some(Box::new(el.clone())), vars: vec![], with: None, std: false, bound: true });
                 let bad = bin(BinOp::LAnd, bin(BinOp::Ne, el.clone(), ExprKind::Null.into()), ExprKind::Unary(UnOp::LNot, Box::new(call)).into());
                 let set = Stmt::Assign { lhs: ExprKind::Ident(fname).into(), rhs: num(1), nonblocking: false, timing: None, line };
                 let st = Stmt::If { cond: bad, then_s: Box::new(set), else_s: None, line };
@@ -602,7 +625,7 @@ impl<'a> Compiler<'a> {
                 continue;
             } else {
                 // (from the object's random generator)
-                Stmt::Discard { e: ExprKind::Randomize { obj: None, vars: vec![el], with: None, std: true }.into(), line }
+                Stmt::Discard { e: ExprKind::Randomize { obj: None, vars: vec![el], with: None, std: true, bound: true }.into(), line }
             };
             self.stmt(&Stmt::Foreach { array: a, vars: vec![Some(iv)], body: Box::new(body), line }, dy.sid)?;
         }
@@ -922,12 +945,14 @@ impl<'a> Compiler<'a> {
             let picked = self.tmp(1);
             let z1 = self.const_slot(&Const::zero(1));
             self.emit(Instr::Copy { d: picked, s: z1, w: 1 });
-            // a set (inside, dist) whose conditions hold
+            // the range the bounds leave (`v < e`, `v >= e`, `v == e`, ...)
+            let bounds = if v.w <= 64 { Some(self.rand_bounds(v, &rules, soft_on)?) } else { None };
+            // a set (inside, dist) whose conditions hold (an inside range within the bounds)
             for r in rules.iter().copied().filter(|r| matches!(r.kind, RuleKind::Inside(_) | RuleKind::Dist(_))) {
                 let mut skips = vec![self.jump_if(picked)];
                 skips.extend(self.rule_guard(r, soft_on)?);
                 match r.kind {
-                    RuleKind::Inside(set) => self.pick_inside(set, r.sid, v, val)?,
+                    RuleKind::Inside(set) => self.pick_inside(set, r.sid, v, val, bounds)?,
                     RuleKind::Dist(d) => self.pick_dist(d, r.sid, v, val)?,
                     _ => unreachable!(),
                 }
@@ -937,52 +962,7 @@ impl<'a> Compiler<'a> {
             }
             // otherwise a value in the range the bounds leave
             let skip = self.jump_if(picked);
-            if v.w <= 64 {
-                let (lo, hi) = (self.tmp(64), self.tmp(64));
-                let (min, max) = if v.signed {
-                    (-(1i128 << (v.w - 1)), (1i128 << (v.w - 1)) - 1)
-                } else {
-                    (0, (1i128 << v.w) - 1)
-                };
-                let c64 = |me: &mut Self, x: i128| me.const_slot(&Const::from_i64(x as i64, 64, v.signed));
-                let (cmin, cmax) = (c64(self, min), c64(self, max));
-                self.emit(Instr::Copy { d: lo, s: cmin, w: 64 });
-                self.emit(Instr::Copy { d: hi, s: cmax, w: 64 });
-                let one64 = c64(self, 1);
-                for r in rules.iter().copied() {
-                    let (e, is_lo, is_hi, strict) = match r.kind {
-                        RuleKind::Lo(e, s) => (e, true, false, s),
-                        RuleKind::Hi(e, s) => (e, false, true, s),
-                        RuleKind::Eq(e) => (e, true, true, false),
-                        _ => continue,
-                    };
-                    let skips = self.rule_guard(r, soft_on)?;
-                    let b = self.bound64(e, r.sid, v)?;
-                    let b2 = self.tmp(64);
-                    let op = if is_lo { rt::BinOp::Add } else { rt::BinOp::Sub };
-                    if strict {
-                        self.emit(Instr::Bin { op, d: b2, a: b, b: one64, w: 64 });
-                    } else {
-                        self.emit(Instr::Copy { d: b2, s: b, w: 64 });
-                    }
-                    let lt = if v.signed { rt::CmpOp::LtS } else { rt::CmpOp::Lt };
-                    if is_lo {
-                        // lo = max(lo, b)
-                        let c = self.tmp(1);
-                        self.emit(Instr::Cmp { op: lt, d: c, a: lo, b: b2, w: 64 });
-                        let j = self.emit(Instr::Jz { c, w: 1, to: 0 });
-                        self.emit(Instr::Copy { d: lo, s: b2, w: 64 });
-                        self.patch_all(vec![j]);
-                    }
-                    if is_hi {
-                        let c = self.tmp(1);
-                        self.emit(Instr::Cmp { op: lt, d: c, a: b2, b: hi, w: 64 });
-                        let j = self.emit(Instr::Jz { c, w: 1, to: 0 });
-                        self.emit(Instr::Copy { d: hi, s: b2, w: 64 });
-                        self.patch_all(vec![j]);
-                    }
-                    self.patch_all(skips);
-                }
+            if let Some((lo, hi)) = bounds {
                 let obj = self.code.rand_obj.unwrap_or(NONE);
                 let f = match v.cyc {
                     Some(key) => SysFn::RandcPick { lo, hi, w: v.w, signed: v.signed, obj, key },
@@ -1069,9 +1049,71 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// The range (lo, hi: 64-bit slots) the bounds among `rules` leave for `v` (at most 64
+    /// bits): its type's range narrowed by `v > e`, `v <= e`, `v == e`, ... whose conditions
+    /// hold.
+    fn rand_bounds(&mut self, v: &RVar, rules: &[&Rule], soft_on: u32) -> R<(u32, u32)> {
+        let (lo, hi) = (self.tmp(64), self.tmp(64));
+        let (min, max) = if v.signed {
+            (-(1i128 << (v.w - 1)), (1i128 << (v.w - 1)) - 1)
+        } else {
+            (0, (1i128 << v.w) - 1)
+        };
+        let c64 = |me: &mut Self, x: i128| me.const_slot(&Const::from_i64(x as i64, 64, v.signed));
+        let (cmin, cmax) = (c64(self, min), c64(self, max));
+        self.emit(Instr::Copy { d: lo, s: cmin, w: 64 });
+        self.emit(Instr::Copy { d: hi, s: cmax, w: 64 });
+        let one64 = c64(self, 1);
+        for r in rules.iter().copied() {
+            let (e, is_lo, is_hi, strict) = match r.kind {
+                RuleKind::Lo(e, s) => (e, true, false, s),
+                RuleKind::Hi(e, s) => (e, false, true, s),
+                RuleKind::Eq(e) => (e, true, true, false),
+                _ => continue,
+            };
+            let skips = self.rule_guard(r, soft_on)?;
+            let b = self.bound64(e, r.sid, v)?;
+            let b2 = self.tmp(64);
+            let op = if is_lo { rt::BinOp::Add } else { rt::BinOp::Sub };
+            if strict {
+                self.emit(Instr::Bin { op, d: b2, a: b, b: one64, w: 64 });
+            } else {
+                self.emit(Instr::Copy { d: b2, s: b, w: 64 });
+            }
+            if is_lo {
+                self.max64(lo, b2, v.signed);
+            }
+            if is_hi {
+                self.min64(hi, b2, v.signed);
+            }
+            self.patch_all(skips);
+        }
+        Ok((lo, hi))
+    }
+
+    /// `x = max(x, b)` (64 bits).
+    fn max64(&mut self, x: u32, b: u32, signed: bool) {
+        let lt = if signed { rt::CmpOp::LtS } else { rt::CmpOp::Lt };
+        let c = self.tmp(1);
+        self.emit(Instr::Cmp { op: lt, d: c, a: x, b, w: 64 });
+        let j = self.emit(Instr::Jz { c, w: 1, to: 0 });
+        self.emit(Instr::Copy { d: x, s: b, w: 64 });
+        self.patch_all(vec![j]);
+    }
+
+    /// `x = min(x, b)` (64 bits).
+    fn min64(&mut self, x: u32, b: u32, signed: bool) {
+        let lt = if signed { rt::CmpOp::LtS } else { rt::CmpOp::Lt };
+        let c = self.tmp(1);
+        self.emit(Instr::Cmp { op: lt, d: c, a: b, b: x, w: 64 });
+        let j = self.emit(Instr::Jz { c, w: 1, to: 0 });
+        self.emit(Instr::Copy { d: x, s: b, w: 64 });
+        self.patch_all(vec![j]);
+    }
+
     /// A value of `set` (`inside`) into `val`: one of its items at random, a value of a range
     /// at random.
-    fn pick_inside(&mut self, set: &[(Expr, Option<Expr>)], sid: usize, v: &RVar, val: u32) -> R<()> {
+    fn pick_inside(&mut self, set: &[(Expr, Option<Expr>)], sid: usize, v: &RVar, val: u32, bounds: Option<(u32, u32)>) -> R<()> {
         let n = set.len() as i64;
         let (lo, hi) = (self.const_slot(&Const::zero(64)), self.const_slot(&Const::from_i64(n - 1, 64, false)));
         let k = self.tmp(64);
@@ -1081,14 +1123,14 @@ impl<'a> Compiler<'a> {
             let is = self.tmp(1);
             self.emit(Instr::Cmp { op: rt::CmpOp::Eq, d: is, a: k, b: kj, w: 64 });
             let skip = self.emit(Instr::Jz { c: is, w: 1, to: 0 });
-            self.range_value(a, b.as_ref(), sid, v, val)?;
+            self.range_value(a, b.as_ref(), sid, v, val, bounds)?;
             self.patch_all(vec![skip]);
         }
         Ok(())
     }
 
-    /// A value of `[a:b]` (or `a`) into `val`.
-    fn range_value(&mut self, a: &Expr, b: Option<&Expr>, sid: usize, v: &RVar, val: u32) -> R<()> {
+    /// A value of `[a:b]` (or `a`) into `val`; a range within `bounds` (lo, hi) if given.
+    fn range_value(&mut self, a: &Expr, b: Option<&Expr>, sid: usize, v: &RVar, val: u32, bounds: Option<(u32, u32)>) -> R<()> {
         let w = v.w.max(64);
         match b {
             None => {
@@ -1108,6 +1150,11 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Copy { d: lo, s: y, w: 64 });
                 self.emit(Instr::Copy { d: hi, s: x, w: 64 });
                 self.patch_all(vec![j]);
+                // (an empty intersection gives a value the check rejects: another attempt)
+                if let Some((blo, bhi)) = bounds {
+                    self.max64(lo, blo, v.signed);
+                    self.min64(hi, bhi, v.signed);
+                }
                 let obj = self.code.rand_obj.unwrap_or(NONE);
                 let f = match v.cyc {
                     Some(key) => SysFn::RandcPick { lo, hi, w: v.w, signed: v.signed, obj, key },
@@ -1155,7 +1202,7 @@ impl<'a> Compiler<'a> {
             let c = self.tmp(1);
             self.emit(Instr::Cmp { op: rt::CmpOp::Lt, d: c, a: r, b: e, w: 64 });
             let skip = self.emit(Instr::Jz { c, w: 1, to: 0 });
-            self.range_value(&d.lo, d.hi.as_ref(), sid, v, val)?;
+            self.range_value(&d.lo, d.hi.as_ref(), sid, v, val, None)?;
             out.push(self.emit(Instr::Jmp { to: 0 }));
             self.patch_all(vec![skip]);
         }
