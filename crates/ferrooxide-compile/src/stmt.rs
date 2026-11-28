@@ -675,7 +675,18 @@ impl<'a> Compiler<'a> {
                                 }
                                 continue;
                             }
-                            if let Some(init) = &dl.init {
+                            // a variable declared `static`: its initial value once, before the
+                            // processes start (IEEE 1800-2017 6.21), not at each entry (an
+                            // implicitly static one with an initializer, which 6.21 does not
+                            // allow, is set at each entry)
+                            if let Some(init) = dl.init.as_ref().filter(|_| d.static_ && !self.sigs.automatic.contains(&s)) {
+                                if self.is_const(init, b) && !matches!(self.sig_type(s), Type::Class(_) | Type::Dyn { .. } | Type::Event) {
+                                    self.decl_init(init, s, kind, d.kind(), is_real, depth, w, None, None, &dl.name, b)?;
+                                } else {
+                                    let line = self.line;
+                                    self.push_init(Job::Init { lhs: ExprKind::Ident(dl.name.clone()).into(), rhs: init.clone(), scope: b, line });
+                                }
+                            } else if let Some(init) = &dl.init {
                                 let ty = self.sig_type(s);
                                 let l = self.layout(s);
                                 let v = self.value_for(init, b, w, ty, l.as_deref())?;

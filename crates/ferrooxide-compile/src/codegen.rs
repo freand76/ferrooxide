@@ -742,6 +742,20 @@ impl<'a> Compiler<'a> {
         if self.code.init_open {
             self.close_init();
         }
+        // initializers of static variables of blocks, found while their processes were
+        // compiled (they start before the processes too)
+        loop {
+            let late = std::mem::take(&mut self.code.jobs);
+            if late.is_empty() {
+                break;
+            }
+            for job in &late {
+                self.codegen_job(job)?;
+            }
+            if self.code.init_open {
+                self.close_init();
+            }
+        }
         // the static initializers of the default specializations in use (they start with
         // the other initializers, before the processes)
         loop {

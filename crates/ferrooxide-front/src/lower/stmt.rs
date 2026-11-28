@@ -213,7 +213,7 @@ impl Lower {
             d.names = self.declarators(dl)?;
             self.member_defaults(&mut d, loc)?;
             d.automatic = matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Automatic));
-            d.static_ = self.in_subroutine && matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Static));
+            d.static_ = matches!(it, t::Item::Var(v) if v.lifetime == Some(t::Lifetime::Static));
             d.konst = matches!(it, t::Item::Var(v) if v.const_);
             decls.push(d);
         }
@@ -760,9 +760,9 @@ impl Lower {
             l.spec_count += 1;
             let n = format!("idx${}", l.spec_count);
             let init = std::mem::replace(x, t::Expr::new(t::ExprKind::Ident(n.clone()), x.loc));
-            // (`var type(e) n = e;`: the index's own type)
+            // (`automatic var type(e) n = e;`: the index's own type, set at each entry)
             let dt = t::DataType { kind: t::TypeKind::TypeOf(Box::new(init.clone())), signed: None, packed: vec![], loc };
-            decls.push(t::Item::Var(t::VarDecl { const_: false, var: true, lifetime: None, ty: dt, decls: vec![t::Declarator { name: n, dims: vec![], init: Some(init), loc }], loc }));
+            decls.push(t::Item::Var(t::VarDecl { const_: false, var: true, lifetime: Some(t::Lifetime::Automatic), ty: dt, decls: vec![t::Declarator { name: n, dims: vec![], init: Some(init), loc }], loc }));
             Ok(())
         };
         let other = syn_side_effects(e);
