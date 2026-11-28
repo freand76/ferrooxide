@@ -938,12 +938,14 @@ impl Lower {
                 }
                 let name = self.name(name, *loc);
                 self.qualify_type(&mut t);
-                let (_, heap) = self.unpacked_dims(dims, *loc)?;
-                if heap.is_some() {
-                    if !t.unpacked.is_empty() || t.heap.is_some() {
+                let (_, mut heaps) = self.unpacked_dims_all(dims, *loc)?;
+                if !heaps.is_empty() {
+                    // (at most two levels: `T a[k1][k2]` is an array of arrays)
+                    if !t.unpacked.is_empty() || t.heap.is_some() || heaps.len() > 2 {
                         return self.unsupported(*loc, "an array of queues or dynamic arrays");
                     }
-                    t.heap = heap;
+                    t.heap = Some(heaps.remove(0));
+                    t.inner_heap = heaps.pop();
                     self.types.insert(name, Rc::new(t));
                     return Ok(());
                 }
@@ -1270,6 +1272,7 @@ impl Lower {
                     return self.unsupported(loc, "a fixed-size array of queues or dynamic arrays");
                 }
                 inner.push(h.clone());
+                inner.extend(t.inner_heap.iter().cloned());
             }
             if !inner.is_empty() && !t.unpacked.is_empty() {
                 return self.unsupported(loc, "a queue or dynamic array of unpacked arrays");
