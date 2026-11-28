@@ -591,7 +591,13 @@ impl<'a> Compiler<'a> {
                 // a fork block's automatic variables belong to each branch (see below)
                 // (in an automatic subroutine, block variables are automatic too)
                 let auto_sub = self.subr.inline_stack.last().is_some_and(|f| f.2 .1.contains('#'));
-                let evict = (fork.is_some() && decls.iter().any(|d| d.automatic || (auto_sub && !d.static_))).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
+                let has_autos = decls.iter().any(|d| d.automatic || (auto_sub && !d.static_));
+                let evict = (fork.is_some() && has_autos).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
+                // a block in a loop: each pass is an activation with automatic variables of
+                // its own, which a branch forked from it keeps (see the fork below); the
+                // branches still running from earlier passes give up the memory first
+                let depth = self.code.pb.last().map_or(0, |p| p.loops.len());
+                let loop_evict = (fork.is_none() && has_autos && depth > 0).then(|| self.emit(Instr::Evict { defs: Box::new([]) }));
                 let bsid = if name.is_some() || !decls.is_empty() || !imports.is_empty() || !params.is_empty() {
                     let path = match name {
                         Some(n) => format!("{}.{}", self.scopes[sid].name, n),
@@ -822,8 +828,19 @@ impl<'a> Compiler<'a> {
                 }
                 match fork {
                     None => {
-                        for s in stmts {
-                            self.stmt(s, bsid)?;
+                        let pushed = loop_evict.filter(|_| !auto_mem.is_empty()).map(|e| self.code.pb.last_mut().unwrap().loop_autos.push((depth, auto_mem.clone(), e))).is_some();
+                        let r = stmts.iter().try_for_each(|s| self.stmt(s, bsid));
+                        if pushed {
+                            self.code.pb.last_mut().unwrap().loop_autos.pop();
+                        }
+                        r?;
+                        // (no branch keeps the variables: no eviction, a jump to the next
+                        // instruction)
+                        if let Some(e) = loop_evict {
+                            let code = &mut self.code.pb.last_mut().unwrap().code;
+                            if matches!(&code[e], Instr::Evict { defs } if defs.is_empty()) {
+                                code[e] = Instr::Jmp { to: e as u32 + 1 };
+                            }
                         }
                     }
                     Some(join) => {
@@ -880,6 +897,27 @@ impl<'a> Compiler<'a> {
                             self.subr.static_mem.push((mem0, self.prog.mem.len() as u32));
                         }
                         let join = join_k;
+                        // join_any, join_none: the branches keep the automatic variables of the
+                        // blocks of this pass of the innermost loop (IEEE 1800-2017 6.21: each
+                        // pass is another activation), taken when they start
+                        if join_k != 0 {
+                            let pb = self.code.pb.last().unwrap();
+                            let depth = pb.loops.len();
+                            let inner: Vec<(Vec<(u32, u32)>, usize)> = pb.loop_autos.iter().filter(|x| depth > 0 && x.0 == depth).map(|x| (x.1.clone(), x.2)).collect();
+                            for (mem, e) in inner {
+                                for &c in &children {
+                                    let pd = &mut self.prog.procs[c as usize];
+                                    pd.frame.extend(mem.iter().copied());
+                                    pd.frame = crate::codegen::merge_ranges(std::mem::take(&mut pd.frame));
+                                    pd.capture = true;
+                                }
+                                if let Instr::Evict { defs } = &mut self.code.pb.last_mut().unwrap().code[e] {
+                                    let mut v = defs.to_vec();
+                                    v.extend(children.iter().copied());
+                                    *defs = v.into_boxed_slice();
+                                }
+                            }
+                        }
                         if let Some(e) = evict {
                             // each branch has the fork block's automatic variables of its own
                             for &c in &children {

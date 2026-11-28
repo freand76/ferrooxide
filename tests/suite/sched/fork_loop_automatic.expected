@@ -1,0 +1,13 @@
+i 3
+i 3
+i 3
+branch 0
+parent saw done 0
+branch 1
+parent saw done 1
+10 mdec 10
+10 dec 10
+20 mdec 20
+20 dec 20
+30 mdec 30
+30 dec 30

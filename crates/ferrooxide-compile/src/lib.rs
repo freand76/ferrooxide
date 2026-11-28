@@ -136,6 +136,9 @@ pub(crate) struct PState {
     pub unit: bool,
     /// the shared subroutine's code forks or disables: it cannot be one
     pub bad: bool,
+    /// blocks being compiled inside a loop that have automatic variables: (the loop depth
+    /// where the block is, the variables' memory, its `Evict` at the block's start)
+    pub loop_autos: Vec<(usize, Vec<(u32, u32)>, usize)>,
 }
 
 pub(crate) struct FuncInst {
